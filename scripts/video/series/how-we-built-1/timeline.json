@@ -1,0 +1,127 @@
+[
+ {
+  "file": "intro.mp4",
+  "start": 0.0,
+  "dur": 4.0
+ },
+ {
+  "file": "00-open-talk-mux.mp4",
+  "start": 4.0,
+  "dur": 50.16
+ },
+ {
+  "file": "01-tracks-talk-mux.mp4",
+  "start": 54.16,
+  "dur": 44.04
+ },
+ {
+  "file": "01-tracks-play-mux.mp4",
+  "start": 98.2,
+  "dur": 14.1
+ },
+ {
+  "file": "02-clip-talk-mux.mp4",
+  "start": 112.3,
+  "dur": 39.02
+ },
+ {
+  "file": "02-clip-play-mux.mp4",
+  "start": 151.32,
+  "dur": 11.1
+ },
+ {
+  "file": "03-mix-talk-mux.mp4",
+  "start": 162.42,
+  "dur": 48.62
+ },
+ {
+  "file": "04-hard-talk-mux.mp4",
+  "start": 211.04,
+  "dur": 35.68
+ },
+ {
+  "file": "05-shape-talk-mux.mp4",
+  "start": 246.72,
+  "dur": 58.1
+ },
+ {
+  "file": "05-shape-play-mux.mp4",
+  "start": 304.82,
+  "dur": 25.67
+ },
+ {
+  "file": "06-decision-talk-mux.mp4",
+  "start": 330.49,
+  "dur": 43.38
+ },
+ {
+  "file": "07-converge-talk-mux.mp4",
+  "start": 373.87,
+  "dur": 39.82
+ },
+ {
+  "file": "07-converge-play-mux.mp4",
+  "start": 413.69,
+  "dur": 18.17
+ },
+ {
+  "file": "08-sound-talk-mux.mp4",
+  "start": 431.85,
+  "dur": 30.5
+ },
+ {
+  "file": "08-sound-play-mux.mp4",
+  "start": 462.35,
+  "dur": 21.77
+ },
+ {
+  "file": "09-ai-talk-mux.mp4",
+  "start": 484.12,
+  "dur": 49.48
+ },
+ {
+  "file": "09-ai-play-mux.mp4",
+  "start": 533.6,
+  "dur": 19.57
+ },
+ {
+  "file": "10-fader-talk-mux.mp4",
+  "start": 553.17,
+  "dur": 21.58
+ },
+ {
+  "file": "10-fader-play-mux.mp4",
+  "start": 574.75,
+  "dur": 5.95
+ },
+ {
+  "file": "11-tests-talk-mux.mp4",
+  "start": 580.7,
+  "dur": 32.8
+ },
+ {
+  "file": "11b-count-talk-mux.mp4",
+  "start": 613.5,
+  "dur": 31.32
+ },
+ {
+  "file": "12-film-talk-mux.mp4",
+  "start": 644.82,
+  "dur": 50.16
+ },
+ {
+  "file": "13-scale-talk-mux.mp4",
+  "start": 694.98,
+  "dur": 49.58
+ },
+ {
+  "file": "14-close-talk-mux.mp4",
+  "start": 744.56,
+  "dur": 39.78
+ },
+ {
+  "file": "outro.mp4",
+  "start": 784.34,
+  "dur": 3.0
+ }
+]

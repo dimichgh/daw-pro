@@ -1,0 +1,37 @@
+{
+ "mix-clean.wav": {
+  "seconds": 12.0,
+  "peakDb": -3.38,
+  "rmsDb": -24.13
+ },
+ "pair-fast.wav": {
+  "seconds": 10.1,
+  "peakDb": -20.43,
+  "rmsDb": -43.25
+ },
+ "pair-slow.wav": {
+  "seconds": 10.1,
+  "peakDb": -24.24,
+  "rmsDb": -46.36
+ },
+ "pair-fast-lift.wav": {
+  "seconds": 10.1,
+  "peakDb": -6.43,
+  "rmsDb": -29.25
+ },
+ "pair-slow-lift.wav": {
+  "seconds": 10.1,
+  "peakDb": -10.24,
+  "rmsDb": -32.36
+ },
+ "same-before.wav": {
+  "seconds": 6.0,
+  "peakDb": -3.38,
+  "rmsDb": -26.97
+ },
+ "same-after.wav": {
+  "seconds": 6.0,
+  "peakDb": -3.38,
+  "rmsDb": -26.97
+ }
+}

@@ -1,0 +1,300 @@
+{
+  "set": "ringmod",
+  "description": "m39-m, the .ringMod insert: your sound MULTIPLIED by a tone. Every variant plays the IDENTICAL three-note saw pad (C3 + C4 + G4, 8 bars at 120 BPM) so nothing but the carrier frequency differs.\n\nTHE ONE AXIS IS `carrierHz`. mix (0.5), waveform (0 = sine), inputHighCutHz (20000) and stereoSpreadDeg (0) are byte-for-byte identical in all three effect variants; only the carrier moves, 2 Hz -> 200 Hz -> 800 Hz. Variant 1 has no effect at all.\n\nWHAT A RING MODULATOR ACTUALLY DOES, because it is not a filter and not a distortion. It multiplies the signal by a tone, and the result contains NEITHER of them: every partial at f in the pad becomes a PAIR of new tones at |f - carrier| and f + carrier. A harmonic sound goes in and an INHARMONIC one comes out. That is why it reads as metallic, bell-like or robotic rather than as EQ.\n\nWHAT TO LISTEN FOR. Variant 1 is the pad untouched, so you know what is being changed. In 'carrier-2hz' the carrier is far below hearing, so instead of a new tone you hear a TREMOLO, pulsing twice a second. (A note that cost a correction: the pulse rate depends on mix. At the 0.5 used here the sound dips to silence once per carrier cycle, so 2 Hz is two pulses a second. Above mix 0.5 the carrier swings the signal negative and the pulse DOUBLES - 2 Hz at mix 1 is four a second. The first draft of this text claimed four unconditionally; measuring this very render read 2.00 Hz.) In 'carrier-200hz' the carrier has climbed into the musical range and the chord turns into a struck, bell-like or gong-like sound: still pitched, but the pitches are no longer the ones that were played. In 'carrier-800hz' the sidebands have moved far from their parents and the result is frankly clangorous and sci-fi - the classic robot-voice treatment, applied to a chord.\n\nWHAT WOULD MAKE THIS HARD TO HEAR: nothing on a normal system. This axis rewrites the pitch content of the chord. It is safe on a laptop speaker and on a phone; the 2 Hz variant is the only one whose character (a slow pulse) lives partly in the low end, and even that is an amplitude effect rather than a spectral one, so it survives a small speaker intact.\n\nLOUDNESS, STATED SO IT IS NOT MISTAKEN FOR THE AXIS: the three effect variants are within a fraction of a LU of each other, because the carrier frequency does not change how much energy the multiply passes. The no-effect CONTROL is measurably LOUDER than all three - about 4 dB - and that is arithmetic, not a mix decision: at mix 0.5 half the output is the signal times a sine, and a sine's own RMS is 0.707, so the wet half is quieter than the dry half it replaced. Do not pick the control because it is louder; it is there to tell you what was taken away.\n\nTHE FOLD-BACK IS DELIBERATE. At 800 Hz some of the upper sidebands land above what the sample rate can represent and fold back down as extra inharmonic tones. Classic hardware ring modulators do this and it is half their character, so it is not filtered away here. `inputHighCutHz` (left at its 20000 default in every variant) is the control for anyone who wants a cleaner, bell-like result: pull it to about 4000.",
+  "variants": [
+    {
+      "name": "no-effect",
+      "axis": "no ring modulator at all - the pad untouched, so you know what is being changed",
+      "render": {
+        "durationSeconds": 10
+      },
+      "role": "control",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.7,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 16
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "carrier-2hz",
+      "axis": "carrierHz 2 - far below hearing, so it reads as a TREMOLO rather than a new tone (two pulses a second at this mix of 0.5; above mix 0.5 the rate doubles - measured 2.00 Hz in this very render)",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.7,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "ringMod",
+            "params": {
+              "carrierHz": 2,
+              "mix": 0.5,
+              "waveform": 0,
+              "inputHighCutHz": 20000,
+              "stereoSpreadDeg": 0
+            }
+          },
+          "as": "ring"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 16
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "carrier-200hz",
+      "axis": "carrierHz 200 - inside the musical range, so the chord turns struck and bell-like: still pitched, but not the pitches that were played",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.7,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "ringMod",
+            "params": {
+              "carrierHz": 200,
+              "mix": 0.5,
+              "waveform": 0,
+              "inputHighCutHz": 20000,
+              "stereoSpreadDeg": 0
+            }
+          },
+          "as": "ring"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 16
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "carrier-800hz",
+      "axis": "carrierHz 800 - the sidebands are far from their parents, so the result is clangorous and sci-fi (the robot-voice treatment)",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.85,
+            "release": 0.7,
+            "cutoffHz": 6000,
+            "resonance": 0.1,
+            "gain": 0.62,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9,
+            "unisonStereoSpread": 0.5,
+            "subLevel": 0.25,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "ringMod",
+            "params": {
+              "carrierHz": 800,
+              "mix": 0.5,
+              "waveform": 0,
+              "inputHighCutHz": 20000,
+              "stereoSpreadDeg": 0
+            }
+          },
+          "as": "ring"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 16
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 16
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

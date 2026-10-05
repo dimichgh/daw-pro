@@ -64,6 +64,10 @@ extension ProjectStore {
         let spanStart: Double
         let spanEnd: Double
         let bounceClips: [Clip]
+        // PK-F3: a group target's lanes' pitch shifts at submit. The bounce bakes
+        // them in (the members are rendered as heard), so import must see them
+        // unchanged. A plain clip's fingerprint already carries its shift.
+        let frozenLanePitch: [UUID: Double]
         if let groupID = clip.takeGroupID {
             guard let g = tracks[t].takeGroups.firstIndex(where: { $0.id == groupID }) else {
                 // A member clip must reference a live group.
@@ -74,6 +78,7 @@ extension ProjectStore {
             spanEnd = range.upperBound
             bounceClips = tracks[t].clips.filter { $0.takeGroupID == groupID }
             target = .group(id: groupID, frozenRangeStart: spanStart, frozenRangeEnd: spanEnd)
+            frozenLanePitch = Self.lanePitch(of: tracks[t].takeGroups[g])
         } else {
             spanStart = clip.startBeat
             spanEnd = clip.startBeat + clip.lengthBeats
@@ -84,6 +89,7 @@ extension ProjectStore {
             dry.fadeOutCurve = .linear
             bounceClips = [dry]
             target = .clip(id: clipId, fingerprint: ClipGeometryFingerprint(of: clip))
+            frozenLanePitch = [:]
         }
 
         // 4. Validate the region (built at throw time — the invalidClipEdit
@@ -150,13 +156,15 @@ extension ProjectStore {
 
         // 8. Register the pending fix and return the echo. No project mutation,
         //    no undo entry — submit is a pure side-effect job (D5).
-        pendingClipFixes[receipt.jobID] = PendingClipFix(
+        var pending = PendingClipFix(
             jobID: receipt.jobID, trackID: trackId, target: target,
             windowStartBeat: windowStartBeat,
             windowLengthBeats: windowEndBeat - windowStartBeat,
             regionStartBeat: startBeat, regionEndBeat: endBeat,
             mapRevision: mapRevision, regionBPM: tempoMap.bpm(atBeat: startBeat),
             submittedAt: Date())
+        Self.recordFrozenLanePitch(frozenLanePitch, in: &pending)
+        pendingClipFixes[receipt.jobID] = pending
 
         return ClipFixSubmission(
             jobID: receipt.jobID, state: "queued", queuePosition: receipt.queuePosition,
@@ -308,6 +316,15 @@ extension ProjectStore {
                     + "(was \(frozenLength) beats long, now \(currentLength)) — the fix region no "
                     + "longer lines up; submit again with ai.fixClipRegion")
             }
+            // PK-F3: the bounce baked every lane's pitch shift in, so a lane whose
+            // shift changed since submit (a key change: `project.transpose` moves
+            // them all) would put this fix at the OLD pitch between takes at the
+            // new one. Refused as stale, like a plain clip's re-pitch (D6: only a
+            // pure move is rebasable). Comp edits stay fine.
+            if let why = Self.lanePitchDrift(frozen: Self.frozenLanePitch(of: pending),
+                                             lanes: tracks[t].takeGroups[gi].lanes) {
+                throw ProjectError.clipFixStale(why)
+            }
             return .appendToGroup(groupIndex: gi, delta: range.lowerBound - frozenStart)
 
         case .clip(let id, let fingerprint):
@@ -341,6 +358,57 @@ extension ProjectStore {
 
     /// Tolerance for beat-domain equality/containment checks.
     private static let beatEpsilon = 1e-9
+
+    /// A lane's pitch counts as unchanged within this many semitones: a
+    /// fractional shift moved up and back down is float addition, not identity.
+    nonisolated static let lanePitchEpsilon = 1e-6
+
+    /// Every lane's pitch shift, by lane id (lane ids are stable; member clip
+    /// ids churn on every comp rebuild). `uniquingKeysWith`, not
+    /// `uniqueKeysWithValues`: a duplicate id must not trap a submit.
+    nonisolated static func lanePitch(of group: TakeGroup) -> [UUID: Double] {
+        Dictionary(group.lanes.map { ($0.id, $0.clip.pitchShiftSemitones) },
+                   uniquingKeysWith: { first, _ in first })
+    }
+
+    /// Why a take-group fix is stale on pitch, or nil when every lane that
+    /// existed at submit still plays at its submit-time shift (PK-F3). Lanes
+    /// added since (another fix, say) are not in `frozen` and do not count;
+    /// lanes removed since are the range check's business.
+    nonisolated static func lanePitchDrift(frozen: [UUID: Double], lanes: [TakeLane]) -> String? {
+        var changes: [String] = []
+        var moves: [Double] = []
+        for lane in lanes {
+            guard let was = frozen[lane.id] else { continue }
+            let now = lane.clip.pitchShiftSemitones
+            guard abs(now - was) > lanePitchEpsilon else { continue }
+            changes.append("'\(lane.name)' \(ClampNotice.number(was)) → \(ClampNotice.number(now))")
+            moves.append(now - was)
+        }
+        guard let first = moves.first else { return nil }
+        let everyLaneMoved = moves.count == lanes.filter { frozen[$0.id] != nil }.count
+        let together = everyLaneMoved && moves.allSatisfy { abs($0 - first) <= lanePitchEpsilon }
+        let size = abs(first)
+        let cause = together
+            ? "every take moved \(first > 0 ? "up" : "down") \(ClampNotice.number(size)) "
+                + "\(size == 1 ? "semitone" : "semitones"), as a key change does"
+            : "\(changes.joined(separator: ", ")) semitones"
+        return "the take group's pitch shift changed since this fix was requested (\(cause)) — "
+            + "the fix was made at the old pitch and would sound out of tune against the takes "
+            + "around it; submit again with ai.fixClipRegion"
+    }
+
+    // PK-F3: the lanes' submit-time pitch rides on the pending record
+    // (`PendingClipFix.frozenLanePitch`); these two are its only writer and
+    // reader.
+    private static func recordFrozenLanePitch(_ pitch: [UUID: Double],
+                                              in pending: inout PendingClipFix) {
+        pending.frozenLanePitch = pitch
+    }
+
+    private static func frozenLanePitch(of pending: PendingClipFix) -> [UUID: Double] {
+        pending.frozenLanePitch
+    }
 
     /// The take-lane clip for a fix payload (D3): rate 1.0 / offset 0 / gain 0 /
     /// no fades, violet (AI-generated), at the window position.

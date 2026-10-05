@@ -729,6 +729,115 @@ finding is that the margin has already been spent. When it runs out, it says so
 legibly instead of silently, which is the property `min < 1.0` has and
 `median < 8.0` did not.
 
+#### 6.1-bis RE-DERIVATION, 2026-08-28 (m31-i) — the pair moved together
+
+**Nothing in §6.1 above is edited; this is the dated re-take its own rule asks
+for.** Harness: **6 752 tests / 630 suites** (§6.1's population was 4 712/486).
+Protocol as specified: 5 green full-suite `./scripts/test.sh` runs (NORMAL,
+0 `✘` each) + ONE m23-ab-2 adversarial run (20 CPU hogs, torn down PID-exact,
+verified dead). Never pooled.
+
+```
+  run     wall(s)      T1(s)    m19e max   m19e median   m19e min   under1s
+  1       208.498     1.2693     19.015       7.6997      0.7333       1
+  2       209.689     1.3880     35.863       7.8443      0.8316       1
+  3       209.668     1.3422     24.772       8.2114      1.5224       0
+  4       209.701     2.0635     21.690       7.7624      0.8903       1
+  5       209.343     1.9635     23.920       7.7496      1.5600       0
+  ADV     333.860     3.4632     39.011      13.3125      1.4595       0
+
+  median normal wall 209.668     worst normal wall 209.701
+  W = worst NORMAL T1  2.063495       (§6.1's W was 30.994)
+```
+
+**THE THRESHOLD.**
+
+```
+  adversarialInflation, T1 channel        3.463220 / 2.063495 = 1.6783x
+  HEADROOM_LIMIT_SECONDS = floor(60 / 1.6783)                 = 35
+  headroom over worst normal   35 / 2.063495                  = 16.962x  (rule: >= 1.10x) ✓
+```
+
+⚠️⚠️ **THE SPECIFIED CROSS-CHECK FAILED.** §6.1 says to cross-check the
+coefficient against the same ratio on the m19-e `max` column. Measured:
+
+```
+  T1 channel                 1.6783x
+  m19-e MAX column           1.0878x   <-- 54 % disagreement (2026-08-03: 0.6 %)
+  m19-e MEDIAN column        1.6212x   <-- agrees with T1 within 3.5 %
+```
+
+**The cause is §1.3's own account of the channel**, now grown past its useful
+range: the `max` is an extreme order statistic over 32 *self*-contending
+prepares, and on this harness the self-contention term saturates it — the
+NORMAL population's `max` alone now spreads 19.0–35.9 s (1.886×), with run 2's
+35.863 s nearly touching the adversarial 39.011 s. A ratio whose denominator is
+already near the ceiling collapses toward 1.0. The m19-e **median** is what
+`AUPrepareRenegotiationStressTests`' own point 4 calls *"this file's purest
+reading of ambient queueing load"*, and it agrees with T1.
+
+⭐ **PROPOSED, NOT SILENTLY ADOPTED: future re-derivations should cross-check on
+the m19-e MEDIAN column.** And note what makes the failure non-fatal here: the
+coefficient actually used was the **strictest of the three** — 1.6783 gives 35,
+where the median channel would give 37 and the max channel 55. The
+disagreement cannot have loosened this constant by any route.
+
+**THE VALIDITY LIMIT** (re-derived in the same pass, as the pairing requires):
+
+```
+  preserved relationship, limit / worst normal run wall:
+      2026-08-03:  120 / 101.3  = 1.1846x
+      2026-08-28:  1.1846 x 209.701 = 248.4  ->  CAMPAIGN_VALIDITY_MAX_MEDIAN_WALL_SECONDS = 248
+  adversarial exclusion, adversarial wall / limit:
+      2026-08-03:  156.7 / 120  = 1.3058x
+      2026-08-28:  333.860 / 248 = 1.3462x   (exclusion is slightly STRONGER than before)
+```
+
+**On m23-aw-4's leak class.** That item recorded a campaign scoring VALID
+(median wall 118.473 s) while still exposing the 36 s threshold to a 45.925 s
+T1. The leak is not closed by construction and this document should not claim
+it is — what changed is the size of the margins around it. The observed leak
+was T1 running ~1.5–1.6× above the normal population while wall stayed inside
+validity; reaching 35 s from today's W = 2.063 s requires ~17×. **The known
+leak magnitude cannot reach the new threshold.** Stated as margin, not as proof.
+
+**Expiry, in §6.1's own idiom.** The 1.10× rule expires at a worst-normal T1 of
+35 / 1.10 = **31.8 s** — about **15× above today's 2.063 s**, where §6.1's
+original expiry was 5.5 % of growth away.
+
+**Expiry of the VALIDITY limit, stated so the next agent does not file it as a
+regression.** 248 / 209.701 = **1.18× headroom over today's walls** — the same
+tightness the 120 s limit had in 2026-08-03 terms, and deliberately so. Run wall
+time has grown *superlinearly* with test count (97 s at 4 712 tests → 210 s at
+6 752), so at recent growth this limit fires again within weeks. **That is the
+constant working as a re-measurement cadence**, exactly like Leg C's cap; the
+response is another paired re-derivation, never a unilateral bump.
+
+⚠️⚠️ **THE ONE THING THIS RE-DERIVATION DOES NOT EXPLAIN, AND IT IS THE BIGGEST
+NUMBER ON THE PAGE: T1 FELL FROM 30.994 s (2026-08-03) AND 45.925 s
+(2026-08-04) TO 1.269–2.063 s.** §7.4's negative-control band is 29.287–30.994 s
+and today's campaign is far OUTSIDE it — which is precisely the branch where
+§7.4 says the document's numbers must be re-taken, so they have been. The
+channel is **alive, not blind**: it still inflates 1.678× under the adversarial
+protocol, its measurement site is textually unchanged (same
+`clock.measure { prepareAudioUnits }`, same prefix, file untouched since
+2026-08-20), and m23-ab-3's recorded isolated figure is ~45–70 ms, so
+1.3–2.1 s is still ~30× queueing-dominated. But **no cause was established.**
+Candidates, none asserted: m28-bug's offline block-size change (4096 → 512);
+the Xcode 26.6 toolchain; the m19-e flake fix landed the same day changing the
+AU suites' scheduling. **The 16.96× cushion rests on an unexplained
+improvement, and should not be treated as durable until the cause is known.**
+
+⚠️ **MACHINE STATE (§ m23-aw-4 step 1 requires this recorded verbatim): NOT
+IDLE.** Load average 4.83 → 5.14 across the campaign; Chrome ~117 % across
+helpers, WindowServer ~49 %, jamf-protect ~29 %. This is the same contention
+class that caused m23-aw-4 to refuse to run on 2026-08-04. The conclusions
+survive it — ~2 cores of desktop load on 18 cannot account for 209.7 s against
+a 120 s limit, and every derived margin is ≥ 16× — but m23-aw-4's own
+idle-machine requirement is human-gated and is **left open** on that basis.
+
+---
+
 ### 6.2 Leg B's budget: 3 000 ms of deliberate main-actor spin
 
 **Derivation:** the measured total today (§1.7), pinned where it stands. It is a

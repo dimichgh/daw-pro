@@ -1,0 +1,6 @@
+out-w3/V0-no-rods-control.mp4 e1fb2eb72ece0bfd25b5bf92f116822d 12085724 16.000000
+out-w3/V1-bass-thin-tall-lit-not-emitting.mp4 0d3b310f863340bb3bf3938f60dc5ccb 12242468 16.000000
+out-w3/V1h-thin-tall-with-a-hole.mp4 20e2951d0fcfff0a95d599527658a1bf 12225530 16.000000
+out-w3/V4-bass-height-from-duration.mp4 f8fe13ae5434be1fb4af581f40edc2b0 12243502 16.000000
+out-w3/V8-standing-ahead-at-V5-colour.mp4 7015b45acc02c3a17a474394021f07b0 12290857 16.000000
+out-w3/V9-horizontal-duration-bar.mp4 053d6d3831ccc4db0b7746863f7799cd 12360339 16.000000

@@ -497,12 +497,20 @@ enum M23QComparisonPair {
 
     /// Reads a mono/stereo float32 source file, renders both versions, writes
     /// both as WAVs into `outputDirectory` and returns the planar audio too.
+    ///
+    /// ⚠️ **`latencyCompensated` DEFAULTS TO WHAT SHIPS (m23-q Phase 1).** When
+    /// this renderer was written the curve path had no compensation and the
+    /// pair a listener judged was ~50 ms late against its own request; the
+    /// shipping render now pre-shifts the curve, so a listening pass made with
+    /// `false` would be judging audio the product no longer produces. Pass
+    /// `false` only to reproduce a phase-0 measurement.
     static func render(
         sourceURL: URL,
         outputDirectory: URL,
         constantSemitones: Double,
         curve: [(outputFrame: Int, semitones: Double)],
         formantPreserve: Bool,
+        latencyCompensated: Bool = true,
         namePrefix: String = "m23q-e2"
     ) throws -> Rendered {
         let file = try AVAudioFile(forReading: sourceURL)
@@ -543,7 +551,10 @@ enum M23QComparisonPair {
             semitones: constantSemitones, formantPreserve: formantPreserve)
         let curved = try OfflineStretcher.stretchTransposeCurve(
             input: planar, sampleRate: sampleRate, ratio: 1, curve: curve,
-            formantPreserve: formantPreserve)
+            formantPreserve: formantPreserve,
+            compensation: latencyCompensated
+                ? OfflineStretcher.curveLatencyCompensation(sampleRate: sampleRate)
+                : .none)
 
         let constantURL = outputDirectory
             .appendingPathComponent("\(namePrefix)-constant.wav")

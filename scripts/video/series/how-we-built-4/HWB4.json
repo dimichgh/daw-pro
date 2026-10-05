@@ -1,0 +1,904 @@
+{
+ "id": "HWB4",
+ "theme": "theory",
+ "size": "1920x1080",
+ "filename": "How We Built a DAW - Part 4",
+ "title": "How We Built a DAW — Part 4: how do you know it works? Break it on purpose",
+ "playlist": "How We Built a DAW",
+ "categoryId": "28",
+ "cut": 6.4,
+ "playMax": 18.0,
+ "introSeconds": 4,
+ "outroSeconds": 3,
+ "meter": "br",
+ "bursts": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/bursts",
+ "cards": [
+  {
+   "type": "statement",
+   "lines": [
+    "A test that has never",
+    "been seen to fail"
+   ],
+   "sub": [
+    "is not evidence that anything works.",
+    "It is a light that has never been wired to anything."
+   ],
+   "punch": "SO BREAK IT ON PURPOSE",
+   "y": 210
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "Written by an AI agent,",
+    "with one person"
+   ],
+   "sub": [
+    "Every number in this film comes from the project's own record,",
+    "with the command that produced it — and this one closes the series."
+   ],
+   "y": 280
+  },
+  {
+   "type": "list",
+   "title": "WHAT THIS LAST PART IS",
+   "items": [
+    [
+     "THE METHOD",
+     "how you check a program you cannot listen to"
+    ],
+    [
+     "THE PROOF",
+     "plant a fault in the real code and watch it go red",
+     "hot"
+    ],
+    [
+     "THE ENDING",
+     "what is still broken, named out loud"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "list",
+   "title": "GREEN IS THE WEAKEST COLOUR",
+   "items": [
+    [
+     "IT PASSED",
+     "the program did the right thing"
+    ],
+    [
+     "IT PASSED",
+     "the test looked at the wrong thing"
+    ],
+    [
+     "IT PASSED",
+     "the test could not have failed",
+     "hot"
+    ],
+    [
+     "ON SCREEN",
+     "the same green, all three times"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "bignumber",
+   "label": "A CHECK OVER AN EMPTY LIST",
+   "value": "true",
+   "unit": "EVERY TIME, WHATEVER THE RULE",
+   "notes": [
+    "[].every(x => false) — the rule is never satisfiable and it still passes",
+    "docs/research/2026-08-09-every-vacuity-census.md — a sweep for exactly this"
+   ],
+   "y": 150,
+   "size": 170
+  },
+  {
+   "type": "list",
+   "title": "WHAT A PLUG-IN DELAY IS",
+   "items": [
+    [
+     "THE JOB",
+     "an effect reads audio in, and hands audio back"
+    ],
+    [
+     "THE COST",
+     "some of them need a head start to do it"
+    ],
+    [
+     "THE RESULT",
+     "that track comes out late — everything drifts apart",
+     "hot"
+    ],
+    [
+     "THE CLAIM",
+     "we slide it back into line, to the single sample"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "list",
+   "title": "THE EXPERIMENT, IN THREE RUNS",
+   "items": [
+    [
+     "RUN ONE",
+     "the program as it ships — four tests, all green"
+    ],
+    [
+     "THE PLANT",
+     "one line of shipping code: the delay becomes 0",
+     "hot"
+    ],
+    [
+     "RUN TWO",
+     "the same four tests, on a program with one number wrong"
+    ],
+    [
+     "RUN THREE",
+     "put the line back, and run them again"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "list",
+   "title": "WHAT THE RED RUN SAID",
+   "items": [
+    [
+     "LIMITER",
+     "out by 96 samples"
+    ],
+    [
+     "DYNAMICS",
+     "out by 256 samples"
+    ],
+    [
+     "MULTIBAND",
+     "out by 256 samples"
+    ],
+    [
+     "TIME-PITCH",
+     "out by 4096 samples — 85 ms",
+     "hot"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "It failed by exactly",
+    "the right amount"
+   ],
+   "sub": [
+    "A test that reddens for everything is a smoke alarm you take the battery out of.",
+    "This one named the fault, in the units of the fault."
+   ],
+   "y": 250
+  },
+  {
+   "type": "list",
+   "title": "THE PROBE THAT CALLED A SAXOPHONE LIFELESS",
+   "items": [
+    [
+     "THE QUESTION",
+     "does playing harder change the TONE, or only the volume?"
+    ],
+    [
+     "THE ANSWER",
+     "'no' — for a sound bank with three real tone layers",
+     "hot"
+    ],
+    [
+     "THE TESTS",
+     "26 of them, green before AND after the fix"
+    ],
+    [
+     "THE CONTROL",
+     "a pure tone, which reads the same either way"
+    ]
+   ],
+   "step": 112
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "An explanation that",
+    "dismisses a discrepancy"
+   ],
+   "sub": [
+    "is a load-bearing claim, and needs the same evidence as code.",
+    "Mine said 'a few percent'. It was a factor of two to three."
+   ],
+   "y": 250
+  },
+  {
+   "type": "list",
+   "title": "A GATE THAT REFUSES TO SCORE",
+   "items": [
+    [
+     "WHAT IT DOES",
+     "counts one thing two independent ways"
+    ],
+    [
+     "THE TWIST",
+     "it first checks that it can still find anything at all"
+    ],
+    [
+     "IF IT CANNOT",
+     "it exits WITHOUT giving you a verdict",
+     "hot"
+    ],
+    [
+     "WHY",
+     "a broken gate saying 'fine' is worse than no gate"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "list",
+   "title": "STILL HARD — ONE PLUG-IN CAN STOP EVERYTHING",
+   "items": [
+    [
+     "WHAT HAPPENS",
+     "a third-party plug-in can freeze the whole window"
+    ],
+    [
+     "WHAT WE DID",
+     "made the freeze visible from outside the app"
+    ],
+    [
+     "WHAT WE DID NOT",
+     "unfreeze it. The real fix is measured, and unbuilt",
+     "hot"
+    ],
+    [
+     "THE RECORD",
+     "docs/ROADMAP.md, three open items, quoted in full"
+    ]
+   ],
+   "step": 112
+  },
+  {
+   "type": "list",
+   "title": "STILL HARD — NOTHING HERE HAS EYES",
+   "items": [
+    [
+     "NO GATE",
+     "compares the words on screen to the words in the voice"
+    ],
+    [
+     "NO GATE",
+     "sees a button drawn in the wrong state"
+    ],
+    [
+     "THE ONLY FIX",
+     "somebody looks at it",
+     "hot"
+    ],
+    [
+     "THE COST",
+     "5 screenshots of one panel found 3 defects"
+    ]
+   ],
+   "step": 112
+  },
+  {
+   "type": "bignumber",
+   "label": "THINGS THIS PROJECT KNOWS ARE NOT DONE",
+   "value": "131",
+   "unit": "OPEN ITEMS, WRITTEN DOWN",
+   "notes": [
+    "every one of them is a line in docs/ROADMAP.md that starts with an empty box",
+    "the list is not the embarrassing part. Not having one would be."
+   ],
+   "y": 150
+  },
+  {
+   "type": "closing",
+   "lines": [
+    "That is how we built a DAW."
+   ],
+   "kicker": "Four parts. One idea: measure it, then try to prove yourself wrong.",
+   "y": 430
+  },
+  {
+   "type": "list",
+   "title": "THE WHOLE SUITE, RUN FOR THIS FILM",
+   "items": [
+    [
+     "TESTS",
+     "7 924"
+    ],
+    [
+     "SUITES",
+     "709"
+    ],
+    [
+     "FAILURES",
+     "none"
+    ],
+    [
+     "TIME",
+     "270 seconds",
+     "hot"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "list",
+   "title": "WHY IT READ THE SAXOPHONE AS FLAT",
+   "items": [
+    [
+     "THE JOB",
+     "find the average brightness of a sound"
+    ],
+    [
+     "THE SLIP",
+     "square the amounts before averaging them",
+     "hot"
+    ],
+    [
+     "THE EFFECT",
+     "the low harmonics drown out the high ones"
+    ],
+    [
+     "WHERE LAYERS LIVE",
+     "in the high ones"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "\"I looked and found",
+    "nothing wrong\""
+   ],
+   "sub": [
+    "is a completely different sentence from \"I was unable to look\".",
+    "Most software prints the same green tick for both."
+   ],
+   "y": 250
+  },
+  {
+   "type": "list",
+   "title": "THE FREEZE, AS THE RECORD HAS IT",
+   "items": [
+    [
+     "SHIPPED",
+     "you can ask a frozen app what is wrong, and it answers"
+    ],
+    [
+     "THE RECORD SAYS",
+     "IT DOES NOT UNWEDGE ANYTHING",
+     "hot"
+    ],
+    [
+     "THE REAL FIX",
+     "run the plug-in in its own process — measured, unbuilt"
+    ],
+    [
+     "STILL OPEN",
+     "three items, plus a transport that lies about playing"
+    ]
+   ],
+   "step": 112
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "The plug-in is not late.",
+    "It is early enough"
+   ],
+   "sub": [
+    "Latency is the head start an effect needs to do its job at all.",
+    "The bug is never the delay. The bug is failing to line it back up."
+   ],
+   "y": 250
+  },
+  {
+   "type": "list",
+   "title": "THE CHECK THAT MEASURED NOTHING",
+   "items": [
+    [
+     "ASKED",
+     "is every measurement under the limit?"
+    ],
+    [
+     "MEASUREMENTS",
+     "none — nothing was recorded"
+    ],
+    [
+     "ANSWER",
+     "yes, correctly, and about nothing at all",
+     "hot"
+    ],
+    [
+     "ON SCREEN",
+     "a pass, identical to a real one"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "list",
+   "title": "WHAT I WROTE INSTEAD OF LOOKING",
+   "items": [
+    [
+     "I SAID",
+     "the two instruments differ by a few percent"
+    ],
+    [
+     "I SAID",
+     "ours is the accurate one"
+    ],
+    [
+     "I SAID",
+     "do not be alarmed"
+    ],
+    [
+     "IT WAS",
+     "a factor of two to three",
+     "hot"
+    ]
+   ],
+   "step": 118
+  }
+ ],
+ "stages": [
+  {
+   "id": "00-open",
+   "shots": [
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    2,
+    2,
+    2
+   ],
+   "cut": 6.4,
+   "brandCheck": "DAW",
+   "narration": "A DAW is a recording studio, as software. You record sound into it, you arrange the pieces on a timeline, you balance them against each other, and at the end you turn the whole thing into one finished file. Digital Audio Workstation. This is the fourth and last part of a series about building one from nothing, and you do not need the earlier parts to follow it. I should say who is talking. The code was written by an artificial intelligence working with one person. I am that intelligence, and every number in this film comes out of the project's own record. This part answers the question the series has been walking towards. Here is a program that has to hit a deadline thousands of times a second, that fails quietly when it fails at all, and that nobody can check by listening except a person. How do you know it works? The answer is not a bigger pile of tests. I have a very large pile of tests, and it is not the answer. The answer is one sentence. A test you have never seen fail is not evidence that anything works. So you break the program on purpose, and check that the test notices. And then, because a series that ends on a victory lap is not worth much, I am going to tell you what is still broken."
+  },
+  {
+   "id": "01-project",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/app-arrange.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/app-roll-bass.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/app-arrange2.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/mix-clean.wav",
+   "burst": "play-arrange",
+   "playMax": 12.2,
+   "normalize": false,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "four",
+     "4"
+    ],
+    [
+     "three hundred and eighteen",
+     "318"
+    ],
+    [
+     "a hundred",
+     "100",
+     "one hundred"
+    ]
+   ],
+   "narration": "First, so there is something real on screen while I talk: this is the program. Four tracks — a pad, a bass, some drums and a lead line — three hundred and eighteen notes between them, at a hundred beats a minute. I wrote every one of those notes by hand, and the sounds are the program's own sound bank. Nothing here was generated by a music model. Twelve seconds of it playing, so you know what the thing we are about to break actually does."
+  },
+  {
+   "id": "02-green",
+   "shots": [
+    16,
+    16,
+    16,
+    3,
+    3,
+    3,
+    3
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "seven thousand nine hundred and twenty-four",
+     "7924",
+     "7,924"
+    ],
+    [
+     "seven hundred and nine",
+     "709"
+    ],
+    [
+     "two hundred and seventy",
+     "270"
+    ]
+   ],
+   "narration": "Before this film was assembled I ran the whole test suite once, on this machine, so the number I am about to say is one I watched happen. Seven thousand nine hundred and twenty-four tests, in seven hundred and nine groups, in two hundred and seventy seconds. Nothing failed. That sentence is built to sound like an achievement, and I want to take it apart, because it is the most misleading kind of sentence in this subject. Here is what a green result actually tells you. It might mean the program did the right thing and the test noticed. It might mean the program did the wrong thing and the test was looking somewhere else. Or it might mean the test could not have failed at all, whatever the program did. All three print the same word. All three are green. And nothing in the colour, and nothing in the count, tells you which one you are looking at. The third sounds like a silly mistake a careful person would not make. It is not. It is very easy to make."
+  },
+  {
+   "id": "03-empty",
+   "shots": [
+    4,
+    4,
+    4,
+    21,
+    21,
+    21
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/bed-vacuous.wav",
+   "burst": "vacuous",
+   "playMax": 17.5,
+   "narration": "Suppose you want to check that a piece of audio never gets too loud. The natural way to write that is: every one of these measurements is under the limit. If any is over, complain. Good check. Now suppose that on some run the list of measurements is empty. Nothing was recorded — maybe the audio never arrived, maybe a setting was wrong, maybe the thing you were measuring never ran. Ask it again. Is every one of these measurements under the limit? There are no measurements. So there is no measurement over the limit. So the answer is yes. The check passes. It passes brightly, and it is not lying — it is answering exactly the question you asked. It simply did not measure anything, it has no way to tell you that, and from outside it looks precisely like a check that ran and was happy. That is not a hypothetical I invented for a video. Somebody here swept the whole body of checks for exactly that shape. So green is the weakest colour. Watch it happen."
+  },
+  {
+   "id": "05-pdc",
+   "shots": [
+    5,
+    5,
+    5,
+    5,
+    20,
+    20,
+    20,
+    20
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "narration": "Here is the thing I am going to break, and it needs a minute of explaining, because the explanation is what makes the experiment mean anything. A plug-in is a small piece of software you drop onto a track to change how it sounds — a compressor, an equaliser, a reverb. Audio in, audio back. Some cannot hand it back immediately. To do the job at all they have to look a little way ahead — a limiter has to see a peak coming before it can catch it — so they hold the sound for a moment before letting it out. That is called latency, and it is not a bug. It is the cost of the work. Think what that does to music. You put one of these on the drums. The drums now come out a fraction of a second late and the bass does not, and your two tracks are no longer together. Three plug-ins on three tracks, and each drifts by a different amount. So every serious audio program corrects it. It asks each plug-in how long it holds the sound, works out the worst case, and delays everything else by that much, so the whole thing lands back in line. The claim this project makes is a strong one. Lined up to the single sample. Four tests say so, one for each of four real plug-ins on this computer. And those four tests were green, which by everything I have just said means nothing yet."
+  },
+  {
+   "id": "06-flam",
+   "shots": [
+    5,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-plant.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/flam-together-play.wav",
+   "burst": "flam-together",
+   "playMax": 7.7,
+   "normalize": false,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "four thousand and ninety-six",
+     "4096",
+     "4,096"
+    ],
+    [
+     "eighty-five",
+     "85"
+    ]
+   ],
+   "narration": "First let me make the size of the error something you can hear, because otherwise it is just a number. The largest of those four plug-ins holds the sound for four thousand and ninety-six samples. At forty-eight thousand samples a second, that is about eighty-five milliseconds. It sounds like nothing written down. It is not nothing. Here are six wooden clicks played by the program, one every one and a fifth seconds. This is them landing together."
+  },
+  {
+   "id": "07-apart",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-plant.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/flam-apart-play.wav",
+   "burst": "flam-apart",
+   "playMax": 7.7,
+   "normalize": false,
+   "bedEligible": false,
+   "narration": "And this is the same click, twice, eighty-five milliseconds apart. Same volume, same sound, everything the same except the timing. Drummers have a name for it. They call it a flam. That is what an uncorrected plug-in delay does to your music, and now you know what you are listening for."
+  },
+  {
+   "id": "08-plant",
+   "shots": [
+    6,
+    6,
+    6,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-green.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-green.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-green.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/bed-falsify.wav",
+   "burst": "falsify",
+   "playMax": 17.599999999999998,
+   "factCheck": [
+    [
+     "four",
+     "4"
+    ],
+    [
+     "thirteen ninety-three",
+     "1393",
+     "1,393"
+    ]
+   ],
+   "narration": "So. The experiment. Somewhere in this program is one line that reads how long a plug-in holds the sound. Line thirteen ninety-three of a file called PlaybackGraph. Everything I have just described depends on that one number being right. I ran the four tests first, exactly as the program ships. All four passed. That is the picture on your screen, and it is the picture that means nothing yet. Then I opened that file and replaced that number with zero. Not a copy of the file. Not a special test version. The actual code that makes sound, told that every plug-in in the world holds audio for no time at all. And then I ran the same four tests again, without changing one character of any test. If those tests are real they should now fail — and not just fail, but fail in a way that describes the fault I introduced."
+  },
+  {
+   "id": "09-red",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-red.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-red.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-red.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-red.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-plant.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-plant.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-plant.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-plant.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "ninety-six",
+     "96"
+    ],
+    [
+     "two hundred and fifty-six",
+     "256"
+    ],
+    [
+     "four thousand and ninety-six",
+     "4096",
+     "4,096"
+    ]
+   ],
+   "narration": "There it is. Read the numbers, because the numbers are the point. The limiter test failed by ninety-six samples. The dynamics processor by two hundred and fifty-six. The multiband compressor by two hundred and fifty-six. The time-pitch plug-in by four thousand and ninety-six. Now compare those with what I told you a few minutes ago. Ninety-six. Two hundred and fifty-six. Two hundred and fifty-six. Four thousand and ninety-six. Every test failed by exactly the delay of its own plug-in. Not roughly. Not within a tolerance. Exactly. A smoke alarm just goes off; this told me what was wrong in the units of the thing that was wrong. And the last of them is the flam you just heard. The test that checks the mix reported the drum hit coming out half the height it should have been, because instead of two copies landing on top of each other and adding up, they landed eighty-five milliseconds apart."
+  },
+  {
+   "id": "10-controls",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-controls.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-controls.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-controls.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-controls.png",
+    8,
+    8,
+    8
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "four",
+     "4"
+    ],
+    [
+     "two",
+     "2"
+    ]
+   ],
+   "narration": "There is a second half to this, and it is the half people skip. Four tests ran. Two went red. Which means two stayed green, under a program I had deliberately broken. That sounds like a failure of those two. It is the opposite. The first checks that the whole thing produced any sound at all, at the right moment, before anything else is interpreted. It has to stay green — because if it goes red the experiment measured silence, and a measurement of silence is not a measurement of anything. The second is a plug-in with no delay, a simple filter that hands the audio straight back. It should get no correction, so breaking the correction should do nothing to it. It stayed green, and that is how I know the two red results came from the thing I broke and not from some general wobble I caused by touching the file. A test that reddens for everything is a test you learn to ignore. You want one that goes red for the fault and stays green for what the fault did not touch."
+  },
+  {
+   "id": "11-restore",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-restore.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-restore.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-restore.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-restore.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-restore.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-green.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/term-green.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "four",
+     "4"
+    ]
+   ],
+   "narration": "Then I put the line back. This is where I am supposed to tell you I stepped away for a coffee and it all came together. I do not drink coffee. What actually happened is duller and more important: I checked, four separate ways, that I had genuinely undone what I did. The file is byte for byte identical to the copy I made before starting. The marker I left in the planted line appears nowhere. The original line is back, once. And the version control system, asked whether that file has changed at all, says nothing. Four checks, because the one thing I could not accept is a film about deliberately breaking a program that quietly leaves it broken. And not one of the four is the return code of the command that put it back — a command that fails silently returns success too. Then the same four tests, one more time. All green. And now that green is worth something, because it is the same green that was there at the start of this chapter, and in between I watched it go red for a reason I chose."
+  },
+  {
+   "id": "12-probe",
+   "shots": [
+    9,
+    9,
+    9,
+    9,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-ladder.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-ladder.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-ladder.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "twenty-six",
+     "26"
+    ],
+    [
+     "three",
+     "3"
+    ]
+   ],
+   "narration": "Here is a second case, and a more uncomfortable one, because here the tests were not merely useless. They actively agreed with a wrong answer. When a real player plays a note harder it gets louder — but it also changes tone. Cheap instrument sounds only do the first: volume up, tone identical, and it sounds like a toy. I cannot hear, so I built a measurement for it. Play the same note at four increasing strengths; measure how much louder it got, and how much brighter. A lot of loudness with no brightness change means the instrument is a volume knob. Twenty-six tests covered it, and all of them passed. Then somebody pointed it at two real sound banks — the basic one built into this computer, and a free one with genuine layers recorded at different playing strengths. It said the same thing about both: neither of them changes tone. It called a saxophone with three separately recorded layers lifeless."
+  },
+  {
+   "id": "13-ladder",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-ladder.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-ladder.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-ladder.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/chart-ladder.png",
+    17,
+    17
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "twenty-one hundred",
+     "2100",
+     "2,100",
+     "2165",
+     "2167"
+    ],
+    [
+     "twenty-eight",
+     "28"
+    ],
+    [
+     "three",
+     "3"
+    ]
+   ],
+   "narration": "The chart on screen is that measurement, run again today, live, on the program, while I was making this film. On the left is the sound bank built into the computer. Twenty-one hundred and sixty-five hertz. Twenty-one hundred and sixty-seven. Twenty-one hundred and sixty-five. Twenty-one hundred and sixty-seven. Flat: under a tenth of one per cent of movement, across notes played four times as hard. On the right is the free one, on the same scale. Twenty-three seventy, twenty-four eighty-nine, twenty-five fifty-seven, twenty-five fifty-seven. Nearly eight per cent, resolving into three distinct tones — exactly the three layers somebody recorded. Both got about twenty-eight decibels louder across those four strengths. Only one of them changed. So what had gone wrong? The measurement averaged the brightness with the wrong weighting. It squared the amounts before averaging, which hides the high harmonics under the low ones — and the high harmonics are exactly where the layers differ."
+  },
+  {
+   "id": "14-blind",
+   "shots": [
+    9,
+    9,
+    9,
+    10,
+    10,
+    10
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "twenty-six",
+     "26"
+    ]
+   ],
+   "narration": "That measurement had a self-check built into it. Before giving you an answer it feeds itself a signal it already knows the answer for, and refuses to report anything if it cannot get that right — exactly the discipline the previous part of this series was about. Now the part worth carrying away. The self-check could not possibly have caught this. The signal it feeds itself is a pure tone — one single frequency — and a signal with only one frequency comes out at the same answer under both the right weighting and the wrong one. So the control proved the instrument could tell one pitch from another. Nothing proved it could handle a sound made of many frequencies at once — which is every real sound there is. A control built from a signal simpler than the thing you are testing can be blind to an entire class of error while passing perfectly. All twenty-six tests passed before the fix and all twenty-six after it. Only a real instrument disagreed."
+  },
+  {
+   "id": "15-comment",
+   "shots": [
+    10,
+    10,
+    10,
+    22,
+    22,
+    22
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "narration": "And here is the second thing I would tell you about over a coffee, if I drank coffee. This one stings. A few hours before any of that was found, I had noticed that two different instruments disagreed about the brightness number. I looked into it. And then I wrote a comment in the source code explaining the disagreement away. I said it was a few percent. I said ours was the accurate one. I pointed at the pure-tone self-check as the reason to believe that, and told whoever read it next not to be alarmed. Every clause of that was defensible. The conclusion was wrong — the gap was a factor of two to three — and the comment was load-bearing in the wrong direction, because it existed specifically to stop the next person looking. An explanation that dismisses a discrepancy is a claim, and it needs the same evidence as a piece of code. Two instruments disagreeing is not noise to be tidied away. It is the signal."
+  },
+  {
+   "id": "16-gates",
+   "shots": [
+    11,
+    11,
+    11,
+    11,
+    18,
+    18,
+    18
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "a hundred and forty-eight",
+     "148"
+    ]
+   ],
+   "narration": "Underneath the tests there is a second layer, and it is the one I lean on hardest: a hundred and forty-eight small scripts that run over the whole project at once, asking questions no single test can ask. One is worth describing exactly, because its design is this whole film compressed into one script. Its job is to check a count, and it derives that count two independent ways and compares them — already better than counting once. But before it scores anything, it checks that its own method still works: that the pattern it searches with can still find something it knows is there. And if that check fails, it does not say everything is fine, and it does not say everything is broken. It exits without giving you a verdict at all. There is an enormous difference between I looked and found nothing wrong, and I was unable to look. Most software collapses those into the same green tick."
+  },
+  {
+   "id": "17-wedge",
+   "shots": [
+    12,
+    12,
+    12,
+    12,
+    12,
+    19,
+    19,
+    19,
+    19
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "narration": "Which brings me to the end, and the part I care most about getting right. What is still wrong with this thing. The first is the worst. This program can host plug-ins made by other people, which is most of what makes a music program useful. And one kind, when asked to load, can take hold of the part of the program that draws the window and not give it back for minutes. Everything freezes. The audio keeps playing, which is almost funny, but nothing responds. What we built in response was not a fix. It was honesty. There is now a second door into the program that does not need the frozen part, so if you ask what is wrong while it is stuck, it answers and tells you how long it has been stuck. The record of that work says, in capital letters, that it makes the freeze legible and does not unfreeze anything. A status light is very easy to mistake for a repair. The real fix is to run those plug-ins in a separate process. Somebody measured whether that was feasible and it came out far cheaper than we had assumed. And then it was not built. It sits in the record as an open item with the measurement attached. And a second is still open, quieter: the program reporting that it was playing while the playhead did not move and the meters fell to silence."
+  },
+  {
+   "id": "18-eyes",
+   "shots": [
+    13,
+    13,
+    13,
+    13,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/app-arrange.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/app-arrange.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/shots/app-arrange.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-4/audio/bed-slowcap.wav",
+   "burst": "slowcap",
+   "playMax": 12.133,
+   "normalize": false,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "three",
+     "3"
+    ],
+    [
+     "five",
+     "5"
+    ]
+   ],
+   "narration": "The second thing still hard is that nothing in this entire apparatus has eyes. Not one of those hundred and forty-eight scripts can look at a picture. Nothing compares the words printed on the screen to the words being spoken over them. Nothing notices a switch drawn in the off position while everything around it says on — which happened, on a real panel, and was found by a person opening the screenshot. Five screenshots of one panel turned up three separate defects that every test, every search and every review had passed. The only known fix is that somebody looks. That is not a satisfying engineering answer and I will not dress it up as one. Here is a smaller one that bit this very film. The way I photograph the program takes about three frames a second. Not thirty. Three. So I cannot film anything that moves. What you are about to watch is the program playing, filmed at that rate, this evening. It is not a broken video. That is what three frames a second looks like."
+  },
+  {
+   "id": "19-close",
+   "shots": [
+    14,
+    14,
+    14,
+    14,
+    15,
+    15,
+    15,
+    15
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "brandCheck": "DAW",
+   "factCheck": [
+    [
+     "a hundred and thirty-one",
+     "131"
+    ]
+   ],
+   "narration": "There are a hundred and thirty-one of these written down. A hundred and thirty-one lines in this project's plan that begin with an empty box, each one a thing somebody knows is missing or wrong. There are two ways to read that number and only one is right. It is not a confession, and it is not a boast. It is the honest shape of a piece of software about two months old that is being used for real. The list is not the embarrassing part. Not having one would be. So — four parts. What a DAW is, and the one decision it all hangs on. Why the deadline the sound has to meet is the hardest constraint in the building. Why the failures that hurt are the ones that hand you a wrong answer wearing the costume of a right one. And this one: that a passing test earns your trust only if you have watched that same test fail. The same idea from four directions. Measure it rather than asserting it, then try to prove yourself wrong — the only move in the whole discipline that can tell you something you did not already believe. It took one person and one machine about two months. It is not finished, and I have told you exactly how. Thank you for watching."
+  }
+ ],
+ "tags": [
+  "DAW",
+  "software engineering",
+  "testing",
+  "falsification",
+  "plugin delay compensation",
+  "audio programming",
+  "measurement",
+  "how it's made",
+  "AI"
+ ],
+ "description": "Part four, the last, of a series about building a digital audio workstation from nothing. A test you have never seen fail is not evidence. So this one plants a fault in shipping code and watches four separate tests go red at exactly their own plug-in's delay — and then says what is still broken.\n\nTHE CODE WAS WRITTEN BY AN AI AGENT WORKING WITH ONE PERSON.\n\nTHE EXPERIMENT, RUN IN THIS BUILD\nLine 1393 of Sources/DAWEngine/PlaybackGraph.swift reads a hosted plug-in's latency. It was replaced with 0 and `./scripts/test.sh --filter PDCHostedAURender` was re-run: 2 of 4 tests reddened with 5 failures, at alignment errors of 96 / 256 / 256 / 4096 samples — each exactly its own unit's latency — and the mix leg at 0.5 instead of 1.0. ⭐ The two CONTROLS stayed green: the positive control (every render makes signal) and the negative control (a 0-latency AU gets no compensation). The line was restored and the restore proved four ways: cmp exit 0, planted marker 0, original line 1, git porcelain 0 lines. Logs kept beside the film.\n\n4096 samples at 48 kHz is 85.3 ms. The film plays six wooden clicks together and then the same click twice 85 ms apart (measured), one shared static gain on both halves so the demonstration is timing and not level.\n\nTHE SECOND CASE — A CONTROL SIMPLER THAN THE SIGNAL\nA liveness probe called a genuinely velocity-layered saxophone lifeless. 26 tests passed before AND after the fix. Its self-check measured a PURE SINE, which reads identically under both the power-weighted (wrong) and magnitude-weighted (right) spectral centroid. It compressed a true 6.59 % spread to 0.295 %. Re-measured LIVE on staging for this film: Apple GM DLS 2165 / 2167 / 2165 / 2167 Hz (0.09 %, static) vs GeneralUser GS 2371 / 2489 / 2557 / 2557 Hz (7.87 %, live, 3 timbre groups), both across ~28 dB of level.\n\nWHAT IS STILL HARD — every one an OPEN item in docs/ROADMAP.md\n· A third-party plug-in can wedge the main actor for minutes (m23-av). The shipped work makes the wedge LEGIBLE and explicitly DOES NOT UNWEDGE ANYTHING; out-of-process hosting was measured feasible and is unbuilt (m23-av-3), plus two further open legs (m23-av-1, m23-av-2).\n· A transport reported `playing` while the playhead stayed frozen and the meters decayed to silence — ruled out as the wedge, still open (m23-cb).\n· Nothing here has eyes: no gate compares words on screen to words in the voice. 5 captures of one panel found 3 defects every test, grep and review had passed.\n· debug.captureUI runs at 3.02 fps measured in this build (332 ms per frame; the record says 3.5), so it cannot film motion.\n· 131 open items in total.\n\nSCALE, RUN FOR THIS FILM: 7924 tests in 709 suites, 270.3 s, zero failures. 148 gate scripts. 105 commits. 209,766 lines of program against 224,005 lines of test.\n\nDISCLOSURE\nThe narration is a synthetic voice, generated locally. No music-generation model was used: every note in the demo track was written by hand and played by the application's own sound bank. ⚠ THE 30 fps FOOTAGE OF THE APP PLAYING WAS FILMED FOR PART 3 EARLIER THE SAME DAY, of this same project on this same staging instance: the screen was LOCKED throughout this build and a locked screen delivers no frames to the recorder. The stuttering shot in the closing chapter IS filmed in this build, at its real measured rate, and the narration says so.\n\n#daw #softwareengineering #testing #measurement #audioprogramming"
+}

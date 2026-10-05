@@ -1,7 +1,7 @@
 import AVFAudio
-import DAWCore
 import Foundation
 import Testing
+@testable import DAWCore
 @testable import DAWEngine
 
 // Two sampler controls asked for by an external sax-library team, both
@@ -213,6 +213,33 @@ private func makeSampler(_ params: SamplerParams) -> SamplerInstrument {
     let sampler = SamplerInstrument(params: params, randomSeed: 0xD1CE_5EED)
     sampler.prepare(sampleRate: 48_000, maxFramesPerQuantum: 512, channelCount: 2)
     return sampler
+}
+
+/// m34-s — THE REAL SAVE/OPEN PATH: params → `InstrumentDocument` → JSON →
+/// `InstrumentDocument` → `instrumentDescriptor`. Deliberately NOT
+/// `SamplerParams`' own `Codable`, which round-trips all fifteen fields and so
+/// cannot fail the way a project does — that is precisely the gap m34-s closed,
+/// and `settingsSurviveSaveAndLoad` below only ever exercised the params half.
+///
+/// ⚠️ Zone media rides as an ABSOLUTE path (`ProjectDocument.resolveMedia`'s
+/// documented recovery-bundle form): a zone whose media does not resolve is
+/// DROPPED on open, and a dropped zone would let every measurement below pass
+/// on silence. The zone-count check is what makes that loud.
+private func reopenThroughTheSaveFormat(_ params: SamplerParams) throws -> SamplerParams {
+    let mediaRefs: [UUID: String?] = Dictionary(
+        uniqueKeysWithValues: params.zones.map { ($0.id, $0.audioFileURL.path as String?) })
+    let document = InstrumentDocument(
+        from: InstrumentDescriptor(kind: .sampler, sampler: params), mediaRefs: mediaRefs)
+    let data = try JSONEncoder().encode(document)
+    let reopened = try JSONDecoder().decode(InstrumentDocument.self, from: data)
+    var warnings: [String] = []
+    let restored = try #require(
+        reopened.instrumentDescriptor(bundleURL: URL(fileURLWithPath: "/tmp"),
+                                      warn: { warnings.append($0) }).sampler)
+    #expect(warnings.isEmpty, "the round trip must not warn: \(warnings)")
+    #expect(restored.zones.count == params.zones.count,
+            "a dropped zone would make every measurement here pass on silence")
+    return restored
 }
 
 extension SamplerTests {
@@ -547,10 +574,23 @@ extension SamplerTests {
         #expect(goertzel(out.left[late], hz: 440) < 1e-6)
     }
 
-    // MARK: - 5. Persistence
+    // MARK: - 5. Persistence — the PARAMS half only (see §6 for the save format)
 
     /// A project saved before these fields existed must still open, and open as
-    /// the same instrument. Both directions, on the real `Codable` conformance.
+    /// the same instrument. Both directions, on `SamplerParams`' own `Codable`
+    /// conformance.
+    ///
+    /// ⚠️⚠️ CORRECTION 2026-08-31 (ROADMAP m34-s), left in place because the
+    /// gap it names is the interesting part: THIS TEST WAS GREEN THE WHOLE TIME
+    /// THE FEATURE DID NOT SURVIVE A SAVE. `SamplerParams` does not persist
+    /// through its own `Codable` — `SamplerDocument` (ProjectDocument.swift) is
+    /// the save format, and until m34-s neither key was in ITS CodingKeys, so a
+    /// user's mono/±12 patch reopened as poly/±2. A test named "persistence"
+    /// that exercises a type the save path never encodes is exactly this tree's
+    /// characteristic failure shape: the record says X, the source says Y, and
+    /// nothing compares them. The comparison now lives in §6 below and in
+    /// `PedalHoldLimitCodableTests`; this test keeps its narrower, still-true
+    /// claim about the model type.
     @Test("persistence: absent keys decode as nil, set values round-trip, nil emits nothing")
     func settingsSurviveSaveAndLoad() throws {
         let encoder = JSONEncoder()
@@ -589,5 +629,76 @@ extension SamplerTests {
         // Out-of-range clamps at the model boundary, as every sibling field does.
         #expect(SamplerParams(bendRangeSemitones: 99).bendRangeSemitones == 48)
         #expect(SamplerParams(bendRangeSemitones: -5).bendRangeSemitones == 0)
+    }
+
+    // MARK: - 6. m34-s — the same two settings, after a SAVE and a REOPEN
+
+    /// ⛔ BOTH SETTINGS SHIPPED WITHOUT A SAVE. `bendRangeSemitones` and
+    /// `voiceMode` were absent from `SamplerDocument`'s CodingKeys until
+    /// 2026-08-31, so the sax team's instrument reopened at ±2 and poly no
+    /// matter what had been set — measured, filed as ROADMAP m34-s.
+    ///
+    /// ⭐ This asserts the reopened patch BENDS AN OCTAVE, in Hz. Reading
+    /// `restored.bendRangeSemitones == 12` back would not tell you the number
+    /// reached the sound.
+    @Test("m34-s: a SAVED AND REOPENED bend range 12 still moves a whole OCTAVE")
+    func reopenedBendRangeTwelveStillMovesAnOctave() throws {
+        let fixtures = try BendFixtures.urls()
+        let restored = try reopenThroughTheSaveFormat(
+            bendParams(fixture: fixtures.long, bendRange: 12))
+        #expect(restored.bendRangeSemitones == 12,
+                "the save format dropped the bend range — ROADMAP m34-s")
+
+        var down = noteEvents(on: 0, off: 200_000, pitch: 69, id: 1)
+        down.append(bendEvent(at: 100, raw: 0, id: 900))
+        let downOut = try renderQuanta(makeSampler(restored), events: down, frames: 48_000)
+        expectPitch(downOut.left, hz: 220, window: 9_600..<28_800,
+                    label: "REOPENED range 12, raw 0")
+
+        // ⛔ THE COMPAT CONTROL: the SAME deflection on a patch that never set a
+        // range must still be a WHOLE TONE after a reopen. Every bend lane
+        // already authored in every existing project was written against ±2, so
+        // an absent key resolving to anything else would rescale all of them.
+        let plain = try reopenThroughTheSaveFormat(bendParams(fixture: fixtures.long))
+        #expect(plain.bendRangeSemitones == nil, "an unset range must reopen unset")
+        let plainOut = try renderQuanta(makeSampler(plain), events: down, frames: 48_000)
+        expectPitch(plainOut.left, hz: 440.0 * exp2(-2.0 / 12.0), window: 9_600..<28_800,
+                    label: "REOPENED default range, raw 0")
+    }
+
+    /// The item's brief singled this one out: `voiceMode` changes VOICE
+    /// ALLOCATION, so its reopen gate must HEAR mono behaviour rather than read
+    /// the field back. Same scenario as `monoOverlapRetriggersToTheNewestPitch`
+    /// — an overlapping D5 over a held A4 — with both renders taken through the
+    /// save format, so the comparison is mono-vs-poly and not reopened-vs-not.
+    @Test("m34-s: a SAVED AND REOPENED mono patch still collapses the superseded note")
+    func reopenedMonoStillCollapsesTheSupersededNote() throws {
+        let fixtures = try BendFixtures.urls()
+        let events = noteEvents(on: 0, off: 140_000, pitch: 69, id: 1)
+            + noteEvents(on: 24_000, off: 140_000, pitch: 81, id: 2)
+        let window = 28_000..<47_200
+
+        let reopenedPoly = try reopenThroughTheSaveFormat(bendParams(fixture: fixtures.long))
+        #expect(reopenedPoly.voiceMode == nil, "an unset mode must reopen unset, and mean poly")
+        let poly = try renderQuanta(makeSampler(reopenedPoly), events: events, frames: 60_000)
+        let polyLow = goertzel(poly.left[window], hz: 440)
+        #expect(polyLow > 0.02, "the reopened POLY control must still sound the OLD note")
+
+        let restored = try reopenThroughTheSaveFormat(
+            bendParams(fixture: fixtures.long, voiceMode: .mono))
+        #expect(restored.voiceMode == .mono,
+                "the save format dropped the voice mode — ROADMAP m34-s")
+        let mono = try renderQuanta(makeSampler(restored), events: events, frames: 60_000)
+        let monoLow = goertzel(mono.left[window], hz: 440)
+        let monoHigh = goertzel(mono.left[window], hz: 880)
+        print("[measured] REOPENED MONO during the overlap: @440 \(monoLow), @880 \(monoHigh) "
+              + "(reopened poly had @440 \(polyLow))")
+        expectPitch(mono.left, hz: 880, window: window, label: "reopened mono, newest pitch wins")
+        #expect(monoLow < polyLow / 50,
+                """
+                a REOPENED mono patch left the superseded note sounding: @440 was \(monoLow) \
+                vs the reopened poly control's \(polyLow)
+                """)
+        #expect(monoHigh > 20 * monoLow)
     }
 }

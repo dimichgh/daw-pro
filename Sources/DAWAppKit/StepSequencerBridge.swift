@@ -81,6 +81,14 @@ public final class StepSequencerBridge {
     /// `ArrangeLaneGeometry` ladder rule).
     public private(set) var reportedRowHeight: CGFloat = 0
     public private(set) var reportedStepWidth: CGFloat = 0
+    /// m23-ap I5-F4 — where the drawn columns sit on the SONG's grid: how far
+    /// the clip's first beat sits past column 0's line (0 on a line), the song
+    /// beat column 0 starts at, and the columns the grid drew as bar lines with
+    /// their SONG bar numbers. Without these a probe could not say where an
+    /// off-grid clip's boxes are, nor compare the step grid's bars with the roll's.
+    public private(set) var reportedPhaseBeats: Double = 0
+    public private(set) var reportedFirstStepSongBeat: Double = 0
+    public private(set) var reportedBarMarks: [StepBarMark] = []
 
     /// The grid instance whose report is currently standing, or nil when no grid
     /// is mounted. Never observable — it is the reporters' own bookkeeping, not
@@ -132,9 +140,15 @@ public final class StepSequencerBridge {
     ///
     /// - Parameter token: identifies the reporting grid INSTANCE. See
     ///   `reportNoGrid(from:)` — this is what makes a clip switch safe.
+    ///
+    /// The three song-grid fields (m23-ap I5-F4) default to a clip on a line at
+    /// the song's start, so an older caller reads as exactly that; the grid view
+    /// passes all three from the geometry it drew.
     public func report(token: UUID,
                        lanes: [StepSequencerLane], stepCount: Int, stepBeats: Double,
-                       fills: [StepCellFill], rowHeight: CGFloat, stepWidth: CGFloat) {
+                       fills: [StepCellFill], rowHeight: CGFloat, stepWidth: CGFloat,
+                       phaseBeats: Double = 0, firstStepSongBeat: Double = 0,
+                       barMarks: [StepBarMark] = []) {
         lastReporter = token
         reportedMode = .steps
         reportedLanes = lanes
@@ -143,6 +157,9 @@ public final class StepSequencerBridge {
         reportedFills = fills
         reportedRowHeight = rowHeight
         reportedStepWidth = stepWidth
+        reportedPhaseBeats = phaseBeats
+        reportedFirstStepSongBeat = firstStepSongBeat
+        reportedBarMarks = barMarks
         reportSeq &+= 1
     }
 
@@ -170,6 +187,9 @@ public final class StepSequencerBridge {
         reportedFills = []
         reportedRowHeight = 0
         reportedStepWidth = 0
+        reportedPhaseBeats = 0
+        reportedFirstStepSongBeat = 0
+        reportedBarMarks = []
         reportSeq &+= 1
     }
 }

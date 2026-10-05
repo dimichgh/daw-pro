@@ -110,6 +110,32 @@ struct PianoRollSnapPolicyTests {
         }
     }
 
+    // MARK: - m23-ap I5 — the arithmetic's one home
+
+    /// `PianoRollModel.snap(beat:resolution:)` now FORWARDS here (the pitch
+    /// editor's placement has no roll model to ask). The literals are
+    /// `PianoRollModelTests`' own snap literals, so the two cannot drift apart,
+    /// plus the two the pitch editor's placement truth table leans on.
+    @Test("m23-ap I5 — SnapResolution.snapped is the roll's rounding: nearest line, floored at 0, off passes through")
+    func snappedIsTheOneRoundingRule() {
+        #expect(SnapResolution.off.snapped(2.37) == 2.37)
+        #expect(SnapResolution.off.snapped(-5) == 0)
+        #expect(SnapResolution.bar.snapped(5.9) == 4)
+        #expect(SnapResolution.bar.snapped(6.1) == 8)
+        #expect(SnapResolution.beat.snapped(2.4) == 2)
+        #expect(SnapResolution.sixteenth.snapped(2.37) == 2.25)
+        #expect(SnapResolution.sixteenth.snapped(1.425) == 1.5)
+        for resolution in Self.allPicked {
+            #expect(resolution.snapped(-0.3) == 0, "\(resolution) must floor at 0")
+            guard let grid = resolution.beats else { continue }
+            let landed = resolution.snapped(3.337)
+            #expect(abs((landed / grid).rounded() * grid - landed) < 1e-9,
+                    "\(resolution): \(landed) is not on its own grid")
+            #expect(abs(landed - 3.337) <= grid / 2 + 1e-9,
+                    "\(resolution): \(landed) is not the NEAREST line to 3.337")
+        }
+    }
+
     // MARK: - The symptom, composed with the arithmetic that produced it
 
     @Test("⚠️ the playhead beat the user clicked survives the roll's snap math")

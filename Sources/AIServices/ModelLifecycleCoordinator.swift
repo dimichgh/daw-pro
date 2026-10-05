@@ -458,19 +458,23 @@ public actor ModelLifecycleCoordinator {
         now: @escaping @Sendable () -> Date = { Date() },
         storageDirectory: URL? = nil,
         settleSeconds: Double = 1.0,
-        sleepSeconds: @escaping @Sendable (Double) async -> Void = { seconds in
-            // ⚠️ `try?`, not `try` — the cancellation must be absorbed HERE, in a
-            // concrete closure body, never propagated through the indirect call.
-            // See the crash note on `sleepSeconds`.
-            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-        }
+        sleepSeconds: (@Sendable (Double) async -> Void)? = nil
     ) {
         self.policy = policy
         self.sampleMemory = sampleMemory
         self.now = now
         self.storageDirectory = storageDirectory
         self.settleSeconds = settleSeconds
-        self.sleepSeconds = sleepSeconds
+        // `nil` = the real sleep, supplied HERE and never as the default argument: Swift 6.3.3
+        // re-emits an async default-argument closure in every module that omits the argument,
+        // with a different async context size under one weak symbol, and the link can pair them
+        // wrongly (task-allocator abort). Gate: `scripts/gates/async-default-dup.py`.
+        self.sleepSeconds = sleepSeconds ?? { seconds in
+            // ⚠️ `try?`, not `try` — the cancellation must be absorbed HERE, in a
+            // concrete closure body, never propagated through the indirect call.
+            // See the crash note on `sleepSeconds`.
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+        }
     }
 
     // MARK: - Registration
@@ -578,6 +582,7 @@ public actor ModelLifecycleCoordinator {
             holdConfidence: record.holdConfidence,
             isEvictable: record.descriptor.isEvictable,
             activeJobs: record.activeJobs(now: moment, leaseSeconds: policy.jobLeaseSeconds),
+            yieldsWhenBusy: record.descriptor.yieldsWhenBusy,
             admittedAt: record.admittedAt,
             lastJobEndedAt: record.lastJobEndedAt)
     }

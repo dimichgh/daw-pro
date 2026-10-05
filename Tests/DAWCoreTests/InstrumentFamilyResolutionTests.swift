@@ -69,7 +69,11 @@ struct InstrumentFamilyResolutionTests {
                 trackKind: .instrument, instrument: descriptor, percussionNote: nil)
             let expected: InstrumentFamilyResolution.Reason
             switch kind {
-            case .testTone, .polySynth, .sampler:
+            // m39-dm: `.drumSynth` carries no GM family. GM does have a
+            // percussion convention, but our eight synthesised voices sit on
+            // notes 36–43 with no GM program behind them, so claiming a family
+            // would be a confident answer about a mapping that does not exist.
+            case .testTone, .polySynth, .sampler, .drumSynth:
                 expected = .instrumentKindCarriesNoFamily
             case .audioUnit:
                 expected = .hostedAudioUnitIsOpaque

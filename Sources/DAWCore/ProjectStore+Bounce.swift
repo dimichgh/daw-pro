@@ -109,12 +109,16 @@ extension ProjectStore {
         // master bus into clip material — byte==stem stays BY CONSTRUCTION.
         // The master volume lane is excluded too (m15-c, S-3′ extension): a
         // baked fade would double-apply when the landed clip plays back
-        // through the live master fade.
+        // through the live master fade. Master modulation likewise (m39-e-2):
+        // a baked master tremolo would double-apply through the live master
+        // LFO.
         let audio = try await engine.renderOffline(
             tracks: StemPlan.passTracks(for: descriptor, session: liveTracks),
             tempoMap: transport.tempoMap, masterVolume: masterVolume,
             masterEffects: [],
             masterAutomation: [],
+            masterModulationSources: [],
+            masterModulationRoutes: [],
             fromBeat: startBeat, durationSeconds: duration,
             forcedCompensationTargets: targets
         )

@@ -30,4 +30,25 @@ protocol InstrumentRendering: AnyObject {
     /// All-notes-off NOW. Render-thread-safe by contract. After reset() the
     /// instrument MUST output silence until the next noteOn.
     func reset()
+
+    /// m39-e P1 — the instrument's modulation delivery slot. MAIN ACTOR:
+    /// `nil` unpublishes; the instrument stores the snapshot in its own atomic
+    /// slot and evaluates it INSIDE the per-frame loop it already runs, at
+    /// `renderStart + frame`.
+    ///
+    /// ⭐ This is the whole of the instrument delivery path, and it is why
+    /// m39-b and m39-e are one change rather than two: `AutomationRenderer`
+    /// has no path to `track.instrument` at all, so "add the enum case" would
+    /// have unblocked ADDRESSING and delivered nothing (design §10 H3).
+    ///
+    /// `render(events:renderStart:frameCount:output:)` is UNTOUCHED —
+    /// `renderStart` is already the position-absolute anchor this needs.
+    @MainActor func publishModulation(_ snapshot: ModulationSnapshot?)
+}
+
+extension InstrumentRendering {
+    /// Default-inert, exactly as `EffectRendering.storeAutomatedParam` is: an
+    /// instrument that does not participate needs ZERO edits. Sampler,
+    /// TestTone and EventCapture are all covered by this line in v1.
+    @MainActor func publishModulation(_ snapshot: ModulationSnapshot?) {}
 }

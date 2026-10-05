@@ -1,0 +1,33 @@
+el=24 az=  0 Strings  vis= 107891 occluded=  0.00 %   bright vis=  8264 occludedBright=  0.00 %
+el=24 az=  0 Bass     vis=   8323 occluded=  0.00 %   bright vis=  1284 occludedBright=  0.00 %
+el=24 az=  0 Lead     vis=   3849 occluded=  0.00 %   bright vis=  1138 occludedBright=  0.00 %
+el=24 az=  0 Stabs    vis=      0 occluded=n/a   bright vis=     0 occludedBright=n/a
+el=24 az= 45 Strings  vis= 135225 occluded=  0.00 %   bright vis=  9453 occludedBright=  0.00 %
+el=24 az= 45 Bass     vis=  11127 occluded=  0.00 %   bright vis=  1627 occludedBright=  0.00 %
+el=24 az= 45 Lead     vis=   3456 occluded=  0.00 %   bright vis=  1042 occludedBright=  0.00 %
+el=24 az= 45 Stabs    vis=      0 occluded=n/a   bright vis=     0 occludedBright=n/a
+el=24 az= 90 Strings  vis= 109169 occluded=  0.00 %   bright vis=  8410 occludedBright=  0.00 %
+el=24 az= 90 Bass     vis=  14765 occluded=  0.00 %   bright vis=  2040 occludedBright=  0.00 %
+el=24 az= 90 Lead     vis=   4033 occluded=  0.00 %   bright vis=  1197 occludedBright=  0.00 %
+el=24 az= 90 Stabs    vis=      0 occluded=n/a   bright vis=     0 occludedBright=n/a
+el=24 az=135 Strings  vis=  65966 occluded=  0.00 %   bright vis=  5870 occludedBright=  0.00 %
+el=24 az=135 Bass     vis=  16514 occluded=  0.00 %   bright vis=  2178 occludedBright=  0.00 %
+el=24 az=135 Lead     vis=   9018 occluded=  0.00 %   bright vis=  1645 occludedBright=  0.00 %
+el=24 az=135 Stabs    vis=      0 occluded=n/a   bright vis=     0 occludedBright=n/a
+el=24 az=180 Strings  vis=  45963 occluded=  1.88 %   bright vis=  4145 occludedBright=  0.00 %
+el=24 az=180 Bass     vis=  14765 occluded=  0.00 %   bright vis=  2040 occludedBright=  0.00 %
+el=24 az=180 Lead     vis= 201962 occluded=  0.05 %   bright vis=  4798 occludedBright=  0.00 %
+el=24 az=180 Stabs    vis=      0 occluded=n/a   bright vis=     0 occludedBright=n/a
+el=24 az=225 Strings  vis=  40163 occluded=  1.80 %   bright vis=  3561 occludedBright=  0.00 %
+el=24 az=225 Bass     vis=  11127 occluded=  0.00 %   bright vis=  1627 occludedBright=  0.00 %
+el=24 az=225 Lead     vis= 221789 occluded=  0.13 %   bright vis=  5424 occludedBright=  0.00 %
+el=24 az=225 Stabs    vis=      0 occluded=n/a   bright vis=     0 occludedBright=n/a
+el=24 az=270 Strings  vis=  46228 occluded=  0.00 %   bright vis=  4088 occludedBright=  0.00 %
+el=24 az=270 Bass     vis=   8323 occluded=  0.00 %   bright vis=  1284 occludedBright=  0.00 %
+el=24 az=270 Lead     vis= 187853 occluded=  0.00 %   bright vis=  4502 occludedBright=  0.00 %
+el=24 az=270 Stabs    vis=      0 occluded=n/a   bright vis=     0 occludedBright=n/a
+el=24 az=315 Strings  vis=  64930 occluded=  0.00 %   bright vis=  5721 occludedBright=  0.00 %
+el=24 az=315 Bass     vis=   7394 occluded=  0.00 %   bright vis=  1212 occludedBright=  0.00 %
+el=24 az=315 Lead     vis=   7200 occluded=  0.00 %   bright vis=  1529 occludedBright=  0.00 %
+el=24 az=315 Stabs    vis=      0 occluded=n/a   bright vis=     0 occludedBright=n/a
+wrote /Users/dsemenov/Views/daw-pro/scripts/video/shorts/roads/r36-stage/measure/occl-L2-t14.json  rows=32

@@ -1,0 +1,307 @@
+{
+  "set": "freq-shifter-physics",
+  "description": "m39-z, the .freqShifter insert. THIS SET IS A MEASUREMENT FIXTURE FIRST AND A DEMO SECOND, and the material is chosen for that: every variant plays ONE SUSTAINED SINE at MIDI 69 = 440.000 Hz for the whole render, with the synth's filter wide open and no unison detune, so the source spectrum is a single known line and nothing else.\n\nWHY A BARE SINE AND NOT MUSIC, stated because it is the single most likely way this demo gets built wrong. The claim this effect has to prove is that it is SINGLE-sideband - that energy appears at f0+shift and does NOT appear at f0-shift. On a chord or a riff both of those bins already contain something, so the measurement would read the material rather than the effect, and a build that had quietly become a RING MODULATOR (both sidebands, which is a one-character change away in the all-pass difference equation) would pass while sounding roughly as metallic as it should. With one sine in, the three bins that matter are 240 Hz, 440 Hz and 640 Hz, and all three are empty before the effect runs. scripts/gates/m39z-freq-shifter-physics.mjs asserts exactly that and refuses to score a stale manifest.\n\nWHAT A FREQUENCY SHIFTER ACTUALLY IS, because it gets confused with a pitch shifter and they are not the same thing at all. A pitch shifter MULTIPLIES every frequency in a sound by the same amount, so 100, 200 and 300 Hz become 200, 400 and 600 - the sound keeps its shape and just moves up, which is why it still sounds like a note. This one ADDS the same number of Hz to every frequency, so 100, 200 and 300 become 200, 300 and 400. Those are no longer whole-number multiples of each other, and that is precisely what the ear uses to hear 'a note'. Take it away and the same sound reads as a BELL, or a piece of metal, or a ring-modulated robot. It cannot play in tune and no setting makes it - that is the feature, not a limitation.\n\nWHAT TO LISTEN FOR, variant by variant. 'no-shifter' is the bare 440 Hz tone: a plain, dead-steady electronic pitch. 'shift-up-40' moves it a little, to 480 Hz. 'shift-up-200' moves the tone from 440 Hz to 640 Hz: it is a different, higher pitch, and on a single sine that is all you hear - which is the honest way to show the mechanism before showing the character. 'shift-down-200' moves the same tone DOWN to 240 Hz. 'fine-beating-3hz' is the one that sounds musical rather than technical: the shift is only 3 Hz, far too small to hear as a pitch change, and you hear instead a slow, steady PULSING about three times a second. That beating is the classic use of this effect, and a pitch shifter physically cannot produce it.\n\nWHY THAT ONE VARIANT ALSO LOWERS `mix` TO 0.5 WHILE THE OTHERS SIT AT 1, which looks like a second axis and is not. Beating is two tones at slightly different frequencies ADDING TOGETHER. At mix 1 there is no dry signal left for the shifted copy to beat against, so a 3 Hz shift of a single sine is simply a 443 Hz sine - a pitch change of 12 cents that nobody can hear, and the variant would be inaudible while reporting success. Keeping the dry signal is not a stylistic choice here, it is the only thing that makes this setting audible at all.\n\nWHY THERE IS NO `mix` 0 VARIANT IN THIS SET, since rule 6.0.7's bit-exact-dry law is a real claim that wants proving. `scripts/demos/render-variants.mjs` FAILS a set containing two byte-identical renders, deliberately and with no opt-out, because a set whose axis produces identical output is a set whose axis is not an axis. The mix 0 law is instead proven by `FreqShifterTests` L6, which is strictly stronger than a file hash: it compares BIT PATTERNS sample by sample, on a buffer seeded with -0.0 and subnormals that a tolerance test cannot see, with every other knob set non-default to prove `mix` alone is the gate.\n\nWHY YOU ARE NOT HEARING BELLS HERE. A single sine has nothing inharmonic to become - it has only one partial, so shifting it just moves it. The clangorous, metallic character this effect is famous for needs a sound with SEVERAL partials (a piano note, a guitar chord, a drum). That sound is what a listener wants and the WRONG fixture for a physics gate, so it is deliberately not this set.",
+  "variants": [
+    {
+      "name": "no-shifter",
+      "axis": "no frequency shifter at all - the bare 440 Hz tone, so the three measured bins are known to be empty before the effect runs",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 69,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "shift-up-40",
+      "axis": "shiftHz +40 at mix 1 - a small shift, still audibly a different pitch on a sine, so the axis has a middle rather than only its extremes",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 69,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "freqShifter",
+            "params": {
+              "shiftHz": 40,
+              "fineHz": 0,
+              "stereoSpreadHz": 0,
+              "mix": 1,
+              "outputDb": 0
+            }
+          },
+          "as": "shifter"
+        }
+      ]
+    },
+    {
+      "name": "shift-up-200",
+      "axis": "shiftHz +200 at mix 1 - the 440 Hz tone becomes 640 Hz, and 240 Hz must stay empty (that absence is what makes it single-sideband rather than a ring modulator)",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 69,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "freqShifter",
+            "params": {
+              "shiftHz": 200,
+              "fineHz": 0,
+              "stereoSpreadHz": 0,
+              "mix": 1,
+              "outputDb": 0
+            }
+          },
+          "as": "shifter"
+        }
+      ]
+    },
+    {
+      "name": "shift-down-200",
+      "axis": "shiftHz -200 at mix 1 - the same tone becomes 240 Hz, proving THE SIGN IS THE DIRECTION and there is no separate up/down switch",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 69,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "freqShifter",
+            "params": {
+              "shiftHz": -200,
+              "fineHz": 0,
+              "stereoSpreadHz": 0,
+              "mix": 1,
+              "outputDb": 0
+            }
+          },
+          "as": "shifter"
+        }
+      ]
+    },
+    {
+      "name": "fine-beating-3hz",
+      "axis": "fineHz 3 at mix 0.5 - THE MUSICAL ONE: far too small to hear as a pitch change, so it beats against the dry signal about 3 times a second, which a pitch shifter cannot do",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 69,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "freqShifter",
+            "params": {
+              "shiftHz": 0,
+              "fineHz": 3,
+              "stereoSpreadHz": 0,
+              "mix": 0.5,
+              "outputDb": 0
+            }
+          },
+          "as": "shifter"
+        }
+      ]
+    }
+  ]
+}

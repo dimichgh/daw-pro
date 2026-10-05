@@ -404,4 +404,110 @@ struct AutomationFXParamTests {
         let untouched = try processOnes(gain, frames: 1_024)
         #expect(untouched[1_023] == 1.0)
     }
+
+    // MARK: - m39-e P3 — modulation composes into the value this path computes
+
+    /// ⭐ THE CONSEQUENCE §3.3 WARNS IS EASY TO GET WRONG: today a target with
+    /// NO automation lane never appears in `schedule.effectParamTracks`, so
+    /// nothing stores it. A modulated-but-UNAUTOMATED param therefore needs a
+    /// SYNTHETIC ONE-POINT HOLD track carrying the knob value — and one point,
+    /// not zero, because a zero-point track is skipped twice over and would
+    /// look exactly like a route that does nothing.
+    ///
+    /// This measures the whole chain: the synthetic track is built, the store
+    /// runs, and the MODULATED value — not the knob value — reaches the live
+    /// effect.
+    @Test("⭐ m39-e P3: a modulated-but-UNAUTOMATED effect param reaches the effect through a synthetic one-point track")
+    func modulatedButUnautomatedEffectParamReachesTheEffect() throws {
+        var gainEffect = EffectDescriptor(kind: .gain)
+        gainEffect.gain = GainParams(gainLinear: 1.0)
+        // A macro at full travel through a NEGATIVE depth: a deterministic,
+        // position-independent offset, so the assertion is arithmetic rather
+        // than a phase guess.
+        let macro = ModulationSource(kind: .macro, params: .macro(MacroSourceParams(value: 1)))
+        let route = ModulationRoute(
+            sourceID: macro.id,
+            target: .effectParam(effectID: gainEffect.id, paramName: "gainLinear"),
+            depth: -0.25)
+
+        // The synthetic lane the graph builds for exactly this case.
+        let synthetic = ModulationSnapshotBuilder.syntheticEffectParamLanes(
+            routes: [route], effects: [gainEffect], automation: [])
+        #expect(synthetic.count == 1, "one route, one synthetic track")
+        #expect(synthetic.first?.points.count == 1,
+                "ONE point, not zero — a zero-point track is silently inert")
+        #expect(synthetic.first?.points.first?.value == 1.0, "carrying the KNOB value")
+
+        // An already-AUTOMATED param must NOT get a second track: two stores
+        // into one slot per quantum would be a last-writer-wins race.
+        let lane = AutomationLane(target: route.target,
+                                  points: [AutomationPoint(beat: 0, value: 0.5)])
+        let none = ModulationSnapshotBuilder.syntheticEffectParamLanes(
+            routes: [route], effects: [gainEffect], automation: [lane])
+        #expect(none.isEmpty, "an automated param already has a track")
+
+        // Render it: build the schedule from the synthetic track and let the
+        // renderer's pre-walk store run against a live chain.
+        let processor = EffectChainProcessor()
+        let state = EffectChainState(processor: processor)
+        state.sync(descriptors: [gainEffect], sampleRate: Self.sampleRate)
+        let renderer = AutomationRenderer()
+        let schedule = try #require(AutomationSchedule.build(
+            volumeLane: nil, panLane: nil,
+            effectParamLanes: synthetic,
+            fromBeat: 0, tempoMap: TempoMap(constantBPM: 120),
+            sampleRate: Self.sampleRate, generation: 1, mode: .offline))
+        renderer.publish(schedule)
+        renderer.publishModulation(try #require(ModulationSnapshotBuilder.build(
+            strip: ModulationSnapshotBuilder.Strip(
+                sources: [macro], routes: [route], effects: [gainEffect]),
+            generation: 1, timelineID: 1, sampleRate: Self.sampleRate,
+            originSample: 0, positionValid: true)))
+
+        var ts = offlineTimestamp(sample: 0)
+        renderer.storeEffectParams(chain: processor, frameCount: Self.quantum, timestamp: &ts)
+
+        // `gainLinear` is 0…16 LINEAR, so a -0.25 offset on a normalised base
+        // of 1/16 clamps the normalised value to 0 → the effect's floor.
+        let spec = try #require(EffectParamSpec.specs(for: .gain)
+            .first { $0.name == "gainLinear" })
+        let expected = ModulationDepthLaw.value(base: 1.0, sum: -0.25,
+                                                range: spec.range, curve: spec.curve)
+        let buffer = try stereoBuffer(frames: Self.quantum, fill: 1)
+        processor.process(bufferList: buffer.mutableAudioBufferList,
+                          frameCount: Self.quantum, key: nil)
+        let data = try #require(buffer.floatChannelData)
+        // The gain effect's store ends in a ~5 ms declick ramp (§2.4), so the
+        // LAST sample of the quantum is the one that has travelled furthest
+        // toward the target — the value is asserted as a DIRECTION plus a
+        // bound, not as an instantaneous equality the smoother cannot give.
+        let last = data[0][Self.quantum - 1]
+        print("[measured] m39-e P3: knob 1.0, macro 1.0 at depth -0.25 → target "
+              + "\(expected); rendered last sample \(last)")
+        #expect(expected < 1.0, "the modulated target must be BELOW the knob value")
+        #expect(last < 1.0, "the effect must actually have moved toward it")
+
+        // CONTROL: with NO modulation published the same schedule stores the
+        // knob value, and unity gain leaves the signal alone.
+        let controlProcessor = EffectChainProcessor()
+        let controlState = EffectChainState(processor: controlProcessor)
+        controlState.sync(descriptors: [gainEffect], sampleRate: Self.sampleRate)
+        let controlRenderer = AutomationRenderer()
+        controlRenderer.publish(try #require(AutomationSchedule.build(
+            volumeLane: nil, panLane: nil, effectParamLanes: synthetic,
+            fromBeat: 0, tempoMap: TempoMap(constantBPM: 120),
+            sampleRate: Self.sampleRate, generation: 1, mode: .offline)))
+        var controlTS = offlineTimestamp(sample: 0)
+        controlRenderer.storeEffectParams(chain: controlProcessor,
+                                          frameCount: Self.quantum, timestamp: &controlTS)
+        let controlBuffer = try stereoBuffer(frames: Self.quantum, fill: 1)
+        controlProcessor.process(bufferList: controlBuffer.mutableAudioBufferList,
+                                 frameCount: Self.quantum, key: nil)
+        let controlData = try #require(controlBuffer.floatChannelData)
+        print("[measured] m39-e P3 CONTROL (no modulation published): last sample "
+              + "\(controlData[0][Self.quantum - 1])")
+        #expect(controlData[0][Self.quantum - 1] == 1.0,
+                "without modulation the synthetic track stores the knob, which is unity")
+    }
+
 }

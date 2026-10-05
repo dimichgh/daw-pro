@@ -31,6 +31,38 @@ final class FakeTransientEngine: AudioEngineControlling {
         return stubMarkers
     }
 
+    // MARK: - m32-b2 slice-boundary seam
+
+    /// The FILE geometry this fake pretends to have read. Frames are DERIVED
+    /// from `boundarySeconds × stubSampleRate`, so a test that changes the rate
+    /// gets a genuinely different frame list — the property the real seam
+    /// exists to guarantee.
+    var stubSampleRate = 44_100.0
+    /// 2 s at 44.1 kHz — the same window `FakeMedia`'s 2 s file implies, so the
+    /// clip's window reaches the file end and the last pad's `endFrame` is nil.
+    var stubFrameCount = 88_200
+    /// When set, returned verbatim instead of the derived geometry (for the
+    /// snap-offset / residual reporting tests).
+    var stubGeometry: SliceBoundaryGeometry?
+    var resolveCalls = 0
+    var lastBoundarySeconds: [Double]?
+    var lastSnapWindowSeconds: Double?
+
+    func resolveSliceBoundaries(inFileAt url: URL, boundarySeconds: [Double],
+                               snapWindowSeconds: Double) async throws -> SliceBoundaryGeometry {
+        resolveCalls += 1
+        lastURL = url
+        lastBoundarySeconds = boundarySeconds
+        lastSnapWindowSeconds = snapWindowSeconds
+        if let stubGeometry { return stubGeometry }
+        let frames = boundarySeconds.map { Int(($0 * stubSampleRate).rounded()) }
+        return SliceBoundaryGeometry(
+            sampleRate: stubSampleRate, frameCount: stubFrameCount,
+            boundaryFrames: frames,
+            snapOffsetFrames: Array(repeating: 0, count: frames.count),
+            residualAmplitude: Array(repeating: 0.0, count: frames.count))
+    }
+
     func prepare() throws { isRunning = true }
     func shutdown() { isRunning = false }
     func tracksDidChange(_ tracks: [Track]) {}

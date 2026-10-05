@@ -4,12 +4,17 @@
   "owner": {
     "name": "dsemenov"
   },
-  "description": "DAW Pro's own Claude Code plugin marketplace: the music-making agent team and workflow skills that drive the app over its MCP server.",
+  "description": "Claude Code plugins from the DAW Pro repo: the music-making agent team that drives the app over its MCP server, and a general-purpose narrated-video kit that has no dependency on the app at all.",
   "plugins": [
     {
       "name": "daw-pro-music-team",
       "source": "./claude-plugin",
       "description": "A team of specialized agents and workflow skills that drive DAW Pro for real song creation and management, over its existing MCP server."
+    },
+    {
+      "name": "narrated-film",
+      "source": "./plugins/narrated-film",
+      "description": "Turn screenshots, footage and audio into a finished narrated video entirely on your own machine: local cloned-voice TTS with a transcribe-back content gate, ffmpeg assembly, branded intro/end cards and channel art from a brand.json, and a verifier that checks the finished file with positive controls. No cloud service, no API key, and nothing specific to any one application."
     }
   ]
 }

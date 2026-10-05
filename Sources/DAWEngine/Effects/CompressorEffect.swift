@@ -5,9 +5,33 @@ import Foundation
 
 /// Built-in soft-knee downward compressor (M4 iii). Topology (the classic
 /// log-domain feed-forward design):
-///   stereo-linked peak detector → log-domain gain computer (quadratic soft
-///   knee) → one-pole attack/release smoothing ON THE GAIN SIGNAL → makeup
-///   → parallel dry/wet blend (m23-ck).
+///   [de-ess detector filter (m39-ae, OFF by default)] → stereo-linked peak
+///   detector → log-domain gain computer (quadratic soft knee) → one-pole
+///   attack/release smoothing ON THE GAIN SIGNAL → makeup → parallel dry/wet
+///   blend (m23-ck).
+///
+/// ## The de-esser (m39-ae) — one filter, on the detector, and nowhere else
+///
+/// `detectorMode` 1/2 inserts a per-channel 2-pole biquad (`Primitives/Biquad`)
+/// in front of the peak detector. **It is not in the audio path.** The samples
+/// that get multiplied by the computed gain are the same samples that arrived;
+/// the filter only changes WHICH of them the unit decides to react to. That is
+/// the whole of a wideband de-esser, it needs no crossover, and it adds ZERO
+/// latency — `latencySamples` stays a literal 0, so no existing project moves
+/// in time and delay compensation has nothing new to plan.
+///
+/// ⛔⛔ **THE DEFAULT IS OFF AND IT IS BIT-EXACT, NOT "CLOSE".** At
+/// `detectorMode` 0 the filter is never stepped and the detector's expression
+/// is character-for-character what it was: `abs(channelData[c]![frame])`. The
+/// branch that chooses between filtered and raw is OUTSIDE the arithmetic, so
+/// the raw path's rounding cannot change. Pinned off rendered audio — including
+/// a SIDECHAIN-KEYED variant, because the keyed detector loop is the branch
+/// this item restructured — by
+/// `scripts/gates/m39ae-compressor-default-bytes.mjs`.
+///
+/// ⚠️ The filter composes with the sidechain key rather than competing with it:
+/// with a key attached it is the KEY that gets filtered, because the key IS the
+/// detector's input. The dry signal is always this effect's own main input.
 ///
 /// The blend is `out = mix·wet + (1−mix)·dry` with the dry term the unit's own
 /// MAIN input at the same sample index — the compressor has no lookahead and
@@ -63,6 +87,24 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
     private var mixDry = 0.0
     private var attackCoeff = 0.0   // per-sample one-pole feedback coefficient
     private var releaseCoeff = 0.0
+    /// De-ess detector filter (m39-ae). `detectorActive` false is the DEFAULT
+    /// and the bit-exact path: the filters are never stepped and the coeffs
+    /// are never read. One section per channel — the detector is stereo-LINKED
+    /// (it takes the max across channels) but the FILTER cannot be, because a
+    /// filter has memory and sharing one section between channels would make
+    /// the result depend on channel order.
+    private var detectorActive = false
+    private var detectorFilters = InlineBiquads()
+    private var dB0 = 0.0, dB1 = 0.0, dB2 = 0.0, dA1 = 0.0, dA2 = 0.0
+    /// Coefficient cache. Recomputing `sin`/`cos` on every automation store is
+    /// affordable but pointless; this makes a lane on `thresholdDb` — which
+    /// routes through the same `deriveRenderParams` — cost nothing extra.
+    /// ⚠️ Seeded with NaN so the FIRST derive always recomputes: `NaN != NaN`,
+    /// whereas a 0 seed would collide with a real request for 0.
+    private var lastDetectorFreq = Double.nan
+    private var lastDetectorQ = Double.nan
+    private var lastDetectorMode = CompressorParams.DetectorMode.off
+    private var lastDetectorRate = Double.nan
     /// Smoothed gain reduction in dB (≤ 0; 0 = no reduction).
     private var envelopeDb = 0.0
     /// Instant-attack peak-follower state (linear) + its fixed 5 ms decay.
@@ -141,17 +183,32 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
         grHeldDb = 0
         grDecayDbPerSample = GainReductionMeter.decayDbPerSample(sampleRate: sampleRate)
         GainReductionMeter.publish(grSlot, db: 0)
+        // m39-ae: the de-ess sections are STATE and a rate change invalidates
+        // both them and their coefficients. `lastDetectorRate` is compared, not
+        // assigned here, so the next derive cannot decide nothing changed.
+        detectorFilters.clearAll()
+        lastDetectorRate = .nan
         lastGeneration = .max  // re-derive coefficients at the new rate
     }
 
+    /// ⛔ A LITERAL 0, AND IT STAYS ONE. m39-ae adds a filter to the DETECTOR,
+    /// which needs no lookahead and no delay line, so nothing here becomes
+    /// parameter-dependent. (Contrast `SaturatorEffect`, whose latency DOES
+    /// depend on a param and which therefore had to refuse an automation lane
+    /// on it — see `Automation.swift`. This kind refuses none of its three new
+    /// params for that reason, because the reason does not exist here.)
     var latencySamples: Int { 0 }
 
     /// Clears the envelopes — post-reset output is uncompressed immediately,
     /// and the GR meter honestly reads 0 (atomic store — render-thread safe).
+    /// m39-ae: the de-ess filter sections are cleared too, so a transport stop
+    /// does not leave a decaying tail from the last "sss" biasing the first
+    /// samples after the restart.
     func reset() {
         envelopeDb = 0
         detectorLevel = 0
         grHeldDb = 0
+        detectorFilters.clearAll()
         GainReductionMeter.publish(grSlot, db: 0)
     }
 
@@ -182,17 +239,91 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
         // envelope covers 63.2% of a step in exactly attack/release ms.
         attackCoeff = exp(-1.0 / (p.attackMs * 0.001 * sampleRate))
         releaseCoeff = exp(-1.0 / (p.releaseMs * 0.001 * sampleRate))
+        deriveDetectorFilter(p)
     }
 
-    /// RENDER-THREAD automation store (M4 vii-c). Slot order =
-    /// `EffectParamSpec.specs(for: .compressor)`: 0 thresholdDb, 1 ratio,
-    /// 2 attackMs, 3 releaseMs, 4 kneeDb, 5 makeupDb, 6 mix. Pokes a
+    /// m39-ae — the de-ess detector filter's coefficients.
+    ///
+    /// ⚠️⚠️ **EVERY FIELD IS RE-GUARDED AND RE-CLAMPED HERE, and that is a
+    /// correctness requirement rather than defensive habit.** A field-by-field
+    /// overlay poke from `storeAutomatedParam` BYPASSES `CompressorParams.init`,
+    /// so that init's clamping is not in force — the `ClipperEffect` comment
+    /// spells out the same trap. Two of the three ways this bites are specific:
+    ///   · `detectorMode(at:)` does an `Int()` conversion, which **TRAPS** on a
+    ///     NaN (the `RingModParams.waveform` precedent). It guards `isFinite`
+    ///     itself, and that guard is the reason it exists rather than a local
+    ///     `Int(round(x))`.
+    ///   · an unclamped `detectorFreqHz` at or above Nyquist makes `w0` reach
+    ///     π, where the section is degenerate. `min(freq, sampleRate * 0.49)`
+    ///     inside `EQFilterResponse` already covers it; clamping to the
+    ///     DECLARED range first means the clamp the user is told about is the
+    ///     clamp that happens, at every sample rate down to 32 kHz where
+    ///     16 kHz would otherwise be half of Nyquist.
+    ///
+    /// The `sin`/`cos` are skipped unless the mode is on AND something the
+    /// coefficients depend on actually moved, so an automation lane riding
+    /// `thresholdDb` — which routes through `deriveRenderParams` and therefore
+    /// through here — costs three comparisons per quantum and no trig.
+    /// Render-thread safe: pure libm, no allocation, no locks.
+    private func deriveDetectorFilter(_ p: CompressorParams) {
+        let mode = CompressorParams.detectorMode(at: p.detectorMode)
+        guard mode != .off else {
+            detectorActive = false
+            // ⛔ The sections are CLEARED when the mode leaves, not when it
+            // arrives. Clearing on arrival would be the same thing at a steady
+            // state and WRONG during an automated 0→1→0→1 flutter: the filter
+            // would restart from silence on every re-entry and click. Clearing
+            // on exit means a re-entry starts from a state that is already zero
+            // because nothing fed it while it was off.
+            if lastDetectorMode != .off { detectorFilters.clearAll() }
+            lastDetectorMode = .off
+            return
+        }
+        let freq = (p.detectorFreqHz.isFinite ? p.detectorFreqHz : 6_500)
+            .clamped(to: CompressorParams.detectorFreqRange)
+        let q = (p.detectorQ.isFinite ? p.detectorQ : 2)
+            .clamped(to: CompressorParams.detectorQRange)
+        detectorActive = true
+        guard mode != lastDetectorMode || freq != lastDetectorFreq
+                || q != lastDetectorQ || sampleRate != lastDetectorRate else { return }
+        lastDetectorMode = mode
+        lastDetectorFreq = freq
+        lastDetectorQ = q
+        lastDetectorRate = sampleRate
+        // THROUGH THE ONE HOME (`EQFilterResponse`), never a second copy of the
+        // RBJ cookbook. The band-pass is the constant-0-dB-PEAK form on
+        // purpose: `thresholdDb` must mean the same dBFS banded as broadband.
+        let section: EQBiquad = mode == .bandPass
+            ? EQFilterResponse.bandPassSection(freq: freq, q: q, sampleRate: sampleRate)
+            : EQFilterResponse.cutSection(highPass: true, freq: freq, q: q,
+                                          sampleRate: sampleRate)
+        dB0 = section.b0
+        dB1 = section.b1
+        dB2 = section.b2
+        dA1 = section.a1
+        dA2 = section.a2
+    }
+
+    /// RENDER-THREAD automation store (M4 vii-c). ⛔ SLOT ORDER IS
+    /// `EffectParamSpec.specs(for: .compressor)` AND IT IS FROZEN: 0
+    /// thresholdDb, 1 ratio, 2 attackMs, 3 releaseMs, 4 kneeDb, 5 makeupDb,
+    /// 6 mix, 7 detectorMode, 8 detectorFreqHz, 9 detectorQ. Pokes a
     /// preallocated params copy and re-derives — no allocation, no locks. The
     /// envelope smoother naturally declicks the quantum steps. Slot 6 (m23-ck)
     /// IS accepted: the blend is two multiplies against state that already
     /// exists, so a lane can ride it without allocating anything.
+    ///
+    /// ⭐ m39-ae's three slots are ALL accepted, and the contrast with
+    /// `SaturatorEffect` — which guards `(0...2)` and refuses a lane on its
+    /// fourth param — is the point. That refusal is about LATENCY: the
+    /// saturator's `latencySamples` depends on its factor, and moving it from
+    /// the render thread would leave the delay-compensation plan stale. This
+    /// kind reports a literal 0 at every setting of every param, so there is no
+    /// plan to invalidate. Slot 7 does clear the filter sections when it leaves
+    /// the on state (`deriveDetectorFilter`), which is bounded work on a fixed
+    /// struct — not an allocation, and not a reason to refuse.
     func storeAutomatedParam(slot: Int, value: Double) {
-        guard value.isFinite, (0...6).contains(slot) else { return }
+        guard value.isFinite, (0...9).contains(slot) else { return }
         adoptPendingParams()
         overlay.beginStore()
         switch slot {
@@ -202,7 +333,10 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
         case 3: overlay.effective.releaseMs = value
         case 4: overlay.effective.kneeDb = value
         case 5: overlay.effective.makeupDb = value
-        default: overlay.effective.mix = value
+        case 6: overlay.effective.mix = value
+        case 7: overlay.effective.detectorMode = value
+        case 8: overlay.effective.detectorFreqHz = value
+        default: overlay.effective.detectorQ = value
         }
         deriveRenderParams(overlay.effective)
     }
@@ -261,8 +395,67 @@ final class CompressorEffect: KeyableEffectRendering, GainReductionReporting,
             // Stereo-linked peak detector: instant attack, fixed 5 ms decay.
             // Keyed: the detector listens to the KEY signal (frames beyond
             // the delivered key read as silence); self-keyed: the main signal.
+            //
+            // ⛔⛔ m39-ae: THE BRANCH IS OUTSIDE THE ARITHMETIC, AND THAT IS WHY
+            // THE DEFAULT IS BIT-EXACT. The two `else` limbs below are the
+            // pre-m39-ae expressions character-for-character — same operand
+            // order, same `abs` on the same `Float`, same comparison. A
+            // "filtered = active ? step(x) : x" one-liner would have read
+            // better and would have been a REWRITE of the shipped path, which
+            // is the shape that changes a low bit and passes every unit test.
             var peak: Float = 0
-            if keyCount > 0 {
+            if detectorActive {
+                // The de-ess path: filter each detector channel, THEN rectify.
+                // One section per channel — sharing one would make the result
+                // depend on channel order.
+                if keyCount > 0 {
+                    if frame < keyFrames {
+                        for channel in 0..<keyCount {
+                            var filtered = detectorFilters.step(
+                                channel, Double(keyData[channel]![frame]),
+                                b0: dB0, b1: dB1, b2: dB2, a1: dA1, a2: dA2)
+                            if !filtered.isFinite { detectorFilters.clearAll(); filtered = 0 }
+                            let sample = abs(Float(filtered))
+                            if sample > peak { peak = sample }
+                        }
+                    } else {
+                        // ⚠️ KEY UNDERRUN, AND THE FILTER IS FED THE SILENCE
+                        // RATHER THAN FROZEN. The unfiltered path above reads
+                        // these frames as silence and that is the end of it;
+                        // a 2-pole band-pass, though, is RECURSIVE — freezing
+                        // it holds its last output and would keep the
+                        // compressor pinned for the length of the underrun.
+                        // Feeding zeros lets it ring down the way the signal
+                        // actually did. Costs a loop only in a case that
+                        // should not happen.
+                        for channel in 0..<keyCount {
+                            _ = detectorFilters.step(channel, 0,
+                                                     b0: dB0, b1: dB1, b2: dB2,
+                                                     a1: dA1, a2: dA2)
+                        }
+                    }
+                } else {
+                    for channel in 0..<channelCount {
+                        var filtered = detectorFilters.step(
+                            channel, Double(channelData[channel]![frame]),
+                            b0: dB0, b1: dB1, b2: dB2, a1: dA1, a2: dA2)
+                        // ⛔ THE NaN GUARD LIVES HERE, NOT IN `Biquad`. A
+                        // recursive filter fed a NaN is poisoned FOREVER —
+                        // z1/z2 never recover, so the de-esser would be dead
+                        // for the rest of the session while every meter read
+                        // 0 and nothing logged. Note the unfiltered path needs
+                        // no such guard and has never had one: `NaN > peak` is
+                        // false, so a NaN sample is simply not the peak. Only
+                        // the filter has memory. Clearing the whole bank
+                        // (16 stores, no allocation) rather than one section is
+                        // deliberate: a poisoned bank is useless, and a buffer
+                        // carrying a NaN is already a catastrophe upstream.
+                        if !filtered.isFinite { detectorFilters.clearAll(); filtered = 0 }
+                        let sample = abs(Float(filtered))
+                        if sample > peak { peak = sample }
+                    }
+                }
+            } else if keyCount > 0 {
                 if frame < keyFrames {
                     for channel in 0..<keyCount {
                         let sample = abs(keyData[channel]![frame])

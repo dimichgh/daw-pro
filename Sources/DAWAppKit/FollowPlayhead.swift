@@ -86,6 +86,91 @@ public enum FollowPlayhead {
                        contentWidth: contentWidth, currentOffset: currentOffset)
     }
 
+    // MARK: - The VERTICAL axis: reveal, not page (m34-a-3)
+
+    /// Where a vertical reveal should land, and which edge it lands against.
+    /// The edge is carried rather than re-derived by the caller because the
+    /// arrange applies its vertical scroll through `ScrollViewProxy.scrollTo(
+    /// _:anchor:)` on the destination ROW's id — the `debug.arrangeScroll`
+    /// precedent — so the anchor is part of the answer, not a detail of it.
+    public struct RowReveal: Equatable, Sendable {
+        /// The scroll offset this reveal corresponds to, clamped. Fed to the
+        /// manual-scroll detector as the expected offset; the proxy's landing
+        /// is then absorbed as an in-flight issue rather than blamed on the user.
+        public var offset: CGFloat
+        /// True when the row is BELOW the viewport and should land against its
+        /// bottom edge; false when it is above and should land against the top.
+        public var anchorsBottom: Bool
+    }
+
+    /// ⭐⭐ **THE VERTICAL POLICY, AND IT IS DELIBERATELY NOT `pageOffset`.**
+    ///
+    /// The horizontal axis follows a playhead that moves on its own and would
+    /// leave the frame every few seconds if nothing turned the page; landing it
+    /// `leadFraction` in from the edge is what keeps the approach visible. The
+    /// vertical axis follows a ROW THAT DOES NOT MOVE. There is exactly one
+    /// moment worth scrolling for — the take is on a row the user cannot see —
+    /// and after it there is nothing to chase.
+    ///
+    /// ⛔⛔ **SO THE RULE IS: SCROLL ONLY WHEN THE ROW IS ENTIRELY OUT OF VIEW,
+    /// AND NEVER RE-CENTRE A ROW THAT IS ALREADY VISIBLE.** A performer scrolls
+    /// vertically ON PURPOSE — to watch another track while a take runs — and a
+    /// vertical follow that re-centred, or that used the horizontal axis'
+    /// `edgeMargin`, would drag the view back from wherever they put it. That
+    /// fights the user far more visibly than a horizontal page turn ever does,
+    /// because a page turn is what they asked for and a yank back to a row they
+    /// deliberately scrolled away from is not.
+    ///
+    /// **"Entirely out" is strict on purpose, and its cost is stated rather than
+    /// hidden**: a row showing only a sliver at an edge is left alone. The
+    /// conservative direction is the right one here — the failure mode of being
+    /// too eager (the view fighting a deliberate scroll) is far worse than the
+    /// failure mode of being too shy (a row the user can already partly see is
+    /// not moved). It also means a row TALLER than the viewport needs no special
+    /// case: it can never be entirely out while any of it is showing.
+    ///
+    /// ⚠️ **THE TOP CLAMP IS BORROWED FROM m25-b-4, NOT RE-DERIVED.** That item
+    /// established that a vertical offset must be clamped at the TOP as well as
+    /// floored at 0, **against the NEW content height** — the arrange's row
+    /// heights are variable (the S/M/L ladder, plus per-track automation and
+    /// take sections), so the ceiling moves. `maxOffset` is the same axis-free
+    /// arithmetic the horizontal clamp uses; the argument labels read
+    /// `width`/`X` because that shared rule was written on the horizontal axis.
+    ///
+    /// - Parameters:
+    ///   - rowTop: the row's top y in the lanes' CONTENT space.
+    ///   - rowHeight: the row's clip-band height (`ArrangeLaneGeometry.rowHeight`).
+    ///   - viewportHeight: the visible height of the vertical scroller.
+    ///   - contentHeight: the scroller's laid-out content height (the clamp's
+    ///     ceiling — measured, never derived from a row count).
+    ///   - currentOffset: where the scroller sits right now, reported by the
+    ///     view's own geometry.
+    public static func rowReveal(rowTop: CGFloat, rowHeight: CGFloat,
+                                 viewportHeight: CGFloat, contentHeight: CGFloat,
+                                 currentOffset: CGFloat) -> RowReveal? {
+        guard viewportHeight > 1, rowHeight > 0 else { return nil }
+        let rowBottom = rowTop + rowHeight
+        let ceiling = maxOffset(contentWidth: contentHeight, viewportWidth: viewportHeight)
+        let target: CGFloat
+        let anchorsBottom: Bool
+        if rowBottom <= currentOffset {
+            target = rowTop                             // entirely ABOVE the viewport
+            anchorsBottom = false
+        } else if rowTop >= currentOffset + viewportHeight {
+            target = rowBottom - viewportHeight         // entirely BELOW it
+            anchorsBottom = true
+        } else {
+            return nil                                  // any part of it is visible
+        }
+        let clamped = target.clamped(to: 0...max(0, ceiling))
+        // The same landing tolerance the page policy uses: a target this close
+        // to where the scroller already sits is not worth a scroll. It is what
+        // makes the ends of a short session quiet — with the scroller pinned at
+        // `maxOffset`, a bottom row's clamped target stops changing.
+        if abs(clamped - currentOffset) < landTolerance { return nil }
+        return RowReveal(offset: clamped, anchorsBottom: anchorsBottom)
+    }
+
     /// The shared landing computation: the clamped target, or nil when it is where
     /// the scroller already is. Backwards is symmetric with forwards — a loop wrap
     /// or a rewind pages BACK by the same rule, so follow never leaves the playhead
@@ -215,6 +300,44 @@ public final class FollowPlayheadModel {
         }
     }
 
+    /// The VERTICAL twin of `target(isEnabled:…)` (m34-a-3): the reveal this
+    /// surface should perform now, or nil for "stay put".
+    ///
+    /// ⭐⭐ **IT REUSES THIS MODEL'S SUSPENSION, BASELINE AND COUNTERS RATHER
+    /// THAN ADDING A SECOND "WHO OWNS THE SCROLL" POLICY.** The arrange's
+    /// vertical scroller is a genuinely different scroller from its horizontal
+    /// one (`ScrollView(.vertical)` in `ContentView` vs the lanes' own
+    /// `ScrollView(.horizontal)`), which is exactly the "one instance per
+    /// scrolling surface" this class documents — so it gets its OWN instance,
+    /// and that instance answers the vertical question with the vertical
+    /// landing rule. What must never happen is two DIFFERENT suspension rules on
+    /// one surface (the m25-r shape); one rule applied to two scrollers is the
+    /// opposite of that.
+    ///
+    /// ⚠️ It deliberately does NOT feed vertical reports into the HORIZONTAL
+    /// instance — `PianoRollView.editorVerticalScrollReader` records why: a
+    /// second axis' reports arriving at a horizontal detector make every scroll
+    /// on the other axis look like a manual horizontal drag.
+    ///
+    /// `isPlaying` is kept in the signature (and in the guard) for exact parity
+    /// with `target`: the two must be able to suspend and re-arm identically, and
+    /// a vertical follow that ran while the transport was stopped could move the
+    /// view under a user who is editing.
+    public func rowRevealTarget(isEnabled: Bool, isPlaying: Bool,
+                                rowTop: CGFloat, rowHeight: CGFloat,
+                                viewportHeight: CGFloat, contentHeight: CGFloat,
+                                currentOffset: CGFloat) -> FollowPlayhead.RowReveal? {
+        noteGeometry(contentWidth: contentHeight, viewportWidth: viewportHeight)
+        guard isEnabled, isPlaying, !isSuspended else { return nil }
+        guard let reveal = FollowPlayhead.rowReveal(
+            rowTop: rowTop, rowHeight: rowHeight, viewportHeight: viewportHeight,
+            contentHeight: contentHeight, currentOffset: currentOffset) else { return nil }
+        expectedOffset = reveal.offset
+        issueInFlight = true
+        scrollCount += 1
+        return reveal
+    }
+
     /// A scroll this surface should perform that follow did NOT ask for — the seam
     /// a debug-tier gate uses to reproduce a POINTER drag on either following
     /// surface (`debug.followPlayhead {simulateUserScroll}`, the `debug.*Seed`
@@ -229,6 +352,23 @@ public final class FollowPlayheadModel {
     public func scrollExternally(to x: CGFloat) {
         externalScrollX = max(0, x)
         externalScrollNonce += 1
+    }
+
+    /// Stands follow down on this surface WITHOUT touching the persisted enable
+    /// (m23-cu-1) — the same state a manual scroll produces, reached by an
+    /// explicit request instead of by a detected divergence.
+    ///
+    /// Its one caller is the FOLLOW chip while the arrange is following only
+    /// because a take is rolling: there the persisted preference is OFF, so a
+    /// press cannot be expressed as a toggle of it without meaning the opposite
+    /// of what was pressed. ⭐ It reuses `isSuspended` deliberately rather than
+    /// adding a second "follow is off right now" flag — two of those on one
+    /// surface is the m25-r shape, and `rearm()` already clears this one on the
+    /// next transport start, which is exactly the lifetime a per-take stand-down
+    /// wants.
+    public func standDown() {
+        isSuspended = true
+        issueInFlight = false
     }
 
     /// Re-arms follow: the transport started, or the user clicked the chip back on.

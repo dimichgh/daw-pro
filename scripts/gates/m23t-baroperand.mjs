@@ -17,9 +17,15 @@
 // colour mutation twice).
 //
 // TWO TRANSPORT STATES, OR THIS GATE IS VACUOUS. Off-clip (project beat 40,
-// outside a clip spanning 16…32) must read `BAR 1`; inside at clip-local bar 3
-// (project beat 24) must read `BAR 3`. One state alone is passed by a hardcoded
-// `Text("BAR 1")`. Each state's transport position is asserted INDEPENDENTLY
+// outside a clip spanning 16…32) must read `BAR 5`, the SONG bar holding the
+// clip's first beat; inside at song bar 7 (project beat 24) must read `BAR 7`.
+// One state alone is passed by a hardcoded `Text("BAR 5")`.
+//
+// ⭐ RESTATED BY m23-ap I5-F2 (2026-09-25): the readout names the SONG's bar,
+// the transport's own number. These legs read `BAR 1` / `BAR 3` (the clip's
+// bars counted from its first beat) until then; the literals moved, every leg
+// stayed, and the inside states gained a leg that the drawn bar IS the
+// transport's bar (`transportReadout`, the TransportBar string). Each state's transport position is asserted INDEPENDENTLY
 // through `project.overview` — a different subsystem from the view probe — and
 // its off/inside classification is checked against the clip geometry read back
 // from `project.snapshot`, never assumed.
@@ -32,8 +38,8 @@
 //
 // TWO ANTI-VACUITY LEGS, because "no cyan here" is passed by a crop of empty
 // glass:
-//   (a) the crop's sha must DIFFER between the two transport states — "BAR 1"
-//       and "BAR 3" are different glyphs, so a crop actually on the readout
+//   (a) the crop's sha must DIFFER between the two transport states — "BAR 5"
+//       and "BAR 7" are different glyphs, so a crop actually on the readout
 //       changes and a crop on blank panel is byte-identical;
 //   (b) the same metric must FIND cyan in the same capture — measured over the
 //       transport bar's POSITION readout, which is a genuine cyan position
@@ -163,7 +169,8 @@ try {
   const trackId = r.result?.id;
   ck("F5 track.add", r.ok && typeof trackId === "string", JSON.stringify(r.error ?? r.result));
 
-  // Four bars long, so clip-local bar 3 EXISTS. m23-c1's own fixture is two bars
+  // Four bars long (song bars 5…8), so song bar 7 is INSIDE it and the inside
+  // state has a bar other than the fallback. m23-c1's own fixture is two bars
   // and tops out at BAR 2 — the inside state would be unreachable on it.
   const notes = [4, 5, 6].map((b, i) => ({
     pitch: [60, 64, 67][i], startBeat: b, lengthBeats: 0.9, velocity: 100,
@@ -179,17 +186,17 @@ try {
   ck("F7 the clip is on the timeline and reports its own geometry",
      clip != null, JSON.stringify((snap.tracks ?? []).map((t) => (t.clips ?? []).length)));
   const clipStart = clip?.startBeat, clipLen = clip?.lengthBeats;
-  ck("F8 clip spans project beats 16…32 (four bars, so clip-local bar 3 exists)",
+  ck("F8 clip spans project beats 16…32 (song bars 5…8, so song bar 7 is inside it)",
      clipStart === 16 && clipLen === 16, `start=${clipStart} len=${clipLen}`);
   const clipEnd = clipStart + clipLen;
 
   // ---- the states ----------------------------------------------------------
   const STATES = [
-    { tag: "OFF", beat: 40, density: "pro", expect: "BAR 1", inside: false,
+    { tag: "OFF", beat: 40, density: "pro", expect: "BAR 5", inside: false,
       note: "4 bars AFTER the clip — the bar-1 fallback, the reported defect's frame" },
-    { tag: "IN", beat: 24, density: "pro", expect: "BAR 3", inside: true,
-      note: "inside the clip at clip-local bar 3" },
-    { tag: "SIMPLE", beat: 24, density: "simple", expect: "BAR 3", inside: true,
+    { tag: "IN", beat: 24, density: "pro", expect: "BAR 7", inside: true,
+      note: "inside the clip at song bar 7" },
+    { tag: "SIMPLE", beat: 24, density: "simple", expect: "BAR 7", inside: true,
       note: "same transport, DEFAULT density — the mode most users are in" },
   ];
   const seen = {};
@@ -224,6 +231,15 @@ try {
        typeof role?.text === "string" && typeof role?.ink === "string", JSON.stringify(role));
     ck(`${st.tag}.6 the DRAWN string is "${st.expect}"`, role?.text === st.expect,
        JSON.stringify(role?.text));
+    // I5-F2 — inside the clip the operand bar IS the transport's bar: the
+    // header and the TransportBar name one song bar (off-clip it is the
+    // clip's first bar, deliberately not the transport's).
+    if (st.inside) {
+      ck(`${st.tag}.6b the drawn bar is the TRANSPORT's bar ("${probe.transportReadout}", the TransportBar string)`,
+         typeof probe.transportReadout === "string" &&
+         role?.text === `BAR ${probe.transportReadout.split(".")[0]}`,
+         `${role?.text} vs transport ${probe.transportReadout}`);
+    }
 
     const tokens = probe.inkTokens ?? {};
     // Pinned against the DOC's literal, not against the app's own token.
@@ -267,7 +283,7 @@ try {
   ck("X2 attribution: a neutral header chip beside the cluster is byte-IDENTICAL across the two states, so X1 is the readout and not a global redraw",
      seen.OFF.neutral.sha === seen.IN.neutral.sha,
      `${seen.OFF.neutral.sha} vs ${seen.IN.neutral.sha}`);
-  ck("X3 the DRAWN strings differ across the two states — a hardcoded Text(\"BAR 1\") fails here",
+  ck("X3 the DRAWN strings differ across the two states — a hardcoded Text(\"BAR 5\") fails here",
      seen.OFF.role.text !== seen.IN.role.text,
      `${seen.OFF.role.text} vs ${seen.IN.role.text}`);
   ck("X4 the ink is the SAME in all three states — it is not derived from the transport, which is the whole point",
@@ -285,7 +301,7 @@ try {
   await sleep(700);
   const refilled = (await cmd("debug.pianoRollBarOps")).result ?? {};
   ck("L2 the next redraw refills it with the NEW value — the report runs every body, it is not a stale record",
-     refilled.roles?.barReadout?.text === "BAR 1" &&
+     refilled.roles?.barReadout?.text === "BAR 5" &&
      refilled.roles?.barReadout?.ink === refilled.inkTokens?.textDim,
      JSON.stringify(refilled.roles));
   ck("L3 a bare call is READ-ONLY (the m11-a law) — reading twice does not change what is reported",
@@ -405,9 +421,30 @@ try {
   //         stays at 186. The Swift-side pin (`ReferenceCommandTests`) also
   //         passed on this tree. ⭐ A COUNT PIN IS TWO CLAIMS — the NUMBER and
   //         the COUNTING — and only the first one is visible when it fails.
-  const EXPECTED_VERBS = 186;
-  ck(`W1 allCommands still holds ${EXPECTED_VERBS} verbs (counted off the ARRAY body, not the case labels)`,
-     verbs.length === EXPECTED_VERBS, String(verbs.length));
+  //   DERIVED — m23-ap I5-F3, 2026-09-26. ⭐ NO MORE LITERAL. The pin read 186
+  //         while the wire held 247 (found RED on the I5-F2 run; the last bump
+  //         in this log was m25-p): a literal count in a gate nobody reruns is
+  //         the m23-ac hazard by construction. W1 now asks the repo's ONE
+  //         command census, `scripts/gates/doc-count-drift.mjs` (two independent
+  //         routes that must agree, plus its own planted-verb self-control that
+  //         exits 3 when blind), and asserts THIS gate's counter agrees with it.
+  //         W1b is this gate's own positive control: a dotted verb planted into
+  //         an in-memory copy of the array must be counted, or the counter is
+  //         reading something other than the array. The claim "the probe added
+  //         no verb" was always W2's, and still is.
+  const census = spawnSync("node", ["scripts/gates/doc-count-drift.mjs"], { cwd: ROOT, encoding: "utf8" });
+  const censusOut = `${census.stdout ?? ""}${census.stderr ?? ""}`;
+  const measured = Number((censusOut.match(/MEASURED COMMAND TOTAL: (\d+)/) ?? [])[1]);
+  ck("W0 the command census ran, self-controlled, and measured a total (exit 0 or 1 — doc drift is not this gate's claim; 2 = the wire disagrees with itself, 3 = the census was blind)",
+     (census.status === 0 || census.status === 1) && /positive control OK/.test(censusOut) && measured > 0,
+     `status=${census.status} measured=${measured} :: ${censusOut.slice(0, 300)}`);
+  ck(`W1 this gate's allCommands counter agrees with the census (${verbs.length} vs ${measured})`,
+     verbs.length === measured, `${verbs.length} vs ${measured}`);
+  const plantedArr = arrCode.replace(/\n(\s*)"([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)",/, '\n$1"$2",\n$1"zz.fakePlantedM23t",');
+  const plantedVerbs = [...plantedArr.matchAll(/"([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)+)"/g)].map((m) => m[1]);
+  ck("W1b POSITIVE CONTROL: a verb planted into an in-memory copy of the array IS counted (+1), so W1 compares the array and not a constant",
+     plantedArr !== arrCode && plantedVerbs.length === verbs.length + 1 && plantedVerbs.includes("zz.fakePlantedM23t"),
+     `${plantedVerbs.length} vs ${verbs.length} + 1`);
   ck("W2 the probe added NO wire verb — nothing bar-ops-shaped is in allCommands",
      !verbs.some((v) => /barOps/i.test(v)), verbs.filter((v) => /barOps/i.test(v)).join(","));
   const server = readFileSync(`${ROOT}/mcp-server/src/server.ts`, "utf8");

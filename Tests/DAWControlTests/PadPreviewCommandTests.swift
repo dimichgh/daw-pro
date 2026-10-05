@@ -356,4 +356,173 @@ struct PadPreviewCommandTests {
                 "a preview is a gesture, never the record — the lane verb is the record")
         #expect(store.tracks.first { $0.id == instrument }?.clips.isEmpty == true)
     }
+
+    // MARK: - m34-f step ② — pad.playEffort, the PERFORMANCE verb
+    //
+    // ⭐ FOLDED INTO THIS SUITE ON PURPOSE. The two verbs share one handler case
+    // and differ in EXACTLY ONE thing, so the assertions worth having are the
+    // COMPARISONS. A separate file would let the pair drift with nothing reading
+    // both, which is this tree's characteristic failure in miniature.
+
+    private func play(_ router: CommandRouter, _ params: [String: JSONValue]) async
+        -> ControlResponse {
+        await router.handle(ControlRequest(id: "1", command: "pad.playEffort", params: params))
+    }
+
+    @Test("pad.playEffort is registered, and NOT inside the pinned note.audition block")
+    @MainActor
+    func playVerbIsRegistered() {
+        #expect(CommandRouter.allCommands.contains("pad.playEffort"))
+        let all = CommandRouter.allCommands
+        let play = all.firstIndex(of: "pad.playEffort")
+        let chord = all.firstIndex(of: "chord.voice")
+        #expect(play != nil && chord != nil)
+        // Placed AFTER chord.voice — the first index past the three chained
+        // adjacency pins (note.audition -> pad.previewEffort -> note.play ->
+        // chord.voice), so none of them moves.
+        #expect(play == chord.map { $0 + 1 })
+        #expect(play != all.count - 1, "must NOT be at the tail")
+        // ⛔ AND THE THREE PINS IT WAS PLACED TO PROTECT, ASSERTED HERE TOO. A
+        // future insertion that breaks them would otherwise redden in three
+        // other files and leave nobody looking at this placement decision.
+        let audition = all.firstIndex(of: "note.audition")
+        let preview = all.firstIndex(of: "pad.previewEffort")
+        let notePlay = all.firstIndex(of: "note.play")
+        #expect(preview == audition.map { $0 + 1 })
+        #expect(notePlay == preview.map { $0 + 1 })
+        #expect(chord == notePlay.map { $0 + 1 })
+    }
+
+    @Test("⭐ pad.playEffort SUCCEEDS mid-take where pad.previewEffort is refused — the one difference")
+    @MainActor
+    func theTwoVerbsDifferExactlyHere() async throws {
+        let (router, store, engine, instrument, _) = makeRouter()
+        _ = try store.setTrackArm(id: instrument, armed: true)
+        try store.record()
+        #expect(store.transport.isRecording)
+        engine.clear()
+
+        // The PREVIEW verb is refused, and pushed nothing.
+        let refused = await preview(router, [
+            "trackId": .string(instrument.uuidString),
+            "value": .number(0.5),
+            "gesture": .string("begin"),
+        ])
+        #expect(!refused.ok)
+        #expect(engine.pushes.isEmpty)
+
+        // The PERFORMANCE verb goes through, on the same store, same instant.
+        let performed = await play(router, [
+            "trackId": .string(instrument.uuidString),
+            "value": .number(0.5),
+            "gesture": .string("begin"),
+        ])
+        #expect(performed.ok)
+        #expect(engine.pushes.count == 1)
+        #expect(performed.result?["controller"]?.doubleValue == 11)
+        #expect(performed.result?["controllerValue"]?.doubleValue == 64)
+    }
+
+    @Test("both verbs echo capturedPoints and recording — the preview's are ALWAYS 0/false")
+    @MainActor
+    func theHonestyFieldsAreOnBothVerbs() async {
+        // ⛔ A FIELD THAT IS ALWAYS FALSE IS A PROMISE BEING KEPT IN PUBLIC. The
+        // preview verb says "I recorded nothing" on every single call rather
+        // than leaving a caller to infer it from a doc string.
+        let (router, _, _, instrument, _) = makeRouter()
+
+        let previewed = await preview(router, [
+            "trackId": .string(instrument.uuidString),
+            "value": .number(0.5),
+            "gesture": .string("begin"),
+        ])
+        #expect(previewed.ok)
+        #expect(previewed.result?["capturedPoints"]?.doubleValue == 0)
+        #expect(previewed.result?["recording"]?.boolValue == false)
+        _ = await preview(router, ["trackId": .string(instrument.uuidString),
+                                   "gesture": .string("end")])
+
+        // Not recording, so the performance verb honestly reports the same —
+        // the fields describe what HAPPENED, not which verb was called.
+        let performed = await play(router, [
+            "trackId": .string(instrument.uuidString),
+            "value": .number(0.5),
+            "gesture": .string("begin"),
+        ])
+        #expect(performed.ok)
+        #expect(performed.result?["capturedPoints"]?.doubleValue == 0)
+        #expect(performed.result?["recording"]?.boolValue == false)
+    }
+
+    @Test("pad.playEffort enforces the SAME gesture scoping — a move with no begin is refused")
+    @MainActor
+    func theGestureRulesAreShared() async {
+        let (router, _, engine, instrument, audio) = makeRouter()
+
+        let orphanMove = await play(router, [
+            "trackId": .string(instrument.uuidString),
+            "value": .number(0.5),
+            "gesture": .string("move"),
+        ])
+        #expect(!orphanMove.ok)
+        #expect(engine.pushes.isEmpty, "a refused call must never have moved a controller")
+
+        // Audio tracks are refused on the performance verb too.
+        #expect(await play(router, [
+            "trackId": .string(audio.uuidString),
+            "value": .number(0.5),
+            "gesture": .string("begin"),
+        ]).ok == false)
+        #expect(engine.pushes.isEmpty)
+    }
+
+    @Test("pad.playEffort rejects an unknown key, naming ITSELF rather than its sibling")
+    @MainActor
+    func unknownKeysNameTheRightVerb() async {
+        // ⚠️ The two verbs share a handler case, so the guard is written out
+        // twice with LITERAL verb names — once because `doc-count-drift.mjs`
+        // scrapes for the literal, and once because an error that names the
+        // wrong verb sends a caller to read the wrong tool's documentation.
+        let (router, _, _, instrument, _) = makeRouter()
+        let response = await play(router, [
+            "trackId": .string(instrument.uuidString),
+            "value": .number(0.5),
+            "gesture": .string("begin"),
+            "pressure": .number(0.9),
+        ])
+        #expect(!response.ok)
+        let message = response.error ?? ""
+        #expect(message.contains("pressure"), "the error must name the offending key")
+        #expect(message.contains("pad.playEffort"),
+                "and the verb the caller actually invoked, not pad.previewEffort")
+    }
+
+    @Test("pad.playEffort is not an EDIT — no clip, no undo entry, even mid-take")
+    @MainActor
+    func performingIsNotAnEdit() async throws {
+        // The record is the take's controller lane, written by the capture
+        // session at `finish` — never a `performEdit` here. A verb that quietly
+        // spent an undo step per drag frame would make the history unusable.
+        // ⚠️ `engine` is BOUND, not `_`: `ProjectStore.engine` does not keep the
+        // engine alive on its own, and a released engine makes `record()` throw
+        // `.engineUnavailable`. Measured here, not guessed — this test failed
+        // exactly that way with `_`.
+        let (router, store, engine, instrument, _) = makeRouter()
+        _ = try store.setTrackArm(id: instrument, armed: true)
+        try store.record()
+        _ = engine
+        let historyBefore = store.undoHistory().undo
+
+        #expect(await play(router, [
+            "trackId": .string(instrument.uuidString),
+            "value": .number(0.9),
+            "gesture": .string("begin"),
+        ]).ok)
+        #expect(await play(router, [
+            "trackId": .string(instrument.uuidString),
+            "gesture": .string("end"),
+        ]).ok)
+
+        #expect(store.undoHistory().undo == historyBefore)
+    }
 }

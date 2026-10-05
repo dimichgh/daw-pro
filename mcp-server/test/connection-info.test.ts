@@ -15,6 +15,13 @@
  *     carrying the app's own message verbatim, never swallowed — even
  *     though the real command never throws, the wire-level contract still
  *     holds if the bridge itself fails (e.g. app not running)
+ *
+ * m31-a additive coverage: this tool ALSO merges in this MCP server
+ * process's own build identity — `serverProcessStartedAt`,
+ * `serverBuildMtimeAtStartup`, `serverBuildMtimeNow`, and
+ * `serverBuildMayBeStale` — computed entirely locally (never sent to or
+ * read from the app/bridge), so the app's own connectionInfo fields still
+ * round-trip verbatim ALONGSIDE these four new ones, not replaced by them.
  */
 
 import { test, before, after, beforeEach } from "node:test";
@@ -79,6 +86,24 @@ function parseJSON(result: any): any {
   return JSON.parse(first.text as string);
 }
 
+const BUILD_IDENTITY_KEYS = [
+  "serverProcessStartedAt",
+  "serverBuildMtimeAtStartup",
+  "serverBuildMtimeNow",
+  "serverBuildMayBeStale",
+] as const;
+
+/** Asserts the app's own fields round-trip verbatim alongside the m31-a build-identity fields. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function assertAppFieldsRoundTripWithBuildIdentity(actual: any, expectedAppFields: Record<string, unknown>): void {
+  for (const key of BUILD_IDENTITY_KEYS) {
+    assert.ok(key in actual, `missing build-identity field ${key}`);
+  }
+  const { serverProcessStartedAt, serverBuildMtimeAtStartup, serverBuildMtimeNow, serverBuildMayBeStale, ...appFields } =
+    actual;
+  assert.deepEqual(appFields, expectedAppFields, "the app's own connectionInfo fields round-trip verbatim");
+}
+
 // ---------------------------------------------------------------------------
 // app_connection_info
 // ---------------------------------------------------------------------------
@@ -98,8 +123,7 @@ test("app_connection_info takes no params and forwards to app.connectionInfo wit
   assert.equal(calls[0]!.command, "app.connectionInfo");
   assert.deepEqual(calls[0]!.params, {}, "no arguments are forwarded — this command takes no params");
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  assert.deepEqual(parseJSON(result as any), stubbedInfo, "the app's response round-trips back verbatim");
+  assertAppFieldsRoundTripWithBuildIdentity(parseJSON(result as any), stubbedInfo);
 });
 
 for (const source of ["environment", "settings", "default"] as const) {
@@ -119,9 +143,23 @@ for (const source of ["environment", "settings", "default"] as const) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const r = result as any;
     assert.ok(!r.isError, "a healthy stubbed response is never a tool error");
-    assert.deepEqual(parseJSON(r), stubbedInfo);
+    assertAppFieldsRoundTripWithBuildIdentity(parseJSON(r), stubbedInfo);
   });
 }
+
+test("app_connection_info reports serverBuildMayBeStale: false when the build hasn't changed since process start", async () => {
+  queuedResult = { url: "ws://127.0.0.1:17600", port: 17600, source: "default", defaultPort: 17600 };
+
+  const result = await client.callTool({ name: "app_connection_info", arguments: {} });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const body = parseJSON(result as any);
+
+  // In this test process, the module load time and "now" are the same file
+  // with no rebuild in between, so the two mtimes must agree.
+  assert.equal(body.serverBuildMtimeAtStartup, body.serverBuildMtimeNow);
+  assert.equal(body.serverBuildMayBeStale, false);
+  assert.ok(typeof body.serverProcessStartedAt === "string" && body.serverProcessStartedAt.length > 0);
+});
 
 test("app_connection_info surfaces a bridge-side error as an MCP tool error, message verbatim", async () => {
   queuedError = new Error("app not running — start DAW Pro or run `swift run DAWApp`");

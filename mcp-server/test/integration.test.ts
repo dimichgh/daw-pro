@@ -383,7 +383,383 @@ test("tools/list returns exactly the audit-enforced tool count", { skip: SKIP_RE
   // not derived, by the same two regexes: **35 direct + 156 wrapper = 191**,
   // 0 duplicates, 0 names in both sets, and a bogus-name negative control that
   // returned nothing.
-  assert.equal(result.tools.length, 191);
+  //
+  // 191 -> 192 at m31-f (`instrument_probe_liveness` — render a velocity
+  // ladder and report whether the TIMBRE moves with it; it takes arguments and
+  // rides the strict-schema wrapper, so it joined the wrapper count).
+  // RE-MEASURED, not derived, by the same two name-capturing regexes:
+  // **35 direct + 157 wrapper = 192**, 0 duplicates, 0 names in both sets, and
+  // a bogus-name negative control (`"zzz_not_a_tool"`) that returned 0.
+  //
+  // 192 -> 193 at m31-c (`clip_repeat_notes` — copy a clip-relative note
+  // window/selection into the same clip N times, periodBeats apart, so an
+  // agent authors one bar and repeats it instead of paying for every note;
+  // it takes required arguments and rides the strict-schema wrapper, so it
+  // joined the wrapper count). Command<->tool bijection stays mechanical
+  // (`clip.repeatNotes` -> `clip_repeat_notes`), no exception-table entry
+  // needed: **35 direct + 158 wrapper = 193**.
+  //
+  // 193 -> 194 at m26-a/m27-n (`clip_patch_notes` — BY-ID partial note edit:
+  // change pitch/velocity/startBeat/lengthBeats on specific notes without
+  // resubmitting the clip's other notes, the missing rung between
+  // clip_get_notes and clip_set_notes; it takes required arguments and
+  // rides the strict-schema wrapper, so it joined the wrapper count).
+  // Command<->tool bijection stays mechanical (`clip.patchNotes` ->
+  // `clip_patch_notes`), no exception-table entry needed: **35 direct +
+  // 159 wrapper = 194**.
+  //
+  // 194 -> 195 at m32-b2 (`clip_slice_to_sampler` — THE SAMPLE FLIP: chop an
+  // audio clip at its transients/divisions/grid into sampler PADS plus a MIDI
+  // clip that replays the original groove; it takes a required `clipId` and
+  // rides the strict-schema wrapper, so it joined the wrapper count).
+  // Command<->tool bijection stays mechanical (`clip.sliceToSampler` ->
+  // `clip_slice_to_sampler`), no exception-table entry needed: **35 direct +
+  // 160 wrapper = 195**.
+  //
+  // 195 -> 196 at m24-m leg A (`vc_convert_clips` — PER-CLIP voice conversion
+  // over a SELECTED SET: N chosen audio clips convert separately and land at
+  // the same beats on ONE new track, so the arrangement survives; it takes a
+  // required `clipIds` array and rides the strict-schema wrapper, so it
+  // joined the wrapper count). Command<->tool bijection stays mechanical
+  // (`vc.convertClips` -> `vc_convert_clips`), no exception-table entry
+  // needed: **35 direct + 161 wrapper = 196**.
+  //
+  // 196 -> 198 at m24-n (`project_embedded_voices` — a pure READ of which
+  // voice models the project carries, what they cost, and whether each is
+  // usable here; no params, so it joins the DIRECT read-only count — and
+  // `vc_install_embedded_voice`, which copies a carried voice into this
+  // machine's voice store and takes a required `voiceId`, so it rides the
+  // strict-schema wrapper). Command<->tool bijection stays mechanical
+  // (`project.embeddedVoices` -> `project_embedded_voices`,
+  // `vc.installEmbeddedVoice` -> `vc_install_embedded_voice`), no
+  // exception-table entry needed: **36 direct + 162 wrapper = 198**.
+  //
+  // 198 -> 199 at m23-ct (`note_play` — play notes live and HOLD them, the
+  // musical-typing path and the ONE note tool whose sound can be RECORDED
+  // into a take; it takes a required `trackId`/`pitches` and rides the
+  // strict-schema wrapper, so it joined the wrapper count). Command<->tool
+  // bijection stays mechanical (`note.play` -> `note_play`), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **36 direct + 163 wrapper = 199**, 0 duplicates,
+  // 0 names in both sets, and a bogus-name negative control (`"zzz_not_a_tool"`)
+  // that returned 0.
+  //
+  // 199 -> 200 at m23-cv (`chord_voice` — work out well-voiced chord notes:
+  // key + Roman-numeral degrees in, voice-led MIDI pitch arrays out. READ-ONLY
+  // and silent, and deliberately so: the DELIVERABLE of m23-cv is the on-screen
+  // one-key chord button, and this tool exists to make agent-authored clips
+  // better voiced, never to stand in for the button. It takes only optional
+  // parameters and still rides the strict-schema wrapper). Command<->tool
+  // bijection stays mechanical (`chord.voice` -> `chord_voice`), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **36 direct + 164 wrapper = 200**, 0 duplicates in
+  // either set, 0 names in both sets, and the same bogus-name negative control
+  // (`"zzz_not_a_tool"`) returning 0.
+  // m34-l: 208 -> 209. `play_sustain` (the damper pedal, CC 64) is registered
+  // through the same wrapper path as every other tool; the bijection stays
+  // mechanical (`play.sustain` -> `play_sustain`), so no exception-table entry
+  // is needed here either.
+  //
+  // 209 -> 216 at m34-h-1 (LIVE LOOPING, the loop deck): `looper_begin`,
+  // `looper_arm_layer`, `looper_finish_layer`, `looper_undo_layer`,
+  // `looper_set_layer_muted`, `looper_status`, `looper_end`. All seven ride
+  // the strict-schema wrapper — including the three that take no params,
+  // because they are registered with `inputSchema: {}` like every other
+  // parameterless verb on that path. The command<->tool bijection stays
+  // mechanical (`looper.begin` -> `looper_begin`,
+  // `looper.setLayerMuted` -> `looper_set_layer_muted`, ...), so no
+  // exception-table entry is needed for any of them.
+  //
+  // 220 -> 222 at m23-cw's MCP mirror (2026-09-19): `au_list_presets` (a
+  // pure READ of a hosted AU's own factory/user preset lists, so it joined
+  // the DIRECT `server.registerTool` count like its `au_describe_params`
+  // sibling) and `au_load_preset` (LOADS a preset onto the live plugin
+  // instance, so it joined the strict-schema wrapper count like its
+  // `au_set_param` sibling). `au.listPresets`/`au.loadPreset` themselves
+  // shipped engine+wire+catalog earlier at the same m23-cw close — this is
+  // just the MCP half that closes the "215 mirrored of 217 wire" gap
+  // `claude-plugin/skills/daw-wire-reference/SKILL.md` flagged as sanctioned.
+  // Command<->tool bijection stays mechanical (`au.listPresets` ->
+  // `au_list_presets`, `au.loadPreset` -> `au_load_preset`), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **39 direct + 183 wrapper = 222**, 0 duplicates
+  // in either set, 0 names in both sets, and the same bogus-name negative
+  // control (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 222 -> 223 at m39-f/g's MCP mirror (2026-09-19): `instrument_describe_synth`
+  // — the Poly Synth's twin of `instrument_describe_sampler`, closing the gap
+  // `claude-plugin/skills/daw-wire-reference/SKILL.md` flagged as sanctioned
+  // when `instrument.describeSynth` shipped wire-only earlier the same day.
+  // It is a pure READ but rides the strict-schema wrapper anyway, the
+  // `instrument_describe_sampler` precedent (real params — just `trackId` —
+  // worth typo-catching), so it joined the WRAPPER count, not the direct
+  // count. The same close also mirrored m39-g's fifteen Poly Synth richness
+  // parameters into `track_set_instrument`'s EXISTING schema — new
+  // parameters on an existing tool, so that half adds zero to this total on
+  // its own. Command<->tool bijection stays mechanical
+  // (`instrument.describeSynth` -> `instrument_describe_synth`), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **39 direct + 184 wrapper = 223**, 0 duplicates
+  // in either set, 0 names in both sets, and the same bogus-name negative
+  // control (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 223 -> 232 at m39-e's MCP mirror (2026-09-19): the nine `mod_*` tools —
+  // `mod_describe_kinds`, `mod_add_source`, `mod_set_source`,
+  // `mod_remove_source`, `mod_add_route`, `mod_set_route_depth`,
+  // `mod_remove_route`, `mod_set_macro`, `mod_describe` — closing the gap
+  // this same total left OPEN since `mod.*` shipped wire-only at m39-e's own
+  // engine close earlier the same day (`Commands.swift` went 218 -> 227
+  // there; this file stayed at 223 until now). `mod_describe_kinds` and
+  // `mod_describe` are pure READS with only OPTIONAL params (the
+  // `fx_describe` precedent — `kind`/`trackId`+`atBeat` are both optional,
+  // unlike `instrument_describe_synth`'s REQUIRED `trackId`), so both joined
+  // the DIRECT `server.registerTool` count; the other seven mutate and rode
+  // the strict-schema wrapper. Command<->tool bijection stays mechanical
+  // (`mod.addSource` -> `mod_add_source`, etc.), no exception-table entry
+  // needed. RE-MEASURED, not derived, by the same two name-capturing
+  // regexes: **41 direct + 191 wrapper = 232**, 0 duplicates in either set,
+  // 0 names in both sets, and the same bogus-name negative control
+  // (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 232 -> 236 at m39-dm's MCP mirror (2026-09-21): the drum machine's four
+  // wire verbs (`instrument.setDrumParam`/`describeDrumKit`/`listDrumPresets`/
+  // `loadDrumPreset`) shipped engine+wire+catalog earlier (`Commands.swift`
+  // stayed at 231 — no wire growth, this is MCP-only) — this closes the "an
+  // AI agent cannot touch the instrument at all" gap. `instrument_set_drum_param`
+  // and `instrument_load_drum_preset` mutate and rode the strict-schema
+  // wrapper; `instrument_describe_drum_kit` is a pure READ with a required
+  // `trackId` but rode the wrapper anyway, the `instrument_describe_synth`
+  // precedent (real params worth typo-catching); `instrument_list_drum_presets`
+  // takes no params at all and joined the DIRECT `server.registerTool` count,
+  // the `instrument_list_sound_banks`/`marker_list` precedent. The `kind`
+  // enum on `track_set_instrument` also gained `drumSynth` and a new
+  // `drumKit` object param — additions to an EXISTING tool's schema, so that
+  // half adds zero to this total on its own. Command<->tool bijection stays
+  // mechanical (`instrument.setDrumParam` -> `instrument_set_drum_param`,
+  // etc.), no exception-table entry needed. RE-MEASURED, not derived, by the
+  // same two name-capturing regexes: **42 direct + 194 wrapper = 236**, 0
+  // duplicates in either set, 0 names in both sets, and the same bogus-name
+  // negative control (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 236 -> 239 at m23-q Phase 2's writer leg (2026-09-22): the pitch-
+  // correction model/policy had a detector (`clip_detect_pitch`) but no way
+  // to ACT on a clip — `clip_auto_correct_pitch` / `clip_clear_pitch_edits` /
+  // `clip_get_pitch_edits` close that gap, mirroring the wire's
+  // `clip.autoCorrectPitch`/`clip.clearPitchEdits`/`clip.getPitchEdits`
+  // (`Commands.swift` 231 -> 234) 1:1. All three route through the
+  // strict-schema wrapper (the `clip_detect_pitch` precedent — real,
+  // typo-worth-catching params even on the read-only getter/clear, which take
+  // just `clipId` but keep the shape uniform across the trio). Command<->tool
+  // bijection stays mechanical, no exception-table entry needed. RE-MEASURED,
+  // not derived, by the same two name-capturing regexes: **42 direct + 197
+  // wrapper = 239**, 0 duplicates in either set, 0 names in both sets, and
+  // the same bogus-name negative control (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 239 -> 242 at the pitch-editor command-surface door (2026-09-24,
+  // `docs/design/2026-09-22-pitch-editor-ui.md` §9): the pane had no way for
+  // an agent to open it, read it, or edit a note — `view_open_pitch_editor`
+  // (the explicit latch, §3.6, refuses a MIDI clip), `clip_set_note_pitch`
+  // (absolute `pitchOffsetCents`, clamped +/-2400) and `clip_split_note`
+  // (mirrors the scissors tool's 60ms minimum-half refusal) close that gap,
+  // mirroring the wire's `view.openPitchEditor`/`clip.setNotePitch`/
+  // `clip.splitNote` (`Commands.swift` 234 -> 237) 1:1. All three route
+  // through the strict-schema wrapper (real, typo-worth-catching params —
+  // `clipId`/`segmentId`/`cents`/`atSourceSeconds` — the `clip_set_note_pitch`
+  // pair joining `clip_auto_correct_pitch`'s precedent, `view_open_pitch_editor`
+  // joining `view_select_clip`'s). Command<->tool bijection stays mechanical
+  // (`view.openPitchEditor` -> `view_open_pitch_editor`, etc.), no
+  // exception-table entry needed. RE-MEASURED, not derived, by the same two
+  // name-capturing regexes: **42 direct + 200 wrapper = 242**, 0 duplicates
+  // in either set, 0 names in both sets, and the same bogus-name negative
+  // control (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 242 -> 244 at m39-levels-2 wire (2026-09-24): SIXTEEN LEVELS' model API
+  // (`Sources/DAWCore/SixteenLevels.swift`'s `ProjectStore` extension)
+  // shipped earlier with no wire door reaching it — `instrument_spread_slice`
+  // / `instrument_set_spread_direction` close that gap, mirroring the wire's
+  // `instrument.spreadSlice`/`instrument.setSpreadDirection`
+  // (`Commands.swift` 237 -> 239) 1:1. Both route through the strict-schema
+  // wrapper (the `instrument_describe_sampler`/`instrument_set_sampler_zones`
+  // precedent). Command<->tool bijection stays mechanical, no exception-table
+  // entry needed. RE-MEASURED, not derived, by the same two name-capturing
+  // regexes: **42 direct + 202 wrapper = 244**, 0 duplicates in either set, 0
+  // names in both sets, and the same bogus-name negative control
+  // (`"zzz_not_a_tool"`) returning 0.
+  //
+  // 244 -> 245 at m23-ap C-0c close (2026-09-24): `clip_get_played_pitch`
+  // (new tool, wrapper — real typo-worth-catching params: `clipId`,
+  // `fromSeconds`/`durationSeconds`/`maxPoints`), mirroring the wire's
+  // `clip.getPlayedPitch` (`Commands.swift` 239 -> 240) 1:1, no
+  // exception-table entry needed. The same close's C-F3 `replaceExisting`
+  // param on `clip_auto_correct_pitch` adds zero — a new optional field on
+  // an already-registered tool. RE-MEASURED: **42 direct + 203 wrapper =
+  // 245**, 0 duplicates in either set, 0 names in both sets, bogus-name
+  // negative control still returning 0.
+  //
+  // 245 -> 246 at I7a (2026-09-24): `clip_set_note_cleared` (new tool,
+  // wrapper — real typo-worth-catching params: `clipId`, `segmentIds`,
+  // `cleared`), mirroring the wire's `clip.setNoteCleared`
+  // (`Commands.swift` 240 -> 241) 1:1, no exception-table entry needed.
+  // RE-MEASURED: **42 direct + 204 wrapper = 246**, 0 duplicates in either
+  // set, 0 names in both sets, bogus-name negative control still returning 0.
+  //
+  // 246 -> 247 at U-D (2026-09-24): `clip_set_note_gain` (new tool, wrapper —
+  // real typo-worth-catching params: `clipId`, `segmentIds`, `gainDb`),
+  // mirroring the wire's `clip.setNoteGain` (`Commands.swift` 241 -> 242)
+  // 1:1, no exception-table entry needed. RE-MEASURED: **42 direct + 205
+  // wrapper = 247**, 0 duplicates in either set, 0 names in both sets,
+  // bogus-name negative control still returning 0.
+  //
+  // 247 -> 248 at the I4 wire leg (2026-09-24, mcp-integration-engineer part
+  // 1 of 2): `clip_set_note_pitches` (new tool, wrapper — real
+  // typo-worth-catching params: `clipId`, `notes`), mirroring the wire's
+  // `clip.setNotePitches` (`Commands.swift` 242 -> 243) 1:1, no
+  // exception-table entry needed. It is the BATCH twin of
+  // `clip_set_note_pitch`: each note carries its OWN cents, unlike
+  // `clip_set_note_gain`/`clip_set_note_cleared`'s one value shared by every
+  // named note. RE-MEASURED, not derived, by the same two name-capturing
+  // regexes (`^server\.registerTool($` / `^registerTool($`): **42 direct +
+  // 206 wrapper = 248**, 0 duplicates in either set, 0 names in both sets,
+  // bogus-name negative control still returning 0. NOT a plugin release:
+  // `claude-plugin/server/index.mjs` stays at 247 (42 + 205) this close —
+  // part 2 (after the DAWEngine/DAWCore audition leg lands) adds
+  // `clip_audition_note`, then ONE regen and the version bump.
+  //
+  // 248 -> 249 at the I1 wire leg (2026-09-25, mcp-integration-engineer part
+  // 2 of 2): `clip_audition_note` (new tool, WRAPPED — the note_audition
+  // precedent: its closest sibling, "sounds now, not an edit", is itself
+  // registered through the wrapped/strict path, and the brief separately
+  // requires a strict schema regardless), mirroring the wire's
+  // `clip.auditionNote` (`Commands.swift` 243 -> 244) 1:1, no
+  // exception-table entry needed. RE-MEASURED, not derived, by the full
+  // name-capturing/dedup/intersection regex (never just the anchored line
+  // count): **42 direct + 207 wrapper = 249**, 0 duplicates in either set,
+  // 0 names in both sets, `clip_audition_note` present in the wrapper set
+  // (positive control), a bogus name absent from both (negative control).
+  // ONE release, 0.17.0, lands in this same close: see plugin.json and the
+  // built-bundle smoke test below.
+  //
+  // 249 -> 250 at the UB-2 close (2026-09-25, mcp-integration-engineer):
+  // `clip_find_unpitched_sounds` (new tool, WRAPPED — the
+  // `clip_auto_correct_pitch` precedent, real typo-worth-catching
+  // `clipId`/`marginDb` params), mirroring the wire's
+  // `clip.findUnpitchedSounds` (`Commands.swift` 244 -> 245) 1:1, placed
+  // immediately after `clip.auditionNote`/`clip_audition_note` in the same
+  // per-note pitch-editor door cluster, no exception-table entry needed.
+  // RE-MEASURED, not derived, by the same two anchored name-capturing
+  // regexes (`^server\.registerTool($` / `^registerTool($`): **42 direct +
+  // 208 wrapper = 250**, `clip_find_unpitched_sounds` present in the
+  // wrapper set (positive control), a bogus name absent from both
+  // (negative control). Additive echoes, no tool count of their own:
+  // `origin` on every segment of `clip_get_pitch_edits`/
+  // `clip_auto_correct_pitch`'s `segments`, and `unpitchedCount`/
+  // `unpitchedSkippedReason` on `clip_auto_correct_pitch`. NOT a plugin
+  // release: `claude-plugin/server/index.mjs` and the agent allowlists are
+  // the release lane's job, unregenerated by this close.
+  //
+  // 252 -> 257 at NT-W (2026-09-25, mcp-integration-engineer): FIVE tools
+  // land together — `clip_set_note_formant`, `clip_set_formant_correction`,
+  // `clip_set_note_transition`, `clip_set_pitch_transition_smoothness`,
+  // `clip_set_note_glide_follow` (all new, WRAPPED — the `clip_set_note_
+  // vibrato`/`clip_set_note_vibratos` precedent), mirroring the wire's
+  // `clip.setNoteFormant`/`clip.setFormantCorrection`/`clip.setNoteTransition`/
+  // `clip.setPitchTransitionSmoothness`/`clip.setNoteGlideFollow`
+  // (`Commands.swift` 247 -> 252, landed together, placed immediately after
+  // `clip.setNoteVibratos` in the same per-note pitch-editor door cluster)
+  // 1:1, no exception-table entry needed. RE-MEASURED, not derived, by the
+  // same two anchored name-capturing regexes (`^server\.registerTool($` /
+  // `^registerTool($`): **42 direct + 215 wrapper = 257**, all five new tool
+  // names present in the wrapper set (positive control), 0 duplicates in
+  // either set, 0 names in both sets, a bogus name absent from both
+  // (negative control). Additive echoes, no tool count of their own:
+  // `formantCorrection`/`transitionSlopeCentsPerSecond`/
+  // `predatesNaturalTuning` (set-level) and `transitionOutMs`/`glideFollow`/
+  // `joinToNext`/`effectiveTransitionMs` (per-note) on `clip_get_pitch_edits`.
+  // SHIPPED: NT-PK's provisional-render memo-key fix landed and was
+  // verified by the orchestrator, lifting the earlier hold on the two
+  // VOICE tools. NOT a plugin release: `claude-plugin/server/index.mjs`
+  // and the agent allowlists are the release lane's job, unregenerated by
+  // this close.
+  //
+  // 260 -> 261 at W7-WIRE2 (2026-09-27, mcp-integration-engineer): ONE
+  // tool, `clip_set_note_shapes` (new, WRAPPED), the BATCH twin of
+  // `clip_set_note_shape`, mirroring the wire's `clip.setNoteShapes`
+  // (`Commands.swift` 255 -> 256, landed in the same per-note pitch-editor
+  // door cluster immediately after `clip.setNoteShape`) 1:1, no
+  // exception-table entry needed: several notes' drawn pitch lines in ONE
+  // undo step, over the SAME `ProjectStore.setClipNoteShapes` the single
+  // verb already calls. RE-MEASURED by the same two anchored
+  // name-capturing regexes: **42 direct + 219 wrapper = 261**. Additive
+  // echo, no tool count of its own: `consonantsOffByChoice` on
+  // `clip_get_pitch_edits` (beside `keepConsonantsUntuned`), and the same
+  // round's `formantCorrection` field on `clip_auto_correct_pitch` (an
+  // argument, not a new tool).
+  //
+  // 259 -> 260 at X4 (2026-09-27, mcp-integration-engineer): ONE tool,
+  // `clip_upgrade_natural_tuning` (new, WRAPPED), mirroring the wire's
+  // `clip.upgradeNaturalTuning` (`Commands.swift` 254 -> 255, landed in the
+  // same per-note pitch-editor door cluster immediately after
+  // `clip.setNoteShape`) 1:1, no exception-table entry needed. The ONE
+  // upgrade path (design `docs/design/2026-09-25-natural-tuning.md` §X4):
+  // turns natural tuning on for a legacy vocal without touching a note,
+  // over `ProjectStore.upgradeToNaturalTuning`. RE-MEASURED by the same two
+  // anchored name-capturing regexes: **42 direct + 218 wrapper = 260**. No
+  // additive echo on `clip_get_pitch_edits` this close — the
+  // `predatesNaturalTuning` field text grew (which per-note verbs upgrade a
+  // legacy vocal, and that this tool does the same without one), not the
+  // response shape. Added to the `composer`/`mix-engineer` agent allowlists
+  // beside the other natural-tuning tools, and `claude-plugin/server/index.mjs`
+  // WAS regenerated this close (`npm run bundle:plugin`, once).
+  //
+  // 258 -> 259 at C5b-3b (2026-09-26, mcp-integration-engineer): ONE tool,
+  // `clip_set_note_shape` (new, WRAPPED), mirroring the wire's
+  // `clip.setNoteShape` (`Commands.swift` 253 -> 254, landed in the same
+  // per-note pitch-editor door cluster immediately after
+  // `clip.setConsonantProtection`) 1:1, no exception-table entry needed.
+  // RE-MEASURED by the same two anchored name-capturing regexes: **42
+  // direct + 217 wrapper = 259**. Additive echo, no tool count of its own:
+  // per-segment `shape` on `clip_get_pitch_edits` (present only when the
+  // note carries one).
+  //
+  // 257 -> 258 at NT-W over NT-C C2 (2026-09-25, mcp-integration-engineer):
+  // ONE tool, `clip_set_consonant_protection` (new, WRAPPED), mirroring the
+  // wire's `clip.setConsonantProtection` (`Commands.swift` 252 -> 253,
+  // landed in the same per-note pitch-editor door cluster immediately
+  // after `clip.setNoteGlideFollow`) 1:1, no exception-table entry needed.
+  // RE-MEASURED, not derived, by the same two anchored name-capturing
+  // regexes: **42 direct + 216 wrapper = 258**, the new tool name present
+  // in the wrapper set (positive control), 0 duplicates in either set, 0
+  // names in both sets, a bogus name absent from both (negative control).
+  // Additive echoes, no tool count of their own: `keepConsonantsUntuned`
+  // and `consonantProtection {active, inactiveReason}` on
+  // `clip_get_pitch_edits`. Built, mirrored and tested ahead of the render
+  // mix landing, per the orchestrator's instruction (~00:35) — NT-E2 has
+  // SINCE LANDED (2026-09-26) and the mix is live in the product render.
+  // NOT a plugin release: `claude-plugin/server/index.mjs` and the agent
+  // allowlists are the release lane's job, unregenerated by this close.
+  //
+  // 250 -> 252 at C5a-3/NT-L3 (2026-09-25, mcp-integration-engineer): TWO
+  // tools land together, `clip_set_note_vibrato` and its batch twin
+  // `clip_set_note_vibratos` (both new, WRAPPED — the
+  // `clip_set_note_pitch`/`clip_set_note_pitches` precedent pair; the batch
+  // tool's inner `notes[]` element is its own `.strict()` schema, the m30-c
+  // nested-strict precedent, and carries NO `reset` key — reset stays
+  // single-note), mirroring the wire's `clip.setNoteVibrato` /
+  // `clip.setNoteVibratos` (`Commands.swift` 245 -> 247, landed together,
+  // placed immediately after `clip.findUnpitchedSounds` in the same
+  // per-note pitch-editor door cluster) 1:1, no exception-table entry
+  // needed. RE-MEASURED, not derived, by the same two anchored
+  // name-capturing regexes (`^server\.registerTool($` / `^registerTool($`):
+  // **42 direct + 210 wrapper = 252**, both `clip_set_note_vibrato` and
+  // `clip_set_note_vibratos` present in the wrapper set (positive control),
+  // 0 duplicates in either set, 0 names in both sets, a bogus name absent
+  // from both (negative control). Additive echoes, no tool count of their
+  // own: `vibratoPhaseAnchorSeconds`/`heardVibratoRateHz` on every segment
+  // of `clip_get_pitch_edits`, and a per-note `wobble`/`wobbleNote` reading
+  // on `clip_get_played_pitch`'s new `notes` array. NOT a plugin release:
+  // `claude-plugin/server/index.mjs` and the agent allowlists are the
+  // release lane's job, unregenerated by this close.
+  assert.equal(result.tools.length, 261);
 });
 
 // ---------------------------------------------------------------------------

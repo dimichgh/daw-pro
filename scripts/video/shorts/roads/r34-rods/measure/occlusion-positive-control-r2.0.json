@@ -1,0 +1,68 @@
+[
+ {
+  "name": "PLANT-fat-rod-positive-control",
+  "t": 31,
+  "road": 0,
+  "visible": 1138054,
+  "hidden": 236050,
+  "frac": 0.20741546534698704,
+  "visibleBright": 10740,
+  "hiddenBright": 0,
+  "fracBright": 0
+ },
+ {
+  "name": "PLANT-fat-rod-positive-control",
+  "t": 31,
+  "road": 1,
+  "visible": 1282495,
+  "hidden": 365987,
+  "frac": 0.28537109306469033,
+  "visibleBright": 4206,
+  "hiddenBright": 0,
+  "fracBright": 0
+ },
+ {
+  "name": "PLANT-fat-rod-positive-control",
+  "t": 101,
+  "road": 0,
+  "visible": 990026,
+  "hidden": 419641,
+  "frac": 0.4238686660754364,
+  "visibleBright": 4429,
+  "hiddenBright": 0,
+  "fracBright": 0
+ },
+ {
+  "name": "PLANT-fat-rod-positive-control",
+  "t": 101,
+  "road": 1,
+  "visible": 1344693,
+  "hidden": 790021,
+  "frac": 0.587510309044518,
+  "visibleBright": 2928,
+  "hiddenBright": 2928,
+  "fracBright": 1
+ },
+ {
+  "name": "PLANT-fat-rod-positive-control",
+  "t": 129,
+  "road": 0,
+  "visible": 1004190,
+  "hidden": 238427,
+  "frac": 0.23743215925273106,
+  "visibleBright": 2920,
+  "hiddenBright": 0,
+  "fracBright": 0
+ },
+ {
+  "name": "PLANT-fat-rod-positive-control",
+  "t": 129,
+  "road": 1,
+  "visible": 1204025,
+  "hidden": 406956,
+  "frac": 0.3379963040634538,
+  "visibleBright": 1990,
+  "hiddenBright": 1990,
+  "fracBright": 1
+ }
+]

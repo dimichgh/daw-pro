@@ -1,0 +1,45 @@
+{
+  "tags": {
+    "06-bach-prelude": [
+      "Bach",
+      "Prelude in C",
+      "BWV 846",
+      "Well-Tempered Clavier",
+      "classical music",
+      "music visualiser",
+      "sheet music",
+      "piano",
+      "DAW Pro",
+      "three.js"
+    ],
+    "07-bach-short": [
+      "Bach",
+      "Prelude in C",
+      "BWV 846",
+      "classical music",
+      "music visualiser",
+      "sheet music",
+      "piano",
+      "DAW Pro",
+      "three.js",
+      "Shorts"
+    ],
+    "08-bach-side": [
+      "Bach",
+      "Prelude in C",
+      "BWV 846",
+      "Well-Tempered Clavier",
+      "classical music",
+      "music visualiser",
+      "sheet music",
+      "piano",
+      "DAW Pro",
+      "three.js"
+    ]
+  },
+  "licenceNotes": {
+    "06-bach-prelude": "LICENCE NOTES\n1. The public-domain statement above is the typesetter's own dedication,\nwritten inside the LilyPond source file (copyright = \"Public Domain\"). It is a\nstatement in a source file rather than a licence document, and it is quoted\nhere, not interpreted.\n2. That same header's \"source\" field reads \"Unknown\", so the edition this was\nkeyed from is not stated. The composition is unambiguously public domain; the\nengraving's provenance rests on the dedication above.",
+    "07-bach-short": "LICENCE NOTES\n1. The public-domain statement above is the typesetter's own dedication,\nwritten inside the LilyPond source file (copyright = \"Public Domain\"). It is a\nstatement in a source file rather than a licence document, and it is quoted\nhere, not interpreted.\n2. That same header's \"source\" field reads \"Unknown\", so the edition this was\nkeyed from is not stated. The composition is unambiguously public domain; the\nengraving's provenance rests on the dedication above.",
+    "08-bach-side": "LICENCE NOTES\n1. The public-domain statement above is the typesetter's own dedication,\nwritten inside the LilyPond source file (copyright = \"Public Domain\"). It is a\nstatement in a source file rather than a licence document, and it is quoted\nhere, not interpreted.\n2. That same header's \"source\" field reads \"Unknown\", so the edition this was\nkeyed from is not stated. The composition is unambiguously public domain; the\nengraving's provenance rests on the dedication above."
+  }
+}

@@ -18,10 +18,49 @@ public struct SongSkeletonTrack: Sendable, Equatable {
     /// resolves against `MixerPresetCatalog.v1`.
     public let mixerPreset: String?
 
-    public init(name: String, kind: TrackKind, mixerPreset: String? = nil) {
+    /// m34-o — the GM program this part SOUNDS LIKE, or nil to leave the track
+    /// unconfigured (which plays `InstrumentDescriptor.default`, the built-in
+    /// Poly Synth).
+    ///
+    /// ⭐ WHY THIS EXISTS, and it is the sustain-pedal report's real half. The
+    /// user's rule: *"piano decays, organ sustains and so on depending on
+    /// instrument."* THE INSTRUMENT DECIDES — a piano's note fades because a
+    /// piano fades, an organ's does not because an organ does not. That rule
+    /// was already TRUE on the hosted sound-bank path (measured: GM program 0
+    /// "Acoustic Grand Piano" falls to silence under a held pedal within 15 s,
+    /// while program 19 "Church Organ" holds dead flat), and it could not be
+    /// true of a skeleton, because a skeleton assigned NO instrument at all:
+    /// every generated part — the one named "Drums", the one named "Piano",
+    /// the one named "Organ" — came out as the same saw poly synth. A part
+    /// called Piano that neither sounds nor fades like a piano is the defect
+    /// this field ends.
+    ///
+    /// ⛔ NOT EVERY PART GETS ONE, DELIBERATELY. "Synth", "Lead" and the two
+    /// guitars in the electric genres stay nil where the built-in synth is a
+    /// defensible voice for them: a synth part BEING a synth is
+    /// instrument-appropriate, and blanket-assigning GM to everything would
+    /// make this a "replace the built-in" change rather than a "make the
+    /// default fit the part" one.
+    ///
+    /// ⚠️ ONLY `.instrument` PARTS. An audio track (Vocals, FX, Samples) hosts
+    /// no instrument; a program on one is rejected at validation rather than
+    /// silently dropped.
+    ///
+    /// ADDITIVE-OPTIONAL: nil is exactly today's behaviour, so a caller-supplied
+    /// roster written before m34-o still compiles and still generates what it
+    /// always did. And because the store writes the resolved descriptor into the
+    /// new track EXPLICITLY, this changes only songs generated from now on —
+    /// it cannot reach a project already on disk (see `ProjectDocument`: a track
+    /// with no `instrument` key resolves the type-level default at LOAD, which
+    /// is why the fix is here and not on `InstrumentDescriptor.default`).
+    public let program: SoundBankProgram?
+
+    public init(name: String, kind: TrackKind, mixerPreset: String? = nil,
+                program: SoundBankProgram? = nil) {
         self.name = name
         self.kind = kind
         self.mixerPreset = mixerPreset
+        self.program = program
     }
 }
 
@@ -130,9 +169,16 @@ public enum SongSkeletonCatalog {
         displayName: "Pop",
         defaultTempoBPM: 120,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
-            SongSkeletonTrack(name: "Keys", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Drums", kind: .instrument,
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight",
+                              program: GMProgramCatalog.melodic(33)),   // Electric Bass (finger)
+            // ⭐ THE REPORTED CASE. "Keys" was a saw synth that held forever
+            // under the sustain pedal; an Acoustic Grand Piano fades, because
+            // a piano fades. Measured to silence within 15 s.
+            SongSkeletonTrack(name: "Keys", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(0)),    // Acoustic Grand Piano
+            // Lead stays nil: the built-in Poly Synth IS a defensible pop lead.
             SongSkeletonTrack(name: "Lead", kind: .instrument),
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
@@ -154,10 +200,18 @@ public enum SongSkeletonCatalog {
         displayName: "House",
         defaultTempoBPM: 124,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
+            SongSkeletonTrack(name: "Drums", kind: .instrument,
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight",
+                              program: GMProgramCatalog.melodic(38)),   // Synth Bass 1
+            // Synth stays nil — a house synth part being the built-in synth is
+            // instrument-appropriate, not a gap.
             SongSkeletonTrack(name: "Synth", kind: .instrument),
-            SongSkeletonTrack(name: "Pads", kind: .instrument, mixerPreset: "warm-keys"),
+            // ⭐ A SUSTAINING PART, ON PURPOSE. A pad HOLDS under the pedal and
+            // must keep holding: this is the shipped-surface control that the
+            // m34-o envelope work did not simply make everything fade.
+            SongSkeletonTrack(name: "Pads", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(89)),   // Pad 2 (warm)
             SongSkeletonTrack(name: "FX", kind: .audio),
         ],
         defaultSections: [
@@ -176,8 +230,10 @@ public enum SongSkeletonCatalog {
         displayName: "Hip-Hop",
         defaultTempoBPM: 90,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument),
-            SongSkeletonTrack(name: "808 Bass", kind: .instrument, mixerPreset: "bass-tight"),
+            SongSkeletonTrack(name: "Drums", kind: .instrument,
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "808 Bass", kind: .instrument, mixerPreset: "bass-tight",
+                              program: GMProgramCatalog.melodic(38)),   // Synth Bass 1
             SongSkeletonTrack(name: "Samples", kind: .audio),
             SongSkeletonTrack(name: "Lead", kind: .instrument),
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
@@ -198,8 +254,15 @@ public enum SongSkeletonCatalog {
         displayName: "Rock",
         defaultTempoBPM: 140,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
+            // D3 (m39-tpl-3, a defect fix): these two were the only drum and bass
+            // parts in the catalog with no instrument, so they played the built-in
+            // Poly Synth. They now get what every other band genre's get: the GM
+            // Standard Drum Kit and program 33 (TPL-4's listening round may prefer
+            // 34, "Electric Bass (pick)").
+            SongSkeletonTrack(name: "Drums", kind: .instrument,
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight",
+                              program: GMProgramCatalog.melodic(33)),   // Electric Bass (finger)
             // m26-n: these two were the ONLY playable parts typed `.audio` in
             // this file — every other genre types every playable part
             // `.instrument` (Drums/Bass/Keys/Lead/Synth/Pads/Piano/Strings) and
@@ -208,8 +271,10 @@ public enum SongSkeletonCatalog {
             // had to REMOVE and RE-ADD them — which changes their ids and
             // silently staled every id the macro had just returned to the
             // caller (2026-08-17 field report, N4).
-            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument),
-            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument),
+            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument,
+                              program: GMProgramCatalog.melodic(29)),   // Overdriven Guitar
+            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument,
+                              program: GMProgramCatalog.melodic(30)),   // Distortion Guitar
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
         defaultSections: [
@@ -230,9 +295,12 @@ public enum SongSkeletonCatalog {
         displayName: "Ballad",
         defaultTempoBPM: 72,
         tracks: [
-            SongSkeletonTrack(name: "Piano", kind: .instrument, mixerPreset: "warm-keys"),
-            SongSkeletonTrack(name: "Strings", kind: .instrument),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
+            SongSkeletonTrack(name: "Piano", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(0)),   // Acoustic Grand Piano
+            SongSkeletonTrack(name: "Strings", kind: .instrument,
+                              program: GMProgramCatalog.melodic(48)),   // String Ensemble 1 — SUSTAINS, correctly
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight",
+                              program: GMProgramCatalog.melodic(32)),   // Acoustic Bass
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
         defaultSections: [
@@ -259,11 +327,16 @@ public enum SongSkeletonCatalog {
         displayName: "Blues",
         defaultTempoBPM: 84,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-room"),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
-            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument),
-            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument, mixerPreset: "guitar-crunch"),
-            SongSkeletonTrack(name: "Organ", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-room",
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round",
+                              program: GMProgramCatalog.melodic(33)),   // Electric Bass (finger)
+            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument,
+                              program: GMProgramCatalog.melodic(27)),   // Electric Guitar (clean)
+            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument, mixerPreset: "guitar-crunch",
+                              program: GMProgramCatalog.melodic(29)),   // Overdriven Guitar
+            SongSkeletonTrack(name: "Organ", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(16)),   // Drawbar Organ — HOLDS under the pedal, and MUST
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
         defaultSections: [
@@ -284,11 +357,16 @@ public enum SongSkeletonCatalog {
         displayName: "Jazz",
         defaultTempoBPM: 132,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-room"),
-            SongSkeletonTrack(name: "Upright Bass", kind: .instrument, mixerPreset: "bass-round"),
-            SongSkeletonTrack(name: "Piano", kind: .instrument, mixerPreset: "warm-keys"),
-            SongSkeletonTrack(name: "Horn", kind: .instrument, mixerPreset: "horn-section"),
-            SongSkeletonTrack(name: "Guitar", kind: .instrument),
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-room",
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Upright Bass", kind: .instrument, mixerPreset: "bass-round",
+                              program: GMProgramCatalog.melodic(32)),   // Acoustic Bass
+            SongSkeletonTrack(name: "Piano", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(0)),   // Acoustic Grand Piano
+            SongSkeletonTrack(name: "Horn", kind: .instrument, mixerPreset: "horn-section",
+                              program: GMProgramCatalog.melodic(56)),   // Trumpet
+            SongSkeletonTrack(name: "Guitar", kind: .instrument,
+                              program: GMProgramCatalog.melodic(26)),   // Electric Guitar (jazz)
         ],
         defaultSections: [
             SkeletonSection(name: "Intro", bars: 8),
@@ -307,10 +385,14 @@ public enum SongSkeletonCatalog {
         displayName: "Country",
         defaultTempoBPM: 100,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
-            SongSkeletonTrack(name: "Acoustic Guitar", kind: .instrument, mixerPreset: "acoustic-sparkle"),
-            SongSkeletonTrack(name: "Electric Guitar", kind: .instrument),
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue",
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round",
+                              program: GMProgramCatalog.melodic(32)),   // Acoustic Bass
+            SongSkeletonTrack(name: "Acoustic Guitar", kind: .instrument, mixerPreset: "acoustic-sparkle",
+                              program: GMProgramCatalog.melodic(25)),   // Acoustic Guitar (steel)
+            SongSkeletonTrack(name: "Electric Guitar", kind: .instrument,
+                              program: GMProgramCatalog.melodic(27)),   // Electric Guitar (clean)
             SongSkeletonTrack(name: "Pedal Steel", kind: .instrument),
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
@@ -334,10 +416,14 @@ public enum SongSkeletonCatalog {
         displayName: "R&B",
         defaultTempoBPM: 88,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
-            SongSkeletonTrack(name: "Keys", kind: .instrument, mixerPreset: "warm-keys"),
-            SongSkeletonTrack(name: "Pads", kind: .instrument),
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue",
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round",
+                              program: GMProgramCatalog.melodic(33)),   // Electric Bass (finger)
+            SongSkeletonTrack(name: "Keys", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(4)),   // Electric Piano 1 — decays
+            SongSkeletonTrack(name: "Pads", kind: .instrument,
+                              program: GMProgramCatalog.melodic(89)),   // Pad 2 (warm) — SUSTAINS, correctly
             SongSkeletonTrack(name: "Lead Vocal", kind: .audio, mixerPreset: "vocal-presence"),
             SongSkeletonTrack(name: "Backing Vocals", kind: .audio),
         ],
@@ -362,11 +448,16 @@ public enum SongSkeletonCatalog {
         displayName: "Funk",
         defaultTempoBPM: 108,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
-            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument),
-            SongSkeletonTrack(name: "Clavinet", kind: .instrument, mixerPreset: "warm-keys"),
-            SongSkeletonTrack(name: "Horns", kind: .instrument, mixerPreset: "horn-section"),
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue",
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight",
+                              program: GMProgramCatalog.melodic(33)),   // Electric Bass (finger)
+            SongSkeletonTrack(name: "Rhythm Guitar", kind: .instrument,
+                              program: GMProgramCatalog.melodic(27)),   // Electric Guitar (clean)
+            SongSkeletonTrack(name: "Clavinet", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(7)),   // Clavinet — the part is NAMED for the program
+            SongSkeletonTrack(name: "Horns", kind: .instrument, mixerPreset: "horn-section",
+                              program: GMProgramCatalog.melodic(61)),   // Brass Section
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
         defaultSections: [
@@ -388,11 +479,16 @@ public enum SongSkeletonCatalog {
         displayName: "Metal",
         defaultTempoBPM: 170,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight"),
-            SongSkeletonTrack(name: "Rhythm Guitar L", kind: .instrument, mixerPreset: "guitar-crunch"),
-            SongSkeletonTrack(name: "Rhythm Guitar R", kind: .instrument, mixerPreset: "guitar-crunch"),
-            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument, mixerPreset: "guitar-crunch"),
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue",
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-tight",
+                              program: GMProgramCatalog.melodic(33)),   // Electric Bass (finger)
+            SongSkeletonTrack(name: "Rhythm Guitar L", kind: .instrument, mixerPreset: "guitar-crunch",
+                              program: GMProgramCatalog.melodic(30)),   // Distortion Guitar
+            SongSkeletonTrack(name: "Rhythm Guitar R", kind: .instrument, mixerPreset: "guitar-crunch",
+                              program: GMProgramCatalog.melodic(30)),   // Distortion Guitar
+            SongSkeletonTrack(name: "Lead Guitar", kind: .instrument, mixerPreset: "guitar-crunch",
+                              program: GMProgramCatalog.melodic(30)),   // Distortion Guitar
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
         defaultSections: [
@@ -414,11 +510,15 @@ public enum SongSkeletonCatalog {
         displayName: "Folk",
         defaultTempoBPM: 96,
         tracks: [
-            SongSkeletonTrack(name: "Acoustic Guitar", kind: .instrument, mixerPreset: "acoustic-sparkle"),
+            SongSkeletonTrack(name: "Acoustic Guitar", kind: .instrument, mixerPreset: "acoustic-sparkle",
+                              program: GMProgramCatalog.melodic(25)),   // Acoustic Guitar (steel)
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
-            SongSkeletonTrack(name: "Fiddle", kind: .instrument),
-            SongSkeletonTrack(name: "Percussion", kind: .instrument),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round",
+                              program: GMProgramCatalog.melodic(32)),   // Acoustic Bass
+            SongSkeletonTrack(name: "Fiddle", kind: .instrument,
+                              program: GMProgramCatalog.melodic(40)),   // Violin
+            SongSkeletonTrack(name: "Percussion", kind: .instrument,
+                              program: GMProgramCatalog.standardDrumKit),
         ],
         defaultSections: [
             SkeletonSection(name: "Intro", bars: 4),
@@ -440,10 +540,14 @@ public enum SongSkeletonCatalog {
         displayName: "Reggae",
         defaultTempoBPM: 76,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue"),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
-            SongSkeletonTrack(name: "Skank Guitar", kind: .instrument),
-            SongSkeletonTrack(name: "Organ", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "drum-bus-glue",
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round",
+                              program: GMProgramCatalog.melodic(33)),   // Electric Bass (finger)
+            SongSkeletonTrack(name: "Skank Guitar", kind: .instrument,
+                              program: GMProgramCatalog.melodic(27)),   // Electric Guitar (clean)
+            SongSkeletonTrack(name: "Organ", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(16)),   // Drawbar Organ — HOLDS, correctly
             SongSkeletonTrack(name: "Vocals", kind: .audio, mixerPreset: "vocal-presence"),
         ],
         defaultSections: [
@@ -466,9 +570,12 @@ public enum SongSkeletonCatalog {
         displayName: "Lo-Fi",
         defaultTempoBPM: 78,
         tracks: [
-            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "lofi-tape"),
-            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round"),
-            SongSkeletonTrack(name: "Keys", kind: .instrument, mixerPreset: "warm-keys"),
+            SongSkeletonTrack(name: "Drums", kind: .instrument, mixerPreset: "lofi-tape",
+                              program: GMProgramCatalog.standardDrumKit),
+            SongSkeletonTrack(name: "Bass", kind: .instrument, mixerPreset: "bass-round",
+                              program: GMProgramCatalog.melodic(33)),   // Electric Bass (finger)
+            SongSkeletonTrack(name: "Keys", kind: .instrument, mixerPreset: "warm-keys",
+                              program: GMProgramCatalog.melodic(4)),   // Electric Piano 1 — decays
             SongSkeletonTrack(name: "Samples", kind: .audio, mixerPreset: "lofi-tape"),
             SongSkeletonTrack(name: "Vinyl FX", kind: .audio),
         ],
@@ -479,6 +586,37 @@ public enum SongSkeletonCatalog {
             SkeletonSection(name: "Loop A", bars: 16),
             SkeletonSection(name: "Outro", bars: 8),
         ])
+}
+
+// MARK: - The roster as template tracks (m39-tpl-3)
+
+extension SongSkeletonTrack {
+    /// m39-tpl-3 (design §5.5): this roster slot as a template track, so the skeleton builds its tracks through
+    /// the SAME `TemplateBuilder` a template does. It carries exactly what the skeleton always built: the name, the
+    /// kind, the mixer preset (as a reference, built fresh by `freshChain()`), and the resolved General MIDI
+    /// instrument. The skeleton golden gate (`SkeletonGoldenTests`) pins that the result is byte-identical.
+    ///
+    /// `key` is local to the template the skeleton builds and never reaches a caller.
+    func templateTrack(key: String) -> TemplateTrack {
+        TemplateTrack(key: key, name: name, kind: kind,
+                      instrument: program.map(Self.generalMIDIInstrument),
+                      mixerPreset: mixerPreset)
+    }
+
+    /// m34-o: the part's GM program as an EXPLICIT instrument descriptor on the new track. Explicit is the whole
+    /// safety argument — a track that carries its own instrument is immune to any future change of
+    /// `InstrumentDescriptor.default`, and equally this assignment cannot reach a project already on disk. A
+    /// slot with no program gets no instrument, exactly as before m34-o.
+    static func generalMIDIInstrument(_ program: SoundBankProgram) -> InstrumentDescriptor {
+        InstrumentDescriptor(
+            kind: .soundBank,
+            soundBank: SoundBankConfig(
+                source: .generalMIDI, program: program.program,
+                bankMSB: program.bankMSB, bankLSB: program.bankLSB,
+                // Cosmetic, and DERIVED from the catalog rather than typed here, so a roster cannot label a
+                // program with a name that is not that program's.
+                displayName: program.name))
+    }
 }
 
 // MARK: - Result
@@ -551,11 +689,19 @@ public struct SongSkeletonResult: Sendable, Equatable {
     public let loopEnd: Double
     /// The Arrangement guide track's id.
     public let arrangementTrackID: UUID
+    /// m39-tpl-3: with a template, every template track key → the id of the track it became (design §6.2's
+    /// `templateKeys`). Empty without a template.
+    public let templateKeys: [String: UUID]
+    /// m39-tpl-3: with a template, what the builder and the store worked around (an Audio Unit that is not
+    /// installed, a setting that steps), each `{code, path, message}`. Empty without a template.
+    public let warnings: [TemplateWarning]
 
     public init(genre: String, tempoBPM: Double, tracks: [TrackRef],
                 sectionClips: [SectionClipRef], markers: [MarkerRef],
                 loopStart: Double, loopEnd: Double,
-                arrangementTrackID: UUID) {
+                arrangementTrackID: UUID,
+                templateKeys: [String: UUID] = [:],
+                warnings: [TemplateWarning] = []) {
         self.genre = genre
         self.tempoBPM = tempoBPM
         self.tracks = tracks
@@ -564,7 +710,45 @@ public struct SongSkeletonResult: Sendable, Equatable {
         self.loopStart = loopStart
         self.loopEnd = loopEnd
         self.arrangementTrackID = arrangementTrackID
+        self.templateKeys = templateKeys
+        self.warnings = warnings
     }
+}
+
+// MARK: - Plan (the dry run)
+
+/// m39-tpl-3 (design §6.2): everything one `applySongSkeleton` call would add, built and checked, before anything
+/// is added. `planSongSkeleton` returns it and changes nothing; `applySongSkeleton` makes it and then adds exactly
+/// it in ONE edit. So a dry run IS the apply, stopped before the edit, and the two cannot drift apart.
+public struct SongSkeletonPlan: Sendable, Equatable {
+    /// The genre's kebab id.
+    public let genre: String
+    /// "Song Skeleton '<Genre>'", or "Song Skeleton '<Genre>' with '<Template>'".
+    public let undoLabel: String
+    /// The effective tempo (the caller's, else the genre default).
+    public let tempoBPM: Double
+    /// Every track the call adds, complete, in order: the roster (the genre's, the caller's `tracks`, or the
+    /// template's), then the "Arrangement" guide track LAST. The ids are minted for this plan; a dry run never
+    /// adds them, and a real call adds exactly these values.
+    public let tracks: [Track]
+    /// The guide clips on the Arrangement track, in timeline order.
+    public let sectionClips: [SongSkeletonResult.SectionClipRef]
+    /// One marker per section start, in section order.
+    public let markers: [Marker]
+    public let loopStart: Double
+    public let loopEnd: Double
+    /// The template's name, or nil without one.
+    public let templateName: String?
+    /// With a template: each template track key → its track's id in `tracks`. Empty without one.
+    public let templateKeys: [String: UUID]
+    /// With a template: the builder's and the store's warnings. Empty without one.
+    public let warnings: [TemplateWarning]
+    /// With a template: true when its tracks play into each other (an output into a bus, a send, a sidechain
+    /// key). The roster of a genre or a `tracks` override never does.
+    public let hasRouting: Bool
+
+    /// The guide track (always the last of `tracks`).
+    public var arrangementTrack: Track? { tracks.last }
 }
 
 // MARK: - Apply (store method)
@@ -593,6 +777,9 @@ extension ProjectStore {
     /// The "Arrangement" guide track is NOT counted here — it is appended on
     /// top of the roster, always, so the real ceiling is 24 + 1 tracks.
     static let songSkeletonTrackCountRange: ClosedRange<Int> = 1...24
+    /// m39-tpl-3: `template` and a `tracks` override together (design §5.5, in its words).
+    static let songSkeletonTemplateAndTracksRefusal =
+        "Use either a template or your own track list, not both."
 
     /// Scaffolds a working session for `genre` in ONE undoable edit
     /// ("Song Skeleton '<GenreDisplayName>'"): sets the tempo, appends the
@@ -635,26 +822,118 @@ extension ProjectStore {
     /// override — it still supplies everything the caller did not override
     /// (the default tempo today) and keeps the wire contract stable.
     ///
+    /// TEMPLATE (m39-tpl-3, design §5.5): with `template`, the roster IS the
+    /// template's tracks — instruments, effects, buses, sends, sidechain keys
+    /// and modulation, built by `TemplateBuilder` — and the form (tempo,
+    /// sections, markers, the "Arrangement" track, the loop) is still the
+    /// genre's. The edit is then called "Song Skeleton '<Genre>' with
+    /// '<Template>'". It checks what `applyTemplate` checks, before the edit:
+    /// the builder's refusals, the template's sound-bank and Sampler files, and
+    /// — for a template whose tracks play into each other — the recording
+    /// guard. `template` with `tracks` is refused. WITHOUT a template, every
+    /// roster slot becomes a template track too and goes through the same
+    /// builder (`SongSkeletonTrack.templateTrack(key:)`), byte-identical to the
+    /// skeleton before TPL-3 (`SkeletonGoldenTests`, 28 fixtures).
+    ///
     /// Guards run OUTSIDE the edit body (the `applyMixerPreset` precedent):
     ///  - unknown `genre` → `songSkeletonGenreNotFound` whose message lists every
     ///    valid genre name;
     ///  - out-of-range `tempoBPM` (20...400) → `invalidSongSkeleton`;
     ///  - a bad `sections` override (count, name length, bar count) →
     ///    field-named `invalidSongSkeleton`;
+    ///  - `template` together with `tracks` → `invalidSongSkeleton`;
     ///  - a bad `tracks` roster (count 1...24, name length, a `.bus` kind, an
     ///    unresolvable `mixerPreset` — whose message lists every valid preset)
-    ///    → field-named `invalidSongSkeleton`.
+    ///    → field-named `invalidSongSkeleton`;
+    ///  - a template the builder refuses, or whose files are missing →
+    ///    `TemplateRefusal`; a connected template while recording →
+    ///    `transportBusy`.
     /// The whole scaffold publishes through a SINGLE `performEdit` snapshot — the
     /// tempo and loop mutations fold in via `applyTempoChange` / `applyLoopRegion`
     /// (which do NOT open their own edits) rather than the public `setTempo` /
     /// `setLoop` (which would each journal a separate undo step). `tempoBPM` nil
     /// means the genre default; `sections` nil means the genre's default layout;
     /// `tracks` nil means the genre's default roster.
+    ///
+    /// ⚠️ F-8 (design §5.5, NOT changed here on purpose): the tempo change skips
+    /// both guards `setTempo` has (recording, a multi-segment tempo map). It is
+    /// item TPL-F8, a flagged behaviour change; the golden gate forbids making
+    /// it silently.
     @discardableResult
     public func applySongSkeleton(genre genreID: String,
                                   tempoBPM: Double? = nil,
                                   sections: [SkeletonSection]? = nil,
-                                  tracks: [SongSkeletonTrack]? = nil) throws -> SongSkeletonResult {
+                                  tracks: [SongSkeletonTrack]? = nil,
+                                  template: TrackSetTemplate? = nil) throws -> SongSkeletonResult {
+        let plan = try planSongSkeleton(genre: genreID, tempoBPM: tempoBPM, sections: sections,
+                                        tracks: tracks, template: template)
+        guard let arrangementTrack = plan.arrangementTrack else {
+            // Unreachable: a plan always ends with the guide track. A total
+            // function rather than a force-unwrap.
+            throw ProjectError.invalidSongSkeleton("the scaffold has no Arrangement track")
+        }
+
+        // ONE undoable edit. Nested performEdit calls would EACH journal an undo
+        // entry (the journal only coalesces adjacent same-key edits inside an
+        // 800 ms window — a scaffold's tempo/track/loop mutations carry different
+        // keys), so we mutate directly here instead of calling addTrack/setTempo/
+        // setLoop — and, for the same reason, NOT the public `addMarker` (which
+        // journals its own "Add Marker '<name>'" edit per marker: a pop skeleton
+        // would cost eight extra undo steps). `tracks` and `markers` are
+        // internal(set) (mutable from this extension — the documented `markers`
+        // rule); the transport (private setter) is folded in through the
+        // primary-file `applyTempoChange` / `applyLoopRegion` helpers, mirroring
+        // how `importGeneration` folds a tempo change into its single edit.
+        // `markers` rides `EditState`, so undo reverts the beat map with the rest
+        // of the scaffold. The merge re-applies the SHARED `markersSortedByBeat`
+        // funnel (no second sort here) so pre-existing markers survive in the
+        // store's canonical order rather than being appended after them.
+        //
+        // `self.tracks` is spelled out here because the `tracks:` ROSTER OVERRIDE
+        // parameter shadows the store's `tracks` property inside this body. The
+        // two are different things and the compiler would reject the mistake, but
+        // an explicit `self.` says WHICH one at a glance.
+        performEdit(plan.undoLabel) {
+            self.tracks.append(contentsOf: plan.tracks)
+            markers = Self.markersSortedByBeat(markers + plan.markers)
+            applyTempoChange(plan.tempoBPM)
+            applyLoopRegion(enabled: true, startBeat: plan.loopStart, endBeat: plan.loopEnd)
+            engine?.tracksDidChange(self.tracks)
+        }
+
+        return SongSkeletonResult(
+            genre: plan.genre,
+            tempoBPM: plan.tempoBPM,
+            tracks: plan.tracks.map { .init(id: $0.id, name: $0.name) },
+            sectionClips: plan.sectionClips,
+            markers: plan.markers.map { .init(id: $0.id, name: $0.name, beat: $0.beat) },
+            loopStart: plan.loopStart,
+            loopEnd: plan.loopEnd,
+            arrangementTrackID: arrangementTrack.id,
+            templateKeys: plan.templateKeys,
+            warnings: plan.warnings)
+    }
+
+    /// m39-tpl-3 — THE DRY RUN (design §6.2): every guard and the whole build of
+    /// `applySongSkeleton(genre:tempoBPM:sections:tracks:template:)`, stopped
+    /// before the edit. Returns what the call would add and CHANGES NOTHING:
+    /// no track, marker, tempo, loop or undo step. It throws exactly what the
+    /// call would throw. A dry run that succeeds means the call will succeed
+    /// unless the project changes in between (for example, recording starts).
+    ///
+    /// TODO(TPL-6): `macro.songSkeleton {dryRun: true}` in
+    /// `Sources/DAWControl/Commands.swift` calls this and replies with the
+    /// plan's names, kinds, instruments, insert chains and sections, with
+    /// `applied: false` and no ids; `{template}` passes through to the
+    /// `template:` parameter (an id or an inline object, read by
+    /// `TrackSetTemplateCodec`). TODO(TPL-7): `macro_song_skeleton` in
+    /// `mcp-server/src/server.ts` gains `template` and `dryRun` as opaque
+    /// passthroughs (design §6.5).
+    public func planSongSkeleton(genre genreID: String,
+                                 tempoBPM: Double? = nil,
+                                 sections: [SkeletonSection]? = nil,
+                                 tracks: [SongSkeletonTrack]? = nil,
+                                 template: TrackSetTemplate? = nil) throws -> SongSkeletonPlan {
         // Genre guard — message lists every valid name (the mixerPresetNotFound
         // precedent).
         guard let genre = SongSkeletonCatalog.genre(named: genreID) else {
@@ -694,24 +973,109 @@ extension ProjectStore {
             }
         }
 
-        // Roster: caller's override else the genre default, validated field by
-        // field the same way `sections` is — and validated on the EFFECTIVE
-        // roster, so the catalog is held to exactly the contract a caller is.
-        // This override replaces the GENRE ROSTER ONLY; the Arrangement guide
-        // track below is appended unconditionally and is not reachable from
-        // here (that is the whole safety argument — see the doc comment).
-        let effectiveRoster = tracks ?? genre.tracks
-        guard Self.songSkeletonTrackCountRange.contains(effectiveRoster.count) else {
+        // The roster's tracks, built — NO model mutation (a plan changes nothing).
+        let rosterTracks: [Track]
+        var templateKeys: [String: UUID] = [:]
+        var warnings: [TemplateWarning] = []
+        var hasRouting = false
+        if let template {
+            // A template IS the roster; a `tracks` override beside it would be a
+            // second roster, so the pair is refused rather than one silently
+            // winning.
+            guard tracks == nil else {
+                throw ProjectError.invalidSongSkeleton(Self.songSkeletonTemplateAndTracksRefusal)
+            }
+            // `applyTemplate`'s first three steps, in its order: the plan, the
+            // files on this Mac, then the recording guard for a template whose
+            // tracks play into each other. Every one runs before the edit.
+            let built = try TemplateBuilder.plan(template)
+            warnings = built.warnings + (try checkTemplateResources(built))
+            if built.hasRouting {
+                try requireRoutingMutationAllowed("add a template whose tracks play into each other")
+            }
+            rosterTracks = built.tracks
+            templateKeys = built.keyToTrackID
+            hasRouting = built.hasRouting
+        } else {
+            // Roster: caller's override else the genre default, validated field by
+            // field the same way `sections` is — and validated on the EFFECTIVE
+            // roster, so the catalog is held to exactly the contract a caller is.
+            // This override replaces the GENRE ROSTER ONLY; the Arrangement guide
+            // track below is appended unconditionally and is not reachable from
+            // here (that is the whole safety argument — see the doc comment).
+            let effectiveRoster = tracks ?? genre.tracks
+            try Self.validateSkeletonRoster(effectiveRoster)
+            // m39-tpl-3: every slot becomes a template track and the roster is
+            // built by the SAME `TemplateBuilder` a template is (design §5.5):
+            // its mixer preset as a fresh chain, its GM program as an explicit
+            // instrument. The guards above already refused everything the
+            // builder could refuse here (a count outside 1...24, an unknown
+            // preset, a program on an audio track, a bus), so a refusal from it
+            // is unreachable; it is still reported by name rather than trapped.
+            let roster = TrackSetTemplate(
+                name: genre.displayName,
+                tracks: effectiveRoster.enumerated().map { index, spec in
+                    spec.templateTrack(key: "roster-\(index + 1)")
+                })
+            do {
+                rosterTracks = try TemplateBuilder.plan(roster).tracks
+            } catch let refusal as TemplateRefusal {
+                throw ProjectError.invalidSongSkeleton(refusal.errorDescription ?? refusal.message)
+            }
+        }
+
+        // Build the Arrangement guide track: one contiguous empty MIDI clip per
+        // section (notes: [] makes it a MIDI clip with no notes). startBeat is the
+        // running sum; lengthBeats is bars × 4. The SAME loop mints the section
+        // marker off the SAME `cursorBeats` and the SAME name string, so the
+        // guide clips and the beat map can never disagree.
+        var guideClips: [Clip] = []
+        var sectionRefs: [SongSkeletonResult.SectionClipRef] = []
+        var sectionMarkers: [Marker] = []
+        var cursorBeats = 0.0
+        for section in effectiveSections {
+            let lengthBeats = Double(section.bars) * Self.beatsPerSkeletonBar
+            guideClips.append(Clip(name: section.name, startBeat: cursorBeats,
+                                   lengthBeats: lengthBeats, notes: []))
+            sectionRefs.append(.init(name: section.name, startBeat: cursorBeats,
+                                     lengthBeats: lengthBeats))
+            sectionMarkers.append(Marker(name: section.name, beat: cursorBeats))
+            cursorBeats += lengthBeats
+        }
+        let totalBeats = cursorBeats  // >= 4 (min 1 section × 1 bar) — a valid loop region.
+        let arrangementTrack = Track(name: "Arrangement", kind: .instrument, clips: guideClips)
+
+        let label = template.map { "Song Skeleton '\(genre.displayName)' with '\($0.name)'" }
+            ?? "Song Skeleton '\(genre.displayName)'"
+        return SongSkeletonPlan(
+            genre: genre.name,
+            undoLabel: label,
+            tempoBPM: tempo,
+            tracks: rosterTracks + [arrangementTrack],
+            sectionClips: sectionRefs,
+            markers: sectionMarkers,
+            loopStart: 0,
+            loopEnd: totalBeats,
+            templateName: template?.name,
+            templateKeys: templateKeys,
+            warnings: warnings,
+            hasRouting: hasRouting)
+    }
+
+    /// The `tracks` roster's field-by-field guards, in their order (count, then
+    /// per slot: name, kind, a program on a non-instrument, an unknown preset).
+    private static func validateSkeletonRoster(_ effectiveRoster: [SongSkeletonTrack]) throws {
+        guard songSkeletonTrackCountRange.contains(effectiveRoster.count) else {
             throw ProjectError.invalidSongSkeleton(
-                "tracks must have between \(Self.songSkeletonTrackCountRange.lowerBound) and "
-                + "\(Self.songSkeletonTrackCountRange.upperBound) entries — got \(effectiveRoster.count)")
+                "tracks must have between \(songSkeletonTrackCountRange.lowerBound) and "
+                + "\(songSkeletonTrackCountRange.upperBound) entries — got \(effectiveRoster.count)")
         }
         for (i, spec) in effectiveRoster.enumerated() {
             let trimmed = spec.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, spec.name.count <= Self.songSkeletonSectionNameMaxLength else {
+            guard !trimmed.isEmpty, spec.name.count <= songSkeletonSectionNameMaxLength else {
                 throw ProjectError.invalidSongSkeleton(
                     "tracks[\(i)].name must be a non-empty string of at most "
-                    + "\(Self.songSkeletonSectionNameMaxLength) characters")
+                    + "\(songSkeletonSectionNameMaxLength) characters")
             }
             // v1 skeletons never make buses: a skeleton's job is playable parts
             // plus the guide track, and a bus with nothing routed into it is
@@ -723,6 +1087,15 @@ extension ProjectStore {
                     + "'\(spec.kind.rawValue)'; v1 skeletons never create buses "
                     + "(add one afterwards with track.add if you need it)")
             }
+            // m34-o: an audio track hosts no instrument, so a program on one
+            // could only ever be silently dropped — the silent-discard defect
+            // class this tree keeps paying for. Refused by name instead.
+            if spec.program != nil, spec.kind != .instrument {
+                throw ProjectError.invalidSongSkeleton(
+                    "tracks[\(i)].program is set on a '\(spec.kind.rawValue)' track — only "
+                    + "instrument tracks host an instrument. Drop the program or make the "
+                    + "track kind 'instrument'.")
+            }
             // The message LISTS every valid preset (the songSkeletonGenreNotFound
             // precedent) so one round trip teaches the whole vocabulary.
             if let presetName = spec.mixerPreset,
@@ -732,96 +1105,5 @@ extension ProjectStore {
                     "tracks[\(i)].mixerPreset is unknown: '\(presetName)' — valid: \(valid)")
             }
         }
-
-        // Build the roster tracks with fresh preset chains — NO model mutation
-        // yet (everything is staged, then published in one edit below).
-        var rosterTracks: [Track] = []
-        var trackRefs: [SongSkeletonResult.TrackRef] = []
-        for spec in effectiveRoster {
-            var effects: [EffectDescriptor] = []
-            if let presetName = spec.mixerPreset {
-                // Reuse the mixer-preset chain machinery directly (macro-b). The
-                // up-front roster guard above already rejected an unresolvable
-                // preset with a field-named error, so this branch is unreachable
-                // — it stays as the total-function fallback (the alternative is a
-                // force-unwrap that would CRASH if the catalogs ever drift).
-                guard let preset = MixerPresetCatalog.preset(named: presetName) else {
-                    let valid = MixerPresetCatalog.names.joined(separator: ", ")
-                    throw ProjectError.mixerPresetNotFound(
-                        "unknown mixer preset '\(presetName)' — valid: \(valid)")
-                }
-                effects = preset.freshChain()
-            }
-            let track = Track(name: spec.name, kind: spec.kind, effects: effects)
-            rosterTracks.append(track)
-            trackRefs.append(.init(id: track.id, name: track.name))
-        }
-
-        // Build the Arrangement guide track: one contiguous empty MIDI clip per
-        // section (notes: [] makes it a MIDI clip with no notes). startBeat is the
-        // running sum; lengthBeats is bars × 4. The SAME loop mints the section
-        // marker off the SAME `cursorBeats` and the SAME name string, so the
-        // guide clips and the beat map can never disagree.
-        var guideClips: [Clip] = []
-        var sectionRefs: [SongSkeletonResult.SectionClipRef] = []
-        var sectionMarkers: [Marker] = []
-        var markerRefs: [SongSkeletonResult.MarkerRef] = []
-        var cursorBeats = 0.0
-        for section in effectiveSections {
-            let lengthBeats = Double(section.bars) * Self.beatsPerSkeletonBar
-            guideClips.append(Clip(name: section.name, startBeat: cursorBeats,
-                                   lengthBeats: lengthBeats, notes: []))
-            sectionRefs.append(.init(name: section.name, startBeat: cursorBeats,
-                                     lengthBeats: lengthBeats))
-            let marker = Marker(name: section.name, beat: cursorBeats)
-            sectionMarkers.append(marker)
-            markerRefs.append(.init(id: marker.id, name: marker.name, beat: marker.beat))
-            cursorBeats += lengthBeats
-        }
-        let totalBeats = cursorBeats  // >= 4 (min 1 section × 1 bar) — a valid loop region.
-        let arrangementTrack = Track(name: "Arrangement", kind: .instrument, clips: guideClips)
-        trackRefs.append(.init(id: arrangementTrack.id, name: arrangementTrack.name))
-
-        let loopStart = 0.0
-        let loopEnd = totalBeats
-
-        // ONE undoable edit. Nested performEdit calls would EACH journal an undo
-        // entry (the journal only coalesces adjacent same-key edits inside an
-        // 800 ms window — a scaffold's tempo/track/loop mutations carry different
-        // keys), so we mutate directly here instead of calling addTrack/setTempo/
-        // setLoop — and, for the same reason, NOT the public `addMarker` (which
-        // journals its own "Add Marker '<name>'" edit per marker: a pop skeleton
-        // would cost eight extra undo steps). `tracks` and `markers` are
-        // internal(set) (mutable from this extension — the documented `markers`
-        // rule); the transport (private setter) is folded in through the
-        // primary-file `applyTempoChange` / `applyLoopRegion` helpers, mirroring
-        // how `importGeneration` folds a tempo change into its single edit.
-        // `markers` rides `EditState`, so undo reverts the beat map with the rest
-        // of the scaffold. The merge re-applies the SHARED `markersSortedByBeat`
-        // funnel (no second sort here) so pre-existing markers survive in the
-        // store's canonical order rather than being appended after them.
-        //
-        // `self.tracks` is spelled out here because the `tracks:` ROSTER OVERRIDE
-        // parameter shadows the store's `tracks` property inside this body. The
-        // two are different things and the compiler would reject the mistake, but
-        // an explicit `self.` says WHICH one at a glance.
-        performEdit("Song Skeleton '\(genre.displayName)'") {
-            self.tracks.append(contentsOf: rosterTracks)
-            self.tracks.append(arrangementTrack)
-            markers = Self.markersSortedByBeat(markers + sectionMarkers)
-            applyTempoChange(tempo)
-            applyLoopRegion(enabled: true, startBeat: loopStart, endBeat: loopEnd)
-            engine?.tracksDidChange(self.tracks)
-        }
-
-        return SongSkeletonResult(
-            genre: genre.name,
-            tempoBPM: tempo,
-            tracks: trackRefs,
-            sectionClips: sectionRefs,
-            markers: markerRefs,
-            loopStart: loopStart,
-            loopEnd: loopEnd,
-            arrangementTrackID: arrangementTrack.id)
     }
 }

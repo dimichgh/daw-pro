@@ -33,14 +33,14 @@
 //      below the statistic's design point — refusing the whole campaign is
 //      the deliberate, stated choice (design §7.3).
 //   4. CAMPAIGN VALIDITY leg (anti-contamination): median run wall time must
-//      be <= 120 s. Measured (design): normal campaigns 93.4-101.3 s,
-//      adversarial 156.7 s. A campaign run on a busy machine is not a
+//      be <= 248 s. Measured (m31-i, 2026-08-28): normal campaign runs
+//      208.5-209.7 s, adversarial 333.9 s. A campaign run on a busy machine is not a
 //      normal-population campaign and must not be scored as one. Exit 2,
 //      distinct from a threshold failure (exit 1) — this is what actually
 //      buys the 36 s threshold its safety: the derivation in §6.1 uses the
 //      adversarial run ONLY as a same-run-channel COEFFICIENT, never as an
 //      admissible campaign observation, and this leg is what enforces that
-//      exclusion mechanically. ⚠️ The 120 s limit and the 36 s threshold are
+//      exclusion mechanically. ⚠️ The 248 s limit and the 35 s threshold are
 //      re-derived TOGETHER (design §6.1) — loosening one without the other is
 //      the same class of edit as raising the horizon.
 //   5. ANTI-CIRCUMVENTION leg: the parsed `horizon` must be EXACTLY 60.0
@@ -53,7 +53,7 @@
 //      message must never be mistaken for the threshold leg's — this is
 //      DESIGN'S OWN SINGLE MOST VALUABLE LEG, per §5.3.
 //   6. THE THRESHOLD: worst-of-campaign GM prepare time (T1) must be
-//      <= HEADROOM_LIMIT_SECONDS (36, derived `floor(60 / 1.591)`, design
+//      <= HEADROOM_LIMIT_SECONDS (35, derived `floor(60 / 1.6783)`, design
 //      §6.1 — re-derivation rule lives there, not here: DO NOT invent a fresh
 //      constant without re-running that derivation). Exit 1.
 //   7. On PASS: prints the full campaign table (population idiom) for T1, and
@@ -70,7 +70,24 @@
 // the same ratio on the m19-e `max` column, and set
 // `HEADROOM_LIMIT_SECONDS = floor(60 / adversarialInflation)`. The result
 // must retain >= 1.10x headroom over the worst normal observation. If it
-// cannot, STOP — do not lower the ratio and do not raise
+// cannot, STOP
+//
+// ⚠️⚠️ THE SPECIFIED CROSS-CHECK FAILED AT m31-i AND THE RULE NEEDS AMENDING.
+// Measured 2026-08-28: T1 channel 1.6783x, m19-e `max` channel 1.0878x — a
+// 54 % disagreement where the 2026-08-03 derivation had 0.6 % (1.591 vs
+// 1.582). Cause is design §1.3's own account of the channel: the `max` is an
+// extreme order statistic over 32 SELF-contending prepares, and on this
+// harness the self-contention term has grown until it saturates the channel
+// (normal-population `max` now spreads 19.0-35.9 s, 1.89x, with one normal
+// run at 35.86 s nearly touching the adversarial 39.01 s), so its AMBIENT
+// inflation ratio collapses toward 1.0. The m19-e MEDIAN column — which
+// AUPrepareRenegotiationStressTests' own point 4 calls "this file's purest
+// reading of ambient queueing load" — gives 1.6212x, agreeing with T1 within
+// 3.5 %. PROPOSED (not silently adopted): future re-derivations cross-check
+// on the m19-e MEDIAN column, not the `max`. ⭐ Note the coefficient actually
+// USED was the STRICTEST of the three: floor(60/1.6783) = 35 against 37 from
+// the median channel and 55 from the max, so the cross-check failure cannot
+// have loosened this constant by any route. — do not lower the ratio and do not raise
 // `AUHostRegistry.testPrepareTimeout`. That state means an ordinary loaded
 // machine is inside one bad run of the horizon, and the correct response is
 // load reduction (m23-aw-1) or a roadmap-approved, argued change of horizon —
@@ -151,8 +168,12 @@ const GATES_DIR = path.dirname(fileURLToPath(import.meta.url));
 // the horizon constant itself (`AUHostRegistry.testPrepareTimeout`, already
 // pinned in two places); the campaign statistics below live ONLY here. ──
 const HORIZON_SECONDS = 60.0;
-const HEADROOM_LIMIT_SECONDS = 36; // design §6.1: floor(60 / 1.591), >= 1.10x over 30.994 measured worst
-const CAMPAIGN_VALIDITY_MAX_MEDIAN_WALL_SECONDS = 120; // design §6.1: paired with the limit above, re-derive together
+// m31-i (2026-08-28) RE-DERIVED THE PAIR TOGETHER on the 6 752-test / 630-suite
+// harness. Full table, both inflation channels and the cross-check finding:
+// design §6.1's dated re-derivation subsection. Superseded values: 36 / 120,
+// derived 2026-08-03 on a 4 712-test harness.
+const HEADROOM_LIMIT_SECONDS = 35; // §6.1 (m31-i): floor(60 / 1.6783), >= 1.10x over 2.063 measured worst (16.96x)
+const CAMPAIGN_VALIDITY_MAX_MEDIAN_WALL_SECONDS = 248; // §6.1 (m31-i): paired with the limit above, re-derive together
 const DEFAULT_RUNS = 5;
 
 const GM_LINE_RE =
@@ -260,8 +281,8 @@ function scoreCampaign(runs) {
       message:
         `campaign INVALID: median full-suite wall time ${medianWall.toFixed(1)}s exceeds the ` +
         `${CAMPAIGN_VALIDITY_MAX_MEDIAN_WALL_SECONDS}s validity limit — this machine was contended ` +
-        `during the campaign (design: normal campaigns read 93.4-101.3s; the m23-ab-2 adversarial ` +
-        `protocol reads ~156.7s). Re-run on an otherwise-idle machine. Do NOT lower this limit to make ` +
+        `during the campaign (m31-i, 2026-08-28: normal campaign runs read 208.5-209.7s; the m23-ab-2 ` +
+        `adversarial protocol reads 333.9s). Re-run on an otherwise-idle machine. Do NOT lower this limit to make ` +
         `a loaded run pass — it is paired with the ${HEADROOM_LIMIT_SECONDS}s threshold and the two are ` +
         `re-derived together or not at all (design §6.1).`,
     };

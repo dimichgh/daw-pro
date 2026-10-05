@@ -17,18 +17,47 @@ import Foundation
 /// Render-path contract: `process()`/`reset()` allocate nothing, take no
 /// locks, log nothing, touch no ObjC. Gain is memoryless (no feedback state),
 /// so it can neither generate denormals nor blow up: the published value is
-/// clamped finite (0...4) by `GainParams`' clamping init.
+/// clamped finite (0...16, m27-c — was 0...4) by `GainParams`' clamping init.
+/// The wider ceiling costs the render path nothing: this is still one multiply
+/// per sample, and 16× a full-scale sample is ~24 dB inside Float32's range —
+/// it can OVERDRIVE the mix (that is the point, and the caller's business) but
+/// it cannot overflow, denormalize, or become non-finite.
+///
+/// POLARITY (m38-a): `GainParams.invertPolarity` is folded into the SIGN of
+/// that same coefficient (`signedTarget`), so the render path stays exactly
+/// one multiply per sample and a flip inherits the existing ~5 ms declick
+/// ramp — +g to -g passes through zero by construction, a brief dip instead
+/// of the full-scale discontinuity an instant flip would be. Magnitude is
+/// still clamped to 0...16, so the coefficient lives in -16...16 and every
+/// non-finite / denormal argument above holds unchanged.
 final class GainEffect: EffectRendering, @unchecked Sendable {
     /// Immutable box crossing main actor → render thread. POD payload — no
     /// ARC or bridging work on the render-side read.
     private final class ParamSnapshot {
         let generation: UInt64
-        let gainLinear: Float
+        let params: RenderParams
 
-        init(generation: UInt64, gainLinear: Float) {
+        init(generation: UInt64, params: RenderParams) {
             self.generation = generation
-            self.gainLinear = gainLinear
+            self.params = params
         }
+    }
+
+    /// The render-side POD params (m38-a). A struct rather than a bare Float
+    /// because the automation overlay must carry BOTH knobs — slot 0 gain,
+    /// slot 1 polarity — and poke either one without losing the other.
+    private struct RenderParams {
+        var gainLinear: Float
+        var invertPolarity: Bool
+    }
+
+    /// THE fold (m38-a): polarity is not a second stage, it is the SIGN of the
+    /// one coefficient the smoother already ramps. So an armed flip retargets
+    /// +g → -g and the existing ~5 ms declick ramp walks it through zero — a
+    /// brief dip, never a full-scale step. `invertPolarity == false` returns
+    /// the identical Float the pre-m38-a code used, so nothing existing moves.
+    private static func signedTarget(_ params: RenderParams) -> Float {
+        params.invertPolarity ? -params.gainLinear : params.gainLinear
     }
 
     private let paramsSlot: UnsafeMutablePointer<daw_atomic_ptr>
@@ -41,7 +70,7 @@ final class GainEffect: EffectRendering, @unchecked Sendable {
     private var rampStep: Float = 0
     private var lastGeneration = UInt64.max  // .max forces exact first-quantum adoption
     /// Automation overlay (M4 vii-c) — render-thread-only knob/lane split.
-    private var overlay: AutomationParamOverlay<Float>
+    private var overlay: AutomationParamOverlay<RenderParams>
 
     // Main-actor-only publish state (retire bin ≥ 1 s, PolySynth contract).
     private var publishedGeneration: UInt64 = 0
@@ -52,9 +81,11 @@ final class GainEffect: EffectRendering, @unchecked Sendable {
         paramsSlot = .allocate(capacity: 1)
         daw_atomic_ptr_init(paramsSlot)
         lastAppliedParams = params
-        overlay = AutomationParamOverlay(base: Float(params.gainLinear))
+        let render = RenderParams(gainLinear: Float(params.gainLinear),
+                                  invertPolarity: params.invertPolarity)
+        overlay = AutomationParamOverlay(base: render)
         // Initial publish: nothing renders yet, so a plain exchange is safe.
-        let snapshot = ParamSnapshot(generation: 0, gainLinear: Float(params.gainLinear))
+        let snapshot = ParamSnapshot(generation: 0, params: render)
         _ = daw_atomic_ptr_exchange(
             paramsSlot, UnsafeMutableRawPointer(Unmanaged.passRetained(snapshot).toOpaque()))
     }
@@ -76,8 +107,10 @@ final class GainEffect: EffectRendering, @unchecked Sendable {
         guard params != lastAppliedParams else { return }
         lastAppliedParams = params
         publishedGeneration &+= 1
-        let snapshot = ParamSnapshot(generation: publishedGeneration,
-                                     gainLinear: Float(params.gainLinear))
+        let snapshot = ParamSnapshot(
+            generation: publishedGeneration,
+            params: RenderParams(gainLinear: Float(params.gainLinear),
+                                 invertPolarity: params.invertPolarity))
         let now = ContinuousClock.now
         let raw = UnsafeMutableRawPointer(Unmanaged.passRetained(snapshot).toOpaque())
         if let old = daw_atomic_ptr_exchange(paramsSlot, raw) {
@@ -107,8 +140,8 @@ final class GainEffect: EffectRendering, @unchecked Sendable {
         guard snapshot.generation != lastGeneration else { return }
         let firstAdoption = lastGeneration == .max
         lastGeneration = snapshot.generation
-        overlay.rebase(snapshot.gainLinear)
-        setGainTarget(snapshot.gainLinear, exact: firstAdoption)
+        overlay.rebase(snapshot.params)
+        setGainTarget(Self.signedTarget(snapshot.params), exact: firstAdoption)
     }
 
     /// One retargeting path for UI publishes, automation stores, and the
@@ -130,14 +163,20 @@ final class GainEffect: EffectRendering, @unchecked Sendable {
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
-    /// `EffectParamSpec.specs(for: .gain)`: 0 = gainLinear. Pokes the
+    /// `EffectParamSpec.specs(for: .gain)`: 0 = gainLinear, 1 = invertPolarity
+    /// (m38-a, binary at >= 0.5 — the store's own snap). Pokes the
     /// preallocated overlay copy and retargets — no allocation, no locks.
     func storeAutomatedParam(slot: Int, value: Double) {
-        guard slot == 0, value.isFinite else { return }
+        guard value.isFinite, (0...1).contains(slot) else { return }
         adoptPendingParams()
         overlay.beginStore()
-        overlay.effective = Float(value)
-        setGainTarget(Float(value), exact: false)  // quantum step, ~5 ms declick
+        switch slot {
+        case 0: overlay.effective.gainLinear = Float(value)
+        default: overlay.effective.invertPolarity = value >= 0.5
+        }
+        // Quantum step, ~5 ms declick — a polarity lane flip ramps through
+        // zero exactly as a knob flip does.
+        setGainTarget(Self.signedTarget(overlay.effective), exact: false)
     }
 
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
@@ -145,13 +184,15 @@ final class GainEffect: EffectRendering, @unchecked Sendable {
         // Automation lane(s) vanished (republish without this effect, or
         // stop): the knob value restores — no main-actor republish needed.
         if overlay.endQuantum() {
-            setGainTarget(overlay.base, exact: false)
+            setGainTarget(Self.signedTarget(overlay.base), exact: false)
         }
 
         let stride = MemoryLayout<Float>.stride
         if rampRemaining == 0 {
             // Steady state: one exact constant multiply per channel. Unity
-            // skips the pass entirely (bit-exact null by construction).
+            // skips the pass entirely (bit-exact null by construction) — and
+            // that skip is +1 ONLY, so an inverted unity (-1) correctly still
+            // runs the pass (m38-a).
             guard currentGain != 1 else { return }
             let gain = currentGain
             for buffer in buffers {

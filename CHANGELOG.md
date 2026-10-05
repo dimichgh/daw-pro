@@ -1,5 +1,3498 @@
 # Changelog
 
+## Unreleased (after 2026-09-27's commit, e6f7a27)
+
+1. **Tune to Melody: tune a sung vocal to a MIDI melody.**
+   - **How:** right-click a vocal clip, then **Tune Vocal ▸ Tune to Melody…**. Pick the MIDI melody under it (a track named “Lead” comes first), a style, and whether to match the octave you sang in, then Apply. Each sung note is tuned to the melody note under it, as one Undo step. A line then says how many notes were tuned, how many had no melody note under them (those stay as you sang them), and warns when a note had to move a long way, since a big move can change how a voice sounds.
+   - **When it's greyed:** no MIDI note sits under the vocal. The menu says so, and it decides that with the same check the command itself uses, so the two never disagree.
+   - **The styles, measured:** in Tune to Melody every style tunes each note fully onto the melody. Gentle, Natural and Tight differ only where one note runs straight into the next (Gentle lets a little more of your own singing through there); Hard Tune also reduces vibrato.
+   - **Accuracy:** in a playback test every note landed within a tenth of a semitone of its melody note. The pitch reader itself can be a few cents off on some voices, so we say “tuned to the melody”, never “exactly on it”.
+   - **For agents:** `clip_auto_correct_pitch` (wire `clip.autoCorrectPitch`) takes `melodyClipId` or `melodyTrackId` (one of them) and `octaveMatch` (`nearestOctave` by default, or `exact`), and its reply carries a `melody` report. No new command, so the count stays 256.
+2. **Pulse and wobble effects are saved now.**
+   - **Before:** tremolo, auto-pan, the chopped “trance gate” and anything else made with the modulation tools, on a track or the master channel, played but was gone after saving and reopening. The project file had no place for it. This was in every build since 2026-09-19.
+   - **Now:** they are saved, reopened, recovered after a crash, and undone correctly, and a check fails if any future setting is left out of the project file. A project already saved without them cannot get them back.
+3. **Auto-Tune on a vocal moved to a new key snaps to the new key's notes.**
+   - **Before:** it snapped to the old key's notes.
+   - **Now:** the new key's notes. A small deliberate detune (a few cents, say, to match another recording) is kept, not tuned away; the reply reports it (`keptDetuneCents`).
+4. **Applying a preset asks less often.** It no longer asks “replace your edits?” when the only thing you changed is a setting the preset keeps anyway, such as voice size.
+5. **Hard Tune's description is corrected.** It said “Replaces your pitch with the exact note”. Measured, a held note keeps about two thirds of its vibrato. It now says “Holds each note in tune, with less vibrato. The robot effect.”
+6. **The sampler card shows the sound you actually hear.**
+   - **Decay and Sustain:** a sample that has no setting of its own now shows the instrument-wide value it plays with. Before, it showed 0 s and 100 %, whatever was really playing.
+   - **One Shot:** when the samples set it themselves, the card's switch says “One Shot does nothing: zones set it, not this card.” instead of looking like it works.
+   - **For agents:** a setting the engine will never use, such as an instrument-wide release that every sample overrides, is still stored (a later sample edit can make it heard again), but the reply now says so in `warnings`, once, on the write that caused it. That includes a glide stored while the instrument plays chords, where glide does nothing. `track.setInstrument`'s reply and `project.snapshot` now show the instrument-wide decay and sustain once they are set. This is the quiet success behind the sax tester's 3.4-second release (2026-08-20).
+
+7. **For agents: an absurdly large number can no longer crash the app.**
+   - **Before:** a whole number of about 9.2 quintillion (2^63) or more, such as `1e20`, sent in a numeric field of about 40 commands (`track.reorder`, `fx.add`, `clip.repeatNotes`, the generators' seeds, MIDI export, and others) crashed the app.
+   - **Now:** any number of 2^53 (9,007,199,254,740,992) or more, anywhere in a command's fields, is refused with a message naming the field, for example `params.notes[3].pitch is too large: wire numbers must be below 9007199254740992`. Positions keep their own "past the timeline limit" message. Paging values that large in `au.describeParams` and `instrument.describeSampler`, which used to be quietly clamped, are refused too.
+   - `arrange.insertBars` and `arrange.deleteBars` refuse a fractional bar `count` (2.7 used to become 2).
+8. **A new Rock song skeleton has real drums and bass.** Its Drums and Bass tracks had no instrument, so they played the built-in synth's plain tone. They now use the General MIDI Standard Drum Kit and Electric Bass (finger), the same as the other band genres. Only new skeletons change: a saved project keeps the tracks it has.
+**Behind the scenes:** the song skeleton now builds its tracks with the same code that will build band templates. Recorded projects for all 14 genres, with and without your own track list (28 in all), came out byte-for-byte the same before and after; the only change is the Rock fix above. Ten built-in band templates (Pop Band, Piano Ballad, Rock Band, House Club, Hip-Hop 808, Lo-Fi Chill, Jazz Combo, Acoustic Folk, Soul & Blues Band, Reggae Riddim) now ship inside the app with a check that every one loads and follows the rules, but nothing can open them yet. Chopping a clip into pads with an impossibly fine grid can no longer freeze or crash the app; the values that did it were already out of reach of the app and the wire, so this guards against a future caller. The drum-note rule the agents follow now has its own test, and four rule tests report which case failed instead of a bare “false”. The full test suite passes again (11,134 tests): it had been freezing for about 100 seconds and failing 16–22 tests that passed on their own. The cause was the test runner starting every test at once; it now runs as many at a time as the Mac has cores. That freeze was also hiding a crash: a Swift 6.3.3 compiler bug miscompiles an async closure used as a default value when another module relies on it. Five such closures moved into the code that uses them, and a new check (`scripts/gates/async-default-dup.py`) reads every build for the problem. Measured: the app built on 27 September never had it.
+
+## 2026-09-27 (e6f7a27)
+
+1. **Pitch moves now land where you ask, from small corrections to two-octave jumps.**
+   - **Before:** moving a note, correcting pitch, or transposing a clip landed a little off: about 10 cents on a mid-range note, and up to about 40 cents on low bass notes (a −25 cent correction came out near −15). Octave jumps on low notes could be off by up to about 44 cents. And a clip stretched by a hair (say, a long clip's edge dragged by one 1/16) played up to about 1 cent off, even with no pitch change at all.
+   - **Why:** three small bugs in the pitch-shifting library we build on. We fixed all three in our copy.
+   - **Now:** steady notes land within about a hundredth of a cent, from a few cents up to two octaves either way, and a slightly stretched clip keeps its exact pitch. One exception: a rich, low sound taken down so far that its harmonics end up closer than about 34 Hz apart (a 110 Hz voice taken down two octaves) is still about 12 cents off.
+   - **What it costs, plainly:**
+     - **Deep vibrato moved down an octave.** A note with a very wide vibrato (about ±60 cents) moved down 12 semitones can now sit up to about 4 cents sharp on average. An ordinary vibrato (about ±30 cents) stays within about 1.2 cents (before, it could be up to about 30 cents off on a rich low voice moved down an octave), and within 0.07 cents for moves of a semitone.
+     - **Big upward jumps on low sounds.** From about +9 semitones up, the faint noise between a low sound's harmonics (breath, hiss) is pulled toward the harmonics. Overall loudness does not change, but that noise can sound slightly thinner or more "combed". A 55 Hz tone moved up an octave keeps its in-between noise within about 2 dB of before; bass moved up 19 semitones loses much more of it.
+     - **Two sounds very close in pitch** (within about 15 Hz of each other) move as one when shifted. The quieter one was already tens of cents off there (in one measured case, about 21 cents; now about 33).
+     - Transposing takes a little longer to prepare, roughly a sixth longer than the last release. It never happens while audio plays.
+   - **What you'll notice:** clips you had already transposed or tuned re-render once, the first time they play. So do plain time-stretched clips stretched by less than 5 % either way, because those were the slightly-off ones. Every other plain time-stretched clip is untouched.
+
+2. **Exporting stems or bouncing a track no longer loads your instruments just to plan the timing.** *(Shipped in this commit; added to these notes on 2026-10-05.)*
+   - **Before:** to line up delays between tracks, export first loaded every plug-in on the session, instruments included, though only effects add delay. Loading a sample library can take many seconds (once 28.7 s, measured while the full test suite was running).
+   - **Now:** the planning step loads only the effects it needs to measure. Measured: the same stems and bounces come out byte-for-byte identical (11 of 11 files). This removes one difference between exporting and a normal mixdown; it is not yet proven to be the cause of the sax tester's slow export.
+
+## 2026-09-25 — Hear the note you're editing
+
+**Press a note in the pitch editor and you hear it. Drag it and it plays at each step. Let go and it plays once more, about 50 ms later, even on a 5-minute recording. While an edit is being prepared, the vocal keeps playing the version before it instead of going silent.**
+
+1. **Hear the note you're editing.**
+   - **How it works:** press a note to hear it. While you drag it up or down it plays at each step, and once more when you let go. Only the edited notes are rendered, with a little of the sound around them, through the same engine as playback, so what you hear is what will play.
+   - **How fast (measured):** about 50 ms from letting go to sound, on both a 33-second and a 5-minute recording. Waiting for the whole recording to re-render used to take 1.7 s and 12.9 s. The first press on a clip takes about 0.4 s while its pitch is read.
+   - **A silent failure fixed:** on recordings longer than about 3 minutes, the note you edited was never played, and nothing said so.
+   - **Controls and messages:**
+     - The **HEAR** switch in the editor turns hearing off.
+     - Stop, Esc, picking another clip or closing the editor silences the note.
+     - "Preparing your note…" shows while a note is being prepared, and "Couldn't play that note in time. Click it to hear it." when it can't be.
+   - **Cleaner sound:** quick drags no longer click when one note's sound replaces the last, and the note stops at once when the audio output stops.
+
+2. **The vocal keeps playing while an edit is prepared.**
+   - **Before:** after a pitch edit, a tuned clip went silent until the whole recording was re-rendered: about 1.8 s on a 33-second recording, 13 s on a 5-minute one.
+   - **Now:** it keeps playing the version it played a moment ago, and switches to the new one when that is ready.
+   - **When it still goes silent:**
+     - there is no earlier version;
+     - the edit changes the timing (a new stretch ratio);
+     - the clip now points at a different file (for example after a save);
+     - the new version fails to render.
+   - A new notice, `clip-render-previous`, says when a clip is playing its previous version.
+
+3. **Select notes, and move several at once.**
+   - **Selecting:** click a note; ⇧- or ⌘-click to add or remove one; drag a rectangle; ⌘A for all. The line under the editor counts them ("3 notes selected"). A selected note has a bright white ring, easy to see on tuned (green) notes too.
+   - **Moving together:** drag one selected note and the others move by the same step. One undo puts them all back.
+   - **Esc:** it clears the selection first, then leaves the bigger editor. In the MIDI note editor too: Escape now reaches the editor you're looking at.
+   - **Zoom:** zooming keeps the playhead where it was on screen.
+   - **Fixed:** clicking a note drawn between two pitches snapped it to the nearest one and recorded an edit. Now a click only selects it.
+
+4. **Clear notes, and a volume per note.**
+   - **Clearing:** select notes and press ⌫, choose Edit ▸ Clear Selected Notes, or right-click ▸ Clear. The notes go silent in place, and nothing around them moves.
+     - One Undo brings them all back, and right-click ▸ Restore brings back a single note.
+     - In an exported file a cleared note is exact silence, with short 10 ms fades at its edges. Nothing else in the recording changes.
+     - A cleared note is drawn as a hollow dashed box.
+   - **Volume per note:** the AI agents can set a note's volume. The quietest level is −72 dB, which is never full silence. The editor shows it as "Level -6.0 dB". A control for it in the editor comes later.
+   - **The label:** a clip where you only cleared notes or changed their volume says "NOTES EDITED" instead of "TUNING APPLIED".
+   - **Remove Tuning** now says when it would also bring back cleared notes.
+
+5. **Delete and Cut no longer remove the vocal clip while the note editor is open.**
+   - **Before:** ⌫ or Edit ▸ Cut with the note editor open removed the whole vocal clip. Undo brought it back.
+   - **With notes selected:** ⌫ clears them (4).
+   - **With none selected:** Delete and Cut leave the clip alone and say "Delete and Cut won't remove the clip while the note editor is open. Close the note editor first." Copy still works.
+
+6. **The cut line, and a bigger editor.**
+   - **The cut line:** in Split mode a thin line follows the mouse, labelled with the two lengths the cut makes ("Cut · 400 ms | 400 ms").
+   - **A bigger editor:** a button fills the window with the note editor, and Esc brings it back.
+   - **Fills the window:** the notes fill the whole window. Extra rows appear above and below your notes at the row size you chose, and you can drag a note into them. A note moved there stays in view when the editor goes back to its usual size.
+
+7. **For AI agents (plugin 0.17.0).** Four new control commands, each with an MCP tool:
+   - `clip.auditionNote` / `clip_audition_note` plays notes of a vocal clip as they will sound.
+     - At most about 6 seconds are heard per call.
+     - `audible: true` means the request was accepted, not that it was heard.
+   - `clip.setNotePitches` / `clip_set_note_pitches` retunes several notes at once, as one undo step.
+   - `clip.setNoteCleared` / `clip_set_note_cleared` silences or restores notes.
+   - `clip.setNoteGain` / `clip_set_note_gain` sets a note's volume.
+   - Also: `clip.getPitchEdits` now reports `hasTuningEdits`, and `project_snapshot` lists the new `clip-render-previous` notice.
+
+8. **Playbox gives the number of chords you ask for.**
+   - **Before:** asking Playbox for a 2-chord progression sometimes gave 4 chords: 28 of 1000 answers in a major key and 129 of 1000 in a minor key. A chord swap could make both chords the same, and the backup answer ignored the length.
+   - **Now:** every length from 2 to 16 gets exactly that many chords. Every answer that was already right is unchanged; the 314 wrong answers of 34,000 checked now play the progression without the swap.
+
+**A correction to the 2026-09-24 entry.** It said Hard Tune makes the wobble inside a held note "about 70% flatter". Measured note by note after note splitting, Hard Tune removes about half to two-thirds of it (a median 49 % by one pitch meter, 68 % by an independent one), and every measured note stays on its own note. The old figure came from before note splitting and counted notes pulled onto the wrong pitch. That entry is corrected below, and so is the design note that repeated the number.
+
+## 2026-09-24b — Bugs you could hear, fixed
+
+**Five bugs a person using the app would hear or see: audio that jumped, a clip that went silent, a false alarm, a pad grid that miscounted, and a chop that lost a pad.**
+
+1. **Split or trim a time-stretched clip and the audio jumped.** The cut point was computed in timeline seconds and applied to the source file. At stretch ratio 2 the audio after a split skipped ahead 1.0 s; at 0.5 it repeated 0.25 s. The same maths served insert/delete bars and every overlap resolution (move, duplicate, paste, import). Fixed: rendering a clip whole vs split now differs by exactly 0.0 at the seam, with no lag. Projects already saved keep their stored offsets, so they sound exactly as they did.
+
+2. **A tuned or time-stretched clip went silent after the first save**, until the app was quit. Saving points the clip at the project's own copy of its audio file, and a check that could not see that change refused to re-render. Fixed.
+
+3. **A false alarm after tuning.** Tuning a clip posted "still being time-stretched — plays as silence" within milliseconds (11 ms measured), even with the transport stopped, and it stayed in the notice list. Now the notice is posted only when playback or recording starts while the tuned version is still being prepared, and for a clip that is tuned but not time-stretched it reads "The tuned version of '<clip name>' is still being prepared — the clip plays as silence until it's ready."
+
+4. **Sixteen Levels (the pad grid): three display bugs.** Reopening a project saved while LEVELS was on showed the pads reading "1" and the slices shifted by one; the header counted the spread as a slice ("9" for 8 slices); spreads made by an agent over the wire read the same way. Fixed with one rule that recognises a spread by its shape. On reopen the grid shows the chop, with the line "Sixteen Levels · a spread is on sixteen other pads — press LEVELS to go there".
+
+5. **"Equal pieces: 8" gave 7 pads** (and a grid of quarter notes gave 3 pads for 4): the first piece was being discarded as if it were silence before the first hit. Now N pieces make N pads. ⚠ Agents: each pad now sits one slice up from before; nothing was renamed. The toggle "Keep the lead-in as pad 1" dims and explains itself where it does not apply.
+
+**Also:** a newly added clipper now starts with oversampling 1 (OFF); a clipper saved in an older project keeps 4, because a shipped effect may not change the sound of a saved song. Sixteen Levels spreads can go UP from the slice or be CENTRED on it.
+
+## 2026-09-24 — Hard Tune for real, and a sung phrase becomes notes
+
+**Hard Tune now really flattens a sung note, a sung phrase is split into notes before anything is tuned, and the editor draws what the render will play.**
+
+**Hard Tune reaches the render.** Until today, the render got an empty pitch line, so Hard Tune only shifted each note by a constant. Now the detected pitch line reaches it. On a real vocal, Hard Tune now removes about half to two-thirds of the wobble inside each held note (a median 49 % by one pitch meter, 68 % by an independent one), and every measured note stays on its own note, while Tight leaves the wobble as sung. Gentle, Natural and Tight move each held note's centre by what they ask for, to within about a cent (median). *(Corrected: this entry first said "62.8 → 18.2 cents, about 70% flatter" and quoted three centre figures. Those were measured before note splitting, and the 70 % counted some notes flattened onto the wrong note.)* **Hard Tune is back in the Tune Vocal menu.** If the pitch line cannot be read for a clip, the render falls back to exactly the old (constant-offset) render, byte for byte, and posts the notice code `clip-pitch-contour-unavailable`.
+
+**A sung phrase becomes notes.** Before, every unbroken stretch of singing was ONE note, pinned to its middle pitch — so a slide into a held note moved the HELD note. On the test take, Hard Tune shifted 4 of 42 notes by more than 3 semitones and 11 by more than 2 (the largest 5.06). Now a phrase is split wherever the pitch settles on a new note. A slide that lasts longer than about 130 ms (8 frames at 62.5 frames per second) becomes its own part. What Hard Tune does with a slide was decided BY EAR: four versions of the same slide were rendered and the user picked "slide kept, note locked": the slide plays as sung and each held note locks to its pitch. Gentle, Natural and Tight also leave every slide exactly as sung. `segmentCount` in the tuning responses now counts NOTES, not phrases. Nothing already saved changes: a stored note table is never re-split, no new field is saved, and the analysis version did not move. ⭐ **Check that the real code matches what was listened to: the new splitter's renders of the listening excerpt are byte-identical to the hand-cut renders the user heard, for all four slide options.** Known and filed, not fixed: on one low note the pitch detector itself reads about 21–23 cents sharp, so that note lands about 20 cents flat after tuning (filed as p2-seg-F-detect).
+
+**The editor draws what you will hear.** The pitch editor now draws the line the RENDER will play, including a clip transpose: a moved note carries its wobble with it, and the place where it was sung is left behind as an empty outline (the "ghost"). Before, the wobble line stayed behind at the old spot while the note moved. When the render's pitch line is not available, the editor says so with an amber "estimate" caption instead of drawing a guess as fact.
+
+**"Replace your hand edits?"** Picking a Tune Vocal preset on a clip you have hand-edited since the last preset now asks first. Title: "Replace your hand edits?" Confirm button: "Replace my edits" (red and deliberately NOT the default button, so Return cannot erase your work). Switching from one preset to another with no hand edits in between stays silent (so comparing presets is still one click each). Projects saved before today get ONE extra confirm the first time (the safe direction). "Remove Tuning" does not ask: its label names the loss, and it is one Undo.
+
+**Wire and MCP:** commands 234 → 240; MCP tools 239 → 245. Six new: `view.openPitchEditor`, `clip.setNotePitch` (ABSOLUTE cents, clamped to +/−2400, and it reads back the stored value), `clip.splitNote`, `clip.getPlayedPitch`, `instrument.spreadSlice`, `instrument.setSpreadDirection`. `clip.autoCorrectPitch` gains `replaceExisting` (default true); with `false` it refuses when the clip has hand edits since the last preset. Every pitch-edits response now carries `handEditedSinceAutoCorrect`. The note verbs never run pitch detection over the wire: a clip with no stored note table is refused. The Claude plugin moves to 0.15.0: the pitch tools are in the mix-engineer and composer agents' allowlists, the played-pitch and open-pitch-editor tools in the demo-director's, the spread pair in the sound-designer's.
+
+**Groundwork with no sound change yet:** note timing edits (the model and the curve maths; the render does not read them yet), and a wobble (vibrato) estimator for the coming Wobble tool. The estimator measured a limit of the product's pitch detector: it reads only 26–32% of a +/−20 cent wobble, so wobbles shallower than about +/−25 cents are nearly invisible to it. Tests: 9287 in 802 suites, 0 failures; MCP 992/992; the command count is 240 by two independent derivations.
+
+## 2026-09-23 — Tune Vocal: pitch correction from the model to the menu
+
+**A person who never opens an editor can now tune a vocal: Tune Vocal in the audio clip's menu, with presets. Gentle, Natural, Tight shipped that day. Hard Tune ("the robot effect") was withheld because the render could not honour it yet (it would have played as a stronger Tight wearing the robot label); it came back on 2026-09-24.**
+
+A note editor pane: a piano ruler, one blob per note, and the per-frame pitch line with its holes left visible (a gap where the detector heard no pitch is drawn as a gap, not bridged).
+
+**Timing:** the correction lands where it was asked for: −0.47 frames, against an uncompensated control of +2854.6. Engine latency measured 54.5 ± 6.1 ms against a declared 49.6.
+
+**Pitch edits stick to clips.** Six clip operations silently DROPPED a clip's pitch edits: split, trim, trim-to-window, re-identify, flatten, and make-slice. All six now carry them. The times are NOT rebased, because they are counted from the start of the source FILE, not the clip (a planted rebase clamped a note to 0.0–0.4 s instead of 0.25–0.90 s).
+
+**What listening found that no test could:** a listener said every preset sounded the same, and was right. (1) The presets move each note's centre by about 18 cents, while that take's own within-note movement is 56 cents (standard deviation), three times larger and kept on purpose. (2) A "detune it, then repair it" demo built to make the effect bigger put 24% of the material on the WRONG semitone, because a 45-cent detune sits next to the 50-cent halfway point and snapping then picks the neighbour. (3) "Distance to the nearest semitone" scored that wrong-note render at 11.7 cents against the untouched take's 18.8, i.e. BETTER than what was sung. A wrong note sung perfectly in tune scores perfectly on that measure. (The fix is a detected key; it is not built. Recorded in the code at `PitchCorrectionScale.chromatic`.)
+
+**Wire and MCP:** commands 231 → 234; MCP tools 236 → 239. Three new: `clip.autoCorrectPitch`, `clip.clearPitchEdits`, `clip.getPitchEdits`.
+
+**Tests:** 8917 in 774 suites, 0 failures.
+
+## 2026-09-20j — An EQ band that only moves when the music makes it move
+
+**A normal EQ turns a frequency down and leaves it down, whatever happens next.
+A compressor turns *everything* down when one part of the music gets loud. The
+new `dynamicEQ` insert does neither: it turns *one frequency* down — or up —
+*only while that frequency itself* is loud, or quiet, and leaves the rest of the
+sound completely alone.** Four independent bells, each with its own centre,
+width, threshold, ratio, depth, attack and release. It is the tool for a vocal
+that is only harsh on the loud notes, a boxy 300 Hz that only appears when the
+singer pushes, a snare that rings at one pitch, or a bass that gets muddy only
+on the low notes.
+
+**Two knobs give four different moves, and the second one is just a minus sign.**
+`bandNMode` picks *which side* of the threshold wakes the band up — above it, or
+below it — and the *sign* of `bandNRangeDb` picks which way the band then moves.
+So: above + negative turns a frequency **down when it gets loud** (the familiar
+de-harsh move); above + positive turns it **up when it gets loud**; below +
+positive brings something **back up when it gets quiet**, which is how you keep
+air in a fading phrase; below + negative turns it **down when it gets quiet**,
+which cleans up rumble between words.
+
+**⭐ A freshly added Dynamic EQ does NOTHING AT ALL — not "almost nothing", but
+bit-for-bit nothing.** Every band starts switched off, and an off band's filter
+is not even run. That was proven on rendered audio over a fixture containing
+silence, full-scale peaks, denormals and *negative zero*, comparing raw bit
+patterns rather than a tolerance — because the one way to get this subtly wrong
+is to add `0.0 × something` to every sample, which is inaudible, passes every
+level test, and turns `-0.0` into `+0.0`.
+
+**⭐⭐ The measurement that says this is a dynamic *EQ* and not a dynamic volume
+control.** On the shipped demo set, each variant's band at 3 kHz moves by 1.6 to
+9.7 dB while everything below 400 Hz moves by **0.005 to 0.106 dB** — a
+separation of 92:1 to 509:1. A unit that had quietly become a compressor would
+match the headline number and fail that dull one by an order of magnitude, so
+the gate asserts the *relation* between the two rather than either alone. The
+out-of-band budget is not one round number for all four: a boost disturbs the
+rest of the spectrum several times as much as a cut of the same size, because
+the side path adds *(G−1)* times a band-pass and *G−1* is +2.98 for a 12 dB
+boost against −0.87 for an 18 dB cut. The gate computes each variant's own skirt
+from its own range and Q, and a flat budget — which the first draft used — is
+simply a false statement about the filter.
+
+**⚠️ The fixture had to be rebuilt before any of that meant anything.** Its first
+cut held one long chord, and the 3 kHz level across that sustain measured 0.2 dB
+of movement: a dynamic EQ on a source with no in-band dynamics is a static EQ,
+and the two depth variants came out 0.069 dB apart while the prose claimed the
+difference was obvious. The shipped fixture is eight chord stabs with **16.9 dB**
+of measured in-band swing (−28.4 dBFS on a stab, −45.3 dBFS in the gap), and
+every threshold in the set was then derived from that number instead of guessed.
+
+**⛔⛔ And the bug this could have shipped with, green.** A dynamic EQ band can
+move *upward*, which no compressor can — so its envelope has a sign, and the
+compressor's own smoothing line does not transfer. Copying it snaps any
+positive envelope to zero on every single sample, which means **every boosting
+band silently does nothing, forever**, while every cut still works perfectly.
+That defect was built on purpose and measured: both boosting variants rendered
+**byte-identical to the no-effect control** — the effect completely absent —
+while both cutting variants were bit-for-bit unaffected. Every level test that
+exercises only downward bands passes either way. Two named tests and the byte
+gate each catch it, and the gate's failure message names the mechanism.
+
+**What it deliberately does not have, and why.** No shelves — the obvious way to
+build one measured a **+1.28 dB boost at 274.5 Hz while being asked for a 9 dB
+cut at 200 Hz** — measured here, through this tree's own shelf section, and
+pinned by `DynamicEQResponseTests`; a defect, not a character, and a wide bell
+does the job cleanly. No
+wet/dry mix — the band's depth *is* the mix. No gain-reduction meter yet: four
+bands have four movements and the mixer's meter can only draw one number, so
+rather than show a confidently wrong one it shows none for now (an agent can
+watch a band move with `fx.spectrum`). It adds **zero latency** at every
+setting, so adding one shifts nothing in your project.
+
+**⚠️ One honest wart, stated where you read it.** This kind's `Q` does not mean
+quite what the ordinary EQ's `Q` means: at 1 kHz and Q 2 a band here is about
+704 Hz wide where the EQ's is 498, and this one *widens* as it works harder.
+That is the price of the topology that lets the gain move every sample without
+clicking, it is measured rather than asserted, and it is written into the
+control's own description.
+
+*Not yet reachable from the MCP server — the kind ships complete in the app and
+over the control protocol; its MCP surface is the next step.*
+
+## 2026-09-20i — A de-esser that is a compressor, and a compressor that did not move
+
+**A singer's "s" and "sh" sounds carry far more energy than the rest of the
+voice, and a microphone makes it worse.** The fix is a de-esser: it turns the
+voice down for the fraction of a second an "s" lasts, and leaves it alone the
+rest of the time. It is not an EQ — an EQ would dull the whole vocal
+permanently to fix a sound that happens for 80 milliseconds at a time.
+
+**⛔ There is no `deEsser` effect, and there is not going to be one.** A
+de-esser *is* a compressor — same threshold, ratio, attack, release — with one
+difference: the part that decides when to turn down listens to a **filtered**
+copy of the signal instead of the whole thing. So it ships as a mode on the
+compressor you already have. Set **`detectorMode`** to 1 and **`detectorFreqHz`**
+to where the "sss" lives (5000–9000 Hz on most voices), and the compressor stops
+hearing the singing and starts hearing only the hiss. Mode 2 is a high-pass
+detector instead, which catches sibilance that moves around — an "sh" sits lower
+than an "s" — at the cost of also hearing cymbals and breath. If you went
+looking for a separate de-esser and did not find one, that is why, and every
+place an agent might look now says so.
+
+**⭐ Measured, on rendered audio: with no sibilance present, the de-esser leaves
+the signal SAMPLE-FOR-SAMPLE IDENTICAL** — 187 200 samples, not one bit
+different — while an ordinary compressor at the very same settings ducks it by
+3.23 dB. That is the whole difference between the two machines, and it is an
+identity rather than a tolerance because that is what actually happens: the
+detector never crosses the threshold, so the gain is exactly 1.0 and the output
+*is* the input. When sibilance does arrive, it ducks.
+
+**⭐⭐ The test that would have caught the real bug is the boring one.** This
+kind of effect is wideband: when it fires, the whole signal ducks for the length
+of the "sss" — it does not carve the bright band out and leave the rest playing.
+That means it applies *one number* to everything and therefore cannot change the
+balance between two frequencies. Measured drift: **0.0013 dB**. The single most
+likely way to build this wrong is to let the filter slip out of the detector and
+into the audio path, and such a build would still be loud, still be audible,
+still duck on sibilance, and sail past every headline number. It would fail that
+one dull assertion by tens of decibels — and that is not a theory. Exactly that
+defect was built on purpose, at a deliberately subtle five percent, and the
+render harness reported four loud, audible, perfectly healthy files while the
+measurement caught it and named it.
+
+**⛔ The compressor itself did not move one byte, and that was proven rather than
+promised.** `compressor` has been in this app since the fourth milestone; there
+are saved projects with one in a chain and automation lanes riding its knobs.
+Six renders captured from the build *before* this feature existed — including
+one with a **sidechain key**, because that is the code path this work
+restructured — all reproduce exactly on the build after it. The new controls are
+appended after the existing ones so no saved automation lane is repointed, and
+the effect adds **zero latency** at every setting, so nothing shifts in time.
+
+**A filter shared by two effects moved house, and the ring modulator was checked
+for fingerprints.** The 2-pole filter this needed already existed inside the ring
+modulator; it is now a shared primitive. Moving it is an arithmetic claim, so all
+four of the ring modulator's existing demo renders were pinned and reproduced
+bit-for-bit — and the pin was proved capable of noticing: a deliberately altered
+constant reddened all three of them.
+
+**⚠️ Writing the tests found a crash.** A parameter can arrive from an automation
+lane without passing through the usual range check, and converting a very large
+but perfectly finite number to an integer *traps* in Swift. The first version
+guarded against "not a number" and not against "too big", and an expectation
+written to be thorough brought the whole test binary down. On the render thread
+that would have been a crash in the audio callback. Fixed, and the line that
+found it is now a permanent test.
+
+**⛔ And the listening demo taught the opposite of the truth until somebody
+measured it.** The four renders shipped for judging this by ear used a sawtooth
+"voice" with a bright blip standing in for an "sss". Measured afterwards: inside
+the detector's band that blip was only **5.5 dB** louder than the sustained
+notes — a sawtooth's harmonics reach that high almost as loudly as the blip does.
+So every threshold low enough to catch the blip *also* ducked the singing, by
+1.5 dB at the middle setting and 6.2 dB at the strongest, while the written
+description told the listener those notes were being left alone. Nothing in the
+pipeline could see it: four files rendered, four were audible, four were
+distinct, and the prose read plausibly. The voice is now a triangle and the blip
+sits on its own fundamental inside the detector's band, which measures **33.1 dB
+of separation** — and at that separation the entire first note of every de-essed
+variant comes back sample-for-sample identical to a render with no compressor at
+all, while the plain compressor at the identical threshold ducks the same notes
+by 5.0 dB. **The load-bearing number in a listening fixture is the separation
+between what the effect targets and what it must leave alone. Measure it before
+choosing the axis, because every other check will pass without it.**
+
+## 2026-09-20h — The saturator gets the clipper's quality knob, switched off
+
+**The `saturator`** bends the wave instead of cutting it: quiet parts come
+through almost untouched, loud parts squash toward a limit they never quite
+reach, and the bending adds tones that were not there before. That is what
+"warm", "thick" and "fuzzy" are made of. It has always had exactly the same
+fold-back problem the clipper does — push it hard and it makes tones above half
+the sample rate, which have nowhere to go and come **back** as a thin metallic
+fizz on frequencies unrelated to the music. Its own source comment has admitted
+that in writing since the day it shipped. It now has the cure: an
+**oversampling** control, 1, 2 or 4, running the bend at 2× or 4× the rate and
+filtering on the way back down.
+
+**⭐ Measured: switching from 1 to 4 drops the folded-back energy by 90.28 dB,
+with the two real harmonics unmoved to 0.000 dB.** That is the clipper's own
+number (91.05 dB) reproduced by a second, differently-shaped nonlinearity
+through the same filter — which is the best kind of agreement, because nothing
+was shared between the two measurements except the filter itself. A deliberately
+broken build (no filter on the way up) collapsed it to 1.11 dB while still
+rendering six loud, distinct, perfectly audible files.
+
+**⛔ It defaults to 1, which is OFF, and that is the entire point of this
+release.** The clipper defaults to 4 and could, because it was brand new. This
+effect is not: there are already saved projects with a saturator in a chain, and
+if adding this control changed what they sound like — or shifted them 32 samples
+in time, which the filters cost — every one of them would quietly change the
+next time it was opened. So at 1 the machinery is skipped outright and the
+effect is **bit-for-bit** what it has always been.
+
+**⭐ That is a measurement, not a promise.** A render of an untouched saturator
+is pinned to the exact file hash it produced on the last build before this
+parameter existed, alongside a no-effect control hash so that an unrelated
+change somewhere else in the engine reports *"the pipeline moved, re-pin"*
+rather than falsely accusing this effect. The hashes were then taken a second
+time from an independently rebuilt copy of that old commit and came back
+identical, which is what makes a file hash usable as evidence here at all.
+
+**⚠️ And the check that hash nearly failed to be.** The default blend is
+100 % wet, so the dry half of the mix is multiplied by zero — meaning a
+rewritten blend that rounds differently could change every part-wet saturator in
+every project and the hash of the default would not move by one byte. Measured,
+by planting exactly that: it passed the hash gate and all twenty unit tests. A
+second pinned render at a partial mix now covers it, and catches it.
+
+**⚠️ If you are adding a saturator today and driving it hard, set oversampling
+to 4.** Leaving it at 1 is also a real choice — plenty of records want the grit,
+and it is the only way to hear what the other settings remove.
+
+**One knob on this effect behaves unlike its twin on the clipper, and it is
+worth knowing:** here it changes the effect's **latency** (0 samples at 1, 32 at
+2 or 4). Delay compensation removes that automatically, so tracks still line up,
+and the number comes back in every `fx.add` / `fx.setParam` result. **⭐ "Tracks
+still line up" is measured by rendering, not asserted:** two tracks playing the
+same single click, one of them through a 4× saturator, come out of the mix on
+the **same output sample** — one click at double height rather than two clicks
+0.67 ms apart — and the same pair at the default never drifts in the first
+place. Breaking the latency report on purpose splits that back into two
+half-height clicks exactly 32 samples apart, which is what the test is there to
+catch. Because of
+it, this knob cannot be drawn as an automation lane — the request is refused
+outright rather than silently ignored — since moving it mid-playback would leave
+the project's delay compensation stale with nothing to report it. Step it
+between sections instead. The identically named knob on the clipper *is*
+automatable, because that kind's latency never moves.
+
+## 2026-09-20g — The clipper, and the thing you cannot hear it doing
+
+**`.clipper`** cuts the waveform off flat at a ceiling you set. That is the
+whole idea, and it is what makes it different from the two effects it gets
+confused with: a **limiter** rides a gain to keep peaks down and tries not to be
+heard, and a **saturator** bends the wave with a curve that only ever
+*approaches* its bound, so it cannot promise a ceiling at all. A clipper's flat
+cut leaves corners in the wave, and those corners **are** new harmonics — which
+is where the loudness and the hardness come from, and also why it needs the
+machinery below and the other two do not. There are two modes: **hard** (the
+flat cut) and **soft** (the same ceiling reached through a rounded knee, so
+quiet parts pass untouched), plus input drive, a wet/dry mix and an output trim.
+
+**⛔ The setting that matters is the one you cannot hear being right.** When a
+clipper makes harmonics above half the sample rate — and it always does — those
+harmonics have nowhere to go, so they **fold back** into the audible band and
+land on frequencies that have nothing to do with what you played. That is the
+thin metallic fizz under a harshly clipped sound. The cure is to run the cut at
+2× or 4× the rate and filter on the way back down, which is what the new
+**oversampling** control does. **1× is deliberately still offered**, because it
+is the only way to hear what the other settings remove — and plenty of records
+want that grit.
+
+**⭐ Measured, because on this one nothing else counts: switching from 1× to 4×
+drops the folded-back energy by 91.05 dB, with the real harmonics unmoved to
+0.000 dB.** An oversampled clipper and a naive one are both loud, both peak the
+same, and render different files — so *sounding fine* and *the bytes changed*
+both prove nothing here. Three deliberately broken builds (the factor never
+reaching the filter, no filter on the way up, no filter on the way down) each
+collapsed that 91 dB to under 1.3 dB, and every one of them still rendered five
+loud, distinct, perfectly audible files.
+
+**⚠️ And the hardest bug in this release was in the test material, not the
+code.** The first demo drove the tone to 0.832 dB *below* the ceiling, so the
+clipper applied gain and nothing else — while every automated check that looks
+at loudness, at file hashes or at whether a human could hear a difference said
+yes. Only the measurement of the fold-back caught it.
+
+The effect declares a constant **32 samples** of latency, and that number is
+deliberately the same at 1×, 2× and 4× — so switching the oversampling setting
+mid-session cannot shift the track's timing relative to the rest of the project,
+which a factor-dependent figure would. (Measured on the effect itself; whether
+the mixer's delay compensation then acts on that figure for built-in inserts was
+not measured here, and the offline mixdown demonstrably does not.) At `mix = 0`
+it passes audio through bit-for-bit, delayed by those 32 samples. Available on
+every track and on the master, through the mixer, the `fx.*` control commands
+and the MCP tools.
+
+## 2026-09-20f — The copilot can finally load a sampler
+
+The AI assistant **inside the app** could not select the sampler or a sound
+bank. Its tool catalogue offered `testTone`, `polySynth` and `audioUnit` while
+the app has shipped `sampler` and `soundBank` for months — so an external agent
+could load the sampler that the entire chop-and-pads workflow is built on, and
+the assistant sitting in the window could not. Both are now offered, and a test
+derives the list from the instrument enum itself, so it cannot drift again.
+
+**The same rot had a second home that the original finding missed.** The MCP
+server's README advertised four of the five kinds too, and documented no
+sound-bank parameter at all — found by *reading the prose*, which no count-based
+gate can do. (The MCP server's own schema was correct throughout.)
+
+**⚠️ And the descriptions now warn about a silent success.** A sampler with no
+zones, an Audio Unit with no plug-in chosen, and a sound bank with no bank
+selected are each perfectly legal states that report success and then play
+nothing. Each track remembers the settings it was last given, so switching back
+to one restores it — but switching to one that was never set up in the app
+leaves a silent track and a cheerful "done". The tools now say so.
+
+## 2026-09-20e — Every partial moved by the same Hz: the frequency shifter
+
+**`.freqShifter`** moves every partial by the same number of **Hz**. A pitch
+shifter multiplies every partial by the same **ratio**. That single difference
+is the whole kind: a harmonic series 100/200/300 Hz shifted by +100 becomes
+200/300/400 Hz, which is no longer a harmonic series, so the ear stops hearing a
+note and starts hearing a bell. ⛔ **It cannot play in tune and no setting makes
+it** — that is the feature. Five parameters: `shiftHz` (coarse), `fineHz`,
+`stereoSpreadHz`, `mix`, `outputDb`.
+
+**⛔ It is also not `.ringMod`, and that distinction is a measured number rather
+than a claim.** A ring modulator is DOUBLE-sideband — it emits both `f + fc` and
+`|f − fc|` and the input itself vanishes. This is SINGLE-sideband: one sideband
+survives and the other is rejected. **Measured off rendered audio with a
+Goertzel probe: wanted sideband −6.02 dB, unwanted image −55.77 dB, carrier
+leakage −153.8 dB — 49.75 dB of rejection.**
+
+**⭐ Two independent instruments agree to 0.1 dB.** The Hilbert network is ten
+first-order all-pass sections in z⁻² (5 + 5, one branch carrying an extra z⁻¹),
+whose coefficients were *designed here* by minimax fit rather than copied. Its
+worst phase error is **0.376° over `f/fs ∈ [0.0002, 0.4998]`** — 9.6 Hz to
+23 990 Hz at 48 kHz — which predicts `20·log10(tan(ε/2))` = **−49.67 dB**. The
+rendered measurement reads −49.75 dB. `FreqShifterParamsTests` Law 1 re-derives
+the phase response *from the shipped coefficient array* rather than restating
+the result, so editing a digit reddens a test instead of quietly degrading the
+sound.
+
+**⚠️ The sign of one operator was the whole risk.** The other plausible
+transcription of an all-pass section, `y[n] = a·(x[n] − y[n−2]) + x[n−2]`, is
+also a perfectly good all-pass — and it destroys the quadrature, bringing the
+unwanted sideband back at **equal amplitude**. It still sounds metallic, and it
+passes any test that only asks whether the output changed. Planted: rejection
+collapses from 50.23 dB to **0.01 dB**, the physics gate fails by name, and the
+demo harness's own byte and audibility checks pass the broken build completely.
+
+**The sign of `shiftHz` is the direction, and there is no mode switch.** Running
+the oscillator backwards turns the upper-sideband formula into the lower one for
+free, so up and down are one formula with no branch — and the control sweeps
+continuously *through* zero, which a discrete direction parameter could never do
+(it would also be `Modulatable: refused` by rule 6.0.5). `fineHz` exists because
+the famous use of this effect is the tiny one: 1–20 Hz beats slowly against the
+dry signal for a thickness no chorus produces, and that zone is 1 % of the coarse
+knob's travel with no logarithmic taper available to a range that crosses zero.
+
+**⚠️ Shifting down past 0 Hz reflects, and that is real.** A 100 Hz tone shifted
+−300 Hz returns at 200 Hz, measured. Every analog Bode shifter does this.
+
+**`latencySamples == 0`**, asserted on the unit and on the chain total with a
+`.limiter` as the positive control. At **`mix == 0` the buffer is never
+written** — bit-exact dry compared as float *bit patterns* over a fixture
+carrying −0.0 and subnormals, with every other knob non-default, while the
+network and both oscillators keep running so raising `mix` is phase-coherent.
+`outputDb` trims the shifted copy only, which is what keeps that law true at
+every trim setting.
+
+**The insert label did not fit and the name changed because of it.** "Frequency
+Shifter" measures **88.156 pt** against the mixer's 85 pt built-in budget and
+would have shipped truncated; the shipped name is **"Frequency Shift"** at
+78.153 pt. "Transient Shaper" (83.907 pt) remains the widest built-in name.
+
+**Eleven plants, each run, each restored.** The all-pass sign, the missing z⁻¹,
+a single edited coefficient, a dropped `fineHz`, a lost sign, a deleted
+`mix == 0` guard, a deleted interpolation, a declared latency, a `Range`
+iteration in the render loop (20 480 000 malloc events), and both compiler-silent
+persistence sites. ⚠️ Two of the first round proved nothing and were re-run: a
+`--filter` that matched zero tests reported "passed", and the first draft of the
+smoothing leg measured a single-sample jump that a phase-continuous oscillator
+can never produce — its plant left it green. The replacement asserts the
+accumulated phase against the left-endpoint sum derived from the loop. ⚠️ The
+allocation probe was also found to be order-dependently flaky (0, 2, 5, 6 events
+on identical code) because `static let` arrays are lazily initialised on first
+touch; a warm-up outside the measured region fixed it, and it now reads 0 across
+five consecutive runs.
+
+**⛔⛔ Verified independently afterwards, and the verification is the part worth
+keeping: the demo harness would have shipped a ring modulator without
+complaint.** Zeroing the Q branch — which reduces `I·cos + Q·sin` to `I·cos`,
+textbook double-sideband — left `render-variants.mjs` exiting 0 with every
+variant marked audible, while sideband rejection collapsed from **50.23 dB to
+9.54 dB**. A third instrument built for the check (a pure-python Goertzel over
+ffmpeg-decoded renders, sharing no code with the gate) read the same 50.23 dB on
+the shipped build and flipped its verdict to "not a shifter" on the planted one.
+**Audibility and byte-distinctness say nothing about whether the effect did its
+job; only the three-bin physics gate does.**
+
+## 2026-09-20d — Punch and body, separately: the transient shaper
+
+**`.transientShaper`** is the insert for "more punch", "snappier drums", "tame
+the click" and "less room on the kit". It changes how HARD a sound starts and
+how LONG it rings, and nothing in between — six parameters: `attackDb` (punch),
+`sustainDb` (body), `attackMs`, `sustainMs`, `outputDb`, `mix`.
+
+**⛔ It is not a compressor and it has no threshold, deliberately.** A
+compressor watches absolute LEVEL, so its setting means something different at
+every fader position and turning the track down turns the effect off. This
+watches how fast the signal is rising or falling relative to *its own* running
+average, in the linear amplitude domain, with the two differentials taken as
+**dB ratios**. That one choice is what makes it level-independent — a linear
+one-pole has a level-proportional step response, so the ratio is invariant under
+input gain. **Measured: the same burst at −12 dBFS and at −32 dBFS produces gain
+trajectories agreeing to 1.65e−06 dB, sample for sample, with 15 dB of real
+shaping present at both levels.** The test plants the classic wrong formulation
+(a linear *difference*) and it reddens.
+
+**The two ends of a sound are independent, and that is the product.** At
+`attackDb +9` the window 50–200 ms after each onset moves **0.00 dB**, while the
+same pair inside the attack window moves **+9.00 dB**; `attackDb ±6` lands
+**+6.000 / −6.000 dB** on the peak of `attackWindowMs`. `sustainDb ±9` moves the
+80–200 ms window by **∓8.892 dB** while leaving the attack window at 0.00 dB —
+and the sign is asserted separately from the magnitude, because implementing it
+backwards is the likeliest error and a magnitude-only test cannot see it.
+
+**Zero lookahead, `latencySamples == 0`, a deliberate refusal.** It adds no new
+latency source to the insert PDC measured sample-exact at m25-n — asserted on
+the unit *and* on the chain total, with a `.limiter` as the positive control
+that the chain accessor can report a non-zero at all. The honest cost is that a
+cut leaves the first ~2 samples of a leading edge unattenuated. At its defaults
+the insert is **bit-exact dry**: identical output, sample for sample, compared
+as float *bit patterns* over a fixture carrying signed zeros and subnormals.
+
+**⭐ The demo proves punch rather than volume, which a level change cannot
+fake.** Two four-variant sets on a staccato pluck — a pad would have been the
+worst possible source, since an effect that acts only on onsets and decays does
+nothing to a held chord and every variant would have come out near-identical
+while still reporting success. Every variant is trimmed with `outputDb` to the
+same **−26.4 LUFS (0.00 LU spread)**, and at that constant loudness true peak
+walks **−16.5 → −14.2 → −11.2 → −7.7 dBTP** across the attack axis and the
+opposite way, **−11.7 → −17.5**, across the sustain axis. Crest factor measured
+independently with `ffmpeg astats`: **12.5 → 14.9 → 17.9 → 21.2 dB** at an RMS
+that never moves more than 0.1 dB.
+
+**⚠️ Two things this cost that are worth recording.** A transcription error in
+the window law — `ln(1/(1 − 10^(−12/20)))` written as `ln(1/10^(−12/20))` —
+shipped past a clean build and past twelve green legs, giving a full-shaping
+window 4.8× too wide. Only the leg asserting a *number* caught it: the attack
+CUT measured −3.15 dB where it had to measure −6.00, while the BOOST still read
+a clean +6.00. And the design's own fixture would have put the independence
+window inside the −70 dBFS detector gate, where both renders are trivially
+identical — a vacuous pass in this tree's characteristic shape; the tail is
+longer now, and the gate has its own leg.
+
+**⭐⭐ And the eight-site count is now recorded.** `EffectDescriptor` has
+**eight** hand-written per-kind rebuild sites, not the six that were folklore:
+the six in `ProjectDocument.swift`, plus `MixerPresets.withFreshID()` (a preset
+containing the kind would stamp onto a strip with every parameter silently reset
+to default) and `ProjectStore`'s display-name `default:` arm (it would ship as
+"TransientShaper" in every undo label). Both are compiler-silent, because
+`EffectDescriptor.init`'s parameters are all nil-defaulted, and neither is a
+surface the kind-surface gate can see. Both now carry `Kind.allCases`-driven
+censuses, so the next kind is covered without anyone remembering they exist.
+
+## 2026-09-20c — Sixteen Levels: one slice, played as an instrument
+
+**"It does not increase pitch when it is moved on the note scale. Is it
+expected?"** It was, and the reason is one line in the chopper: every slice is
+written `minPitch == maxPitch == rootPitch` — one key wide. The sampler
+transposes perfectly well (`baseIncrement = exp2((pitch − rootPitch) / 12)`), but
+a one-key zone has no pitch above its own root to reach, so walking up the
+keyboard walks onto the *next slice*, and past the last one onto silence.
+
+That default is right — *"a slice is a fragment of a record; letting it sound
+across a whole keyboard by default makes overlapping garbage on a chord"* — and
+the chopper's own comment had always named the escape hatch nobody built:
+*"chromatic play is one `sampler.zonePatches` call away (widen maxPitch) — the
+'16 Levels' pattern."* Now it is built.
+
+**LEVELS on the pad grid.** Press it, hit the pad holding the slice you want, and
+all sixteen pads become that slice a semitone apart — pad 1 as recorded, each pad
+up one semitone. The pads stop showing slice numbers and show the interval
+instead, with the unshifted pad marked. EXIT LEVELS puts the chop back.
+
+**⛔ It adds a zone; it never edits one, and that is the whole design.** The two
+obvious builds — widen the chosen slice in place, or swap the keymap for sixteen
+transposed copies and remember the original in the view model — are both
+data-loss shapes. A keymap is the only home a chop has, and a "remembered"
+original that lives in a view model is gone when the window closes or the app
+quits: you would open a saved project and find ninety hand-placed slices replaced
+by sixteen copies of slice 7. So the spread is **one new zone at a pitch range no
+existing zone occupies**, and the grid moves there. Your chop keeps playing on
+its own notes the whole time, the reconstruction MIDI clip still triggers its own
+slices, and quitting inside LEVELS loses nothing because nothing was taken away.
+
+The free window is a decidable function with its own tests, not a hard-coded
+octave: a ninety-slice chop based at 36 reaches note 125, so "just put it an
+octave up" would have fallen off the top of MIDI. It prefers the sixteen keys
+directly below the chop, then directly above, then the lowest window that fits —
+and **returns nothing, loudly, when the keymap genuinely fills the keyboard**,
+rather than overlapping something and producing pads that sometimes play the
+spread and sometimes play a slice.
+
+Proven by planting the data-loss build — widening the source zone in place — and
+watching the guard redden on exactly the right assertion, with the source zone's
+`maxPitch` visibly stuck at 53 after exit.
+
+## 2026-09-20b — Pads learn what happens when you let go, and a refusal learns your words
+
+Two defects from one user session. Neither was findable by a gate: the first was
+accurate, the second was working as designed.
+
+**"Over the maxSlices limit of 9 — raise maxSlices, lower sensitivity, raise
+minSliceSeconds."** Every number in that sentence was right and every remedy
+would have worked. The user was looking at a panel whose sliders say **MOST PADS
+TO MAKE** and **HOW MANY HITS TO CATCH**, and none of those three words is on
+their screen. The chop card now translates the store's refusal into the
+vocabulary of the controls beside it. **The store's own string is untouched** —
+agents read it, tests pin it byte-exact, and a UI problem must not be fixed by
+changing a wire contract. A test asserts both halves at once: the person's copy
+loses `maxSlices` and keeps 90, 9, 96 and "trim the clip"; the wire's copy keeps
+`maxSlices`, `minSliceSeconds` and the raw UUID.
+
+**A click on a pad was a 50 ms blip, and nothing said why.** The pads have always
+been a true gate — hold to play, let go to stop — which is what an MPC's NOTE ON
+mode does and exactly what you want for stutters and rolls. Its partner was
+missing. `SliceToSampler` writes no `oneShot` on the zones it creates, so every
+chop inherits the sampler's global `false`, and the default envelope release is
+0.05 s. Tap a pad holding two seconds of vocal and the mouse-down and mouse-up
+land in the same frame: loaded pad, lit light, almost no sound.
+
+The grid now carries a **LET GO: STOPS / PLAYS ON** switch beside the bank chips.
+**No new wire command and no new MCP tool** — `SamplerParams.oneShot` has shipped
+for milestones and `instrument_set_sampler_param` already sets it. This is a new
+surface onto an existing capability, put where the hand is, and it writes through
+`store.setInstrument(id:sampler:)` — the same one home the sampler editor card
+uses, so the row, the card and the wire cannot hold three opinions. It reads the
+sampler live rather than caching, so an agent's `oneShot` write moves the row.
+
+**One thing is reported rather than fixed:** in PLAYS ON the pad light goes dark
+while the slice is still sounding. The light is driven by the held-pitch set,
+which is the hand's ledger, and the engine deliberately plays a one-shot voice
+past note-off. Making the light true needs a note-ended signal back from the
+engine. Until then the mode's own tooltip says so, because a grid that quietly
+claims silence over audible sound is the failure this whole subsystem is arranged
+against.
+
+**Also honest about what was left alone:** the reason the ceiling was 9 is that
+`ValueSlider` is jump-to-point — a single click at ~8% across a 1–96 track sets
+9. That is a documented pointer convention used throughout the app, so changing
+how every slider answers a click is a design decision, not a bug fix.
+
+## 2026-09-20 — The pad grid: a human can finally reach the chopper
+
+**`clip.sliceToSampler` has had no door.** Measured 2026-09-19 with positive
+controls: `grep -rniE 'padGrid|drumPad|padBank|fingerDrum' Sources/` returned
+**zero** (control: `breathPad` 18 files), and `grep -rli 'sliceToSampler'
+Sources/DAWApp Sources/DAWAppKit` returned **zero files**. An AI agent could chop
+a record into 53 playable pads over MCP and a user could reach none of it. This
+ships the surface.
+
+**A 4×4 MPC grid as Musical Typing's THIRD FACE.** The strip already resolves
+the hard half of a performance surface — which track is the target, whether it
+can sound, whether a take is capturing, the sustain pedal, the velocity ladder,
+release-on-record-edge, release-on-track-change. A pad grid mounted anywhere
+else would need all of it again and the second copy would drift. So `KEYS /
+CHORDS` becomes `KEYS / CHORDS / PADS`, on the strip's own stated law: *the
+piano is not relabelled, it is REPLACED*, because in pads mode a key names a
+SLICE and not a pitch.
+
+⭐⭐ **PAD 1 IS BOTTOM-LEFT BECAUSE THAT IS WHAT NOTE 36 MEANS.** Every MPC and
+every Drum Rack lays 36 at the bottom-left square and counts upward, which is
+exactly why `SliceToSamplerSettings.defaultBaseNote` is 36 in the first place. A
+top-left grid would disagree with the note number — a picture that lies about
+what a click does.
+
+⛔⛔ **A BANK STRIDES SIXTEEN, NOT TWELVE, and that is the bug a reviewer should
+hunt.** Musical Typing's `baseOctave` steps by twelve; reusing it for banks is
+the obvious economy and it is wrong, because a bank is sixteen pads. It would
+make bank 2 start four pads INSIDE bank 1 — overlapping four slices and hiding
+four more — while every bank-1-only test stayed green. The controller therefore
+carries `padBaseNote` / `padBank` as their own state. Planted, it reddens three
+named tests.
+
+⭐⭐⭐ **THE COMPUTER KEYBOARD DRUMS THE PADS FROM A SPATIALLY ALIGNED 4×4
+BLOCK — the keys sit under the hand the way the pads sit on screen.**
+
+    1 2 3 4   → pads 13-16 → notes 48-51   (TOP row of the grid)
+    Q W E R   → pads  9-12 → notes 44-47
+    A S D F   → pads  5-8  → notes 40-43
+    Z X C V   → pads  1-4  → notes 36-39   (BOTTOM row of the grid)
+
+The keyboard's bottom row drives the grid's bottom row, because pad 1 is
+bottom-left on every MPC, Maschine and Drum Rack. Bank and velocity move to
+`K`/`L` and `O`/`P` — under the right hand, while the left hand drums — and the
+legend, the readouts and the pad captions all follow from the one key table.
+
+⛔⛔ **THIS REPLACED A LINEAR RE-READ OF THE PIANO ROW, AND THE FIRST ANSWER WAS
+WRONG.** v1 mapped the 17 note keys (`A W S E D F T G…`) to pads 1–16 in piano
+order — Ableton's own answer, and defensible on paper. It is not a pad grid: a
+**linear mapping onto a SQUARE surface** means a pad's position on screen tells
+you nothing about which key plays it, so "row 2, column 3" was reachable only by
+knowing it was semitone 6 and that semitone 6 is `T`. That is
+transposition-by-lookup, not finger drumming. **Spatial correspondence is the
+feature, not a nicety.**
+
+⚠️ **THE BLOCKER WAS SELF-IMPOSED.** v1's note said the 4×4 block "cannot be
+built here" because `Z X C V` are the octave/velocity controls and `1 2 3 4` are
+not in `allCaps`. That is a constraint of **notes** mode. Pads mode is a MODE and
+may set its own key arbitration, exactly as it already sets its own note
+semantics — so `decide` now takes a `playMode` and swaps the whole key table.
+Pads mode claims exactly **six** keycodes the app did not already swallow
+(`Q R 1 2 3 4`, asserted by `padOnlyKeyCodes`), and only while it is on; measured
+against every `keyboardShortcut` in the app, none collides. In exchange the
+piano keys that are not part of the block (`T G Y H U J ;`) stop being swallowed
+in pads mode — a stray `;` reaches the app instead of dying silently.
+
+⚠️ **A KEY THAT CHANGED MEANING IS PINNED FROM BOTH SIDES.** `Z` shifted the
+octave down before this existed; in pads mode it is pad 1 and must not touch the
+octave at all. The test asserts both readings of the same physical key, because
+a branch that moved both would leave notes mode transposed after a visit to the
+pads. The origin itself (`Z` → pad 1 → note 36; `1` → pad 13 → note 48, and the
+drawn bottom-left square agreeing with the keyboard's bottom-left key) is
+asserted outright — inverting a pad grid is silent, and it is the commonest way
+this gets built backwards.
+
+⭐ **POLYPHONY COMES FROM THE KEY PATH, WHICH IS WHY IT IS THERE.** One pointer
+is one pad; a kick under a hat needs two, so the letter keys go through the
+controller's own `keyPitches` ledger rather than through `pointerDown`. ONE
+controller, ONE pusher at the live-note sink, three faces — a second object
+pushing its own held set would fight `releaseAll()` for what is ringing.
+
+⚠️ **VELOCITY FROM STRIKE POSITION IS SHARED, AND THE SEAM IS WHY.** Aim high on
+a pad for a harder hit. `LiveNoteSink.setHeldPitches` is SET-shaped — a pitch set
+and ONE velocity for all of it — so a per-hit velocity cannot be represented
+while another pad is held. The strike therefore moves the same velocity `C`/`V`
+move, and the strip's VELOCITY readout shows it, which makes the shared value
+visible instead of secretly wrong.
+
+⭐⭐ **THE SOURCE-STILL-PLAYS PROBLEM IS NOW ADDRESSABLE, AND THE TWO DEFAULTS
+DIVERGE ON PURPOSE.** The chop is read-only, so afterwards the timeline holds
+BOTH the original and a reconstruction that replays it — measured **+6.0 LU**
+and audibly comb-filtered, the same waveform a few samples adrift.
+`clip.sliceToSampler` gains an additive **`muteSourceTrack`**, applied INSIDE the
+one `performEdit` so a single undo puts the pads and the mute back together. It
+defaults **FALSE on the wire** (a shipped verb keeps its exact meaning) and
+**TRUE in the card**, which can show the toggle, NAME the track, and warn when
+other clips on it go quiet too. Silently muting a track the caller never named is
+the plausible-looking-success shape this subsystem is arranged against; saying
+nothing leaves the first chop sounding wrong with no explanation on screen.
+
+⭐⭐ **THE RESULT REPORTS TWO FACTS, NOT ONE, AND THEY DIVERGE IN BOTH
+DIRECTIONS.** `mutedTrackId` answers *"what did this call change, and what will
+undo restore?"*; `sourceTrackMuted` answers *"will the original be heard?"* — read
+back OUT OF THE STORE after the edit. An already-muted track gives `nil` + true;
+a chop onto the source's own track gives `nil` + false. A surface inferring
+audibility from `mutedTrackId` would tell a user to go mute a track that is
+already silent. **The first cut of the card did exactly that** — it assembled the
+notice from what it had REQUESTED — and the fix is pinned by a test that walks
+all three reachable combinations.
+
+⚠️ **ONE BRANCH IS DEFENSIVE AND CURRENTLY UNREACHABLE, said out loud so nobody
+deletes it.** `sourceTrackID == destinationID` needs an AUDIO clip on an
+INSTRUMENT track, and `ProjectStore.importAudio` guards `kind == .audio`
+(ProjectStore.swift:4465), so no path in the tree can produce it today. A future
+audio-on-instrument path would make it live the same day, and its absence then
+would silently mute the pads. No behavioural test can reach it; `PadGridSiteTests`
+pins that it exists.
+
+**Loaded is not empty, and lit is not pressed.** A loaded pad is a raised panel
+with a dim trace of its own accent; an empty one is a recess at the placeholder
+ink floor — a fill difference, because a 1 px border change is not a
+glance-level difference. `isPlaying` is read back from the controller's
+`soundingPitches`, never from "was clicked", so **a pad struck on a track that
+cannot sound depresses and stays dark**. Each pad carries its letter key, its
+slice ordinal *over the whole keymap* (bank 2 pad 1 reads "slice 17", not "slice
+1"), its note name, and a position tick showing where in the record the slice
+sits — **frames as a fraction, never fabricated seconds**, because converting
+needs the file's sample rate and that means main-actor file I/O (the m26-i
+ruling). **Violet whenever the material is AI-made**, cyan otherwise; the grid
+reports honestly rather than guessing provenance from a filename.
+
+⭐ **SLICES BELOW PAD 1 ARE REPORTED, not hidden.** A keymap based under the
+grid draws sixteen empty squares over a full sampler with every other reading
+agreeing. The header says how many and offers the one-click re-base.
+
+**Surfaces.** `DAWAppKit.PadGridGeometry` (pure, non-isolated) + `PadGridModel`
+(`@MainActor`, injector-shaped like `SamplerEditorModel`, read fresh every
+access so a wire chop redraws the grid); `DAWApp/Components/PadGridView`
+(value-in, previewable) and `DAWApp/Instrument/ChopToPadsPanel` (centered
+dark-glass card in the window content, so `debug.captureUI` can photograph it;
+Simple = where to cut + how finely + the mute decision, Pro adds the pad
+ceiling, pad 1's note and the lead-in). `ExplainID.padGrid` (registry 99 → 100,
+floor raised). `debug.padGrid` staging — **app tier, off `allCommands` and off
+MCP**, the `debug.samplerEditor` precedent, so the wire count stays **227**. No
+`padGrid.*` verb was added and that is a decision: the one new capability went
+onto the verb an agent already looks at, and every pad is a MIDI note that
+`note.play` already sounds and `instrument.describeSampler` already reports.
+
+⚠️ **NOT A `Canvas`, and that is a considered exception.** `Canvas` +
+`TimelineView` is the recipe for surfaces that redraw CONTINUOUSLY. A pad grid
+redraws on note-on, note-off, bank change and chop — discrete events, tens per
+minute at a hard performance. Sixteen light views buy real hit-testing, real
+tooltips, real accessibility labels and the ONE `glow()` recipe from `Theme`
+rather than a second copy written as `GraphicsContext.addFilter(.shadow(...))`.
+Nothing here allocates per frame because there is no frame.
+
+⚠️ **A NOTE-NAME CONVENTION CLASH IS RECORDED, NOT "FIXED".**
+`SliceToSamplerSettings.defaultBaseNote` is documented as *"36 = C1, the MPC
+pad-1 note"* (Yamaha/MPC octaves) while this app's ONE namer,
+`Fundamental.noteName`, uses scientific pitch and calls 36 **C2**. The grid uses
+the app's namer — a pad grid that invented a second octave convention would
+disagree with the piano roll and the sampler card about the same note — and the
+card's prose says "note 36" with no letter, so a panel cannot contradict its own
+readout. The chopper's comment is the thing out of step; it is prose, not
+behaviour.
+
+⭐⭐ **A SECOND ROUTE: right-click an audio clip ▸ "Chop to Pads…".** The first
+cut shipped the chopper three gestures deep — Musical Typing ▸ PADS ▸ *CHOP A
+CLIP…* — behind a strip that is OFF by default. That is reachable and
+undiscoverable, which is m23-cf's whole lesson (*"an operation reachable by only
+one route is an operation that goes missing"*). The menu entry sits with DELETE
+and CUT/COPY **outside the `if pro` block**, because turning a recording into an
+instrument is not expert clip-edit chrome; a site test asserts that position
+rather than mere existence, since the bug it prevents is invisibility in Simple.
+It selects the clip it named before opening the card — right-click does not
+select on macOS, so without that the card would offer to chop whatever was
+selected before.
+
+### ⛔⛔ THREE DEFECTS THAT ONLY A CAPTURE COULD FIND
+
+All three shipped green. `debug.captureUI` photographed them.
+
+1. **The notice named the WRONG TRACK.** The summary read the ACTIVE track's
+   name, but the app switches the active track only *after* `runChop` returns —
+   so a clip on "Break" chopped onto a new "loop chops" produced *"1 pad on
+   "Break" (a new track)"*, pointing the user at the track that had just been
+   MUTED, while the header two lines above said "on loop chops". **One screen,
+   two answers.** The summary now resolves the landed track BY ID
+   (`trackNameForID`). The test harness hid it by returning a constant name for
+   both questions; the new test makes them deliberately disagree.
+2. **"its 1 other clip GO quiet too."** The plural was handled on the noun and
+   forgotten on the verb; every fixture used more than one clip.
+3. **The refusal showed a beginner a raw UUID.** The store writes for an agent:
+   *"chopping clip 6017D54C-0E44-…-06E006C52A1B would make 15 pads…"*. The card
+   already names the clip, so `lastRefusalForHumans` swaps the id for the name —
+   **every number and every remedy survives**, and `lastRefusal` stays byte-exact
+   for the wire.
+
+⚠️ **STILL OPEN, REPORTED NOT FIXED:** that same store sentence offers remedies
+in API spelling — *"raise minSliceSeconds"*, *"Pass includeHead: true"* — to a
+user whose controls are labelled *MOST PADS TO MAKE* and *Keep the lead-in as
+pad 1*. The numbers are right and the text is actionable, but the nouns are the
+wire's, not the user's. Rewriting it touches a shared, separately-tested string.
+
+⛔ **A stale mirror was removed.** `PadGridModel.refusal` was written by
+`runChop` and read by nothing — the card and the wire both ask `blockingRefusal`,
+which recomputes from the live selection. Two answers to "why can't I chop?",
+one of which goes stale the moment the selection changes.
+
+## 2026-09-19k — A phaser, and a measurement that proves it is not a flanger
+
+`.phaser` (m39-o, design §2.1 rank 7) ships: a cascade of first-order all-pass
+sections sharing one swept corner, summed with the dry signal, with bipolar
+feedback. Seven parameters — `rateHz`, `centerHz`, `depthOctaves`, `stages`,
+`feedback`, `mix`, `stereoPhaseDeg` — one new effect kind, **zero new wire
+commands**; it rides `fx.add` / `fx.setParam` / `fx.describe` like every other
+built-in, and `doc-count-drift` still measures **227**, which is the tripwire
+design rule 6.0.11 asks for.
+
+⛔ **THE ITEM IS THE DISTINCTION, NOT THE EFFECT.** "Phaser" and "flanger" get
+used interchangeably by people who mean one of them specifically, and the
+difference is arithmetic rather than taste. A flanger sums with a **delayed**
+copy, which cancels at the odd multiples of `1/(2·delay)` — a dense, evenly
+spaced, **harmonic** comb, dozens of notches wide. This kind has no delay line
+in it at all. It sums with a **phase-shifted** copy, and cancellation happens
+only where the chain's accumulated phase crosses an odd multiple of 180°:
+exactly **`stages`/2 notches**, at `tan((2k+1)·π/2N)` times the corner, a
+**non-harmonic** series that spreads as it climbs. Few, uneven, spreading is
+what "phaser" sounds like; many, even is what "flanger" sounds like.
+
+⭐ **MEASURED AGAINST THE SIBLING, NOT AGAINST ITSELF.** One notch-finder is run
+over a rendered `.phaser` and a rendered `.flanger` and each law is asserted to
+fit its own kind **and to be rejected by the other**. In 15 Hz–8 kHz the phaser
+puts **4** notches at **1 : 3.359 : 7.523 : 25.25**, matching `notchHz` to
+better than 2 % and sitting **12 % / 50 % / 261 %** from a comb; the flanger
+puts **16** at **1 : 3.000 : 5.000 : 7.000**, matching `combNotchHz` and sitting
+**10.7 % / 33.5 % / 72.3 %** from the phaser law. Two self-checks would have
+passed if both kinds were flangers; this cannot.
+
+⚠️ **THE COEFFICIENT SIGN IS THE TRAP, AND IT WAS CAUGHT BEFORE ANY CODE WAS
+WRITTEN.** The all-pass coefficient is `(t−1)/(t+1)`, **not** the
+`(1−t)/(1+t)` that appears in one-pole and shelving derivations. Both forms are
+stable all-passes; in double precision the wrong one puts **−0.04° / −13.1°** of
+phase at corners where the right one puts exactly **−90.000°**. A first check
+that "confirmed" the right sign had used `a = 0`, the one value where both forms
+agree. ⚠️ **And the follow-up claim, that "a count-based test passes either
+way", was ALSO wrong — the plant refuted it.** Planted in Swift it reddens three
+legs: the −90° law leg (19 issues), the rendered notch POSITIONS (82 issues),
+and the notch COUNT. The count moves for a reason worth naming, because it is
+not a discrimination: the wrong sign parks the corner near DC, which drags
+notches out of the 15 Hz–12 kHz scan window. A plausible-sounding sentence about
+which test catches what is a hypothesis; the plant is the experiment.
+
+⭐ **THE SWEEP CEILING IS STRUCTURAL RATHER THAN CLAMPED.** `centerHz` tops out
+at 1 kHz and `depthOctaves` at 4, so the corner can never exceed **16 kHz** —
+below `0.45·fs` at every rate this app runs at. The `tan` guard that keeps a
+32 kHz project stable therefore never engages at 44.1/48/88.2/96 kHz, and the
+sweep top is never flattened. Widening either range reddens
+`maxCornerFitsEverySupportedRate`.
+
+⛔ **THE DENORMAL FLUSH IS PER SECTION, AND THAT IS NOT THE FLANGER'S RULE.**
+The flanger owns one recirculating word because its delay line is its only
+memory. Every first-order all-pass here is its **own** IIR with a pole at `|a|`,
+so each decays into subnormals on silence independently — **at `feedback` 0 as
+much as at 0.95**, which is the case a flanger-shaped one-word flush would leave
+uncovered. The leg renders both.
+
+⚠️ **`mix: 1` WITH `feedback: 0` IS VERY NEARLY INAUDIBLE, AND THAT IS
+CORRECT.** An all-pass chain alone changes no frequency's level at all —
+measured flat to **1.2e-05 dB** — so with no dry signal left to cancel against
+there is nothing to hear. It ships as a warning on every surface because it is
+the most likely bug report this kind will attract. `mix: 0` is a **bit-exact**
+bypass, and its positive control renders at `mix: 0.5` so "bit-exact" cannot
+quietly mean "inert".
+
+⭐⭐ **m39-o ALSO PAID A DEBT FOUR OTHER KINDS HAD DEFERRED TO IT.**
+`Sources/DAWCore/ProjectDocument.swift` mirrors `EffectDescriptor` by hand at
+six sites and the compiler forces only three; miss `encodeIfPresent` and a
+project **saves, reports success, and reopens with that effect reset to
+defaults**. Four comments in that file said the exhaustive pin would arrive with
+this item. It has: `EffectDocumentMirrorTests` round-trips a non-default
+descriptor for **every** `EffectDescriptor.Kind`, is driven by `allCases` so a
+kind with no fixture **fails rather than being skipped**, asserts every fixture
+differs from its spec default **field by field** (an all-defaults fixture passes
+with every `encodeIfPresent` deleted), and carries a plant control that **strips
+a params key** and proves the comparison reddens.
+
+⚠️ **`phaser` USED TO BE THE "DEFINITELY NOT A KIND" FIXTURE IN FIVE TESTS.**
+Two Swift suites and two MCP suites used it to provoke an unknown-kind refusal.
+A test whose impossible value becomes possible does not fail gracefully — it
+asserts the wrong branch. All five now say `wobbulator`, and the Swift one keeps
+a positive control proving the old name is now **accepted**.
+
+⛔⛔ **TWO OF THIS ITEM'S OWN TESTS COULD NOT FAIL, AND ONLY A PLANT SAID SO.**
+Deleting **every** per-section denormal flush left **35/35 green**; so did
+replacing the `mix == 0` bypass guard with `if true`. Neither was a mistuned
+threshold — both assertions were structurally blind. The flush leg read only the
+OUTPUT, where a separate chain-output flush masks the section states; it now
+reads the section words themselves, **once per quantum across the tail**,
+because a single end-of-tail sample misses the band the state decays through.
+The bypass leg compared `[Float]` arrays on a sine — and `dry·1 + wet·0` is
+exactly `dry` for every normal float, so the only input that can tell "never
+written" from "neutrally blended" is **−0.0**… which `[Float] ==` still cannot
+see, because IEEE says `−0.0 == +0.0`. It now seeds −0.0, ±`leastNonzeroMagnitude`
+and −`leastNormalMagnitude` and compares **bit patterns**, with a control
+asserting `input[0] == 0.0` is *true* while the bit patterns differ. Re-planted,
+each defect now reddens **exactly one** leg. A third blind spot was found the
+same way before it could ship: **every spectral leg renders at `depthOctaves: 0`,
+where the coefficient never moves**, so nothing could see whether the 32-frame
+coefficient stride is interpolated or slammed — `L14` now measures it, and the
+threshold sits between two measured renders (**−80.6 dB** interpolated,
+**−44.9 dB** stepped) rather than being invented.
+
+⚠️ **AND THE ALLOCATION GATE CAUGHT ITS OWN FIXTURE.** §12 gate 2 renders 4 000
+quanta and asserts zero malloc events. Re-processing one staged chunk in place
+feeds the effect its own output, and at `mix 0.5 / feedback 0.8` this kind's DC
+gain is **3.0** — so the signal reached `inf`, then `NaN`, while the allocation
+count stayed a clean **0**. A probe measuring a NaN render reports its zero in
+exactly the same green as a probe measuring a real one. The buffer is now
+re-staged from a preallocated source every call.
+
+**The demo** (`scripts/demos/specs/phaser.json`, four variants on the `stages`
+axis) is loudness-matched to within **0.4 LU** of the set median, and the sweep
+is measured **in the shipped files**: band energy divided by the control's peaks
+at **0.355 Hz** for 4 and 8 stages — the LFO's own 0.35 Hz — and at **1.05 Hz**
+for 12, which is three times the rate and exactly what six notches should do.
+The control measured against itself reports **0.000** at every frequency, so the
+probe cannot manufacture a modulation that is not there. ⚠️ The pad's unison
+detune was **removed** after measurement showed its own ~0.9 Hz beating was
+louder than the sweep the listener is being asked to notice.
+
+## 2026-09-19j — The demo harness can finally hear a real recording
+
+⛔ **Until today, nothing in this tree had ever demonstrated an effect on
+recorded audio.** The headless harness (`DemoRender`) implemented neither
+`clip.addAudio` nor `clip.sliceToSampler`, so every demo ever rendered here ran
+on material the harness synthesised itself. That was invisible because
+synthesised demos are perfectly good at showing what an effect *does* — the gap
+only surfaces when someone asks a question a synth cannot answer. A user asked
+whether the DJ filter works on their own recorded voice, then sent the file.
+
+Both commands are now implemented. Two consequences, and the second is the one
+that mattered:
+
+1. Effects can be demonstrated on a real recording. Measured on the user's
+   voice: the `djFilter` sweep removes **35.6 dB** of treble early and
+   **30.3 dB** of bass late; `stereoWidth`'s `spread` builds a side channel at
+   **&minus;28.4 dB** where the mono source had **&minus;inf**; the `tapeDelay`
+   still rings at **&minus;48 dB** after the voice stops, where dry is silent.
+2. **The sample-flip chop is demonstrable at all.** 53 transient slices from
+   9.7 s of speech, and the auto-generated MIDI reconstruction null-tests
+   **28 dB below** the source (residual &minus;52.6 dB against a &minus;24.3 dB
+   signal; **25,284 of 3.8 million bytes** differ, 0.66 %). The claim that a
+   chop "starts from identical to the record" is now measured, not asserted.
+
+⚠️ **Two traps, both found by measuring rather than by reading.** The chopper
+REFUSES when the transient count exceeds `maxSlices` (53 vs a default cap of 32)
+and says so naming both numbers — *"slices are never silently dropped, because a
+chop missing its last bar still looks like a successful chop."* And the source
+clip is read-only and **keeps playing**, so pads and source sound together:
+measured **+6.0 LU** and comb-filtered until the source track is silenced.
+
+⭐ **`scripts/gates/demo-harness-audio.mjs` guards both capabilities**, and it
+generates its own source audio with ffmpeg rather than committing a WAV — a
+fixture in `/tmp` is a gate that silently stops running, and the effects commit
+deliberately carried no binaries. It proves it can fail three ways: a
+**negative control** that fails the gate if an unknown key is ever silently
+*accepted* (the `unisonVoices` regression shape), a **non-vacuity** check that a
+chop reporting zero pads is a failure rather than a silent pass, and a
+falsification run confirming the harness rejects a vanished command by name.
+
+## 2026-09-19i — Width you can take to a club PA, and the theorem that says what it costs
+
+`.stereoWidth` (m23-dj) ships: a mid/side widener and mono-maker whose headline
+is a **guarantee rather than a sound**. Four parameters — `width`, `spread`,
+`bassMonoHz`, `bassMonoAmount` — one new effect kind, **zero new wire
+commands**; it rides `fx.add` / `fx.setParam` / `fx.describe` like every other
+built-in, and `doc-count-drift` still measures **227**, which is the tripwire
+design rule 6.0.11 asks for.
+
+The item was raised by the user on 2026-08-04, who asked for *"true stereo"*
+rather than a fake width trick. That distinction **is** the design.
+
+⛔ **WHAT MOST PLUG-INS DO IS PHASE-DAMAGING, AND THIS DOES NOT DO IT.** A Haas
+delay (5–30 ms on one side) or a polarity-flipped duplicate both widen
+convincingly on headphones and then comb, collapse or hollow out the moment
+anything sums to mono — a club PA, a phone, a Bluetooth speaker, a car door.
+Here every operation happens to the SIDE channel and the MID is passed through
+untouched, so `L' + R' = 2·M = L + R` at every setting of every parameter. Mono
+compatibility is a **structural property**, not a tuning.
+
+⭐⭐ **THE ACCEPTANCE TEST IS AN ORACLE WITH TWO BUILT-IN POSITIVE CONTROLS,
+because a passing oracle would otherwise prove nothing.** Any side-only design
+satisfies this by construction — including an inert one. So the same
+measurement runs over two wideners written in the test file that the item names
+as wrong, and it must redden on both:
+
+| widener | mono level | worst band | mono residual |
+|---|---:|---:|---:|
+| **`.stereoWidth`** at width 1.8 / spread 0.8 | **−7.9e-10 dB** | **−3.7e-9 dB** | **−145.8 dB** |
+| Haas, right side delayed 15 ms | −2.58 dB | **−10.26 dB** @ 440 Hz | +4.26 dB |
+| mid normalised by 1/√2 | **−3.0103 dB** | −3.0103 dB, flat | — |
+
+The third row is the item's own stated failure — *"a widener that loses 3 dB of
+vocal when summed"* — reproduced on demand so the instrument is known to be able
+to see it.
+
+⚠️⚠️ **THE TRADE IS A THEOREM AND IT IS NAMED ON EVERY SURFACE RATHER THAN
+HIDDEN.** Out of a MONO source you cannot have both a flat mono sum and flat
+individual channels: `L = M(1 ± s·A)` gives a flat sum and complementary
+per-channel ripple of `1 ± s`, while two different all-passes per channel give
+flat channels and a combed sum. There is no third arrangement. This kind always
+takes the flat sum and reports the cost per instance as `channelPeakDb` /
+`channelNotchDb`, **measured out of a render at +2.2789 / −3.0975 dB against the
+law's +2.2789 / −3.0980** at the 0.3 default. In the same measurement the summed
+response is flat to **0.0 exactly** at all 463 probe frequencies while each
+channel alone ripples 5.4 dB peak-to-notch.
+
+⚠️ **`width` IS A SILENT NO-OP ON A MONO SOURCE** — it is a gain on the
+left-minus-right difference, and that difference is zero — so `fx.add {kind:
+"stereoWidth", params: {width: 2}}` on a mono track reports success, echoes
+`width: 2`, and changes not one byte. `spread` is the control that widens a mono
+source. That trap is in the param note, in `fxKindSchema`, in the MCP README and
+in the wire-reference skill, because it is the wrong answer to the most likely
+request.
+
+⚠️ **A TEST THAT READ AS A CENSUS WAS A HAND-WRITTEN LIST, AND IT HAD ALREADY
+LOST A KIND.** `fxAddAndSetParamWorkForNewKinds` enumerated kind/param pairs in a
+literal array — so it looked like "every kind round-trips on the wire" while
+silently omitting `.tapeDelay`, which had shipped hours earlier. Nothing failed,
+because a list cannot miss what it never mentions. It is now driven by
+`Kind.allCases`: a kind with no probe entry **fails** rather than being skipped,
+with a non-vacuity floor in case `allCases` ever stops enumerating. Falsified by
+planting the omission — it reddens with `kinds with no entry in this census:
+["tapeDelay"]`.
+⭐ **Converting it immediately exposed a second thing the list had hidden:** 17
+kinds on one track exceeds the **16-effect cap**, so the last kinds failed with
+"effect chain is full" — a cap artifact that reads exactly like a wire defect.
+The census now uses one fresh track per kind. **A list does not just fail to
+cover; it conceals what full coverage would have revealed.**
+
+⛔⛔ **AND THE SECOND TRAP WAS ONE WE SHIPPED INTO THE PROSE OURSELVES, IN FOUR
+PLACES AT ONCE, BEFORE REVIEW CAUGHT IT.** The `width` param note, `fxKindSchema`,
+the MCP README and the wire-reference skill's recipe table all said *"`width: 0`
+is a real mono-maker"*. It is not. The side path is `side·width +
+decorrelated·spread` and **`spread` defaults to 0.3**, so `width: 0` on a freshly
+added insert still emits a synthesized side channel — and on a **mono** source it
+emits one where there was none, i.e. it does the **opposite** of the request that
+recipe was written for. Measured: a mono fixture goes in at a width figure of
+**0.0** and comes out at **0.0748**; a stereo fixture at 0.4100 comes out at
+**0.0798** rather than 0. The corrected recipe, now in all four places, is
+**`width: 0` AND `spread: 0` together** — which measures **0.0** and is
+bit-identical between channels. The mono-compatibility guarantee was never
+affected; what was wrong was a recipe an agent would have followed verbatim,
+received `ok: true` for, and reported done on. It is now pinned behaviourally
+(engine leg L2c), on the wire-adjacent param note (`ModulationTests`) and in the
+MCP text (`fx-stereo-width.test.ts`), so the words and the samples cannot drift
+apart again.
+
+⭐ **The derived ripple fields now have a wire test, and did not before.**
+`channelPeakDb` / `channelNotchDb` are emitted by `Commands.effectParamsJSON`
+and appeared in no test that could see the emission — only in a unit test of the
+closed form. `FXCommandTests` now asserts them through the running router on
+`fx.add` and `fx.setParam`, asserts they TRACK `spread` (6.0206 dB peak and a
+**−120 dB floor rather than −inf or NaN** at spread 1), and asserts they are
+**absent** from `fx.describe` with a positive control for the absence.
+
+⛔ **NO `mix` PARAMETER, DELIBERATELY.** A dry/wet blend on a mid/side widener is
+algebraically another `width` and another `spread`, so it would be a lie in
+`fx.describe`. The named neutral position is `width 1 / spread 0 /
+bassMonoAmount 0`, and at exactly that position the render path **never writes
+the buffer** — the bypass cannot be an arithmetic identity, because a mid/side
+round trip is not bit-exact in IEEE floating point.
+
+**Two defects were caught by planting them, and one of them was mine before the
+plant.** The bass-mono crossover shipped in its first draft as
+`x − lowpass²(x)`, which factors as `(1 − LP)(1 + LP)` — a SIX dB/oct high-pass
+with a +6 dB lift, not the twelve the control claims. It is identical in the
+source to the correct structure and identical in the output above 1 kHz; at
+40 Hz against a 120 Hz corner it removes **4.3 dB where the shipped one removes
+20.1 dB**. And planting "remove the interpolation-endpoint snap" reddened
+**nothing** until L7's fixture and ride value were both changed: the accumulated
+`width` lands on 0.9999999999999956, which narrows to exactly `1.0f`, so the
+effect computes `M ± S` — and on balanced material that round trip happens to be
+bit-exact. It takes a deliberately asymmetric fixture (one channel 1e-7, the
+other 0.9) AND a ride value whose delta is not a binary fraction (0.33, found by
+search — only 99 of 1650 three-decimal widths leave any residue at all).
+
+**Demo:** `scripts/demos/specs/stereowidth.json`, one axis (`spread` 0.25 →
+0.45 → 0.65) on an identical mono pad, plus a no-effect control. Per design §9.6
+a width demo **ships a measurement alongside the audio**, because a width change
+is close to inaudible on one speaker by construction — so
+`render-variants.mjs` gained an additive `monoCompatibility` measurement type
+that reports, per variant: stereo width **0.0000 → 0.0449 → 0.1321 → 0.2411**,
+L/R correlation **1.0000 → 0.9199 → 0.7571 → 0.5425**, and a mono fold-down that
+moved **0.000 dB** with residuals of **−158.6 / −156.1 / −154.3 dB**. The
+listening note opens by telling the listener to use headphones or two speakers.
+All four variants sit within **0.8 LU** of the set's median with no level
+compensation applied.
+
+## 2026-09-19h — An echo that wobbles, and the erratum that was waiting for it
+
+`.tapeDelay` (m39-n) ships, **FREE-MS MODE ONLY**: a tape echo read through a
+fractional delay line whose position is pushed around by wow (a slow motor
+drift) and flutter (two fixed fast components), with the repeat path saturated
+and rolled off. Eight parameters, one new effect kind, **zero new wire
+commands** — it rides `fx.add` / `fx.setParam` / `fx.describe` like every other
+built-in, and `doc-count-drift` still measures **227**, which is the tripwire
+design rule 6.0.11 asks for.
+
+⛔ **`.delay` IS NOT REPLACED, AND THE SPLIT IS STRUCTURAL.** `DelayEffect`
+holds its delay in an `Int` and reads `line[index - delaySamples]`, so the
+fractional part of every requested time is discarded at assignment: a drift of
+a tenth of a sample is not a tuning problem there, it is **unrepresentable**.
+`.delay` keeps tempo sync; `.tapeDelay` has none in v1 (the sync resolver is
+hardwired to `.delay` at five intake seams, generalising it is m39-c, and a
+second hand-rolled resolver is a frozen prohibition).
+
+⭐⭐⭐ **THE §4.1 ERRATUM WAS CONFIRMED BY THE CALLER IT WAS WRITTEN ABOUT.**
+The capability table in the design's §4.1 states the minimum-delay floor as
+"1 sample" flatly; the addendum under it predicted that the tape-delay author
+would declare `minDelaySamples: 1` alongside `.cubicHermite` — the interpolation
+that same section recommends to this effect **by name** — and be refused at
+`prepare()`. The first draft did exactly that and was refused with
+`minimumDelayBelowStencil(minDelaySamples: 1.0, required: 2.0)`. The message
+names both numbers and is actionable. ⚠️ **But the observable symptom is
+silence, not a message:** the worked example the brief points at
+(`FlangerEffect.prepare`) catches the refusal into an empty block, so the
+refusal reaches nobody and the effect renders bit-exact dry. `TapeDelayEffect`
+keeps the error in `lastPrepareRefusal` for exactly that reason, and the floor
+it ships is DERIVED from the ranges (11 ms = 528 samples at 48 kHz), pinned by
+an inequality test so widening a depth range without widening the time floor
+fails loudly.
+
+⭐⭐ **The wow is a MEASURED number, not a description.** Peak pitch deviation
+is `1200·log2(1 + π·rateHz·depthMs/1000)` and does not depend on `timeMs`.
+Rendered a 1 kHz tone through the effect and recovered the instantaneous pitch
+from interpolated zero crossings:
+
+| depth / rate | predicted | measured |
+|---|---:|---:|
+| 5.0 ms @ 1.5 Hz | ±40.32 cents | +40.32 / −41.28 |
+| 2.5 ms @ 0.8 Hz (defaults) | ±10.84 cents | +10.85 / −10.92 |
+| 0 ms (control) | 0 | 0.000 |
+
+The measured asymmetry is not noise and not a defect: the pitch ratio is
+`1 - d'(t)`, so the upward peak is `1200*log2(1 + pi*f*D)` and the downward one
+is `-1200*log2(1 - pi*f*D)`, which is always slightly larger. At 5 ms / 1.5 Hz
+the closed forms are 40.318 and 41.279 — the two measured numbers, to two
+decimals. `wowCents` documents the upward peak because one number goes on the
+wire; the arithmetic for the other is in its doc comment and pinned in
+`TapeDelayParamsTests.quotedCentsFiguresAreReal`.
+
+Every `fx.add` / `fx.setParam` result — and `project.snapshot` — echoes
+`wowCents` and `flutterCents` in that insert's `params` object, so an agent can
+ask for a stated amount of wobble instead of guessing at milliseconds. ⚠️ They
+are **per-instance echoes and are NOT in `fx.describe`**, which returns schemas
+and no values; the first draft of this entry, of `server.ts`, of the skill and
+of the MCP README all said "fx.describe echoes" — copied from the flanger's
+`firstNotchHzAtSweepFloor` wording, which says the same thing and is wrong in
+the same way. Caught in review before it shipped.
+
+The flanger's pre-existing copy is **now fixed too**, and chasing it turned up a
+second, larger defect in the same prose. Searching by FIELD NAME rather than by
+phrasing found three sites, not one: `fxKindSchema` (shared by `fx_add` and
+`fx_describe`, so the wording there had to name the tool explicitly),
+`fx_describe`'s own description — where "the response echoes
+`firstNotchHzAtSweepFloor`" reads as *this* tool's response and is therefore
+false — and the `fx_describe` row of the MCP README. ⭐ **The lesson is the
+search key: "fx_describe echoes" found one of the three.**
+
+⛔⛔ **AND THE PROSE WAS SPLICED.** The entire `hallReverb` paragraph had been
+inserted INTO THE MIDDLE of the flanger's, severing it mid-sentence at "…50 Hz
+at 10 ms - and " and re-attaching the flanger's tail (`feedback` is bipolar,
+`mix: 0.5`, `stereoPhaseDeg`, through-zero) after hallReverb's `freeze`
+sentence. Every agent reading `fx_add`'s kind list got flanger law attributed to
+the reverb, and a flanger paragraph that stopped mid-clause. Repaired by moving
+the hallReverb block whole to after the flanger's closing line; verified by
+paragraph ORDER (ringMod → flanger → hallReverb → tapeDelay) and by a
+duplication count of exactly 1 on three marker phrases.
+⭐ **`effect-kind-surface.mjs` passed throughout, correctly: it asks whether a
+kind is PRESENT on a surface. Presence is not contiguity, and no gate in this
+tree reads prose for coherence.**
+
+⚠️ **THE DENORMAL PLANTS TAUGHT MORE THAN THE CODE DID.** Removing the tap
+flush reddened **nothing**; removing the record-filter flush also reddened
+nothing at first. Two separate findings. (1) The two flushes are **mutually
+redundant at the output** — the filter is the last stage before the write, so
+either one alone keeps every rendered sample clean. (2) The filter's own state
+crosses the entire subnormal band in **20 samples** at the default 6 kHz
+corner, so sampling it at 512-frame quantum boundaries misses the window
+almost always. The gate now renders at `highCutHz` 500 (a 244-sample crossing)
+in 32-frame quanta, and asserts the sampling density itself so a future reader
+cannot quietly restore a stride that cannot see anything. The tap flush stays —
+§4.1 obliges it and it costs one compare — but the code says plainly that no
+gate in this tree can see it go.
+
+Five plants, each named against the leg that caught it: frozen wow LFO → the
+cents leg (plus three others); `.linear` for `.cubicHermite` → the
+interpolation-response leg **only**, which separates the two closed forms by
+1.94 dB at 12 kHz; zero feedback → the second-echo leg; the filter moved to the
+feedback path → the first-repeat-brightness leg; both flushes removed → the
+subnormal legs. A sixth plant, added in review, is about the DOCS: putting
+`125.5 cents` back into the shipped `wowDepthMs` note reddens the new
+`paramNotesQuoteTheRealFigures` and **nothing else** — `quotedCentsFiguresAreReal`
+stays green, because it compares the arithmetic to a hand-copied LITERAL rather
+than to the sentence a user reads. That is how 125.5 and 51.1 shipped past a
+green pin in the first place. The new test formats the closed form with `%.1f`
+and asserts the note CONTAINS it, so there is no copy left to rot.
+
+Swift **8289 / 726 / zero failures** (+38, +2 suites, none retired); MCP
+**867 / 0** (+9); wire unchanged at **227**; demo specs 16 → 17; effect-kind
+surface 15 × 5 → 16 × 5; chorus **and** flanger renders byte-identical (all
+eleven files re-rendered after the review edits and compared byte-for-byte),
+chorus positive control still separating baseline from perturbed by
+2 619 028 bytes.
+
+## 2026-09-19g — The echo freezes, and the number it stops at is the whole item
+
+The delay's `feedback` ceiling moves **0.95 → 0.999** (m39-k), which is the echo
+freeze: at 0.95 each repeat loses 0.45 dB and the tail is gone in about four
+seconds; at 0.999 it loses **0.0087 dB** and simply holds. No new parameter, no
+new command, no new effect kind — one range, and the notes that make it usable.
+
+⭐⭐ **The ceiling stops one repeat short of 1.0 ON A MEASUREMENT, and the design
+document's own text was the thing it corrected.** §3.1 said a freeze "needs
+feedback at or fractionally above 1.0". Rendered, feedback 1.0 does not sit at
+the edge of stability — it **diverges without bound on anything the loop cannot
+lose**. A DC offset of 0.1 into a 10 ms delay measured **9.66 / 96.97 / 193.94 /
+290.94** after 1 / 10 / 20 / 30 s: a straight line, steps constant to three
+figures, no ceiling at all. The same input at 0.999 **settled at 94.56** against
+the predicted 1/(1−f)·0.1 = 100. So 0.999 is the largest value that still cannot
+run away, and it is a freeze by any musical measure — a 350 ms tail is **3.19 dB
+down after 110 seconds**. Filed as ERRATUM E11.
+
+⭐ **`highCutHz` was described as the thing that keeps a near-unity loop from
+ringing forever. It is not, and the false half is the safety half.** The loop
+filter is a one-pole low-pass whose gain at DC is **exactly 1 at every setting**
+— the 1.0 divergence above was measured at `highCutHz` 500, the most damped
+setting there is. What it really does up there is decide **how long the hold
+lasts**: at feedback 0.999 on a 350 ms delay, a tail was 3.19 dB down after 110 s
+at 20 kHz and **gone in about 20 s at 500 Hz**. Both parameters' `note`s now
+carry those numbers, and the `feedback` note says how to actually use a freeze —
+put the delay on a bus and pull the send to 0, because a loop that loses nothing
+adds everything it is given (sustained input builds toward 1/(1−feedback)).
+
+⚠️ **No discrete freeze button.** At the ceiling the continuous knob already
+holds, so a boolean would duplicate "feedback at maximum" while spending an
+automation slot that is append-only forever.
+
+⭐ **Existing projects are byte-identical, and that was proved by rendering one
+before and after**: a four-variant demo set rendered on the pre-change build and
+again after it, with `no-echo`, `feedback-40` and `feedback-95` hashing
+identically both times — and `freeze-999`, which clamped to 0.95 before the
+change, hashing **differently**, which is what proves the comparison could have
+caught something. A pre-change FNV-1a pin over a feedback-0.95 render now lives
+in the suite as the permanent guard.
+
+⚠️ **The demo set breaks the 1 LU house rule on purpose and says so.** The three
+on-axis variants read −32.0 / −32.1 / −27.7 LUFS. Integrated loudness is a gated
+mean: `feedback-95` is fuller than `feedback-40` (true peak 2.0 dB higher) and
+still reads 0.1 LU *quieter*, because its dying tail contributes quiet blocks;
+the freeze reads louder because its tail never gets quiet. Matching them would
+mean lowering `mix` as feedback rises, hiding the axis behind a second one.
+
+Nine new legs (`EchoFreezeTests`), five plants, each reddening a named leg —
+including the one that matters: restoring the ceiling to 1.0 makes the
+unbounded-growth leg fail with constant increments. Swift **8251 / 724 / zero
+failures** (+9, +1 suite, none retired or modified); MCP **858 / 0**; wire
+unchanged at **227**; chorus/flanger renders byte-identical, positive control
+still separating baseline from perturbed by 2 619 028 bytes.
+
+## 2026-09-19f — A reverb that has a SIZE, and the old one gets an honest label
+
+`.hallReverb` (m39-l) ships: an 8-line Feedback Delay Network with Householder
+mixing, per-line two-band absorption, a smoothly-moving pre-delay and a small
+independently-phased tail modulation. Fourteen parameters, one new effect kind,
+**zero new wire commands** — it rides `fx.add` / `fx.setParam` / `fx.describe`
+like every other built-in.
+
+⭐⭐ **The anti-metallic claim is MEASURED, not asserted.** A reverb built from
+fixed-length recirculating lines rings at a fixed set of modal frequencies, which
+the ear reports as a metallic, pitched tail. Sliding each line's length
+independently smears those modes. The instrument that sees exactly that and
+nothing else is **spectral flatness** — the geometric mean of the power spectrum
+over its arithmetic mean, which is scale-free and so cannot be fooled by a level
+change. Measured on the late tail (1.0–3.7 s of an impulse response,
+`decaySeconds: 8`, 500 Hz–6 kHz):
+
+| `modDepthMs` | spectral flatness | spectral crest | tail RMS |
+|---|---:|---:|---:|
+| 0 (modulation off) | **−29.36 dB** | 18.58 dB | 0.001406 |
+| **0.15 — the DEFAULT** | **−7.96 dB** | 16.89 dB | 0.001406 |
+| 1.0 | −2.95 dB | 14.73 dB | 0.001417 |
+
+**+21.39 dB of flatness at the shipped default**, with the tail level moving
+**0.0015 dB** — so the measure is reading ringing, not loudness. Freezing the
+LFOs reddens that leg and **nothing else in the suite**.
+
+⛔ **`.reverb` is untouched and NOT deprecated.** Not one byte of `ReverbEffect`
+changes. What it gets is honest metadata, on both surfaces that can disagree
+(`EffectParamSpec` and the MCP tool text): **`roomSize` controls how long the tail
+RINGS, not how big the space is.** It scales the feedback of eight comb filters
+whose lengths are compile-time constants, so that room has exactly one shape
+forever. Deprecating it in prose was considered and rejected — that creates a
+second-class effect agents route around while real projects still render through
+it, and Freeverb's small, bright, dense room is a genuinely good sound the hall
+does not replicate. An MCP test pins the **absence** of the word "deprecated".
+
+⭐ **Two measurements changed the design mid-build, and both are filed as errata.**
+`.cubicHermite` replaced the shared line's `.linear` default on the tank lines
+(E9): a chorus passes its line once, but each of these is re-read ~50 times a
+second, so the interpolator's loss compounds — with `.linear` the measured RT60
+fell to **0.775×** the requested value at `decaySeconds: 4` and the 8 kHz tail
+lasted **2.23 s instead of 4.70**, which made `highDecayMultiplier: 1`
+("no damping, bright") a lie. And `diffusion` became an equal-power crossfade
+rather than the allpass coefficient (E10): a Schroeder allpass at `g == 0` is a
+**pure delay**, so `diffusion: 0` was silently adding **35 ms of pre-delay no
+parameter accounted for** — measured as a first arrival at 56.6 ms where the
+closed form says 19.8 ms.
+
+⚠️ **Two plants reddened nothing on the first pass, and both were real gaps in the
+tests rather than proof the code was safe.** Removing the denormal flush from the
+recirculating tap left the whole suite green — because the leg used
+`decaySeconds: 0.5` and 3 s of silence, and at 120 dB/s the tank only reaches
+~1.2e-24 in that time, fourteen orders of magnitude above the subnormal boundary.
+At `decaySeconds: 0.1` and 5 s the same plant produces **13 225 subnormal output
+samples**. And the first Householder leg (counting arrivals in the first 150 ms)
+passed with identity mixing planted: 297 with mixing, **152 without**, against a
+threshold of 120. Late-window occupancy separates them 0.0550 vs 0.0202. Both
+legs were rewritten and both plants now redden.
+
+⭐ **Third caller, home unchanged.** `InterpolatedDelayLine` needed no
+modification for nine simultaneous instances. The chorus and flanger renders are
+**byte-identical** — all three hashes unmoved, with the built-in positive control
+still separating `baseline` from `control-perturbed` by 2 619 028 bytes.
+
+## 2026-09-19e — The flanger, and a note that argued with its own measurement
+
+`.flanger` (m39-j) — the jet-plane whoosh: the signal mixed with a copy of
+itself delayed by a few thousandths of a second, that delay sliding slowly, so
+the cancellation notches sweep the spectrum. Axis params: `rateHz`, `depthMs`,
+`delayMs`, `feedback` (bipolar), `mix`, `stereoPhaseDeg`.
+
+⭐ **It exists to prove `InterpolatedDelayLine` is a real home, and it did — the
+primitive took a FEEDBACK caller without a single byte changing.** The two things
+the flanger had to bring itself, a denormal flush and its own modulation, are
+exactly the two §4.1 said a caller would bring. A contract that correctly predicts
+its second caller was designed rather than merely extracted.
+
+⭐⭐ **The most informative result was a memory-safety one.** §6.3.2 mandates an
+upward-only sweep rather than a bipolar one. Planting the classic bug
+(`delayMs + depthMs·sin φ`) did not clamp and did not trap — it produced
+non-finite output, because `Int(negative)` walked the tap off the channel block.
+The delay line has no bounds check by design, so §6.3.2 is a **memory-safety law,
+not a sonic preference**, and that is now measured rather than asserted.
+
+⛔ **Two plants reddened NOTHING, and both were findings.** Rule 6.0.6's mandatory
+parameter smoothing could be deleted outright with the suite staying **24/24
+green** — the third time in one night that a required behaviour had no instrument
+on it. Two legs added, each verified by re-planting. And every one of the
+flanger's 26 legs survived the reassociated-tap plant: **a second caller did NOT
+buy a second check on the shared primitive.** The chorus byte gate is still the
+only thing that can see that defect class, and nobody should assume otherwise.
+
+⚠️ **The parameter note contradicted itself and then contradicted the render.**
+It stated two different figures for the same setting one sentence apart (11 dB and
+14.8 dB), and the three tokens the tests assert all sat on the correct half, so
+nothing could see it. Worse, its plain claim that negative feedback is quieter is
+**true of the arithmetic at DC and false on real material**: measured on a saw pad,
+EBU R128 integrated, `feedback -0.5` landed **1.0 LU LOUDER** than `feedback 0`.
+The comb is what you hear, not the DC term. The note now says both, and marks which
+is which. That correction exists only because the demo was rendered and measured —
+the formula and the prose agreed with each other perfectly.
+
+Swift **8209 / 722 / zero failures**; MCP **848 / 0**; wire unchanged at **227**.
+
+## 2026-09-19d — A shared delay line, and the defect no test could see
+
+`InterpolatedDelayLine` (m39-j-0) is extracted out of `ChorusEffect` into
+`Sources/DAWEngine/Effects/Primitives/`, and the chorus now runs through it —
+**bit-exactly**. Four callers were waiting on it: the flanger, tape wow/flutter,
+BBD pitch wobble, and FDN tail modulation. The home is a **delay line, not a
+modulated delay line** — no depth, no rate, no LFO — which is the whole reason
+four callers with four different modulation ranges can share it. There is nothing
+for them to disagree about.
+
+⭐⭐⭐ **The plant result is the reason this shipped as its own change.** Rewriting
+the tap as `s0 * (1 - f) + s1 * f` instead of `s0 + (s1 - s0) * fraction` is
+algebraically identical and numerically different, because Float addition is not
+associative. Planted deliberately, it left **all 15 unit tests green** and was
+caught **only** by the byte-identical chorus render: 348,140 differing bytes,
+while the dry control stayed identical — proving the change reached the chorus and
+nothing else. A known-signal test cannot see this class of defect. That is why the
+gate exists and why it must never be weakened.
+
+Every other plant hit exactly its own leg: the wrap off-by-one hit both wrap
+tests, dropping the fractional term hit both fractional-delay tests, and allowing
+`minDelaySamples = 0` hit exactly the two prepare-time refusal tests. A wrong
+cubic `c2` hit only the new degree-2 fixture — a ramp cannot pin `c2`, because a
+wrong coefficient set reproduces a ramp exactly while collapsing cubic into
+linear.
+
+⭐ **The engineer added a check nobody asked for, and it was the right one.**
+Before editing, it re-rendered the *unedited* tree and confirmed all three hashes
+reproduce. Sensitivity and reproducibility are different properties: the
+`depthMs 7.5 → 7.501` control variant proves the gate can *detect* a difference;
+only a repeat render proves a red result afterwards would have been diagnosable.
+
+⚠️ **Addendum to the frozen §4.1: the minimum-delay floor is
+interpolation-dependent — 1 sample for `linear`, 2 for `cubicHermite`.** Hermite's
+stencil reads one sample newer than the tap. The design says "1 sample" flatly, so
+the tape-delay author would declare 1 with `cubicHermite` — the pairing §4.1
+recommends to them by name — and be refused at prepare.
+
+⛔ The home carries **no denormal flushing** and must not grow any: the chorus is
+feedback-free and provably cannot generate denormals, so each feedback caller
+flushes its own state.
+
+Swift **8177 / 721 / zero failures**; MCP **837 / 0**; wire unchanged at **227**.
+
+## 2026-09-19c — The ring modulator, and a number two people got wrong
+
+`.ringMod` (m39-m) — the user asked for frequency modulation by name; this is the
+close relative that makes the sounds you recognise. It multiplies the audio by a
+tone, and every partial is replaced by a **pair** of new ones at `f − fc` and
+`f + fc`. Params: `carrierHz` (0.5…5000, logarithmic), `mix`, `waveform`,
+`inputHighCutHz`, `stereoSpreadDeg`.
+
+Measured from the rendered files, independently, with a separate decode path and
+separate code: the new partials land within **0.11 dB** of the predicted A/4
+across twelve probes, the dry term drops **−5.99…−6.03 dB** against a predicted
+−6.02, and **the carrier does not appear in the output** — its bin measures *at or
+below* the untouched control (−78.72 vs −78.19 at 200 Hz; −90.09 vs −87.00 at
+800 Hz). That absence is the entire difference between ring modulation and
+amplitude modulation, and it is measured rather than asserted.
+
+⭐⭐⭐ **Two people reasoned from the same correct principle to the same wrong
+answer, and only the measurement broke the tie.** The docs claimed in **five
+places** that a 2 Hz carrier gives *four* pulses a second — the reasoning being
+that a bipolar carrier inverts the signal twice per cycle. Reviewing it, the same
+prediction was made independently, for the same reason. Both wrong at the default
+`mix 0.5`: the output is `x·(mix·c + (1−mix))`, so the multiplier is `0.5 + 0.5c`,
+which never goes negative. Nothing rectifies; the rate is 1×. Doubling appears only
+above `mix 0.5`. Measured: the 2 Hz envelope component sits **+21.0 dB** above the
+control while 4 Hz is **−3.8 dB** — not raised at all. The real number was pinned
+with a test across mix 0.25/0.5/1.0 **before** the prose was corrected.
+
+**Two errata, both against previously-frozen text.** *E5*: the specified
+"integrated band-limited triangle" shipped as stateless **PolyBLAMP** instead — an
+integrator has state, `carrierHz` spans 13 octaves so no single leak coefficient
+serves both ends, and `carrierHz` is modulatable, so `dt` changes *while the
+integrator runs*, which on a carrier amplitude-modulates everything the effect
+touches. Worst audible-band alias at a 2917 Hz carrier: naive **−41.66 dB**,
+PolyBLAMP **−57.00 dB**. *E6*: the rule "every demo variant within 1.0 LU of the
+set median" **cannot include a no-effect control**, and two already-shipped sets
+prove it — the DJ filter's control sits **+5.85 LU** off its median. The offset is
+arithmetic, and normalising it would manufacture a confound rather than remove one.
+
+⭐ **One plant initially reddened nothing, and that was the finding.** Removing the
+denormal flush was invisible because an 8192-frame silence lets Double state reach
+1e-165, where Float32 underflows to zero either way. Shortened to 2048 frames
+checking the last 384, it caught it. A plant that fires nothing is evidence about
+the test, not about the code.
+
+⭐ **A consumer-facing gap, found and gated.** `.djFilter` had shipped invisible in
+the `sound-designer` agent's own description — the text that routes a user to the
+agent that builds insert chains — and `.bassEnhancer` and `.bitCrusher` had been
+missing from the same lists since *they* shipped. Three kinds, unnoticed.
+`scripts/gates/effect-kind-surface.mjs` now fails if a kind in the enum never
+reaches any of five complete-list surfaces, including `ProjectDocument.swift`,
+where a miss is silent data loss on save.
+
+Swift **8162 / 720 / zero failures**; MCP **837 / 0**; wire unchanged at **227**.
+
+## 2026-09-19b — One knob: the DJ filter, and which way it turns
+
+`.djFilter` (m39-i) — the club-mixer sweep, and the first creative effect built
+for this app rather than borrowed. One bipolar knob and the knob IS the effect:
+`position` −1…+1 where **0 is a bit-exact bypass**, plus `resonance`,
+`slopeDbPerOct` (12 or 24), `deadZoneWidth` (the do-nothing detent at the
+centre, so a sweep passing through hands over cleanly) and `resonanceTrack`
+(resonance only near the extremes — the isolator feel). `position` is the first
+bipolar parameter on any built-in kind. Deliberately **no `mix`**: blending a
+resonant filter with its own dry signal is comb filtering, not a gentler filter.
+
+Measured: at the sweep extreme, treble down **44.1 dB** one way, bass down
+**68.0 dB** the other; resonance adds **8.8 dB** of lift at the corner, measured
+after loudness-matching so it reads as character and not level. High resonance
+makes the whole filter quieter on purpose — the resonant section is scaled by
+`sqrt(0.707/Q)` so a Q-10 peak cannot slam the mix, costing ~11.5 dB of passband
+at `resonance: 1`. That is the protection working, and `fx.describe` says so.
+
+**The knob was turning the wrong way, and the disagreement was the useful part.**
+The frozen spec said a negative position should remove *bass*; the brief I wrote
+said the opposite. The engineer built the frozen spec and filed an erratum rather
+than treat a brief as an amendment — correct, and the reason the conflict
+surfaced at all instead of being quietly split. The spec was then the one that
+was wrong: this effect is defined by imitating a hardware control, and on a
+Pioneer DJM the filter knob is low-pass to the left, high-pass to the right. An
+imitation that inverts what it imitates is wrong by its own definition, so the
+direction was reversed.
+
+⚠️ **Reversed now, deliberately, because it was a one-way door.** `position` is
+persisted in project files and is automation slot 0. The first project saved with
+a non-zero position, or one automation lane drawn on that slot, turns a four-line
+sign change into a migration that silently re-voices existing work.
+
+⭐ **The reversal found a real bug the tests could not have.** The DSP re-derived
+`position < 0` itself instead of calling the law in `DAWCore` — in a file whose
+own header claims that rule has one home. With the law flipped and the copy not,
+the filter was handed a low-pass corner and told to run a high-pass: it measured
+nearly **flat at its own corner**. A "one home" comment is a claim, not a
+mechanism.
+
+⭐ **And a test that could not fail was made able to.** The per-sample parameter
+smoothing — the thing that earns `position` and `resonance` their modulation
+verdicts — had no gate: all 25 original legs passed with the interpolation
+deleted outright. Two legs were added and *verified by planting that deletion*.
+The reversal then moved one leg's settling window (the sweep now starts at a
+20 Hz high-pass, which settles over thousands of samples where a 20 kHz low-pass
+settles at once), so its claim was restated rather than its bound loosened: the
+residual must **decay** (8.5e-3 → 9.3e-4 → 1.7e-6) against an uncompensated
+0.475. Under the planted deletion it is 0.419 at *every* window — a staircase
+cannot be shifted onto another staircase, which makes the decay positive evidence
+where a bare threshold was only a number.
+
+Two hand-maintained mirrors the compiler does not enforce were found and pinned:
+`ProjectDocument`'s hand-written `EffectDescriptor` copy (parameters silently
+dropped on save without it) and `MixerStripView.addableEffectKinds` (the kind
+invisible in the "+" menu without it).
+
+Swift **8123 / 719 / zero failures**; MCP **826 / 0**; wire unchanged at **227**.
+
+## 2026-09-19 — Sounds that move: a modulation layer, and the day it shipped doing nothing
+
+LFOs, step sequencers, envelope followers and macros, routed to volume, pan,
+effect parameters and — new with m39-b — **instrument** parameters. Nine `mod.*`
+commands, mirrored as nine MCP tools (223 → **232**; wire unchanged at **227**,
+`doc-count-drift` exit 0 with both routes agreeing). This is what makes a filter
+sweep, a tremolo, an auto-pan and a trance gate possible, none of which any
+amount of parameter-setting could produce, because they are all one thing:
+a value that changes while the music plays.
+
+**It shipped inert, and the honest version of that is worth more than the
+feature.** An LFO routed to `.volume` or `.pan` changed the rendered audio by
+nothing at all — **live and offline** — while 24 engine tests passed. A trance
+gate at four different rates rendered four **byte-identical** files.
+
+The mechanism. A strip whose only automation is a modulation *route* still needs
+a schedule — not for its points, it has none, but for its **anchor**, which is
+how the render side learns the transport position. `applyParameters` built and
+published that anchor correctly. Then roll start destroyed it: `startAllPlayers`
+rebuilt every strip's schedule from a record that carried lanes but not the
+anchor requirement, decided a lanes-free strip needed no schedule, and published
+`nil` over the anchor that had just been set up. `applyParameters` could not
+recover, because it consulted the anchor requirement **only** in the branch
+guarded by "nothing published yet" — which the wipe had just falsified. A dead
+state no later pass could escape. With no anchor the render path takes
+`applyModulationWithoutSchedule`, where position-dependent sources hold neutral
+by design, so every LFO sat perfectly still. **A still LFO multiplies by exactly
+1**, which is why the result was not wrong but identical — and identical is the
+one failure a loudness check cannot see.
+
+⭐ **Why the tests were green.** Every one of the 24 published a hand-built
+snapshot *straight to the renderer* and asserted on what the stage did with it.
+The stage was always correct. The defect was one step earlier, in the delivery,
+in a function no test called. **A hand-published snapshot tests the stage, not
+the publication.** And the obvious regression test does not work either: a test
+that calls `applyParameters` and checks the schedule passes both before and
+after the fix, because that pass was never the problem. The gate had to go
+through a **real render**, the only path that reaches roll start.
+
+**The fix is in two independent places**, either of which alone would have
+caught it: the anchor requirement now rides in the lane bookkeeping, so all
+three publish sites read one truth, and it is part of the change detection, so
+the dead state cannot form. The `= false` default was **removed** from
+`publishAutomation`, `buildRollSchedule` and `publishMasterAutomation` —
+both wipe sites were call sites that simply omitted the argument, and a default
+is what let them. Every call site must now state it, including the next one
+anyone adds.
+
+Verified by reverting: the new test fails on the original code and passes on the
+fixed one; 48,760 differing samples, RMS 0.354 → 0.250. Full suite **8090 tests
+/ 718 suites / zero failures**. Routeless tracks are untouched — the byte-identity
+claim holds, pinned by an assertion that a modulation *source* with no route
+still renders bit-identically.
+
+⭐ **What actually caught it was the demo harness**, which refuses to hand over a
+set of variants when two of them come back byte-identical — it asks whether the
+axis you claim to vary changed the audio, which no unit test in this tree asks.
+It fired twice the same night: once on 15 synth parameters being silently
+dropped before the renderer, once on this.
+
+⛔ **Known, filed, not yet fixed: master-strip modulation never reaches a bounce**
+(m39-e-2). `masterModulationSources`/`Routes` are only ever set on the live
+graph; `OfflineRenderer` builds its own and is never given them, so a macro on
+the master fader moves while you play and is absent from every export. Track
+modulation is unaffected — it rides inside `Track`, which *is* passed to the
+renderer.
+
+## 2026-09-06 — The mixer gets its Ø: polarity invert on the gain insert
+
+`GainParams.invertPolarity` (m38-a). A boolean, default `false`, appended at
+`EffectParamSpec` slot 1 so `gainLinear` keeps automation slot 0. It is the
+ordinary channel-strip control this app had none of, and nothing shipped could
+stand in for it: `gainRange` is `0...16`, clamped on init, so **no combination
+of existing settings could produce a negative multiplier.** That blocked fixing
+a backwards-wired mic, blocked auditioning both polarities on a two-mic pair,
+and blocked the null test — the single most useful verification move in audio.
+
+**`gainRange` was deliberately left alone.** A signed range was considered and
+declined: `gainLinear: 0` already means silence, so a −16…16 span makes 0 an
+awkward midpoint and fuses "turn it down" with "flip it" into one control. A
+switch is what the hardware does, what a beginner already understands, and what
+renders correctly as a toggle. The change is purely additive — a project saved
+before today has no `invertPolarity` key and decodes to `false` through the same
+clamping init `gainLinear` routes through, so no existing render moves.
+
+**No new command and no new MCP tool, and that was checked rather than assumed.**
+Effect parameters are a flat name/value surface, so polarity reaches agents
+through the verbs that already exist: seeded by `fx.add`, ridden by
+`fx.setParam`, described by `fx.describe` (name, `0...1`, default 0, unit
+`linear`, plus a note that teaches what a bare 0…1 cannot), echoed by
+`project.snapshot`. Wire count unchanged at **215** — `doc-count-drift` exit 0.
+
+⭐ **The real-time question was the transition, not the multiply.** An instant
+polarity flip mid-playback is a full-scale discontinuity, i.e. a click. The gain
+stage already smooths coefficient changes over ~5 ms, so the sign is folded into
+**that same coefficient** (`GainEffect.signedTarget`) rather than applied as a
+second stage: an armed flip retargets +g → −g and the existing declick ramp
+walks it through zero — a brief dip. Measured on a DC block: max per-sample step
+**0.0084**, where a raw flip would be 2.0, with exactly one sign change. No new
+smoothing machinery, and `invertPolarity: false` is bit-for-bit the old path,
+unity skip and all.
+
+⭐⭐ **The gate is a null test, and it has been shown to FAIL as well as pass.**
+Two audio tracks play the same transient-rich fixture — LCG noise bursts with
+hard onsets, deliberately *not* a sine, which can null by accident at the wrong
+offset — through identical unity-gain inserts, one with the flag armed. The
+residual is **exactly 0.0, i.e. −∞ dBFS** (x + (−x) is exact in IEEE-754, so
+this is asserted as zero, not as "small"). The control that makes it mean
+something: the same graph with the flag OFF sums to **−1.94 dBFS peak, +6.0206
+dB over the solo render** — and planting `invert: false` into the null leg makes
+that leg fail at −1.94 dBFS. A null test that has never been shown to fail is
+not a test.
+
+19 tests added across two new suites (`m38-a gain polarity — params, schema,
+persistence`, `m38-a gain polarity — offline render null test`) plus the store
+and control suites that already own those surfaces; nothing retired. Suite total
+7943 / 711, zero failures, 267.0 s.
+
+## 2026-09-05 — B3 re-cut: release is PREDICTED, and demo 3 stops being a comparison
+
+The compressor lesson is re-shipped to the SAME filename —
+`~/Movies/DAW Pro Lesson - The Compressor, Measured.mp4`, 1920x1080, **411.5 s,
+20.3 MB (was 338.6 s / 13.7 MB)**, all eight `verify.py` gates green, `-16.4
+LUFS / -1.5 dBTP`, a/v drift 14.7 ms. Sources: `scripts/video/comp/` gains
+`d3burst.mjs` (the new material), `d3measure.py` (the per-sample gain curve) and
+`pairgain.py` (the shared static gain an un-levelled A/B needs).
+
+⭐⭐ **DEMO 3 WAS THE HOLE AND IT IS FILLED WITH ARITHMETIC.** Every other
+chapter hands the viewer a number they can check; this one handed them a
+comparison, after its 6.45 Hz "pumping rate" was retracted for reading
+identically in the bypassed control. Release turns out to be exactly as
+predictable as threshold and knee: `CompressorEffect.swift:184` builds
+`releaseCoeff = exp(-1/(releaseMs*0.001*sampleRate))`, a one-pole with
+`tau = releaseMs`, so from G dB of reduction the time back to within 1 dB of
+unity is `releaseMs x ln(G)`. **Predicted 74.55 / 248.49 / 1987.93 ms at 30 /
+100 / 800 ms release. Measured 74.57 / 248.49 / 1987.92.** The falsifying control — the
+same burst at ratio 1:1 — sits at 0.0 dB with no crossing to time, so its
+recovery is undefined, as it must be.
+
+⚠️ **THE MATERIAL IS A GATED BURST, AND IT DROPS TO A QUIET TAIL RATHER THAN TO
+SILENCE.** A drum loop cannot show a release at all (the next hit arrives before
+the recovery finishes — now one sentence of narration rather than a missing
+demonstration). And the gain curve is `compressed / dry` SAMPLE BY SAMPLE, which
+on silence is 0/0: the tail, 12.7 dB below threshold, is the carrier the
+recovery is measured on.
+
+⚠️ **THREE CONFOUNDERS, EACH HANDLED RATHER THAN HOPED AWAY.** (1) The burst
+voice's own synth release was 0.05 s in every other rig here — long enough to
+take ~70 ms to fall through 12.8 dB, so a 30 ms release would have measured the
+SYNTH. It is 0.001 s on this rig. (2) The first pass set the reduction to
+12.2 dB and the 30 ms release **never reached -12 dB** (deepest -11.934),
+because a fast release starts recovering while the peak detector is still
+falling; deepening to 13.8 dB makes the crossing exist at every release, and a
+two-crossing time (-12 dB to -1 dB) is independent of depth. (3) The detector's own fixed 5 ms
+decay, which I expected to make the recovery run long — and this is where the
+re-cut caught itself.
+
+⚠️⚠️ **THE RE-CUT RETRACTED ITS OWN DEVIATION MID-BUILD, AND THE RETRACTION IS
+NOW A 40-SECOND BEAT IN THE FILM.** The first pass measured 74.688 ms at a 30 ms
+release and put "the detector's own 5 ms decay" on the card as the cause. That
+was the INSTRUMENT, not the compressor: `d3measure.py` discarded every sample
+within `FLOOR_DB` of a zero crossing, and against a −39.67 dBFS tail a −60 dB
+floor blanks ~0.15 ms per half cycle — which finds the −12 dB crossing EARLY and
+the −1 dB crossing LATE, both biases pointing long. At a −80 dB floor it reads
+74.583; with both crossings linearly interpolated, **74.57 against a 74.55
+prediction — a residual of 0.02 ms.** The detector's decay is real and is still
+falling when the release begins; it CANCELS between two crossings, because once
+the target reaches 0 the envelope is a pure exponential. ⭐ **A deviation with a
+named cause is only as strong as the test behind the name** — the 6.45 Hz
+retraction's own lesson, one layer deeper, and the film now says it out loud.
+
+⭐ **CHAPTERS 6 AND 7 STOPPED SHARING A CLAUSE.** "Makeup and mix are not
+compression at all" was one idea over two chapters and ~90 s. They are not one
+idea: makeup changes the LEVEL, mix changes how much of the compressor is in the
+signal at all. Each has its own clause now, and the closing card and closing
+narration were rewritten so the spine is seven clauses for seven chapters.
+
+⭐ **DEMO 6'S LOUDNESS HALF IS AUDIBLE INSTEAD OF ASSERTED.** The A/B is no
+longer loudness-levelled: one shared static gain (+12.581 dB) across both halves
+with `normalize: false`, so the 19.3 LU collapse plays rather than sitting on a
+card the ear cannot check. The 11.65 dB transient figure rides the same pair.
+
+⚠️ **A/B HALVES THAT DIFFER ONLY BY A BADGE READ AS A STUCK VIDEO.** The re-cut
+first used the two arrangement bursts for demo 3's halves; extracted, they were
+the same two clips with the playhead in the same place. The halves now show the
+compressor panel at 30 ms against 800 ms — the one value the ear is being asked
+to judge. Found by looking at the frames, which no gate in this rig can do.
+
+**Verified by reading ten frames of the shipped file**, including one INSIDE the
+intro (the corner meter is correctly absent — the sting already is that
+instrument at full size) and one during narration (present, 48 thin lines,
+violet-to-cyan frequency ramp, peak caps).
+
+## 2026-09-04 — B3: the compressor lesson, and a pipeline that inverted its own point
+
+The probe episode for the mix-panel series is shot and shipped:
+`~/Movies/DAW Pro Lesson - The Compressor, Measured.mp4`, 1920x1080, 338.6 s,
+13.7 MB, all eight `verify.py` gates green. Six demonstrations, every number
+predicted from the compressor's gain computer before anything was rendered and
+then measured off the render. Built from `scripts/video/comp/shoot.mjs` (the
+panels, each knob photographed at every value with a read-back asserted against
+the project before the frame is spent) and `scripts/video/comp/spec.py`.
+
+⭐⭐ **`assemble.py` could not carry the episode's honesty beat, and no gate
+would have said so.** Play segments ran a single-pass `loudnorm`, which is
+dynamic. Demo 5 exists to show that makeup gain makes the compressed take
+LOUDER and that louder wins every blind A/B — and MEASURED, a pair that really
+differed by 2.1 LU (-26.7 vs -24.6 LUFS) came out of that filter at -17.3 vs
+-18.8: the difference was **inverted**, not merely flattened. A stage may now
+set `"normalize": false` (default unchanged) and pre-gain its own wavs with one
+shared static gain. Concatenating the pair into a single file was tried first
+and does not work — that is where the inversion was measured.
+
+⭐⭐ **A/V drift, and the two fixes that made it worse.** The gate failed at
+521 ms and then 875 ms. Trimming the stills track to an exact `total` was
+wrong (the truncation happens later, in `mux`'s `-shortest` with `-c:v copy`);
+having `talk_audio` return the written file's duration was wrong (it equals the
+vo's). The cause, found by probing the concat in isolation, is `meter.py`: it
+re-encodes video at a constant `-r fps` over a concat whose last frames are
+HELD, so 338.520 s of video (10129 packets = 337.63 s of frames) became
+337.667 s while the audio stayed 338.541 s. `meter.py` now pads with a cloned
+last frame and cuts to the audio's duration — **8.0 ms**. Its pre-existing
+`shortest=1` guard fixed the mirror-image case and was blind to this one.
+`assemble.py` also gained a same-shaped backstop for the meter-off path.
+
+Two defects that only LOOKING AT THE PIXELS could find, both of which passed
+every gate: the bursts photographed the MIXER (`debug.effectEditor` selects the
+MIX tab and nothing selected it back, so "the app playing" was three channel
+strips with no arrangement, no playhead and no notes — `ui.showMixer
+{show:false}` before the burst is the fix), and the BEFORE/AFTER badge at
+`H*0.82` sat squarely on the MIX readout in demo 6, the one value that A/B
+exists to show (fixed with a taller crop for A/B halves only).
+
+Findings, including the words-per-minute check's limit on short lines, are in
+`docs/lessons/PROGRAM.md`. No generated video is committed.
+
+## 2026-09-05 — M35 g: the four `view.*` tools reach the user's agents
+
+The three prior M35 items built the wire commands and MCP tools that let an
+agent SEE the app; this one ships them. `demo-director` — the only agent in
+`claude-plugin/` holding the `Read` tool, and therefore the only one that can
+actually look at the PNG `view_capture` writes — is granted all four:
+`view_capture`, `view_select_clip`, `view_panel_layout`, `view_open_editor`.
+The other six specialist agents hold no filesystem tools and were left
+untouched: a screenshot tool with nothing to read it back would be a
+distraction, not a capability.
+
+The plugin's bundled server (`claude-plugin/server/index.mjs`) was
+regenerated from `mcp-server/src/` (esbuild) and stdio-verified against the
+built artifact itself: `tools/list` reports 220 tools including all four
+`view_*` names, a negative control (`view_delete_universe`) is correctly
+absent, and `view_capture`'s description carries the "back-to-back
+`view_select_clip` → `view_capture` is safe" text. Plugin version bumped
+`0.11.0` → `0.12.0`. **A `/plugin update` is now due.**
+
+Also fixed in passing: `claude-plugin/skills/daw-wire-reference/SKILL.md`'s
+hand-maintained tool count, which had drifted to 208 against a measured 220 —
+`doc-count-drift.mjs` only pins the command count, not this one, so it rotted
+silently across several closes.
+
+## 2026-09-04 — M35 f: the screenshot showed the frame BEFORE the thing you asked for
+
+⛔ **A `view.selectClip` → `view.capture` pair photographed the STALE frame,
+and both calls reported success.** Selecting a clip written at C1/D1 answered
+`reason: "piano-roll-opened", editorOpen: true` — an honest reply about a frame
+that had not been drawn yet — and the screenshot taken straight afterwards came
+back as the piano roll at its default anchor with an EMPTY GRID. One more round
+trip and the same call framed the notes correctly. The reply was true and the
+picture was a lie, which is the worst possible failure on the one verb whose job
+is showing you the truth: an agent goes on to reason about a photograph of the
+past, with nothing to tell it so.
+
+**`view.capture` now performs a bounded flush before it rasterizes**, so a
+capture taken immediately after `view.selectClip` or `view.openEditor` shows what
+those calls did. `debug.captureUI` is untouched.
+
+⚠️ **The obvious fix did not work, and that is the interesting part.** Spinning a
+nested runloop — what `debug.captureUI` has always done — changed the captured
+frame by ZERO bytes, and because a spin that never ran looks exactly like a spin
+that ran and could not help, that arm was re-run at 2.0 s with the capture's wall
+time instrumented: 2349 ms measured, same stale frame. The caller is *occupying
+the main actor* while it spins, and the work it is waiting for is main-actor
+work, so it cannot run. Spinning harder could never have fixed it; the actor has
+to be released. The flush is therefore a short `await`, and with it cut to 20 ms
+every check still passed — what the fix buys is the SUSPENSION, and the 0.2 s
+ceiling is pure margin.
+
+⚠️ And the stale frame was not "before the roll opened": it showed the roll
+MOUNTED at its default anchor. What had not landed was the second-order chain the
+pitch-axis focus hangs off — geometry tick → focus request → scroll — each link
+needing another main-actor turn.
+
+⭐ **`scripts/gates/m35-view-surface-probe.mjs`** drives a real staging app on
+17695 through all four `view.*` verbs and fails if a capture disagrees with one
+taken a round trip later. It was written BEFORE the fix and went red on the real
+defect; `M35F_ASSERT_STALE=1` inverts its polarity so the same demonstration can
+be repeated on a fixed tree. It refuses to score at all (exit 3) if its own
+controls do not fire — a probe that cannot show it would fail is worth nothing.
+
+## 2026-09-04 — M35 a–e: an agent can now LOOK at the app it is driving
+
+⭐⭐ **The gap was measured, not felt.** An agent over MCP could mutate the
+project but could not see it: it could add a track and it could not screenshot
+the app, open the piano roll on a clip, frame what it wanted to see, or open the
+panel it had just changed. Those four capabilities already worked — as app-tier
+`debug.*` staging seams deliberately off `allCommands` and off MCP. They are now
+production verbs: **`view.capture`, `view.selectClip`, `view.panelLayout`,
+`view.openEditor`**, mirrored 1:1 as `view_capture` / `view_select_clip` /
+`view_panel_layout` / `view_open_editor` (the mechanical name rule lands on all
+four unaided — no exception-table entry, confirmed rather than assumed).
+
+The mechanism is the shipped `PluginUIControlling` / `EditPasteControlling`
+pattern, verbatim: `Sources/DAWControl/ViewUISurface.swift` holds a
+Foundation-only `@MainActor protocol ViewUIControlling` plus its result types,
+`CommandRouter` gains `public weak var viewUI`, and `AppModel` installs itself at
+startup. **No AppKit, no SwiftUI, no DAWEngine entered DAWControl** — the
+handlers live in `Sources/DAWApp/ViewUIWireSurface.swift`.
+
+⭐ **`debug.*` is unchanged in BEHAVIOUR and in every key it emits, and the two
+tiers share ONE implementation rather than a copy.** The rasterization moved into
+`AppModel.captureMainWindowCore(to:)` and both callers use it, so the `debug`
+handler's lines DID move — "byte-for-byte" would be the wrong claim and is not
+made. `debug.captureUI` keeps its `ImageRenderer` fallback, its `target:"plugin"`
+mode, its `selectClip` parameter and its permissive unknown-key behaviour.
+
+⚠️ **`view.capture` deliberately does NOT inherit that fallback, and the absence
+is the feature.** `ImageRenderer` cannot draw NSScrollView-backed content, so the
+track rows, the timeline clips and the piano-roll grid — everything an agent
+asked to SEE — rasterize blank in a 1280×800 PNG the call would report as a
+success. That is this tree's characteristic failure mode. It throws instead, and
+so do the other three when the session is headless: there is no honest empty
+answer to "show me the app."
+
+⭐ **`view.selectClip` answers WHY, and one of its three reasons was not in the
+settled design.** An AUDIO clip selects and opens no piano roll — the reply says
+`audio-clip-has-no-editor` rather than reporting a bare success. The third
+reason, `workspace-is-not-arrange`, came out of building it: the roll mounts in
+the Arrange workspace, so a MIDI clip focused while the Mix console is up is
+selected and **not on screen**, and calling that `piano-roll-opened` would hand
+an agent a capture it could not explain. `editorOpen` is derived from
+`AppModel.openEditorClip` — the tree's one rule for "is the roll on screen" —
+never from `clip.isMIDI`, so the reply and the screen cannot disagree.
+
+⚠️ **A WRITTEN RULE WAS NARROWED, AND THE THREE PLACES THAT CITED IT NOW AGREE.**
+`docs/DESIGN-LANGUAGE.md` records adjustable window layout as a documented
+non-invokable preference with no wire command, and `setPanelLayout`'s header and
+its m25-b-1 comment block both cited it. `view.panelLayout` exposes exactly
+`workspace` and `editorMaximized` — the two controls that decide **what a capture
+can see** — and every other slot (sidebar width, row heights, zoom, minimap,
+waveform scaling, audition, follow) stays debug-tier chrome. m25-b-1's own
+argument was not overturned; a different question reached the same control from
+the capture side. **The fence is enforced, not merely written: 13 debug-tier keys
+are refused by name at both the wire and the MCP boundary.**
+
+`view.openEditor` dispatches an exhaustive `switch` over
+`InstrumentDescriptor.Kind` with **no `default:`** — a future kind must be routed
+on purpose rather than fall into a bucket that names an editor which is not on
+screen — and delegates every hosted Audio Unit to `pluginWindows.openUI`, so
+exactly one code path in this app ever materializes an AU window.
+
+**Counts re-derived, never trusted.** Wire **211 → 215** (`node
+scripts/gates/doc-count-drift.mjs`, two independent routes agreeing, its own
+positive control firing before it scored anything); MCP **216 → 220**. ⚠️ A
+"208 MCP tools" figure in circulation alongside these was **stale**; 216 was
+correct, and the tool pin says so. The four entries went in immediately after
+`plugin.listOpenUIs`, ~70 from the end — a tail append would have reddened ~51
+end-relative assertions — and that placement is now pinned BY NAME in a test that
+explains the reason, so a future append breaks one test that teaches instead of
+fifty that do not.
+
+⚠️ **The "m35 view-surface design brief" that `docs/ARCHITECTURE.md` and
+`docs/ROADMAP.md` both cited as the home of the schemas NEVER EXISTED ON DISK.**
+A citation written forward and never redeemed — the registry-drift shape
+`doc-count-drift.mjs` exists to catch, one layer up where no gate was watching.
+Both citations are replaced with paths that can be opened.
+
+Two existing tests changed shape rather than counts, and neither was retired:
+`EditorMaximizeSiteTests.staysOffTheWire` was **inverted and renamed**
+`onlyReachableThroughViewPanelLayout` (an absence-test that simply deleted itself
+would have left the fence unguarded), and `ControlTests`' every-command-has-a-route
+loop excludes the four `view.*` verbs because that router is headless by
+construction and the loud refusal IS the verb working. The `@MainActor` suite
+cadence fired on schedule at 375 and was bumped to 377 with the circularity its
+own note predicts recorded again.
+
+⛔ **One thing no headless test can see, filed for m35-f's staging probe to
+measure FIRST:** `debug.captureUI` spins the main runloop 0.2 s after a
+`selectClip` before it rasterizes, because setting the selection only SCHEDULES
+the SwiftUI update. `view.selectClip` and `view.capture` are two separate wire
+requests, so whether a back-to-back pair photographs the newly-opened roll or the
+frame before it depends on the control server yielding the main runloop between
+them. That is a real-app question, and the probe on staging 17695 is where it
+gets answered.
+
+**Measured: Swift 7924 tests / 709 suites, 0 failures (7906 / 708 without the new
+suite — +18 tests, +1 suite, zero retired). MCP 747/747 (was 732; +15). `swift
+build` clean. `doc-count-drift` exit 0 at 215.**
+
+## 2026-09-04 — The fourth cut: the roll finds its notes, and a meter in the corner
+
+⭐⭐ **The piano roll was photographing an empty grid, and it was right to.** A
+49 Hz heartbeat is written at C1; the roll opens anchored high in the 128-row
+pitch stack, so the notes were drawn in the minimap and in the velocity lane and
+nowhere the camera was pointed. Shrinking the rows is not the answer —
+**measured at the 10 pt row-height floor the grid still bottomed out at F2**,
+with the notes below it.
+
+So the pitch axis got a way to be pointed: `PanelLayoutStore` gains a
+`pianoRollFocusPitch` + nonce pair — deliberately the ONE slot on that type that
+is **not** persisted, because it is an event ("put that pitch in frame, now")
+and not a remembered dimension — and `PianoRollView.focusPitchAxis(on:)` turns
+it into a clamped vertical scroll. `debug.panelLayout {pianoRollCenterPitch}`
+drives it. `burst()` sends the clip's own MEDIAN pitch, so no chapter is
+special-cased and the heartbeat, the 808 and the vowel chapters all frame their
+own material.
+
+⚠️ **The product half is NOT done and is filed as m35-h**: a user who opens the
+roll on a bass clip still sees an empty grid. The seam exists; the policy —
+centre on the clip's own pitch range when the roll opens — is the roadmap item.
+
+⭐ **A corner meter, and it is a real analysis rather than a decoration.**
+`scripts/video/meter.py` splits the film's own audio into 16 log-spaced bands
+and burns a small spectrum display into the bottom-right, in the intro sting's
+palette. It moves under the narration and it moves under every demo, so a viewer
+can tell "this is playing" from "this is a still" without listening — and
+because it is banded, the 49 Hz heartbeat lights the left of it and nothing
+else. **Measured on the shipped film: bands 0–6 at full height, 7–15 at zero.**
+It runs BEFORE the duration read and before `verify.py`, so every gate judges
+the film that actually ships; a post-processing step after the gates is a step
+the gates cannot see.
+
+Two rig defects fell out of doing it, both found by counting rather than by
+looking:
+
+- **A re-shoot did not clear its burst directory.** It writes `f0001..fN` and
+  stops, so the previous take's frames past N survived and the assembler globs
+  the directory — a shorter re-shoot silently ended on frames it was meant to
+  replace (25 files on disk, 18 in `meta.json`).
+- ⭐ **Two instruments disagreed, and neither was broken.** The meter read flat
+  where `ffmpeg astats` read −16 dB. `ffmpeg -ss` before `-i` is a FAST seek and
+  does not land on the second you asked for: the two were reading different
+  moments, and the audio at that instant really is a −37 dB gap between words.
+  **Check that two instruments are pointed at the same sample before believing
+  either.**
+
+## 2026-09-04 — The third cut: the playhead moves
+
+⭐⭐⭐ **A demo segment is no longer a frozen picture with audio over it.** Every
+sound the film plays now shows the app playing it: the transport running, the
+position readout counting up, and the playhead crossing the notes in the piano
+roll — including the siren's pitch-bend curve drawn underneath its one held
+note, and the eight-track arrangement scrolling under follow-playhead at the
+drop.
+
+`assemble.py` already supported **bursts** (a directory of frames plus a
+`meta.json` frame rate, used in place of a still) and nothing in this rig had
+ever produced one. `build.mjs` now exports `burst(name, seconds, fromBeat,
+opts)`, which opens the roll on the clip, starts the transport and photographs
+the app until the sound ends. Nine exist.
+
+⭐ **Real time comes for free**: `debug.captureUI` costs ~285 ms per frame, so
+the transport advances ~285 ms between frames and a sequence played at the
+*measured* capture rate is the playback, correctly paced. Rates were 2.2–2.9 fps
+with audio running, against 3.5 idle; `meta.json` records what happened rather
+than assuming.
+
+⚠️ **Master volume to zero before capturing.** The burst plays through whatever
+output device the machine has, and nobody asked for eight seconds of siren out
+of their speakers. The audio was already rendered offline.
+
+⚠️ **A whole arrangement is the wrong thing to show in a piano roll.** The first
+`track-drop` burst opened one clip's roll, scrolled to bar 1 while the playhead
+was at bar 36 — an empty grid, photographed 36 times. Multi-track chapters now
+pass `{arrange: true}`. Found by looking at one frame.
+
+⚠️ **A stage naming a burst that does not exist silently degrades to a frozen
+still** — precisely what this change removes. `shortsmith.py` now warns at build
+time, naming the stage and the missing path, and the spec passes an explicit
+`bursts` directory because `--bursts` otherwise defaults to a *relative* path
+(the same defect `--work` had).
+
+⚠️ **These capture scripts did not exit.** `close()` does not always let node's
+event loop drain, so a finished script looked exactly like a hung one and
+blocked the capture loop for four minutes per chapter. They now `process.exit(0)`.
+
+## 2026-09-04 — The second cut: chapters, controls that move, and a synth trying to talk
+
+The session film re-cut after the user watched it. Every note they gave was
+about something no gate in this rig can measure, which is the through-line.
+
+⭐⭐ **Panels are now SEQUENCES, not stills.** "Showing controls does not make
+sense unless you show modifying anything there" — correct, and a still cannot be
+told apart from a control that is doing something. `sweepshot.mjs` drives a
+parameter through its range and photographs each step, so the film shows the
+four oscillator buttons lighting in turn, the thunder filter closing 16 kHz →
+70 Hz with the number legible in every frame, the saturator at the three drive
+figures the narration quotes, and the two EQ peaks walking ee → ah → oo.
+
+⭐⭐ **Ten numbered chapter cards with spoken prologs.** The first cut ran the
+heartbeat straight into thunder with no break of any kind. An 808 is also now
+explained — a drum machine from 1980 — *before* the film calls it the most
+recognisable bass in music, and there is a TURN IT UP warning before the two
+chapters that live below 60 Hz, where a laptop speaker reproduces nothing.
+
+⭐⭐ **A new chapter: asking the synth to say "Hi there".** Two EQ peaks on
+automation lanes, walked along a vowel path. Measured: 730 Hz leads the first
+vowel (+29.1 dB over the window mean), 2290 Hz takes over through the glide,
+1840 Hz leads the second word. A local speech recogniser heard **"I am…"** —
+with a control transcription proving the recogniser worked. The vowels landed
+and every consonant did not, because h, th and r are noise and this synth has
+none. Second honest failure in the film, and it earns its place like the rain.
+
+⭐ **`debug.captureUI` measures 3.5 fps, and it is 3.5 at every `scale`** (277 /
+282 / 284 ms per frame at 2 / 1.5 / 1). The cost is the window render, not the
+pixels. That is the ceiling on motion in these films; screen recording is not a
+way around it (TCC permission this process cannot grant, no on-screen window,
+and it would capture the user's whole desktop).
+
+⚠️ **`debug.selectClip` does not exist — but the capability does**, as a
+parameter of `debug.captureUI`. The first cut shipped with no shot of the piano
+roll because `capture.mjs` called a command name that never existed and printed
+"skipped" into a log nobody read. `pianoshot.mjs` now shoots it, and the crop was
+re-framed after the first rect landed on the empty register ABOVE the notes —
+caught, again, only by looking at it.
+
+⭐ **`DAWPRO_PROFILE_ROOT` is how you photograph the app safely**: it moves
+autosave, recovery and settings to a scratch directory, so no "Restore unsaved
+work?" sheet can draw itself across the panel you are shooting. Discarding that
+snapshot is not an option when its owner cannot be told apart from the user's.
+
+**M35 seeded and designed, not built** (`docs/ROADMAP.md`, design in
+`docs/ARCHITECTURE.md` §Key future decisions): `view.capture`, `view.selectClip`,
+`view.panelLayout`, `view.openEditor` — promoting the capture and navigation
+seams to the production wire + MCP surface, because an agent that can mutate the
+project but cannot look at it is an agent that cannot check its own work.
+
+⭐⭐ **"Is the 808 deliberately quiet?" — no, and gain cannot fix it.** Measured
+as they sit in the film, the heartbeat is −15.7 LUFS at **−1.5 dBTP** and the
+808 −16.4 LUFS: already the loudest things in it, on the true-peak ceiling, with
+no headroom left (`assemble.py` loudness-normalises every demo). What is missing
+is the BAND. Through a 150 Hz high-pass — roughly what a laptop speaker does for
+free — the clean 808 loses **38.2 dB**, the saturated one **33.6 dB**, and the
+heartbeat **30.2 dB**, against 3.7 dB for the full track and 0.1 dB for the
+siren. **The 4.6 dB gap between the two 808 halves is that chapter's own thesis
+and had never been measured**; the film now quotes it, states that the A/B is
+loudness-matched, and carries the TURN IT UP card into the 808 chapter as well.
+
+**Shipped:** the film at 530.0 s, 23 stages, all eight gates green.
+
+## 2026-09-04 — A whole track from four waveforms, and the chapter that failed
+
+A session film and six Shorts, built by driving DAW Pro over the control
+protocol and photographing it as it went. **No generation model was used for
+any audio** — every sound is written as notes and shaped with the app's own
+synth, filter, envelope and effects.
+
+The constraint is the film. The built-in poly synth accepts exactly
+`saw|square|triangle|sine` and refuses everything else (measured, with a bogus
+value refused the same way as a control), so there is no noise oscillator and no
+sample is loaded — a police siren, a heartbeat, thunder, an 808 and a singing
+vowel all had to come out of those four shapes.
+
+**`scripts/video/session/`** is the whole rig: `build.mjs` (the wire helpers,
+which refuse port 17600 outright), `sounds.mjs` / `thunder2.mjs` / `sat.mjs`
+(one chapter's sound per run, rendered solo and measured), `track.mjs` (the
+64-bar arrangement, 8 tracks, 1,329 notes), `loops.mjs` (the DJ chapter),
+`capture.mjs` (the screenshots), and `spec.py` / `shorts.py`, which emit the
+specs for `shortsmith.py` with every figure injected from `MEASUREMENTS.json`.
+**A number is never typed twice**, so the film and the Shorts cannot disagree.
+
+⭐ **The rain chapter stays in, and it failed.** Spectral flatness went 0.0001 →
+0.0157 across two attempts — 157x better and still 36x short of white noise's
+0.5615. Cutting it would have made every other number less believable.
+
+⭐ **`shortsmith.py` now refuses to narrate a spec whose gates cannot pass.**
+A `factCheck` for "four bars" against a script that says "four-bar" burned eight
+speech takes before anyone noticed the gate, not the voice, was wrong. The
+pre-flight compares every `factCheck` and `brandCheck` against the script text
+before any synthesis runs, and was positive-controlled with a planted impossible
+gate. It caught two more spec bugs in this wave's own Shorts.
+
+⭐ **Narration is cached on a hash of the text AND its gates**, so fixing a typo
+in one stage no longer re-synthesises the other eleven. A 30-minute rebuild
+became about two minutes, which is what made iterating on the gates affordable.
+
+⚠️ **`amix` was quietly taking 6 dB off every bedded narration** — it normalises
+by input count. Fixed with `normalize=0`, verified by re-measuring a bedded
+stage (−5 dB → +1.44 dB) against an unbedded control that moved by exactly 0.00.
+
+⚠️ **A moving `crop` can pan but not zoom.** ffmpeg evaluates `crop`'s width and
+height once at configure time, so an animated zoom has to move the origin at a
+fixed size. `assemble.py`'s `_crop_expr` does that, and a comma inside `min()`
+ends `crop`'s argument list — reported, unhelpfully, as a missing filter.
+
+⭐⭐ **No gate in this rig knows WHERE a zoom lands.** The film shipped once with
+the siren chapter's zoom framing empty timeline below the synth panel, and all
+eight verify gates passed — "distinct frames" is content with two different views
+of nothing. Rendering each zoom rect as a still and looking at it took three
+minutes and caught that plus a saturator panel reading 30.0 dB under a narration
+that says "thirty two decibels". The panel was re-shot at the measured figure;
+the sentence was right.
+
+⭐⭐ **Three card-layout bugs, all found by reading one frame.** `sp()` inserted
+three literal spaces between letters while `card_bignumber` and `card_list`
+already letter-space with `track=`, so every label was rendered at triple width
+and auto-shrank to 12-24 pt to fit — legible, and a third of its intended size.
+`card_bignumber` had no fit at all on its label and unit, so "THE SIREN,
+MEASURED" shipped as "E SIREN, MEASUR". And a `list` card's left key had no
+column bound, so "the fundamental never moved" drew straight through its own
+value. The renderer now fits all three; the specs no longer need it to.
+
+⭐⭐ **A/B "before" halves are a fourth place the screen can contradict the
+script.** The 808 chapter played its clean-sine half over a screenshot of the
+SATURATOR at 32.0 dB — the same self-contradiction as the 30-vs-32 figure, one
+row down in the same spec entry. Re-shot against the 808's own POLY SYNTH panel
+with SINE lit. The re-shoot itself found two things worth keeping: the app's
+`DAWPRO_PROFILE_ROOT` gives a screenshot run an isolated profile, which is the
+only safe way past a "Restore unsaved work?" sheet (discarding the snapshot is
+not an option when its owner cannot be told apart from the user's), and a shot
+must be built in a fresh project — `project.open` on the 8-track session wedged
+the app twice.
+
+⭐⭐⭐ **`--skip-narrate` could assemble another spec's voice into a film, and
+did.** Narration takes are named for their STAGE id, so a film and a Short that
+each open with a stage called `01-hook` share one `vo/01-hook.wav` when built
+into the same `--out-dir`. A rebuild with `--skip-narrate` put the Short's
+fourteen-word opening under the film's fifty-one-word script, and **all eight
+gates passed** — every gate measures the file that exists, and a wrong take is a
+perfectly healthy file. The only symptom was eleven missing seconds. It was read
+off words-per-minute per stage: eleven stages between 226 and 266 wpm, and
+`01-hook` at 831. `--skip-narrate` now verifies the cache before assembling and
+refuses, naming the stages whose takes came from different text or gates
+(`verify_cached()`, positive-controlled — it names exactly the one stale stage
+and passes the other eleven). One `--out-dir` per spec is the other half.
+
+**Shipped:** the 404.4 s film and six Shorts, each with a publish sidecar
+carrying `containsSyntheticMedia: true`. The generated video is deliberately not
+committed; `.gitignore` now covers the media formats, `shots/`, `vo/` and
+`segments/` (601 MB of intermediates in this wave alone), with the reference
+voice files explicitly un-ignored.
+
+## 2026-09-03h — A publisher that defaults to private, and a scope that would have failed quietly
+
+**`plugins/narrated-film/scripts/publish.py`** uploads a finished film to
+YouTube, sets its thumbnail, files it in a playlist resolved BY TITLE (created
+if missing), and then **reads the video back** to assert title, privacy,
+duration and the synthetic-media flag against what was sent. Guide:
+`PUBLISHING.md`.
+
+⚠️ **The scope is `.../auth/youtube`, not `youtube.upload`.** Verified against
+the per-method authorization tables rather than recalled:
+`playlistItems.insert` accepts `youtube`, `youtubepartner` and
+`youtube.force-ssl` but **NOT** `youtube.upload`. The narrow scope uploads
+successfully and then fails to file the video — a partial success, which is this
+tree's characteristic failure shape.
+
+⚠️ **Uploads from an unaudited API project are FORCED to private** (any project
+created after 2020-07-28, until it passes YouTube's compliance audit).
+`verify` detects that exact case — asked public, stored private — and reports it
+as the audit lock with the remedy, rather than as a mismatch.
+
+⭐ **Verify POLLS.** `contentDetails.duration` is absent while YouTube is still
+processing, so a single read would compare against nothing and pass. It waits
+for `processed` before asserting.
+
+**Everything checkable offline is checked offline**, so the metadata is provably
+right before the one irreversible call. All 14 rules were negative-controlled:
+11 fail with exit 1 (over-long/blank/angle-bracketed title, over-long
+description, over-long tag set, non-numeric category, bad privacy, malformed
+`publishAt`, `publishAt` on a non-private video, missing thumbnail, non-boolean
+flags) and 3 warn deliberately and pass (unknown category id, `public`, unknown
+key). `--dry-run` prints the exact request body and touches no network.
+
+**Sidecars written for all five existing films** from the descriptions already
+drafted, and all five validate against their actual video files.
+
+⚠️ **The network paths are UNTESTED and cannot be tested until the user
+authorises** — that is stated in the guide and in the report rather than being
+papered over. `install.sh --publish` adds the Google libraries as an OPTIONAL
+extra so the tested default install is unchanged; `client_secret*.json` and
+`*token*.json` are gitignored, proven with a positive control and a negative
+control on `brand.json`.
+
+## 2026-09-03g — A plugin agent that silently lost its tools, and doc rot in the skill that taught it
+
+**`claude plugin validate` fails on `claude-plugin/agents/demo-director.md`, and
+that failure was invisible.** Its `description:` was an unquoted YAML scalar
+containing a colon-space, sitting above a `tools: >-` folded block; the parser
+cannot recover across that combination. The runtime consequence is the dangerous
+part: the agent still LOADS, taking its name from the filename, and **every
+other frontmatter field — `model: opus` and all 40-odd tool grants — is silently
+dropped.** A broken agent and a working one look identical until you run the
+validator. Both descriptions (`demo-director`, and `film-director` in the new
+plugin, which had the same latent shape) are now quoted, with the text preserved
+byte-for-byte through the escape. Both plugins validate clean.
+
+⭐ **The bisect was wrong until it had a baseline.** Quoting the description
+"fixed" it and removing the tools block "fixed" it — two independent single
+changes, which cannot both be the cause. The missing experiment was running the
+UNMODIFIED file through the same harness; it failed, confirming both results
+were real and the fault is the interaction, not either half.
+
+**Doc rot found by looking where the code had moved.** `skills/demo-film/SKILL.md`
+still taught the md5 frame check — extract PNGs, `md5 -q | sort -u | wc -l` —
+which this session PROVED passes a film that is a single still image, because
+h264 noise makes every extracted frame a different md5. It now points at
+`verify.py`, which sits in that same directory and compares pixels against a
+measured noise floor. `BRAND.md` still described `--holder` as defaulting to a
+neutral built-in; it now names `brand.json` as the source of truth and those
+flags as per-run overrides.
+
+⚠️ **`--brand` defaults to the copy inside the plugin.** Measured: with a
+`brand.json` in the working directory, `brand.py` without `--brand` loads the
+plugin's own file and ignores the local one — so a user's edited identity is
+skipped and the cards render the placeholder wordmark `YOUR BRAND` while passing
+every check in the kit. Documented in the plugin's SKILL.md and README, with the
+flag added to every example. The scripts print the brand file they loaded.
+
+**Verified by positive control:** agents AND skills are genuinely discovered by
+the validator (a deliberately broken copy of each was caught), so a clean pass
+means checked, not skipped.
+
+## 2026-09-03f — Three follow-ups, and a confound removed rather than documented
+
+**The `ms-halo` limiter ceiling was the wrong fix, and it is reverted.** It had
+been dropped to −4.4 dB to stop an AAC overshoot; that worked, but it limited
+that variant 2.8 dB harder than its siblings on an axis whose entire purpose is
+comparing INSTRUMENTS — so the listener would have been judging the limiter.
+MEASURED: encoding at 320k instead of 256k removes the overshoot completely
+(+1.0 → −1.2 dBTP) at the SAME −1.6 ceiling every other variant uses. The
+overshoot was codec headroom and the fix belonged in the encoder. All seven
+variants now share one ceiling and one bitrate, so the only difference between
+any two files is the thing named in its label. The original 256k encodes of the
+first three are kept in `256k-originals/`. ⭐ **A confound you can remove beats
+a confound you document.**
+
+**Both tech-house cuts get a trimmed greeting.** The shared greeting said "a
+digital audio workstation written almost entirely by AI" and the film's own
+opening said the same thing twelve seconds later. The identity sentence — "I am
+DAW Pro Claude Opus five" — is identical across every film, which is what
+carries the brand; only the overlapping clause is dropped. Lessons 1 and 2 keep
+the full greeting, because their openings do not collide with it. This avoided
+re-rendering 22 stages from an older-schema manifest, which was the actual risk.
+
+**The Russian cut is re-done**, with Russian voice-over and a Russian opening
+chapter.
+
+The brand-substring gate earned its place twice more. Both new greetings passed
+the aggregate content gate (0.83 and 0.89) while saying **"DAW Proclawed Opus
+five"** and **"DAW Pro Cloud Opus five"**. The English one was a real speech
+defect and took four regenerations to land. ⭐⭐ **The Russian one was NOT** —
+transcribing the ALREADY-SHIPPED Russian narration through the same recogniser
+shows it renders "Claude" as "Cloud" too, so that is Russian Whisper
+transliterating and the take was correct all along. **The same control that
+convicted the English take exonerated the Russian one; without it, six more
+regenerations would have chased a defect that did not exist.**
+
+The Russian film's join measured a 0.52 sample jump against 0.13 for English.
+Not a click: the source film, before any concatenation, has that same 0.5193
+step inside its own first 0.3 s, and both films start at exactly 0.0000. The
+concat contributed nothing. **Measure the source before blaming the edit.**
+
+Chapters re-derived for both tech-house cuts (+13 s, not the +17 s the longer
+greeting needed) and all five descriptions re-validated against actual
+durations; the tech-house runtime claim corrected to 13:35.
+
+## 2026-09-03e — The film pipeline becomes its own plugin
+
+The narrated-video pipeline is now `narrated-film`, a second plugin in this
+repo's marketplace with **no dependency on DAW Pro or on any other
+application**. `/plugin install narrated-film@daw-pro`.
+
+`tools/voice-video-kit/` was MOVED, not copied, to `plugins/narrated-film/` —
+it already existed to be "installed and run on its own" and only lacked a
+manifest, a skill and an agent. A third copy of these scripts would have been
+the duplication this tree has laws against. What moved: the installer, the
+cloned voice, the content gate, the assembler, the brand cards, the channel
+art. What did NOT move: `dawctl.mjs` and `panels.mjs`, which drive DAW Pro's
+control port and stay in `skills/ui-capture/`. **The generic plugin no longer
+requires node at all** — it was only ever needed by those two files.
+
+**Brand identity is now data.** `brand.py` and `channel.py` read `brand.json`
+— wordmark, sub-label, byline, copyright holder, disclaimer, palette, fonts,
+and `markBars`, the bar heights of the mark itself — instead of hardcoding
+"DAW PRO" in six places. DAW Pro's own values live in a `brand.json` beside the
+plugin's mirror, so its invocations are unchanged.
+
+**Pinned, not assumed.** Rendering the DAW cards through the parameterised
+scripts produces output **bit-identical** to the shipped `intro.mp4`,
+`outro.mp4`, `avatar.png`, `lockup.png` and `banner.png` — mean difference
+0.00, zero pixels changed, at every sampled frame. The control is a render with
+the *generic* brand file, which differs by 54,000–129,000 pixels and, on the
+intro, matches the shipped card until t=3.0 s and diverges exactly when the
+wordmark resolves. A pin that cannot fail is not a pin.
+
+**New: `scripts/verify.py`.** The probes that had been retyped as shell
+one-liners all week, in one place with exit codes: streams, A/V drift, distinct
+frames, audio present, loudness and true peak, concat join seams, and
+transcribe-back scored against its own script *and a different stage's*. Every
+check that could pass by doing nothing carries a positive control, and a check
+whose control fails reports `BROKEN` rather than `ok`.
+
+Writing it produced three findings of exactly the kind it exists to catch, all
+found by running it against a deliberately broken film rather than by reading
+it:
+
+- The frame check originally **hashed** the extracted PNGs and **passed a film
+  that was a single still image for its entire duration** — h264 noise makes
+  every extracted frame a different md5, so six identical pictures scored "5
+  distinct of 6". Hashing answers *are these files identical*, which is not the
+  question. It compares pixels now, against a measured noise floor (still film:
+  max 0.11; real film: max 5.04).
+- The loudness check read ebur128's **first per-frame** reading rather than the
+  summary and reported **−70.0 LUFS** for a healthy film, because the film opens
+  on a title card and frame one is gated silence. A wrong number that looks
+  exactly like a real measurement.
+- The join-seam **control was not a worst case**: splicing two arbitrary moments
+  gave a jump of 0.06 while ordinary audio in the same film reached 0.11, so the
+  control sat *below* the thing it was meant to bound. It is now peak against
+  inverted peak (0.91), which is the real worst case for the material.
+
+A fourth was a policy error rather than a bug: the loudness check enforced
+−14 LUFS by default and failed a perfectly good narrated lesson at −19.3. There
+is no single right integrated loudness for a film; the number is always
+reported and only enforced when the caller states a target. True peak over
+−1.0 dBTP stays a failure whatever the material.
+
+`REF_TEXT` in `narrate.py` still names DAW Pro, and that is correct — it is the
+literal transcript of the shipped reference clip. It now says so, loudly:
+generalising the string without replacing the audio degrades every line the
+model speaks, and the result still passes the content gate.
+
+DAW Pro plugin **0.10.0** (its mirrored scripts changed, and it gains
+`verify.py` and `design-voice.py`).
+
+## 2026-09-03d — MuseScore trailer variants, and a greeting on the back catalogue
+
+Four more channel-trailer variants, and the brand intro/greeting/end card added
+to the three films that shipped before Lesson 3 set the format. The existing
+three trailer variants are untouched and still byte-reproducible: `build.mjs`
+now takes variant names on the command line and defaults to exactly the old
+three.
+
+**The variants move on one axis at a time.** The original three vary ENERGY on
+General MIDI; the four new ones freeze energy at `theme` and vary INSTRUMENTS
+(MuseScore_General.sf2). Comparing across both at once would make a pick
+meaningless. All seven are gain-matched to −14.0…−14.2 LUFS measured on the
+delivered m4a, and pairwise-verified distinct (max-abs sample difference, with
+a file-against-itself control returning exactly 0.000000).
+
+Four things measured here, three of which were wrong first:
+
+**A patch that loads is not a patch that plays.** `project.overview` cannot
+verify a sound bank — its `instrument` field is the bare string `"soundBank"`,
+so the obvious readback would have thrown on every variant. `project.snapshot`
+carries the resolved patch NAME, which is the real gate: asking for a bank/LSB
+that is not in the file stores the numbers *exactly as requested* — a numeric
+round-trip passes it — and resolves to a placeholder `MuseScore_General · P89`
+instead of a real patch name. Verified by planting a bogus LSB and watching the
+name check fire where the number check could not.
+
+**Two files can be different patches and identical audio.** The "Expr." variant
+rendered byte-identical to the plain MuseScore one: same md5, sample difference
+exactly zero. The patches had loaded correctly. MuseScore builds them as the
+same samples with modulators routed to CC11 expression, so with nothing written
+on CC11 they *cannot* differ — the patch was fine, it had nothing to respond
+to. That variant now writes the swell, which is the only thing that makes the
+bank mean anything. Caught only because two variants reported identical loudness
+to two decimal places.
+
+**AAC overshoot is material-dependent, not a constant.** The halo/vibraphone
+variant rendered a clean −1.6 dBTP (DAW and ffmpeg agreeing) and encoded to
+**+1.0 dBTP** — a 2.6 dB overshoot where the same ceiling on `theme` overshot
+0.3 dB. Bright, dense, sustained content is the codec's worst case. Fixed with a
+per-variant ceiling (−4.4 dB), which costs no loudness because the convergence
+loop makes the target back up with gain.
+
+**A content gate that passes can still be shipping a wrong brand name.** The
+greeting scored 0.86 similarity — comfortably over the 0.60 floor — while
+saying *"Diadavius, Proclawed Opus five"* for "DAW Pro Claude Opus five". Four
+words out of forty cannot move an aggregate score, and those four are the only
+ones that must be right. It was caught by transcribing the ALREADY-SHIPPED
+Lesson 3, which renders the same phrase cleanly through the same recogniser —
+proving the fault was in the speech, not the transcription. Regenerated with an
+explicit check on the brand phrase; the accepted take scores 0.95.
+**An aggregate similarity score cannot gate a short critical substring — check
+the substring.**
+
+The three films are re-cut by stream copy, not re-encode: intro/outro/film all
+measured identical (h264 High, yuv420p, 1920×1080, 30/1, tb 1/15360, aac 48k
+stereo), so the finished lesson content is preserved bit-for-bit — verified by
+comparing a mid-film frame in the new cut against the original at the same
+moment (0.00 difference, against a control that returns 9.86). Originals are
+kept in `~/Movies/pre-intro-originals/`. One shared greeting take is reused
+across all three, deliberately: three generations would be three subtly
+different readings of the same words. Chapter timestamps shifted +17 s with a
+new opening chapter, all four descriptions re-validated against their actual
+durations.
+
+## 2026-09-03c — Channel-level brand assets, and a visualiser that is not Pillow
+
+Plugin **0.9.0**. A video series and a channel are not the same thing, so
+`scripts/channel.py` renders the assets a channel needs and the per-video cards
+in `brand.py` are left alone: the videos still say LESSONS, the channel says
+AGENTIC. `brand.py` gained `--sub` for exactly that, defaulting to the old
+string so every existing film renders byte-identically.
+
+Three traps, each of which produced a wrong artefact before it produced a right
+one:
+
+**The avatar is a circle, at 88 px.** A wordmark is mud at that size, so the
+avatar is a *mark* — the spectrum-bar motif, cyan at the edges resolving to
+violet in the middle, which is the design language's colour for anything
+AI-touched. `channel.py avatar` therefore writes circle-masked previews at 800
+and 88 px alongside the file, because "looks fine at full size" is not evidence
+about the size it is used at.
+
+**Hand-placed layout is centred layout's convincing impostor.** The banner
+lockup was left-aligned inside the 1546×423 safe area, which reads as balanced
+on a 2560 px desktop banner and badly lopsided on mobile, which crops to the box
+and nothing else. The lockup had the same bug worse: fixed at x=200 on a
+1600 px canvas, its artwork ended at x=822 — a logo file half of which was
+empty. Both now measure the text and centre the group.
+
+**And a README claim that was simply false.** It described the lockup as
+transparent; the file was opaque RGB. Verified by reading the pixel, not by
+reading the code that drew it. There is now a real RGBA variant, and the
+knockout is checked by counting opaque pixels and their bounding box rather
+than by sampling one point — the first probe sampled empty space and would have
+passed a blank image.
+
+**The trailer.** 72 s at 120 BPM in A minor: the same key and tempo as the
+5-second sting, opening with the sting's own rising figure and closing on its
+landing chord, so the channel loop sounds like the sting grew. Hand-written
+notes through GM instruments; no generation model, which is what the channel
+claims about itself and therefore had to be true of its own trailer.
+
+Three variants ship, differing on **one axis only** — energy — with identical
+harmony and melody, gain-matched to within 0.2 LUFS so the choice is musical
+rather than a loudness preference. Master chain is a gain insert (the fader
+stops at +6 dB and GM material needed +14 to +16) into a true-peak limiter, with
+the gain converged by measure-correct-repeat: a single computed gain cannot land
+it, because the limiter sits after the gain and the relationship is not linear.
+
+⚠️ **The limiter ceiling is −1.6 dBFS, not −1.0, and that is deliberate.** AAC
+overshoots: a −1.0 dBTP wav measured −0.5 dBTP once encoded. Limiting to −1.6
+lands the *delivered* mp4 on −1.3. Trimming the wav afterwards was tried first
+and cost 0.7 dB of loudness for the same peak.
+
+Finally, `showfreqs` was tried for the visualiser and rejected — `mode=bar`
+fills solid from the baseline with no gaps, so it cannot draw the logo's shape.
+The bars are Pillow, but the glow layer is rendered at 1/3 scale and upscaled,
+which is what makes 2160 frames take 75 seconds instead of ten minutes.
+
+## 2026-09-03b — A brand for the lessons, and a lesson that argued with me
+
+Plugin **0.8.0**. `scripts/brand.py` renders the two pieces of furniture every
+video now carries: a 5-second opening title whose spectrum bars are driven by
+the actual sting, and a closing copyright card. Both go through the same encoder
+flags as the film body, and `assemble.py` gained `--intro` / `--outro` which
+*refuse* a card whose streams do not match — `concat -c copy` does not error on a
+mismatch, it just glitches on playback.
+
+The sting is hand-written in DAW Pro at 120 BPM so that 5.0 s is exactly 10
+beats, landing on beat 7 where the wordmark resolves. It is gain-matched with a
+measured static gain, not `loudnorm`, which came out 3.7 dB hot on something
+that short and dynamic.
+
+Two drawing lessons are written down in `BRAND.md`: this ffmpeg has no
+`drawtext` at all (no libfreetype — the filter is simply absent and text
+silently never appears), and glow has to be a separate blurred layer, because
+blurring the finished frame turns a white wordmark grey.
+
+**Lesson 3 is the interesting one — it took three tries to measure honestly.**
+
+The first metric, low-mid share of the mix bus, went UP when the mix got better:
+moving the pad up an octave moves it *into* 150–500 Hz while moving it out of the
+bass's way. A mix-bus band share cannot see a collision at all. The second
+measured the parts separately — share of the pad's own energy below 250 Hz —
+which sees the collision but draws the line in the wrong place: the moved pad's
+bottom voice lands at 196–247 Hz, still under it, so the octave move scored a
+feeble −4.2 dB and the textbook carve appeared to make things *worse*.
+
+The line belongs to the bass, and the bass was never asked. Measured: it keeps
+92.9% of its energy below 150 Hz and half below 65 Hz. On that line the lesson
+resolves, and it now teaches the second mistake as well as the answer — every
+fix is scored twice, by share *and* by absolute decibels removed from the zone,
+because a share improves when you remove the right thing and worsens when you
+remove the wrong one. The 250 Hz carve does exactly that: it clears 1.4 dB from
+the collision zone, takes 3.6 dB of body out of the pad, and its share climbs
+from 66% to 76%. A bell at 250 Hz with a Q of 1.2 reaches ~167–375 Hz, and 77%
+of this pad is below it. Moving the part clears 58 dB and makes the pad 4 dB
+*louder* in its own range.
+
+⚠️ **And the numbers that fed the first cut of the narration were contaminated by
+a bug worth generalising.** The teardown between states read
+`track.effects ?? []`, but `project.overview` exposes a track's insert chain
+under **`fx`**. The list was always empty, the removal loop ran zero times, every
+call reported success, and EQs *accumulated* across states — three of six were
+wrong. It was caught by looking at a captured screenshot and seeing three EQ
+chips where there should have been one. **A `?? []` fallback on a key you have
+not verified is not a safe default; it is a loop that silently does not run.**
+
+## 2026-09-03 — Tools for filming the DAW, and two lessons made with them
+
+Making the demo films turned out to need a lot of small, hard-won knowledge that
+lived nowhere. It now ships as part of the plugin (**0.7.0**).
+
+Two new skills. **`ui-capture`** drives DAW Pro's `debug.*` surface — the one
+that is *not* reachable from MCP and is the only way to open a panel, move a
+control, or take a screenshot. It carries a `panels.mjs` registry that can
+photograph any panel by name, and a `pair()` helper that shoots the same knob
+before and after a change and then puts it back, proving the restore by
+re-reading rather than assuming it. **`demo-film`** covers narration and
+assembly: a local text-to-speech voice, and an assembler that turns stills,
+rendered loops and real transport footage into a narrated film.
+
+The traps in both are written down with the session that paid for them, because
+each one *looks like success*: a modal you forgot to close photographs over your
+subject, the instrument picker creates a track when given no valid id, and
+`debug.musicalTyping` returns after the first key it recognises, so two settings
+in one call silently applies one.
+
+The narration gate is the sharpest of these. Level, pace and spectrum checks all
+pass happily on speech that says the *wrong words* — one earlier film had lines
+that transcribed as nothing but "Thank you," and every meter said it was fine.
+So every take is now transcribed and compared against its script. That gate had
+a bug of its own worth knowing about generally: `difflib`'s `autojunk` heuristic
+discards common elements in any sequence over 200 long, and narration lines are
+600–1000 *characters* — so character-level matching threw away the spaces and
+scored a **verbatim** take at 0.17. Compared as word lists with `autojunk=False`
+the same take scores 0.91.
+
+There is also a new **`demo-director`** agent that holds both skills, and a
+standalone `tools/voice-video-kit/` for using the pipeline outside this repo.
+The model weights are not vendored — eight gigabytes of public builds do not
+belong in a git repository, so the installer fetches them.
+
+## 2026-08-31 — Knobs for the slur, and a slide that respects distance
+
+The slurring added earlier today could only be reached by asking an AI agent.
+It now has controls in the Sampler card: three buttons that say what they do
+rather than what they are called — **Chords**, **One Note**, **Slurred** — and
+a **Glide** knob beside them.
+
+Two details in that knob were deliberate. Turned fully down it reads `OFF`, not
+`0.0 ms`, because "no glide at all" and "a very fast glide" are different things
+and should not look the same. And glide does nothing at all on a Chords patch —
+so rather than greying the knob out, it stays usable, its markings dim, and a
+line underneath says `CHORDS ignores Glide — use One Note or Slurred.` You can
+still dial a glide in first and switch the mode after, which is the order most
+people would try.
+
+The slide itself also got smarter. Until now a glide took the same amount of
+time no matter how far it had to travel, so a one-step slur crawled while a leap
+of an octave was rushed through twelve times faster. There is now a second mode
+where distance sets duration, the way a real player's slide behaves: short
+intervals slide quickly, wide ones take their time. It is off by default, and
+the reference is a whole tone — so a glide that sounded right on a stepwise line
+sounds exactly the same after switching, and only changes where it should, on
+the leaps.
+
+One honest trade: the Sampler card's fixed area grew by 57 points to hold the
+new controls, so when the per-zone inspector is open the zone list below shows
+six rows where it used to show eight. Nothing changed with no zone selected.
+
+## 2026-08-31 — A wind line that no longer re-tongues every note
+
+Play a sax or flute part in the built-in Sampler and every note used to start
+over: a fresh breath, a fresh attack, on all of them. That is what makes a
+melody sound typed in rather than played. Overlapping the notes only hid the
+problem — the new attack was still there, tucked under the previous note's
+tail — and the mono voice mode added earlier did not remove it either. Mono
+decided which note wins; it still re-struck the reed on the second one.
+
+The Sampler now has a third voice mode, `legato`. Under it a note arriving
+while another is still sounding does not start a new voice at all: the voice
+already playing simply changes pitch. Its envelope carries straight on from
+wherever it was. There is no second attack, because there is no second note —
+which is what a slur actually is. Play a note with nothing sounding and it
+attacks normally, so phrasing still reads.
+
+Alongside it, `glideTime` is portamento: instead of stepping to the new pitch,
+the voice slides, over anything from an imperceptible smear to four seconds.
+The slide is even across the interval — a semitone takes as long in the low
+register as the high — and it works in mono as well, where the note re-attacks
+but its pitch still slides in from the note before.
+
+One honest limit: a slurred voice keeps playing the sample it started on, so a
+very wide slur drifts in timbre as it goes. That is the same trade every
+hardware sampler makes, and it is the price of the sound being continuous —
+switching samples mid-slide would put a seam in the middle of the slur.
+
+Both are off by default: existing projects render byte-for-byte identically,
+verified by hash before and after.
+
+## 2026-08-31 — Four Sampler settings did not survive being saved. Now they do.
+
+Set a Sampler so its notes fade, save the project, reopen it — and the notes
+held forever again. The setting was simply gone. The same was true of the
+instrument's pitch-bend range and of its mono/poly voice mode: you could set all
+four, hear all four, and lose all four the moment you closed the song.
+
+The cause was one list. A project file records a Sampler's settings by name, and
+these four names had never been added to it, so they were written nowhere and
+quietly reset to their defaults on open. Everything else about the instrument —
+its samples, gain, attack, release, expression settings — was recorded properly,
+which is why the loss was easy to miss: the patch came back looking almost
+right.
+
+**Why this mattered more than a missing checkbox.** With no decay and no sustain
+recorded, a note goes back to holding at full volume for as long as the pedal is
+down — which is exactly the complaint fixed earlier the same day, below. The fix
+arrived intact and a save undid it.
+
+All four are now written into the project and read back, and we checked it by
+sound rather than by reading the setting back afterwards: a saved-and-reopened
+fading patch is measured falling to silence, a saved-and-reopened octave bend is
+measured landing on the octave, and a saved-and-reopened mono line is measured
+cutting the note it replaces.
+
+**Songs you have already saved open exactly as they did before.** A Sampler with
+none of these four set writes no new information at all, and a file that never
+carried them still opens with the settings it always had — a whole-tone bend
+range, poly voices, and a note that holds. And if a future version saves a voice
+mode this one has never heard of, the song still opens; the unknown setting is
+ignored rather than refusing the whole file.
+
+## 2026-08-31 — Piano notes fade under the pedal. Organ notes do not.
+
+Hold the sustain pedal and play a piano note. It should ring, bloom, and die
+away — that is what a piano does, because the pedal only stops the dampers
+falling; it does not keep feeding the strings. Ours kept the note going at full
+volume, forever. A player noticed and asked whether they were wrong. They were
+not.
+
+**What we changed, and what we deliberately did not.** The fix is not "make
+notes fade". An organ, a string pad and a warm synth pad genuinely do hold for
+as long as you keep the pedal down, and making those fade would have been a
+worse bug than the one we started with. **The instrument decides, not the
+pedal.** So the pedal's job stays exactly what it was — it holds the note off
+its release — and the fading is now the instrument's own business.
+
+**Sounds you pick from a sound bank were already right.** A real grand piano
+program carries its own fade and always has; we measured it dying to silence in
+about fifteen seconds with the pedal held, while a church organ from the same
+bank sat perfectly level for the same fifteen seconds. Both correct.
+
+**The built-in Sampler could not fade at all.** It had knobs for how fast a note
+starts and how fast it stops after you let go, but nothing for what happens in
+between while you are still holding the key. If you loaded a piano library with
+sixty samples in it, the only way to make it fade was to edit all sixty. Now
+there are two instrument-wide controls — **Decay** (how long the note takes to
+drop) and **Sustain** (the level it settles at) — and any individual sample can
+still overrule them. Leave them alone and nothing you have already made changes
+by so much as a sample.
+
+**And the songs we build for you now use the right instruments.** Ask for a
+starter song in any of the fourteen styles and, until now, every part came out
+as the same buzzy synth — the one labelled "Piano", the one labelled "Organ",
+even the one labelled "Drums". Now a piano part is a piano, an organ part is an
+organ, drums are a drum kit, and a bass is a bass. Which means the piano fades
+and the organ holds, without you setting anything. Parts genuinely meant to be
+a synth — the ones labelled "Synth" and "Lead" — are left as the built-in
+synth on purpose.
+
+**Projects you already saved are untouched.** We checked this specifically
+rather than assuming it: the new sounds are written into songs as they are
+created, so nothing reaches back into work already on your disk.
+
+**Correction, later the same day:** the two new controls were not being written
+into your project file, so they reset every time you reopened the song. Fixed —
+see "Four Sampler settings did not survive being saved" at the top.
+
+## 2026-08-31 — Build a song by stacking loops, without ever stopping the music
+
+Play a chord part. While it keeps looping, arm a different track, switch to a
+bass sound, and play the bass part over the top. Then a shaker. The music never
+stops, and you never touch the stop button. That is live looping — the way
+The Kiffness builds a track in front of a camera — and DAW Pro now does it.
+
+**How to use it.** Press play, then open a loop session and say how long the
+loop is: **four bars, two bars, whatever you like**. (Or say nothing, play your
+first part, and press finish — the loop becomes as long as what you just played,
+rounded to whole bars so it can never end up slightly off.) Arm a track and a
+light starts **flashing amber**: the recording has not begun yet. It begins at
+the **start of the next time round the loop**, so what you play lands in time
+with what is already going — on a four-bar loop that can be up to four bars of
+flashing, which is the loop waiting for you, not the app ignoring you. (Prefer
+to come in sooner? Choose bar timing and it starts on the next bar line
+instead.) The light goes **solid amber** while you are recording and **cyan**
+once the layer is down and playing. Arm the next track and do it again.
+
+**The bit that matters most: a bad layer goes away with one press, and the
+music does not stop.** Play something wrong, press undo-layer, and it is gone
+while everything else keeps looping — press it again to take back the one before
+that. This is a separate control from the usual undo on purpose: the ordinary
+undo would take back whatever you did last, which mid-performance might be a
+volume change rather than the layer you want rid of.
+
+**You never have to read anything while playing.** The strip beside the
+transport is lights, not numbers: amber means "this one is being recorded into",
+cyan means "this one is sounding", and each light blinks in time with your loop
+rather than to some unrelated ticking. Each light is captioned with the end of
+its track's name — `…Chords`, `…Bass` — because that is the part that tells them
+apart.
+
+**What you end up with is a real song, not a performance that vanishes.** Each
+layer is an ordinary clip on an ordinary track, repeated along the timeline, so
+you can close the loop session and then edit it, mix it, bounce it or export it
+like anything else you have made.
+
+Two honest limits. This records **instrument layers** — parts you play — not
+microphone or guitar layers; those repeat differently and are still to come. And
+if you arm a layer in the last split-second before the bar line, it waits for the
+*next* bar rather than starting late and losing your first chord — the flashing
+light is telling you it heard you.
+
+## 2026-08-31 — A sustain pedal, on the Tab key
+
+Play the on-screen keys and a note stopped the instant you let go. That is what
+a real piano does too — a felt damper drops onto the string the moment the key
+comes up. What you were remembering is the pedal under the pianist's right foot,
+which lifts every damper off the strings so notes keep ringing while both hands
+move on to the next chord.
+
+**Press Tab.** A green **⇥ SUSTAIN** light comes on beside MUSICAL TYPING, and
+from then on the notes you play keep sounding after you let go of the keys — so
+you can move your hand, play the next chord, and hear the two blend the way a
+piano blends them. Press Tab again and everything the pedal was holding
+releases; anything you are still physically holding down keeps playing.
+
+It is a **latch**, not a hold: press once for on, once for off, rather than
+keeping a finger on Tab. Sustain exists precisely because a player has no spare
+finger — that is why it lives under a foot on a real piano — and a computer
+keyboard has no foot. The cost, said plainly: there is no half-pedalling and no
+quick flutter, so re-pedalling on a chord change is two presses instead of one
+foot movement. If you want that, a real MIDI pedal plugged into the Mac has
+always worked and still does.
+
+You can also click the SUSTAIN light itself, which matters because Tab normally
+moves between text boxes. It only becomes the pedal while Musical Typing is on
+and you are not typing into anything — in a name field, in the Copilot box, in
+Settings, or with the mode off, Tab still moves the cursor exactly as before.
+
+**It records.** With a take rolling on an armed instrument track, your pedalling
+is written into the clip as a real sustain lane, so playing the take back
+sustains the same notes in the same places. The pedal cannot be left stranded
+either: it lifts when the take ends, when you hit panic, when you switch off
+Musical Typing, and when the window loses focus — a pedal stuck down is a drone
+with no visible cause, and that is the one thing it must never be.
+
+An agent can work the same pedal through the new `play_sustain` tool.
+
+**Fixed along the way, and it would have bitten you:** a note held only by the
+pedal used to go silent after exactly eight seconds with the transport stopped.
+The instruments were sustaining correctly the whole time; the audio engine had
+stopped asking them to. It is fixed, and measured on all three instrument
+kinds — the built-in synth, the built-in sampler, and the downloaded sound
+banks.
+
+## 2026-08-30 — One button gets you a whole orchestra, and it tells you the truth about the download
+
+A stock Mac ships exactly one sound bank with exactly one drum kit. Ask for
+brushes and the answer used to be "you can't" — not "here is how," just no.
+
+Now there is a **Download** button in the instrument picker. It offers
+**MuseScore General**: 128 instruments and around fifteen drum kits, brushes
+among them, free, MIT-licensed, roughly 216 MB. The size and the licence are on
+screen *before* you press anything, because it is your bandwidth, your disk, and
+somebody else's work.
+
+While it runs, the picker says what is happening in words — "Downloading 88 MB
+of 216 MB…", then "Checking the download…", then "Adding MuseScore General to
+your instruments…" — with a bar that only moves during the actual transfer, and
+a **Cancel** that works. Cancelling says "Stopping…" until the download has
+really stopped, and then "Nothing was added," because the partial file is gone
+by then and not a moment earlier.
+
+**The part that matters most is what "finished" means.** A half-downloaded
+sound bank that reports success is the worst possible outcome here: an SF2's
+instrument names live *after* its sample data, so a transfer that dies two
+thirds of the way through leaves a file that opens, loads, and shows you 128
+instruments called "Program 0" through "Program 127". It looks fine. It is not.
+
+So a download is only finished when four separate things agree: the server's
+advertised size matches what we expect (checked in the first second, not after
+216 MB), the bytes on disk are the right *number* of bytes, they hash to the
+right fingerprint, and — the one that catches the case the others miss — the
+installed file gives up real instrument names when asked. Any of those failing
+deletes the file and tells you plainly what happened. Nothing partly downloaded
+is ever left where it can be mistaken for a working bank.
+
+Agents get the same four operations over the control protocol
+(`instrument.listDownloadableSoundBanks` / `downloadSoundBank` /
+`soundBankDownloadStatus` / `cancelSoundBankDownload`) and as MCP tools. The
+listing carries the licence and the copyright line, so an assistant can tell you
+what it is about to put on your machine.
+
+One piece of honesty about the fingerprint: nobody publishes a checksum for this
+file, so DAW Pro downloaded it once, hashed it, and pinned what it saw. That
+protects you from a corrupted or truncated download. It is **not** a signature
+and does not prove where the bytes came from — and the app's own documentation
+says so rather than implying otherwise.
+
+## 2026-08-30 — Playbox: the AI shows you what to play, you play it, and it is yours
+
+Ask for a set of chords and the keyboard lights up with them. Then **you** play
+them. That is the whole feature, and the order matters: the AI writes the
+invitation, you write the performance. The take is a real recording of you
+pressing keys, captured the same way any other take is. Nothing plays a note on
+your behalf.
+
+Turn on **CHORDS** in the keyboard strip and press **NEW LIGHTS**. You get a
+progression that fits the key, tempo and section you are already working in —
+not a generic one — and the keys that play it light up.
+
+**You choose when the lights move on, because the three ways of using this are
+three different things.**
+
+- **WHEN I PLAY IT** — the outline waits until you play the chord it is showing
+  you. Nothing is refused, nothing is rushed. This is for learning a part.
+- **ON THE BEAT** — the outline moves with the click, one chord per bar, and you
+  keep up. This is for performing one.
+- **AHEAD OF ME** — the outline moves on every chord you play, so the timing is
+  entirely yours. This is for writing with it, and it is the default.
+
+**You can now see what is coming, not just what is next.** The chord to play is
+outlined; the three after it carry a bar underneath, widest first. That is also
+the fix for something that was genuinely confusing: Four Chords and '50s Doo-Wop
+use the same four chords in a different order and both start on the same one, so
+until you played a note they looked identical. Now they do not.
+
+**It works without an API key, and it tells you which one you got.** With a key
+configured, a model writes the progression and the strip says so in violet.
+Without one — or if the model returns something unusable — the app varies one of
+its own built-in progressions instead, and says *that* instead. "The AI wrote
+this" and "we picked a stock progression" are different claims, and only one of
+them is ever true at a time.
+
+Chords only for now. Melody needs a different kind of light and a wider
+keyboard, so it is not half-built here.
+
+For agents: `playbox_generate` returns the progression as scale degrees, and
+defaults its tempo and section from the open project. It lights nothing and
+plays nothing. **Please do not follow it with `clip_set_notes` unless you were
+asked to** — writing the part for the user is precisely the thing this feature
+exists not to do.
+
+## 2026-08-30 — One key, one chord: play real harmony without knowing how to voice one
+
+Musical Typing gave you one key, one note. That is enough to pick out a melody
+and not much else — if you cannot voice a chord, you still cannot play a song.
+
+Turn on **CHORDS** in the keyboard strip and every key becomes a whole chord in
+a key you pick. `A` is the key's home chord, `S` is the second, `F` and `G` are
+the two that surround it, `H` is its sad relative. The letters are printed on
+the keys, the chord names are printed under them, and the Roman numerals are
+printed under those — so you can learn what you are playing while you play it.
+
+**Pick a named progression and the keys light up in order.** Four Chords, '50s
+Doo-Wop, Pop-Punk, the jazz ii-V-I, a 12-bar blues, minor rock. Press 1, then 2,
+then 3, then 4, and you have played a song's worth of harmony with four
+keystrokes. **The unlit keys still work.** Nothing is disabled, nothing is
+locked; the lights are a suggestion you can walk away from mid-bar, and the
+moment you do, the rest of the key is right there.
+
+**The chords are voiced, not stacked.** This is the part that decides whether it
+sounds like music or like someone leaning on a keyboard. Each chord is placed to
+move as little as possible from the one before it, so shared notes simply keep
+ringing instead of being re-struck, and nothing leaps an octave between changes.
+A bass note sits low, separate from the chord above it, the way two hands sit on
+a piano. Close intervals are kept out of the bottom of the range where they stop
+sounding like harmony and start sounding like mud.
+
+**And it changes with the instrument.** Piano splits a low bass note from a
+compact chord. Pad and Strings spread wide and add sevenths. Guitar stays in
+root position where a guitar actually lives. **Bass plays one note — the root —
+and that is on purpose:** handing a bass part a whole stacked chord is the most
+common way an auto-harmonised arrangement goes wrong.
+
+Everything you play this way is recorded exactly as before. Arm an instrument
+track, hit record, follow the lights, and the take is a real MIDI clip you own.
+
+For agents: `chord_voice` returns the same voicings as a pitch array, so
+AI-authored chord parts get the same voice leading the button does. It is
+read-only — it works out notes, it does not play them.
+
+## 2026-08-29 — You can play the DAW without owning a keyboard, and it records
+
+Until now, playing a note in real time required a hardware MIDI controller. If
+you did not own one, the entire live path was closed to you: a full CoreMIDI
+input stack shipped inside the app — a real-time-safe thru ring, a capture
+session, punch, count-in, take comping — and there was no door into any of it.
+Recording a performance was not slow or awkward. It was unreachable.
+
+There is a door now, and it is your computer keyboard. Turn on Musical Typing
+and the middle two rows of the keyboard become a piano: the home row is the
+white keys, the row above it the black ones, `Z` and `X` move an octave, `C` and
+`V` change how hard you are playing. There is an on-screen keyboard too, and it
+is polyphonic — it lights up for what you play, whichever way you played it. The
+layout is the one Logic and Ableton share, so if you have used either, you
+already know it. Keys are matched by physical position rather than by letter, so
+the shape stays correct on a keyboard that is not American.
+
+It is a mode you switch on and off, never an ambient grab at your keystrokes.
+While it is on, typing into a rename field still types. Releasing a note is
+allowed unconditionally, even mid-refusal — the one asymmetry that guarantees a
+key can never get stuck down.
+
+And what you play is recorded. Arm a track, hit record, play, and the notes are
+in the take, in a clip, with real lengths — through the same capture session
+hardware MIDI has always used, so count-in, punch and take numbering all work
+without knowing anything new happened. A held note during a bounce is no longer
+a thing you have to think about.
+
+The one thing to know: a note played in the first fraction of a second after you
+press record does not make it in. A take's anchor is scheduled slightly ahead of
+the button, and notes struck before it are discarded — the same rule that makes
+count-in work. Hit record, take a breath, then play. A proper count-in cue for
+this is still to come.
+
+Separately, and found on the way: a note held in the piano roll's keyboard
+gutter used to keep ringing forever if you switched to another app. The app's
+own code claimed it silenced audition when it lost focus. It never had. It does
+now.
+
+Honest limit, stated plainly: no automated check in this project can press a key
+or look at a screen, so the parts of this that were proven are the routing, the
+note bookkeeping, and — end to end, against a real running app — that a played
+note lands in a take and that an un-armed track records nothing. Whether it
+*feels* right to play has not been tested by anyone, because nobody involved in
+building it has hands.
+
+## 2026-08-29 — Importing a file no longer deletes the one it lands on
+
+Bringing an audio file onto a track that already has a clip at that beat used to
+delete the clip that was there. Not trim it, not warn about it, not ask — delete
+it, and hand you back a new id as though nothing had happened. Two imports at
+beat 0 left one clip. Both calls reported success.
+
+It mattered most exactly where you would hit it. Sampling your own output is
+central to flipping a record: print a section, import the print, chop the print,
+print again. Importing pass after pass onto one track is the workflow, and the
+natural way to write it — reuse `atBeat: 0` each time — quietly destroyed the
+previous pass. The skill that teaches the loop had to carry a warning telling you
+to count your clips afterwards.
+
+An import now refuses to land on top of something. It names the clip that is in
+the way, and it tells you a beat that is free — nothing is trimmed, nothing is
+deleted, nothing is journaled, so the refusal costs you nothing to ignore. The
+cheapest way past it is to leave `atBeat` out entirely, which appends after
+everything on the track and can never collide.
+
+If you did mean to replace what was there, `overwrite: true` still does the old
+thing: clips underneath are trimmed, and ones your file covers completely are
+removed. What is new is that it says so. `trimmedClipIDs` and `removedClipIDs`
+come back naming exactly what went, and those two arrays are in every import
+response, empty on the ordinary path — so a caller checking what happened never
+has to tell an absent field from an empty one.
+
+**What this does and does not cover.** It is the import agents and the control
+protocol use — `clip_add_audio` / `clip.addAudio`. Importing from inside the app
+takes a different path: File - Import Audio always makes new tracks, so it never
+had this problem, but *dropping* a file onto a lane region that already has a
+clip there still resolves the overlap silently, and that is filed separately
+rather than quietly folded in here.
+
+Two details worth stating, because both are the kind of thing that gets
+"simplified" later. The refusal asks the overlap policy itself what a placement
+would cost rather than testing whether the rectangles intersect: take stacks
+legally overlap and lose nothing to an import, so an intersection test would have
+started refusing calls that were never destroying anything. And this is
+deliberately not what dragging a clip does — a drag still trims what it lands on,
+because a drag's footprint is a clip you can see, while an import's length comes
+from the file's duration at the current tempo. `atBeat` alone never told you what
+it was about to cover, so it was never something you could have consented to.
+
+## 2026-08-29 — Convert the clips you picked, and stop converting the takes you trimmed away
+
+Voice conversion now works on a **selection**. Pick the clips you want, convert, and you get a new track carrying a converted counterpart of each one, sitting at exactly the beats the originals sat at. Not one merged render — the same set of clips, so the arrangement you built survives the conversion. It is a plain audio track when it lands: no insert to add, none to remove, nothing wired back to the voice model. Every conversion makes its own new track, and one undo removes the whole set.
+
+**And the thing it was quietly getting wrong.** Converting a clip used to send the voice engine that clip's *entire backing recording*. For the flow it was built for — a freshly imported full-length stem — that was the same thing, so nobody noticed. For the flow people actually have, it was not: comp a vocal, trim it to the four bars you want, convert, and the engine received the whole untrimmed take and handed back a clip of it, landed at your clip's start beat. Not an error, not a crash, not a missing feature. A plausible-looking answer that was the wrong audio.
+
+Converting each clip separately dissolves that rather than patching it. What the engine now receives is an offline render of that one clip over exactly its own window — so the trim, the offset into the recording, the time-stretch and the pitch shift are all honoured because the render *is* the playback path. If you can hear it, that is what gets converted.
+
+One judgment call worth stating, because it is the kind of thing someone will want to change later without knowing why it is the way it is. Time is baked; level is not. The trim, offset, stretch and pitch shift are rendered in, because they decide *which* audio the engine hears. Clip gain, fades and the gain envelope are deliberately left out of the render and carried onto the converted clip instead. Partly so the result stays editable — a fade you can still drag — and partly because a fade-in baked into the source hands a pitch estimator a few hundred milliseconds of silence to find a voice in, and a clip pulled 12 dB down hands it something close to nothing.
+
+The refusals are as deliberate as the behaviour. If two clips you selected overlap in beats, it says so and names both, because one track cannot hold them both at their own beats and silently trimming one would break the only promise the feature makes. If conversion fails part-way through a set of eight, nothing lands at all — no half-arrangement, no track that looks finished and is not. Everything is checked before the first render, so a refusal costs nothing.
+
+Agents get `vc_convert_clips` for the set and keep `vc_convert_vocals` for a single clip, unchanged in name and shape — though the single-clip form now converts the clip's own window too, since that defect was never specific to sets. The bridge budgets one conversion's worth of time per clip you passed, rather than guessing a number that would time out a legitimate ten-clip run.
+
+The proof is in three places, and the one that matters most is a real render: a ramp file with known values at known frames, a clip trimmed half a second in, and an assertion that the extracted audio matches the source **bit for bit at the offset position** — alongside a control asserting it is *not* the head of the file, which is exactly what the old behaviour produced. Zeroing the offset in the extraction flips both together, which is how we know the test is looking at the right thing.
+
+## 2026-08-29 — Sixty-four pads out of one record, and the 23 milliseconds nobody could hear were missing
+
+Two fixes underneath the sampler. Neither is a feature, and both had to land before chopping a whole record onto pads was something you could actually do rather than something the tool would let you attempt.
+
+**One file, loaded once.** A sampler zone used to load its audio privately: open the file, allocate the whole thing, per channel, per zone. That is invisible and fine at eight zones and ruinous at sixty-four, because chopping a record means sixty-four zones pointing at *the same file* — and the sampler was keeping sixty-four copies of it. A four-minute stereo 44.1 kHz rip is about 81 MB in memory; sixty-four pads of it came to roughly **5 GB**. Nothing warned you, because nothing was wrong in the sense the code understood — it just allocated, and kept allocating.
+
+Zones now share one buffer per source file. Sixty-four pads of a record cost what one pad costs. Measured on a sixteen-zone chop of a single file, the load dropped from 2,883,584 bytes to 180,224 — exactly the sixteen-to-one you would predict, which is the point of quoting it. The test that pins this also loads eight zones from **eight different** files and asserts that memory stays at eight copies: sharing that ignored which file a zone actually pointed at would pass a naive dedup test and produce silence-or-worse in real use, so the wrong answer is held permanently in view next to the right one.
+
+**And the end of every mono sample was being dropped.** `AVAudioFile.read(into:)` does not necessarily deliver the frames you asked for in one call on a mono file — it stops on an internal boundary and reports the short count, which the sampler was believing. Up to **1,023 frames, about 23 ms at 44.1 kHz**, vanished off the end of every mono zone. Stereo files were never affected, which is exactly why this survived: every stereo test passed, and stereo is what a test author reaches for.
+
+At a full sample length that is an inaudibly clipped tail. On a *chop* it is not, because a chop is short — a 100 ms hi-hat losing 23 ms has lost a quarter of itself, and the shorter the slice the larger the fraction. This is the kind of defect that reads as "the pads sound a bit dead" rather than as a bug.
+
+The fix reads in a loop until the file is exhausted. Worth naming the trap, because the obvious version of that loop is wrong in a way that destroys audio rather than merely failing: each `read(into:)` **rewrites the buffer from frame 0 and resets its frame count**, so "keep reading until the count reaches the file length" never terminates usefully and leaves the count at zero — and a zero-length zone is not a quiet zone, it is a silent one. The correct loop advances a write offset into the buffer itself. Both the loss and the fix are pinned by a test that reads mono files at lengths on either side of the boundary, with stereo alongside as the control that must not change.
+
+DAW Pro could already cut an audio clip into separate slices sitting exactly where they were, in one undo step, with clean joins. Nobody could tell, because the way to ask for it was `clip_quantize_audio` with `strength: 0` — a quantize tool, set to quantize by nothing. If you were looking for a way to chop a break into pieces you could rearrange, that is not a tool you would have opened.
+
+Nothing about the cutting has changed. The tool now says what it does: with `strength: 0` this is a **pure chop**, and the description leads with that instead of burying it behind the grid maths. That is the whole of the discoverability fix, and it was deliberately bought at description cost rather than by adding a second `chop` command — two commands doing one thing is a bill you pay forever.
+
+Worth knowing why the chop is clean, because it is a property rather than a promise: slice *i* ends at the exact sample where slice *i+1* begins, so playing them in order **is** the original waveform. There is nothing to crossfade and nothing to click. (Cutting a record into *sampler pads* is a different problem — a pad played alone starts and stops at arbitrary sample values — which is why `clip_slice_to_sampler` snaps its cuts and this does not need to.)
+
+**The new part is `divisions`.** Ask for `divisions: 8` and the clip is cut into eight equal parts instead of at its transients. This is the fallback for material the detector has no useful opinion about: drones, ambient beds, sustained pads, and loops that are already perfectly quantized and have no attacks to find. It runs no detection at all, which also means it works on a clip whose transients would have come out wrong, and it is fast.
+
+`divisions` chooses where the clip is **cut**; the grid settings still choose where each slice **moves to**. They compose — `divisions: 4` with `strength: 1` cuts into quarters and snaps each one to the grid. And since `gridBeats` means nothing when nothing is being nudged, you may now omit it entirely at `strength: 0`. Above `strength: 0` it is still required, exactly as before.
+
+Two things it refuses rather than fudges. Sending `sensitivity` together with `divisions` is an error, not a silent no-op — sensitivity is the detector's knob and no detector is running, so a caller who sent it would have received a plausible-looking chop that ignored them. And asking for more divisions than the clip's length allows is refused with the arithmetic spelled out (how long the window is, how thin each part would be, how many parts would fit) instead of quietly returning fewer pieces than you asked for.
+
+## 2026-08-29 — The twelve-bit sound, and why it is not filtered
+
+A new insert effect, **Bit Crusher**, reduces bit depth and sampling rate — the lo-fi character of a 1980s sampling drum machine, the sound a chopped break has on a record you already know.
+
+It starts on the E-mu SP-1200: **12 bits at 26,040 Hz**. Those are that machine's real numbers, not a flavour of them. Set `downsampleHz` to 40,000 and you have the Akai MPC60 instead, which is why MPC60 chops read as cleaner than SP-1200 chops of the same era.
+
+**The two switches that look wrong are the point of the effect, and they ship OFF.** `antiAlias` and `dither` both default to 0. A bit-crusher that filters politely and dithers away the quantization noise sounds clean-but-crunchy; it does not sound gritty, and it does not sound like the record. The reason is specific and worth knowing rather than obeying: the SP-1200's signature comes from its converter *omitting* the reconstruction filter, so everything above the reduced Nyquist frequency images back down into the audible band. That folding is not a defect being tolerated — it is the character. Turn `antiAlias: 1` on when someone asks for a tamer, modern crush, and `dither: 1` on when you are reducing depth for delivery rather than for sound.
+
+What `bits` does is exact rather than approximate: at `bits: N` the output takes exactly 2^N distinct levels, the code range of a real N-bit converter, and the test suite counts them on a rendered ramp instead of trusting the setting. `downsampleHz` holds each captured sample for the right number of frames — at 8 kHz into a 48 kHz project, every value repeats exactly six times, and at the 26,040 Hz default the runs are a measured mix of ones and twos because the ratio is 1.8433 and not an integer. That is why it is built on a fractional accumulator: an effect that rounded the rate to something divisible would quietly be a different machine, and one that restarted its count every audio block would sound different depending on your buffer size.
+
+`mix` blends the crushed signal against your untouched input, so you can put a little grit under an intact transient; at `mix: 0` the effect is a bit-exact bypass. It adds no latency, and it is available on tracks, buses, and the master chain.
+
+Two honest limits. `downsampleHz` tops out at 48,000, so in a project running at 88.2 or 96 kHz even the maximum setting still halves the rate — the effect is never transparent there, and you should bypass or remove it rather than turn it up. And a project saved with a Bit Crusher **still opens in an older build of DAW Pro, just without the effect**: the insert is an unknown kind to that build, so it is dropped with a warning and the track plays uncrushed rather than the file being refused. The thing to watch is what happens next — save from that older build and the insert is gone for good, because it was never in that build's model to write back. Projects without one are unaffected.
+
+## 2026-08-29 — Play a pad backwards, and let one pad cut another off
+
+Two small switches on a sampler zone, both of which a producer reaches for within about ten minutes of chopping their first break.
+
+**`reverse`** plays a zone's span backwards. That is the reversed cymbal before a downbeat, the sucked-in vocal, the swell into a chorus. It costs nothing: the audio is read backwards where it already sits, never copied, so a reversed pad uses exactly as much memory as a forward one and a whole record chopped across sixty-four pads still holds one copy of the file. Playing a reversed pad higher up the keyboard repitches it exactly as a forward pad would.
+
+Two honest limits, stated rather than half-solved. A reversed zone **ignores loops** in this version — set both and it plays its span once, backwards, and tells you it dropped the loop. What a sustain loop means played backwards, and which end of it the crossfade belongs to, is a real question and this is not an answer to it. And `attack`/`release` are not swapped for you: they shape what you hear, so a short release still trims the tail of the reversed sound, which is what you wanted.
+
+**`chokeGroup`** (0–63) is the open/closed hi-hat rule. Give every hat zone the same choke group and a new hat ends the one still ringing, while the kicks and snares in the same instrument stay fully polyphonic. It is also the switch that makes a re-chopped break sound tight instead of like the loose loop it came from, since slices stop ringing into each other. A choked note is not cut dead — it goes into its own release, so a pad with a long release chokes slowly; shorten that pad's release for a hard choke. Pads generated by `clip_slice_to_sampler` already carry a 10 ms release, so a chop chokes tight without being asked.
+
+`chokeGroup` is a different field from `group`, and the difference matters: `group` decides *which* zone fires when a new note arrives (round-robin and alternate layers are built on it), while `chokeGroup` ends notes that are *already playing*. A zone can use both. Two zones layered by the same note never choke each other, and a note never chokes itself.
+
+Both fields survive save and reload, both can be set on a whole keymap or patched onto one zone by id, and both are optional: a project that uses neither renders bit-for-bit identically to before — which is asserted, on a render containing a looping voice and a bent one, against a checksum taken before either feature was written.
+
+## 2026-08-29 — Chop a record into pads, and get the groove back for free
+
+Sampling a break has always been the same three moves: find the hits, cut between them, and put the pieces on pads you can play. DAW Pro could do the first two and had nowhere to put the pieces. Zones with frame spans existed; nothing populated a set of them from a list of slice points.
+
+`clip_slice_to_sampler` does that in one call. Point it at an audio clip and it cuts at the transients — or at N equal parts, or on the musical grid — and builds one sampler pad per slice, all reading the same file, one per MIDI note from C1 up. Then it writes a MIDI clip that plays them back in the original order at the original times.
+
+That last part is the point of the whole thing, and it is worth being precise about what it means: the reconstruction is **bit-exact**. Rendered side by side, the sampler track and the original clip measure the same level to 0.0 dB. You are not starting from an approximation of the record and hoping. You are starting from the record, expressed as pads, and every change you make from there is one you chose.
+
+Getting that took two decisions that look like details and are not. Reconstruction notes fire at **velocity 127**, not at the detector's confidence in each hit — because a sampler pad's level is already the level of the audio inside it, and firing a quiet-looking hit at velocity 13 would put it 20 dB below its own recording. And when the tool makes a new track for you, the sampler's output gain is 1, not the usual 0.8, so nothing sits two decibels under the thing it is reproducing. Velocity still works normally for any new pattern you write; `velocityFromStrength` opts into the detector's dynamics if you want them.
+
+The cuts themselves are snapped to the quietest nearby sample so a pad played alone does not click, and each pad reports how quiet its cut actually was — on a stereo record there is often no point where both channels cross zero at once, and the tool says so rather than implying a clean cut it did not find. Each pad also gets a 10 ms release, which is what actually fixes the click at the *end* of a slice.
+
+Two things it refuses to do rather than do badly. A chop that would make more pads than you allowed, or run past MIDI note 127, is rejected outright with the arithmetic named — it never quietly keeps the first 32 and drops your last bar, because a chop missing its ending still looks like a successful chop. And a clip that is time-stretched or pitch-shifted is refused, because pads read the raw file: the pads would play the original and you would be listening to something else.
+
+Afterwards, the pads are ordinary sampler zones. Widen one pad's key range to play it chromatically, retune another, set the sampler to mono for the classic choked-soul feel — all without resending the rest.
+
+## 2026-08-28 — Changing a few notes no longer means resending all of them
+
+Editing a MIDI clip's notes had exactly one door: send the clip's entire note array back, every note, whether it changed or not. Raising the velocity of 48 shaker hits meant reading and resubmitting all 907 notes in that clip. A legato pass that shortened 225 note lengths had to round-trip all 225. The cost scaled with the clip, not with the edit.
+
+It also carried a quieter hazard. Reading a filtered slice of a clip's notes and writing it back as if it were the whole clip silently deleted everything the filter left out — a real trap, defended only by a warning in the tool's own description.
+
+A new tool, `clip_patch_notes`, changes specific notes by id instead: pitch, velocity, start position, or length, on exactly the notes you name, leaving everything else in the clip untouched. It cannot add or remove a note under any input, so the deletion hazard above cannot happen through it at all — there is no path from calling it to a note disappearing. An id that isn't actually in the clip refuses the whole call and says which id, rather than doing nothing silently. One call is one undo step, whether it touches one note or a thousand.
+
+The existing whole-array tool, `clip_set_notes`, is unchanged and still the right choice for adding, removing, or reordering notes, or rewriting a clip from scratch. The two tools' descriptions now point at each other, so the choice between them is a one-line read rather than a guess.
+
+## 2026-08-28 — A mixing assistant now produces the signal it needs to measure
+
+When a mixing assistant reads a mix's balance and loudness, it has to listen while the song plays. With the transport stopped, the analysis tool used to return -80 dB across the spectrum and a 0 Hz centroid — exactly what silence measures. That output looks entirely legitimate. An AI assistant would believe it, see "this mix is extremely quiet in every band," and make tonal corrections that were not needed, all without anything going wrong visibly. Silent wrong answers are worse than loud failures.
+
+Now the tool refuses when the transport is stopped. It explains why — the bus is silent because nothing is playing — and what to do: start the song, let it run a moment, then measure again. It refuses only for a stopped transport. A mix that is genuinely quiet while playing, or a muted master, still returns a real reading. The tool never claims a cause it cannot establish.
+
+The assistant now holds transport control. It can play, stop, and seek through a session. It still cannot arm a track or record — a live performance stays a human-at-the-instrument job — but it can produce the signal it needs to listen and measure. The change reaches you only after updating the installed plugin; it is not automatic.
+
+## 2026-08-28 — One gain stage now reaches a streaming level, and a clamped value stops pretending
+
+Sound-bank material is quiet. A solo General-MIDI piano part renders at about
+-28 LUFS at velocity 100 and near -35 LUFS at velocity 64, so getting a mix from
+there to a -14 LUFS streaming level takes +14 to +21 dB of makeup. The `gain`
+insert stopped at +12.04 dB, so it took TWO of them chained together — which, as
+the person who hit it put it, "reads like a workaround because it is one".
+
+The gain insert's ceiling is now 16 linear, +24.08 dB, up from 4. That figure is
+not a round number picked for looks: it is the smallest of the candidates that
+covers the quietest ordinary case measured (a soft solo GM piano, +21.49 dB) with
+a little spare. One insert now does what two used to.
+
+Raising a ceiling is safe for work you already have — every gain you ever saved
+was 4 or less and is still in range, so nothing moves and no automation point
+re-clamps. Lowering one would not have been.
+
+The headroom is real, not free. The gain stage is a plain multiply with no
+protection of its own, so a big boost can drive a mix into clipping. Put a limiter
+after it, and check the result with a loudness measurement rather than trusting
+the multiplier. The tool descriptions now say exactly this instead of implying the
+room is free.
+
+**And the more important half.** Asking for more than the ceiling used to return
+`ok` and a value you had not asked for, with nothing anywhere saying so — the same
+shape of failure as a tool that looks like it worked. Raising the ceiling alone
+would only have moved that silent lie to a new number. So the clamp now speaks:
+`fx.setParam`, `fx.add`'s seeded parameters, and `mixer.setMasterVolume` return a
+`warnings` sentence naming what you asked for, what was actually stored, and the
+range. The key is absent when nothing was clamped, so seeing it at all means the
+stored value is not the one you sent. Values still clamp rather than erroring —
+that behaviour was already documented and callers depend on it.
+
+One thing worth stating plainly, because it was reported the other way round: the
+master fader and the gain insert do NOT disagree about out-of-range values at the
+engine level. Both clamp. The refusal a caller sees above 2.0 comes from the MCP
+tool's own schema, one layer above the app — `mixer.setMasterVolume` itself clamps
+silently, which is exactly why it now warns too.
+
+## 2026-08-28 — When you change an instrument, the app now says what your old data will do
+
+Controller lanes — expression, mod wheel, sustain, pitch bend — are performance data
+that rides alongside a clip's notes. Which of them actually SOUND depends entirely on
+the instrument the track is using, and different instruments honour different sets.
+That was already true and already documented. What was missing is that swapping the
+instrument silently changes the answer for data you wrote earlier.
+
+This bit someone hard. A composer drew expression lanes while the track was on the
+built-in poly synth, which ignores expression entirely — so they were correct data that
+did nothing. Later the track was given a sound bank, which honours everything. The
+lanes woke up, and because expression rests at FULL when there is no lane at all,
+values that look perfectly ordinary — peaking around 108, dipping to 42 — were a broad
+volume cut. A finished, checked mix came back 1.25 LU quieter and nobody could see why.
+
+Now changing a track's instrument tells you. If the track carries controller data whose
+meaning just changed, the response says so in plain words: which controller, which
+direction, and — for expression, channel volume and pan, the three whose rest value is
+not zero — why that shows up as a level change rather than as shaping. It warns in both
+directions, because data that STOPS working is the same surprise in reverse.
+
+Two things it deliberately does not do. It never touches your lanes: they are correct
+data, and quietly neutralising them would be a worse bug than the one being fixed. And
+it stays quiet unless the change actually affects a lane you really wrote — switching
+from the poly synth to a sound bank changes the answer for all 128 controllers, and a
+warning that fires every single time is one nobody reads.
+
+Alongside it, every instrument now reports which controllers it honours, so you can
+check before you write rather than after you bounce. That answer depends on the
+instrument's SETTINGS, not just its type — the sampler starts honouring the mod wheel
+and breath controllers only once its expression depth is turned up.
+
+Fixing this turned up a related bug of exactly the same shape. When the sampler's
+brightness filter is switched on, it really does follow whichever controller you point
+it at — but the app was still telling people such a lane "will not sound". It was
+wrong, in the confident way that is worse than saying nothing. Sampler zones that
+crossfade between soft and loud recordings had the same problem. Both now report
+honestly.
+
+
+## 2026-08-28 — The soundfont everyone recommends now actually plays
+
+If you go looking for a free soundfont, you end up at MuseScore. It is the biggest
+distribution channel there is, and what it hands you today is a `.sf3` — that is the
+only format it ships. Until now DAW Pro could see that file and tell you, honestly,
+that it could not play it. That was better than the silence it replaced, but it still
+meant the one file a newcomer is most likely to have was the one file that did not work.
+
+Now it works. Import a `.sf3` and it is converted to a real `.sf2` as it lands in your
+library — everything downstream, from the program list to the sampler, is unchanged
+because what arrives is an ordinary soundfont. MuseScore's own `FluidR3Mono_GM.sf3`
+takes about six seconds and comes out with all 197 of its preset names intact.
+
+Two things worth knowing before you do it. The conversion decompresses the audio, so a
+24 MB download becomes roughly 220 MB in your library — that is the real size of the
+sound, and the `.sf3` was simply a zipped version of it. And if any part of the file
+cannot be read, the whole import fails and tells you so, rather than quietly giving you
+a bank with silent gaps in it. A soundfont that loads and makes no sound is a worse
+outcome than one that refuses, so it refuses.
+
+Under the hood this needed a Vorbis decoder, which is the compressed-audio format
+hiding inside every `.sf3`. macOS turns out to have one, but it is undocumented, it is
+not present on every version we support, and — the deciding fact — it could not read 17
+of the 1186 sounds in that MuseScore file. All 17 were the short single-cycle waveforms
+that the classic synth patches are built from, so leaning on it would have shipped you a
+soundfont where Square Lead, Saw Lead, Synth Bass and Synth Brass were silent while
+every other instrument sounded fine. We carry our own decoder instead, and the test that
+guards this plays those patches and listens.
+
+## 2026-08-28 — One bar, repeated, and the undo step that almost joined a stranger's edit
+
+An AI composing agent writing a twelve-bar blues has one bar of rhythm and eleven more
+bars that are just that bar again. Writing it out in full costs real money and real
+context: expressing that one pattern across all twelve bars was measured at roughly
+30 KB of JSON, crossing the wire twice — once to generate the notes, once to send them
+back to the app. A different, denser piece with 5,248 notes would have cost over
+330 KB for information that is, in truth, one bar and a repeat count.
+
+`clip.repeatNotes` is the fix: name a source (a beat window, or an explicit set of note
+ids), a period, and a count, and the clip grows by that many copies without a single
+note crossing the wire in either direction. The response reports counts — how many
+copies, how many notes were added, whether the clip grew to fit them, whether the
+copies span a meter change, and how many new notes land past the clip's end — and never
+the notes themselves.
+
+The obvious way to build it is also the wrong way, and the wrong way passes its own
+test. Read the existing notes, append the copies in memory, write the result back
+through the same path every other note edit already uses — that path journals its undo
+entry under a key scoped to the clip, and the undo journal folds two edits sharing a key
+if they land inside an 800ms window. A repeat issued shortly after any other edit to
+that clip — which, for an agent iterating on a pattern, is the common case, not the rare
+one — would silently merge into that edit's undo step. Undo once and both the repeat and
+whatever came before it are gone together, with no error and no warning.
+
+The test that catches this has to be about timing, not about notes: edit a clip, repeat
+inside the same clip within the coalescing window, and assert that one undo removes only
+the repeat. It passed against the real implementation, then was run again on purpose
+against the naive shape — routed through the keyed path instead — and went red exactly
+as predicted: the undo count stopped growing, the undo label showed the older edit's
+name instead of the repeat's, and one undo reverted both changes at once. The real
+implementation shares no journal key with anything, so a repeat can never fold into a
+neighbor.
+
+Not everything the underlying item named shipped. Both examples above already have a
+cheaper path today — writing a Standard MIDI File and importing it — but that path is
+still undocumented as the general-purpose thing it actually is; that half is unstarted.
+
+## 2026-08-28 — The instrument meter was calling good instruments dead
+
+The measurement described below shipped, passed twenty-six tests, and was wrong.
+
+Run against two real saxophones — one a single recorded sample, one with genuine
+velocity layers — it reported both as lifeless. The layered one is precisely the case
+the tool exists to recognise, and it was told, confidently, that velocity was only a
+volume knob.
+
+The cause was in how brightness was averaged across the spectrum. The measurement
+weighted each frequency by the square of its strength rather than its strength. That
+sounds like a technicality and is not: squaring makes the lowest, loudest part of a note
+dominate, and the lowest part of a note barely changes when you play harder. The
+information that distinguishes a layered instrument lives in the upper harmonics, and
+squaring is exactly what buries it. A real difference of 6.6% was reported as 0.3%.
+
+It is fixed. The same two instruments now read 0.09% and 7.9%, and the layered one
+resolves into three distinct tones — with the two loudest velocities correctly sharing
+one, which is how that instrument was actually built.
+
+Two things about how this was found are worth saying, because neither is about
+saxophones.
+
+The tool checks itself before every measurement: it generates a low tone and a high one
+and refuses to answer at all if it cannot tell them apart. That check passed the whole
+time, and could never have failed. A pure tone has only one frequency in it, and for a
+single frequency both ways of averaging give the same answer. **A self-test built from
+something simpler than the real thing can be blind to an entire category of mistake
+while passing perfectly.**
+
+And every existing test agreed with it. They used a synthetic instrument whose layers
+were far enough apart that both methods reached the same verdict. Twenty-six passing
+tests, and the only thing that disagreed was a real instrument.
+
+There is now a test that would have caught it, built from a tone with several harmonics
+and checked against the arithmetic rather than against a previously recorded result.
+Put the old method back and it is the only test that fails.
+
+## 2026-08-28 — An instrument that only gets louder can now be measured
+
+A saxophone sounded, in one listener's words, "like a toy". Nothing in the app disagreed: every
+test passed, the levels were correct, the mix met its loudness target. The problem was real and
+none of our instruments could see it.
+
+It is measurable, though. On a real instrument, playing harder changes the tone as well as the
+volume — lean on a saxophone and it gets brighter, not just louder. A single recorded sample
+played at different volumes does not. So: play the same note at rising velocities, and compare
+how far the loudness moved against how far the brightness moved. A large change in one with no
+change in the other is the signature of a sound that will read as lifeless.
+
+That measurement is now a command. It reports the full table, not just a verdict, so you can
+disagree with the conclusion from the evidence.
+
+Four answers are possible, and the distinctions matter: the tone moved (fine), the tone did not
+move (this will sound lifeless on anything exposed), nothing sounded at all, or the velocities
+never changed the loudness in the first place — in which case the question was never actually
+tested. "Nothing was measured" and "we measured, and it was flat" are different findings and
+never share an answer.
+
+It also refuses to answer at all if it cannot first tell a low tone from a high one on a signal
+it generates itself. A meter that cannot hear the difference would report every instrument as
+lifeless, and that reading would look exactly like a true one.
+
+What it does not do is judge quality. It cannot tell you a sound is out of tune, wrong for the
+part, or simply ugly. Taste is still yours. Lifelessness is now ours.
+
+## 2026-08-28 — Bulk edits stop mailing back every note they touched
+
+Duplicating a clip, humanising a performance, or deleting several clips used to return every
+note involved. Measured: duplicating a 149-note clip returned about 24,000 characters; removing
+ten clips returned nearly 200,000 — two hundred kilobytes to report a deletion; humanising a
+guitar part returned 260,000. The useful answer in each case was a handful of identifiers and a
+count.
+
+Those replies now carry the counts, and say explicitly that the notes were left out so a short
+reply is never mistaken for an empty clip.
+
+**This one changes the default**, unlike the same fix applied to note-writing earlier this month,
+where the previous behaviour was kept. Ask for the notes and they come back in full, exactly as
+before.
+
+Two operations deliberately kept the old default, for the same underlying reason: splitting a
+clip and writing its notes both return information you could not have predicted. A split
+truncates any note crossing the cut, and writing notes mints new identifiers. Those still arrive
+complete.
+
+## 2026-08-28 — The tool server now says when it is running stale code
+
+A rebuilt server that has not been restarted serves the old code, and nothing about it looks
+wrong. This cost a whole working session: the source was correct, the build was correct, a search
+of the built file found the new feature — and the running process had never read it, having
+started six hours earlier. The failure mimics "that was never built", which is the exact wrong
+conclusion.
+
+The connection report now carries when the process started, when its code was last built as the
+process saw it, and what that file says now. When the last two disagree, the process is running
+stale code, and the report says so directly rather than leaving it to be inferred.
+
+## 2026-08-28 — Corrections to two pieces of guidance that were wrong
+
+The advice for fixing a too-quiet export did not work. It suggested adding a limiter and then
+raising the level; measured, that lands nowhere near the target, because the level adjustment
+happens after the whole master chain and is limited by what that chain already did. The
+correction names the ordering that does work: the gain goes at the front of the chain, ahead of
+the limiter.
+
+Separately, the song templates listed each genre's tracks by name without saying which ones can
+hold played notes and which can only hold recorded audio. Every genre is now annotated. The
+lo-fi template is the trap worth naming: its track called "Samples" is audio-only, and it is
+exactly the one you would reach for to hold a sampler.
+
+## 2026-08-28 — A sound bank we cannot play now says so, instead of vanishing
+
+Dropping a `.sf3` SoundFont into your bank folder used to do nothing at all. No error, no
+warning, no entry in the list — the file was simply not there as far as the app was concerned.
+You could open the folder, see the file, open the instrument picker, and not see it, with
+nothing to tell you why.
+
+That matters more than it sounds, because `.sf3` is the format most people already have.
+MuseScore, which is where nearly everyone gets a free soundfont, hands out `.sf3` files and
+nothing else. So the most likely first thing anyone tries is also the one thing that failed in
+silence.
+
+The bank list now shows it. An `.sf3` appears with an UNSUPPORTED badge and a line saying what
+to do — open it in MuseScore or Polyphone, export a `.sf2`, and import that. It is deliberately
+shown rather than hidden: being invisible was the whole problem.
+
+Showing it does not make it playable, and that was guarded carefully. You cannot pick it, an
+agent cannot select it, and importing it still refuses with the same plain message it always
+gave. Clicking it in the picker does not quietly do nothing either — it repeats the reason.
+Trading a bank that fails silently for an instrument that plays silence would have been a worse
+bug than the one being fixed.
+
+Playing `.sf3` files directly is a separate, larger job and is not done. Today the app plays
+`.sf2` and `.dls`, and now it says so where you can see it.
+
 ## 2026-08-23 — Arrow keys step over a track they cannot land on
 
 Dragging a clip to another track worked with the mouse and got stuck with the keyboard. With an
@@ -107,6 +3600,11 @@ which is to say gone rather than merely covered. That distinction matters, becau
 of overlapping notes only ever *hid* a re-attack under a decaying tail.
 
 **poly** remains the default and is unchanged.
+
+**Correction, 2026-08-31:** neither the bend range nor the voice mode was
+written into the project file, so a saved song reopened at a whole tone and in
+poly however they had been set. Fixed — see "Four Sampler settings did not
+survive being saved" at the top.
 
 ## 2026-08-23 — When a sampler setting is dead, the app says so and names a fix that works
 
@@ -6474,3 +9972,84 @@ Two things worth knowing from it. **You can already make an instrumental today**
 - 17 Swift tests passing (`./scripts/test.sh`); live E2E: 11/11 control-protocol checks against the running app.
 - Fixed: Swift 6 isolation trap in the metering tap (`@Sendable` on the AVFAudio tap closure).
 - Docs: VISION, ARCHITECTURE, ROADMAP (M0–M9), AI-INTEGRATIONS, DESIGN-LANGUAGE. Agent fleet (8) + skills (6).
+
+## 2026-09-04i — the lesson wave: 20 videos, and four gates that were not gates
+
+**Videos.** Eight lessons (L1–L8) and twelve Shorts now exist, all
+`verify.py`-green and all shipped to `~/Movies`. Tracker: `docs/lessons/PROGRAM.md`.
+
+**`brand.json` was making a false claim on every video.** `line2` read
+"Written, mixed and measured in DAW Pro" — true for the DAW-built lessons, not
+true for the Shorts, L2 or L4, whose audio is generated in Python. It now reads
+"Every number in this video was measured, not estimated", which is true of all
+of them, and **all 16 already-shipped videos were re-rendered**.
+
+**A demonstration is not a bed** (`assemble.py`, `shortsmith.py`). Each stage's
+audio used to carry on under the *next* stage's narration — right for music,
+wrong for a measurement, and in the tuning lesson a pair of beating test tones
+droned under the speaker. Stages now set `"bedEligible": false`. Verified with a
+control: the same manifest with the flag stripped still beats at 6.03 Hz under
+the narration; with it, 0.55 Hz.
+
+**A `[ FAIL ]` was printed and then ignored** (`shortsmith.py`). The Amen lesson
+failed its true-peak check and was copied to `~/Movies` anyway, one line below
+the word FAIL. Shipping now raises on any `[ FAIL ]`; `[BROKEN]` still does not
+block, since that means the probe could not judge.
+
+**True-peak backstop** (`assemble.py`). `loudnorm`'s single-pass `TP=` is a
+target, not a guarantee. The finished concat is now measured and, if over
+ceiling, given a **static trim** — no limiter, no transient reshaped — then
+re-measured, up to four passes, failing loudly if it will not converge.
+
+**`factCheck` may be a list of spellings** (`shortsmith.py`). It rejected eight
+perfect takes of "seventy two beats per minute" because the transcriber writes
+"72". Any one listed spelling now satisfies an entry; the entry is still
+required. Control-tested both ways.
+
+**A/B stages reach `assemble.py` again** (`shortsmith.py`). `assemble.py` has
+implemented before/after alternation with badges for some time, but shortsmith
+never passed the spec's `ab` block through, so such a stage silently played only
+the "after" file. `beforeShots`/`afterShots` are translated from card indices.
+
+## 2026-09-04j — a session film: a whole track from four waveforms
+
+`scripts/video/session/` drives DAW Pro over the control protocol to build a
+64-bar track on camera, photograph the app doing it, and narrate it with
+numbers measured off the renders. No generation model is used anywhere: every
+sound is written as notes and shaped with the app's own synth and effects.
+
+The constraint that turned out to be the story: the poly synth accepts
+`saw|square|triangle|sine` and refuses `noise`, so rain, thunder, a siren and a
+singing vowel all had to come out of those four. Rain is the chapter that
+failed, and it stays in — spectral flatness 0.0001 → 0.0157 against white
+noise's 0.5615, which is 157x better and still 36x short.
+
+Pipeline changes this needed:
+
+- **`shortsmith.py`: a stage can reference a captured screenshot**, not only a
+  rendered card. Cards-only made it impossible to put the app on screen, which
+  is the point of a session film.
+- **`assemble.py`: `zoom` and `to` on a shot** — cut into a region of a
+  screenshot and pan within it. Two ffmpeg facts are documented in the code
+  because each cost a build: a comma inside `min()` ends `crop`'s argument list
+  and is reported as a MISSING FILTER, and `crop`'s width/height are evaluated
+  once at configure time, so a moving crop can pan but cannot zoom. A `to` box
+  of a different size is silently ignored rather than refused.
+- **`shortsmith.py` names its own work dir.** `assemble.py --work` defaults to a
+  relative `segments`, which had put 325 MB at the repo root and 276 MB under
+  `scripts/video` before anyone noticed. Both are now gitignored, along with all
+  generated media — only the tools are tracked.
+- **`install.sh` is re-runnable.** It re-attempted the omlx install every time
+  and dead-ended on a requires-python bound already worked around on the first
+  run, so a user adding `--publish` to a working install was told their Python
+  was wrong and never reached the flag they asked for.
+- **`publish.py` accepts its global flags after the subcommand** as well as
+  before. `publish.py auth --client-secret X` is the obvious spelling and it
+  used to die with "unrecognized arguments" naming the flag it had just
+  documented one line above.
+- **`upload-batch.sh`** uploads a whole wave by filename match, keeps a ledger
+  so no film is sent twice, validates every sidecar offline before the first
+  upload, and prints the plan before it starts.
+- **Synthetic-media disclosure now defaults to true** in both the sidecar
+  generator and publish.py's fallback: this kit exists to make narrated films
+  and the narration is synthetic, so the default should over-disclose.

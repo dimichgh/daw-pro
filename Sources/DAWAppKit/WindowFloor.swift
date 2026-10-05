@@ -34,14 +34,22 @@ public enum WindowFloor {
 
     // MARK: - Width
 
-    /// The Pro transport bar's MEASURED minimum width (`NSHostingView` fittingSize of
-    /// the real row, INCLUDING its own internal hpad 16: 3 transport buttons + LOOP /
-    /// PUNCH / CLICK in the fixed 340 pt leading cluster, the Position / Time / Tempo
-    /// readouts, the EXPORT chip, the Pro-only test-tone button, the vibe meter, the
-    /// master cluster, and the SIMPLE/PRO chip, at spacing 20). The transport is the
-    /// width-binding chrome — wider than the header (~817) or the arrange toolbar
-    /// (~377) — and is present in BOTH workspaces, so it sets the floor. Pro (not
-    /// Simple, ~1125) because Pro is reachable and its extra controls must not clip.
+    /// The Pro transport bar's minimum width. The transport is the width-binding
+    /// chrome — wider than the header (~817) or the arrange toolbar (~377) — and is
+    /// present in BOTH workspaces, so it sets the floor; Pro because Pro is reachable
+    /// and its extra controls must not clip.
+    ///
+    /// ⚠️ HISTORY, and why the number still holds (TB-F1, 2026-09-27): it was first
+    /// MEASURED (m10-j) as the `NSHostingView` fittingSize of the Pro row at spacing
+    /// 20 with every word. That row no longer exists: the worded Pro bar at rest is
+    /// now 1435 pt. The number holds only because TB's word drops and gap closing
+    /// (2026-09-25) and TB-F1's rule-driven gives (`TransportBarFit`) pay for PANIC,
+    /// KEYS, the count-in stepper and the LOOPER door. MEASURED on staging (TB-F1):
+    /// the binding state at the floor is Pro at rest (looper closed, no notice),
+    /// 32 + 689 + 20 + 437 = 1178 pt of bar — 1183 less its 5 pt safety, a
+    /// coincidence of arithmetic, not a derivation. Every other state needs less
+    /// (the rule's 48-case model, `TransportBarFitTests`). Adding a transport
+    /// control means re-deriving this, not trusting it.
     public static let transportProMinWidth: CGFloat = 1183
 
     /// The window content's outer horizontal inset (ContentView's `.padding(12)` on

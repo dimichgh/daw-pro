@@ -532,4 +532,151 @@ struct EffectChainRenderTests {
         let engine = AudioEngine()
         #expect(engine.insertChainLatencySamples(forTrack: UUID()) == 0)
     }
+
+    /// m39-y L9, the CHAIN half. `TransientShaperTests` asserts the unit's own
+    /// `latencySamples == 0`; this asserts what that is FOR — that inserting it
+    /// leaves the chain total unmoved, so it adds no new latency source to the
+    /// insert PDC measured sample-exact at m25-n.
+    ///
+    /// ⛔ It lives here rather than in `TransientShaperTests` because
+    /// `EffectChainState` is `@MainActor` and `MainActorOccupancySiteTests`
+    /// Leg C pins the `@MainActor` SUITE count at its cap with ZERO SLACK — so
+    /// a new main-actor suite is not available and per-test annotation is
+    /// forbidden. This suite is already main-actor-isolated.
+    ///
+    /// ⚠️ It carries its own POSITIVE CONTROL: a `.limiter` in the same
+    /// position DOES move the total. Without that, "the total did not move"
+    /// would be equally consistent with a chain-latency accessor that always
+    /// reports 0.
+    @Test("m39-y L9 — a transient shaper leaves the chain latency total unmoved, and a limiter in the same slot moves it")
+    func transientShaperAddsNoChainLatency() throws {
+        let processor = EffectChainProcessor()
+        let state = EffectChainState(processor: processor)
+
+        state.sync(descriptors: [gainFX(0.5)], sampleRate: 48_000)
+        let baseline = state.latencySamples
+
+        state.sync(descriptors: [gainFX(0.5),
+                                 EffectDescriptor(kind: .transientShaper,
+                                                  transientShaper: TransientShaperParams(
+                                                      attackDb: 12, sustainDb: -8,
+                                                      attackMs: 40, sustainMs: 900))],
+                   sampleRate: 48_000)
+        let withShaper = state.latencySamples
+
+        state.sync(descriptors: [gainFX(0.5),
+                                 EffectDescriptor(kind: .limiter,
+                                                  limiter: LimiterParams())],
+                   sampleRate: 48_000)
+        let withLimiter = state.latencySamples
+
+        print("[measured] m39-y L9 chain latency: gain-only \(baseline), "
+              + "+ transientShaper \(withShaper), + limiter \(withLimiter)")
+        #expect(baseline == 0)
+        #expect(withShaper == baseline,
+                "the transient shaper moved the chain total to \(withShaper) — it has entered the PDC path and must be re-measured against m25-n")
+        // POSITIVE CONTROL: the accessor can report a non-zero.
+        #expect(withLimiter > 0,
+                "the chain-latency accessor reported 0 for a LOOKAHEAD limiter — it cannot see latency at all, so the assertion above proves nothing")
+    }
+
+    /// m39-z L8b — the CHAIN half, for the m39-y reason above (this suite is
+    /// already main-actor-isolated and a new main-actor suite is not available).
+    /// A frequency shifter is a filter network, not a delay line: its group
+    /// delay is frequency-dependent like `.eq`'s and `.phaser`'s, so it declares
+    /// 0 and must not move the chain total.
+    ///
+    /// ⚠ CARRIES ITS OWN POSITIVE CONTROL, without which "the total did not
+    /// move" is equally consistent with an accessor that always reports 0.
+    @Test("m39-z L8b — a frequency shifter leaves the chain latency total unmoved, and a limiter in the same slot moves it")
+    func freqShifterAddsNoChainLatency() throws {
+        let processor = EffectChainProcessor()
+        let state = EffectChainState(processor: processor)
+
+        state.sync(descriptors: [gainFX(0.5)], sampleRate: 48_000)
+        let baseline = state.latencySamples
+
+        state.sync(descriptors: [gainFX(0.5),
+                                 EffectDescriptor(kind: .freqShifter,
+                                                  freqShifter: FreqShifterParams(
+                                                      shiftHz: 733.5, fineHz: 12.5,
+                                                      stereoSpreadHz: -9, mix: 1))],
+                   sampleRate: 48_000)
+        let withShifter = state.latencySamples
+
+        state.sync(descriptors: [gainFX(0.5),
+                                 EffectDescriptor(kind: .limiter,
+                                                  limiter: LimiterParams())],
+                   sampleRate: 48_000)
+        let withLimiter = state.latencySamples
+
+        print("[measured] m39-z L8b chain latency: gain-only \(baseline), "
+              + "+ freqShifter \(withShifter), + limiter \(withLimiter)")
+        #expect(baseline == 0)
+        #expect(withShifter == baseline,
+                "the frequency shifter moved the chain total to \(withShifter) — it has entered the PDC path and must be re-measured against m25-n")
+        // POSITIVE CONTROL: the accessor can report a non-zero.
+        #expect(withLimiter > 0,
+                "the chain-latency accessor reported 0 for a LOOKAHEAD limiter — it cannot see latency at all, so the assertion above proves nothing")
+    }
+
+    /// m39-y A8, the SECOND half. `EffectFactory.makeInstance` is exercised by
+    /// every other render in the tree; `EffectFactory.applyParams` is not —
+    /// nothing else constructs a shaper and then scrubs a knob on the LIVE
+    /// instance. That arm is an inert-effect shape: a mistyped cast
+    /// (`as? PhaserEffect`) compiles to `nil?.apply(…)`, every knob move on a
+    /// playing track silently no-ops, and the whole suite stays green because
+    /// every other test builds a fresh instance carrying the value already.
+    ///
+    /// The knob moved is `outputDb`, not `attackDb`, for the same reason L8
+    /// uses it: on a CONSTANT buffer the three detector envelopes converge, the
+    /// differentials go to 0, and `attackDb` is multiplied by ≈0 — a plant on
+    /// the multiplicative path would not reach the output. `outputDb` is on the
+    /// unconditional path, so the assertion is about the apply, not the DSP.
+    @Test("m39-y A8 — a transient-shaper knob scrub lands on the LIVE instance (EffectFactory.applyParams), same unit, no snapshot republish")
+    func transientShaperParamScrubAppliesInPlace() throws {
+        let processor = EffectChainProcessor()
+        let state = EffectChainState(processor: processor)
+        let id = UUID()
+        func shaper(outputDb: Double) -> EffectDescriptor {
+            EffectDescriptor(id: id, kind: .transientShaper,
+                             transientShaper: TransientShaperParams(
+                                 attackDb: 0, sustainDb: 0, outputDb: outputDb))
+        }
+
+        state.sync(descriptors: [shaper(outputDb: 0)], sampleRate: 48_000)
+        let snapshotBefore = try #require(processor.currentSnapshot)
+        let unitBefore = try #require(state.unit(forEffect: id))
+
+        // Neutral: attack/sustain 0 means shapeDb is 0 whatever the detector
+        // reads, so the walk is a pure `outputDb` multiply of 0.5.
+        let buffer1 = try makeConstantBuffer(0.5, frames: 512)
+        processor.process(bufferList: buffer1.mutableAudioBufferList, frameCount: 512)
+        let channels1 = try #require(buffer1.floatChannelData)
+        #expect(abs(channels1[0][511] - 0.5) < 1e-6)
+
+        // The scrub: +12 dB on the live unit.
+        state.sync(descriptors: [shaper(outputDb: 12)], sampleRate: 48_000)
+        #expect(processor.currentSnapshot === snapshotBefore)  // NO republish
+        #expect(state.unit(forEffect: id) === unitBefore)      // same live unit
+
+        // One quantum of per-sample interpolation, then exact.
+        let buffer2 = try makeConstantBuffer(0.5, frames: 512)
+        processor.process(bufferList: buffer2.mutableAudioBufferList, frameCount: 512)
+        let buffer3 = try makeConstantBuffer(0.5, frames: 512)
+        processor.process(bufferList: buffer3.mutableAudioBufferList, frameCount: 512)
+        let channels3 = try #require(buffer3.floatChannelData)
+        let settled = Double(channels3[0][511])
+        let expected = 0.5 * pow(10.0, 12.0 / 20.0)
+        let settledDb = 20.0 * log10(settled / 0.5)
+        print("[measured] m39-y A8 live apply: 0.5 → \(settled) "
+              + "(\(settledDb) dB, expected +12.000, target \(expected))")
+        #expect(abs(settledDb - 12.0) < 0.01,
+                "the +12 dB scrub reached the live instance as \(settledDb) dB — if it reads 0, EffectFactory.applyParams never touched this instance and every knob move on a playing track is inert")
+        // Anti-vacuity: the ramp had to move, so the walk above is not simply
+        // re-reading a value that was there from construction.
+        let channels2 = try #require(buffer2.floatChannelData)
+        #expect(Double(channels2[0][0]) < settled - 1e-4,
+                "the first post-scrub sample already sat at the settled value — this walk did not observe an apply, it observed a rebuild")
+    }
 }

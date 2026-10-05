@@ -194,6 +194,14 @@ public struct StepSequencerGeometry: Sendable, Equatable {
     /// carries prose ("Acoustic Snare"), not a two-glyph key name.
     public static let laneGutterWidth: CGFloat = 108
 
+    /// The most step columns one grid draws: 2^20 (m23-ap I5-F4 round 4). At the
+    /// finest step (1/64 note = 1/16 beat) that is 65,536 beats, about 9.1
+    /// hours at 120 BPM; at the 1/16-note default, 36 hours. Only a note or a
+    /// clip end further out than that reaches it, and the grid then stops at
+    /// this column: those notes stay in the clip and in the piano roll. Before
+    /// it, such a clip asked for billions of columns (or trapped `Int(_:)`).
+    public static let maximumStepCount = 1 << 20
+
     /// The step size the grid falls back to when the caller's resolution has no
     /// grid at all (`SnapResolution.off`). A step grid IS a grid — "off" is not
     /// a state this surface can render — and 1/16 is the drum-programming
@@ -212,9 +220,37 @@ public struct StepSequencerGeometry: Sendable, Equatable {
     /// LATENT (the engine sounds an onset only while `startBeat < length`,
     /// strict). Drawn as the roll's out-of-clip shade.
     public let clipLengthBeats: Double
-    /// Beats per bar of the meter governing this clip — the column emphasis, so
-    /// a 3/4 clip groups its steps in threes.
+    /// Beats per bar of the meter the clip STARTS in — `stepsPerBar`, and the
+    /// rule that a step as long as a bar draws no bar emphasis. Where the bar
+    /// lines ARE comes from `meterMap` (m23-ap I5-F4), so a meter change inside
+    /// the clip re-spaces them.
     public let beatsPerBar: Int
+
+    // MARK: Where the columns sit on the SONG's grid (m23-ap I5-F4)
+
+    /// The clip's first beat on the song timeline.
+    public let clipStartBeat: Double
+    /// The song's ONE meter map — which columns start a bar, and that bar's
+    /// number (the song's, never counted from the clip).
+    public let meterMap: MeterMap
+    /// How far the clip's first beat sits past the song grid line column 0
+    /// starts on, in beats — EXACTLY 0 when the clip starts on a line
+    /// (`SongGridPhase`), which is what keeps every on-grid column bit-identical
+    /// to the pre-I5-F4 grid. Otherwise column 0 is a PARTIAL column: its left
+    /// part (`0 ..< clipStartX`) is before the clip and is shaded out.
+    public let phaseBeats: Double
+    /// The song beat column 0 starts at (`clipStartBeat − phaseBeats`): a line
+    /// the piano roll draws.
+    public let firstStepSongBeat: Double
+    /// Column 0's index on the song's step lattice (column k starts at song
+    /// beat `(firstStepIndex + k) / stepsPerWholeBeat`). INTEGER so beat and
+    /// bar lines are found by exact arithmetic, never from a float song beat —
+    /// a triplet column that starts ON beat 1 reads 0.9999999999999999 and
+    /// would miss it. 0 when `stepsPerWholeBeat` is nil.
+    let firstStepIndex: Int
+    /// Steps in one whole beat when a beat is an exact number of steps — every
+    /// resolution but Bar (1/2ⁿ, and the 1/3 and 1/6 triplets) — else nil.
+    let stepsPerWholeBeat: Int?
 
     /// Where the lane stack opens when the grid is taller than the pane.
     ///
@@ -233,7 +269,20 @@ public struct StepSequencerGeometry: Sendable, Equatable {
     /// the user's pitch view.
     public let opensAtBottom: Bool
 
-    /// Builds the geometry for a clip.
+    /// Builds the geometry for a clip, ON THE SONG'S GRID (m23-ap I5-F4).
+    ///
+    /// ⭐ **THE COLUMNS ARE THE SONG'S GRID CELLS, NOT THE CLIP'S.** I5-F2/F3 put
+    /// the piano roll's lines and every note edit on the song's grid; this grid
+    /// used to cut its columns from the clip's first beat, so on a clip that
+    /// starts off a line (a clip at 2.1 under 1/16) no column edge was a line
+    /// the roll draws, and a toggled box wrote a note between them. Column 0
+    /// now starts on the song line at or before the clip's first beat
+    /// (`phaseBeats` before it), every column edge is a song line, bar emphasis
+    /// and bar numbers are the SONG's (`meterMap`), and a Bar-sized column is
+    /// one bar of the meter the clip starts in (the I5-F3 ruling: `.bar` is
+    /// meter-aware). For a clip that starts on a line every position this
+    /// geometry answers is bit-identical to before; bar numbers are the song's
+    /// on every clip, as the roll's ruler has been since I5-F2.
     ///
     /// ⚠️ **THE STEP COUNT COVERS EVERY NOTE, not just the clip.** It is the
     /// clip length OR the furthest note ONSET, whichever is later — the
@@ -242,7 +291,64 @@ public struct StepSequencerGeometry: Sendable, Equatable {
     /// and would otherwise be un-toggleable from the only surface that can
     /// delete without the keyboard. It is the onset (not the end) because a
     /// cell IS an onset: extending for a tail would add columns nothing can
-    /// ever fill.
+    /// ever fill. The partial column 0 of an off-grid clip adds `phaseBeats`.
+    nonisolated public static func make(
+        isDrumKit: Bool,
+        notes: [MIDINote],
+        clipLengthBeats: Double,
+        resolution: SnapResolution,
+        songGrid: PianoRollSongGrid.Context,
+        rowHeight: CGFloat = StepSequencerGeometry.defaultRowHeight,
+        stepWidth: CGFloat = StepSequencerGeometry.defaultStepWidth
+    ) -> StepSequencerGeometry {
+        let start = songGrid.clipStartBeat.isFinite ? max(0, songGrid.clipStartBeat) : 0
+        let meterMap = songGrid.meterMap
+        let placement = columnPlacement(clipStartBeat: start, resolution: resolution,
+                                        meterMap: meterMap)
+        let step = placement.stepBeats
+        let phase = placement.phaseBeats
+        let length = max(0, clipLengthBeats)
+        let furthestOnset = notes.map(\.startBeat).max() ?? 0
+        let span = max(length, furthestOnset + step)
+        // TOTAL (m23-ap I5-F4 round 4): the count stays a Double until it is
+        // known to fit. `Int(_:)` trapped on an infinite span and on a note 2^63
+        // or more steps in (~2.4e18 beats at 1/16). Past `maximumStepCount` the
+        // grid stops there; every smaller count is the one it was before.
+        let rawCount = ((span + phase) / step - 1e-9).rounded(.up)
+        let count = rawCount < Double(Self.maximumStepCount)
+            ? max(1, Int(rawCount)) : Self.maximumStepCount
+        let firstStepSongBeat = start - phase
+        // TOTAL (m23-ap I5-F4 round 3): the song-step lattice is exact integer
+        // arithmetic, so it exists only while a Double holds every step index
+        // exactly (below 2^53). Past that (a clip ~1e15 beats out) `Int` would
+        // trap soon after, at 2^63, which a clip.addMIDI far enough out reached.
+        // The geometry drops the lattice there, as a Bar-sized step does: no
+        // song emphasis, and nothing asks the meter map about a beat that far.
+        let lattice = wholeBeatDivisor(step).flatMap { perBeat -> (index: Int, perBeat: Int)? in
+            let index = (firstStepSongBeat * Double(perBeat)).rounded()
+            guard index.magnitude < 9_007_199_254_740_992 else { return nil }
+            return (Int(index), perBeat)
+        }
+        return StepSequencerGeometry(
+            lanes: StepSequencerLanes.lanes(isDrumKit: isDrumKit, notes: notes),
+            stepBeats: step,
+            stepCount: count,
+            rowHeight: rowHeight,
+            stepWidth: stepWidth,
+            clipLengthBeats: length,
+            beatsPerBar: max(1, meterMap.beatsPerBar(atBeat: start)),
+            clipStartBeat: start,
+            meterMap: meterMap,
+            phaseBeats: phase,
+            firstStepSongBeat: firstStepSongBeat,
+            firstStepIndex: lattice?.index ?? 0,
+            stepsPerWholeBeat: lattice?.perBeat,
+            opensAtBottom: isDrumKit)
+    }
+
+    /// The pre-I5-F4 signature: a clip whose first beat is the song's beat 0, in
+    /// one meter of `beatsPerBar`. Forwards to the song-grid `make`, whose phase
+    /// is exactly 0 there — so this is the old geometry, bit for bit.
     nonisolated public static func make(
         isDrumKit: Bool,
         notes: [MIDINote],
@@ -252,26 +358,61 @@ public struct StepSequencerGeometry: Sendable, Equatable {
         rowHeight: CGFloat = StepSequencerGeometry.defaultRowHeight,
         stepWidth: CGFloat = StepSequencerGeometry.defaultStepWidth
     ) -> StepSequencerGeometry {
-        let step = stepBeats(for: resolution)
-        let length = max(0, clipLengthBeats)
-        let furthestOnset = notes.map(\.startBeat).max() ?? 0
-        let span = max(length, furthestOnset + step)
-        let count = max(1, Int((span / step - 1e-9).rounded(.up)))
-        return StepSequencerGeometry(
-            lanes: StepSequencerLanes.lanes(isDrumKit: isDrumKit, notes: notes),
-            stepBeats: step,
-            stepCount: count,
-            rowHeight: rowHeight,
-            stepWidth: stepWidth,
-            clipLengthBeats: length,
-            beatsPerBar: max(1, beatsPerBar),
-            opensAtBottom: isDrumKit)
+        make(isDrumKit: isDrumKit, notes: notes, clipLengthBeats: clipLengthBeats,
+             resolution: resolution,
+             songGrid: PianoRollSongGrid.Context(
+                clipStartBeat: 0,
+                meterMap: MeterMap(constant: TimeSignature(beatsPerBar: beatsPerBar))),
+             rowHeight: rowHeight, stepWidth: stepWidth)
     }
 
     /// Beats per step for a resolution — `off` has no grid, so it takes the
     /// 1/16 fallback rather than silently drawing one column per beat.
+    ///
+    /// The NOMINAL size: `.bar` reads 4 here. A built geometry replaces it with
+    /// one bar of the meter the clip starts in (`columnPlacement`), so read
+    /// `stepBeats` off the geometry, never this, to know what was drawn.
     nonisolated public static func stepBeats(for resolution: SnapResolution) -> Double {
         resolution.beats ?? (fallbackResolution.beats ?? 0.25)
+    }
+
+    /// How wide a column is and how far the clip's first beat sits past the
+    /// song line column 0 starts on (m23-ap I5-F4).
+    ///
+    /// - Every resolution but Bar: `SongGridPhase.phase` — the roll's own phase,
+    ///   from the song's beat 0 (the non-bar lines the roll draws are uniform
+    ///   from there whatever the meter, because every bar starts on a whole beat).
+    /// - Bar: one bar of the meter the clip starts in, measured from the song's
+    ///   bar line at or before the clip's first beat. In one meter that is
+    ///   `start mod beatsPerBar`, the roll's `.bar` snap exactly. Across a meter
+    ///   change a column stays one bar of the STARTING meter — uniform columns
+    ///   cannot re-space, so past the change they drift off the drawn bars.
+    nonisolated static func columnPlacement(clipStartBeat start: Double,
+                                            resolution: SnapResolution,
+                                            meterMap: MeterMap) -> (stepBeats: Double, phaseBeats: Double) {
+        guard resolution == .bar else {
+            let step = stepBeats(for: resolution)
+            return (step, SongGridPhase.phase(of: start, step: step))
+        }
+        let tolerance = SongGridPhase.onGridTolerance
+        var line = meterMap.beat(ofBar: meterMap.barBeat(atBeat: start).bar)
+        var step = Double(meterMap.beatsPerBar(atBeat: line))
+        // A start a nanobeat short of the next bar line counts as ON it.
+        if line + step - start < tolerance {
+            line += step
+            step = Double(meterMap.beatsPerBar(atBeat: line))
+        }
+        let phase = start - line
+        return (step, phase < tolerance ? 0 : phase)
+    }
+
+    /// Steps in one whole beat when a beat is an exact number of steps, else
+    /// nil (a Bar-sized step, or anything longer than a beat).
+    nonisolated static func wholeBeatDivisor(_ step: Double) -> Int? {
+        guard step > 0, step <= 1 else { return nil }
+        let divisor = (1 / step).rounded()
+        guard divisor >= 1, abs(divisor * step - 1) < 1e-9 else { return nil }
+        return Int(divisor)
     }
 
     /// The resolutions the STEP picker offers: every `SnapResolution` that has a
@@ -300,8 +441,12 @@ public struct StepSequencerGeometry: Sendable, Equatable {
     public var contentHeight: CGFloat { CGFloat(lanes.count) * rowHeight }
     public var contentSize: CGSize { CGSize(width: contentWidth, height: contentHeight) }
 
-    /// Clip-local beat a step column starts at.
-    public func beat(forStep step: Int) -> Double { Double(step) * stepBeats }
+    /// Clip-local beat a step column starts at: a song grid line. NEGATIVE for
+    /// the partial column 0 of an off-grid clip (its line is before the clip's
+    /// first beat); a note toggled there lands on the clip's first beat
+    /// (`StepSequencerEdit.toggle`). With `phaseBeats` exactly 0 this is the
+    /// pre-I5-F4 `step · stepBeats`, bit for bit.
+    public func beat(forStep step: Int) -> Double { Double(step) * stepBeats - phaseBeats }
 
     /// x of a step column's leading edge, in content coordinates.
     public func x(forStep step: Int) -> CGFloat { CGFloat(step) * stepWidth }
@@ -318,8 +463,19 @@ public struct StepSequencerGeometry: Sendable, Equatable {
     /// draw a note one column left of where the roll draws it and the toggle
     /// round-trip would break on every triplet grid. Anything within a
     /// millionth of a boundary belongs to that boundary.
+    ///
+    /// m23-ap I5-F4: columns are cut on the SONG's lines, so the beat is shifted
+    /// by `phaseBeats` first (exactly 0 for a clip on a line).
     public func stepIndex(forBeat beat: Double) -> Int {
-        let scaled = beat / stepBeats
+        let scaled = (beat + phaseBeats) / stepBeats
+        // TOTAL (m23-ap I5-F4 round 4): `Int(_:)` trapped on a beat that is not
+        // a number or infinite, and on one 2^63 or more steps out. Such a beat is
+        // in no column: answer a step every caller already reads as outside the
+        // grid (`fills` keeps 0..<stepCount, `notes(in:cell:)` compares with a
+        // real column). Every beat that worked before takes the unchanged path.
+        guard scaled.magnitude < 9_223_372_036_854_775_808.0 else {   // 2^63
+            return scaled > 0 ? Int.max : Int.min
+        }
         let nearest = scaled.rounded()
         if abs(scaled - nearest) < 1e-6 { return Int(nearest) }
         return Int(scaled.rounded(.down))
@@ -346,16 +502,49 @@ public struct StepSequencerGeometry: Sendable, Equatable {
         return StepCell(step: step, pitch: lanes[row].pitch)
     }
 
-    /// True when a step column starts a bar — the emphasized gridline, and the
-    /// column the SF Mono step number is drawn over.
+    /// True when a step column starts a SONG bar — the emphasized gridline, and
+    /// the column the SF Mono bar number is drawn over (m23-ap I5-F4: the
+    /// song's bar lines through `meterMap`, the ones the roll draws — never
+    /// every `stepsPerBar` from the clip's first beat).
+    ///
+    /// Found by exact integer arithmetic on the song's step lattice: the column
+    /// must start a whole song beat, and that beat must start a bar. A step as
+    /// long as a bar (or a whole-beat step in a one-beat meter) draws no bar
+    /// emphasis, as before — `stepsPerBar` is 0 there.
     public func isBarStart(step: Int) -> Bool {
-        stepsPerBar > 0 && step % stepsPerBar == 0
+        guard stepsPerBar > 0, let perBeat = stepsPerWholeBeat else { return false }
+        let songStep = firstStepIndex + step
+        guard songStep >= 0, songStep % perBeat == 0 else { return false }
+        return meterMap.barBeat(atBeat: Double(songStep / perBeat)).beatInBar < 0.001
     }
 
-    /// True when a step column starts a whole beat — the mid-weight gridline
-    /// that makes a 16-step bar countable in fours.
+    /// True when a step column starts a whole SONG beat — the mid-weight
+    /// gridline that makes a 16-step bar countable in fours.
     public func isBeatStart(step: Int) -> Bool {
-        stepsPerBeat > 0 && step % stepsPerBeat == 0
+        guard stepsPerBeat > 0 else { return false }
+        let songStep = firstStepIndex + step
+        return songStep >= 0 && songStep % stepsPerBeat == 0
+    }
+
+    /// The song beat a step column starts at — exact whenever it is a whole
+    /// beat (integer arithmetic on the step lattice), so a bar lookup can never
+    /// fall a hair short of the bar line it names.
+    public func songBeat(forStep step: Int) -> Double {
+        guard let perBeat = stepsPerWholeBeat else {
+            return firstStepSongBeat + Double(step) * stepBeats
+        }
+        let songStep = firstStepIndex + step
+        if songStep % perBeat == 0 { return Double(songStep / perBeat) }
+        return Double(songStep) / Double(perBeat)
+    }
+
+    /// The columns that start a SONG bar, left to right, each with its song bar
+    /// number — the step ruler's labels, derived from `isBarStart` so the ruler
+    /// and the emphasized gridlines read ONE predicate.
+    public var barMarks: [StepBarMark] {
+        (0..<stepCount).compactMap { step in
+            isBarStart(step: step) ? StepBarMark(step: step, bar: barNumber(forStep: step)) : nil
+        }
     }
 
     /// Steps in one beat, rounded — 0 when a step is longer than a beat (Bar,
@@ -375,13 +564,43 @@ public struct StepSequencerGeometry: Sendable, Equatable {
 
     /// x of the clip end — everything right of it is latent (the m19-g out-of-
     /// clip shade, drawn at the same 0.28 + `gridEmphasis` hairline as the
-    /// roll's three bands).
-    public var clipEndX: CGFloat { CGFloat(clipLengthBeats / stepBeats) * stepWidth }
+    /// roll's three bands). Shifted by the partial column 0 (m23-ap I5-F4).
+    public var clipEndX: CGFloat { CGFloat((clipLengthBeats + phaseBeats) / stepBeats) * stepWidth }
 
-    /// One-based bar number a step falls in — the SF Mono column readout.
+    /// x of the clip's first beat — 0 for a clip on a line; inside column 0 for
+    /// an off-grid clip, whose part left of it is BEFORE the clip and takes the
+    /// same out-of-clip shade as the tail (m23-ap I5-F4).
+    public var clipStartX: CGFloat { CGFloat(phaseBeats / stepBeats) * stepWidth }
+
+    /// The transport playhead's x in this grid's content space, or nil while
+    /// the transport sits outside the clip — `PianoRollPlayhead.lineX` on the
+    /// step scale, moved right by the partial column 0 so the line crosses the
+    /// column holding the beat it is on (m23-ap I5-F4).
+    public func playheadX(position: Double, lengthBeats: Double) -> CGFloat? {
+        PianoRollPlayhead.lineX(position: position, clipStartBeat: clipStartBeat,
+                                lengthBeats: lengthBeats,
+                                pixelsPerBeat: stepWidth / CGFloat(stepBeats))
+            .map { $0 + clipStartX }
+    }
+
+    /// One-based SONG bar a step column starts in — the SF Mono column readout.
+    /// m23-ap I5-F4: the song's bar (a clip on bar 3 reads 3, as the roll's
+    /// ruler and the transport do), never counted from the clip's first beat.
     public func barNumber(forStep step: Int) -> Int {
-        guard stepsPerBar > 0 else { return step + 1 }
-        return step / stepsPerBar + 1
+        meterMap.barBeat(atBeat: songBeat(forStep: step)).bar + 1
+    }
+}
+
+/// A column that starts a song bar, and that bar's number — one step-ruler
+/// label (m23-ap I5-F4). Echoed by `debug.stepSequencer` so a gate can compare
+/// the step grid's bars with the roll's.
+public struct StepBarMark: Sendable, Equatable {
+    public let step: Int
+    public let bar: Int
+
+    public init(step: Int, bar: Int) {
+        self.step = step
+        self.bar = bar
     }
 }
 
@@ -491,6 +710,12 @@ public enum StepSequencerEdit {
     /// else is touched). Toggling an EXISTING note off and on again is lossy in
     /// the two ways `notes(in:cell:)` documents — an unsnapped onset returns
     /// snapped, a custom length returns one step, a flam returns as one note.
+    ///
+    /// m23-ap I5-F4: the step's start is a SONG grid line. The partial column 0
+    /// of an off-grid clip has its line BEFORE the clip's first beat, so its
+    /// note lands ON the clip's first beat — clamped at 0, the I5-F3 "notes
+    /// clamp at 0 only" rule the roll's own add follows — and still sits in
+    /// column 0, so the round trip holds there too.
     nonisolated public static func toggle(notes: [MIDINote], cell: StepCell,
                                           geometry: StepSequencerGeometry) -> ToggleOutcome {
         let occupants = self.notes(in: notes, cell: cell, geometry: geometry)
@@ -498,7 +723,7 @@ public enum StepSequencerEdit {
             let note = MIDINote(
                 pitch: cell.pitch,
                 velocity: defaultVelocity,
-                startBeat: geometry.beat(forStep: cell.step),
+                startBeat: max(0, geometry.beat(forStep: cell.step)),
                 lengthBeats: geometry.stepBeats)
             return ToggleOutcome(notes: notes + [note], added: note, removed: [])
         }

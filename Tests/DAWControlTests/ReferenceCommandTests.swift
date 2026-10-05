@@ -142,17 +142,57 @@ struct ReferenceCommandTests {
         // an OFFSET is invisible to a grep for the count literal, and only a
         // full-suite run finds it. (P1's `clip.applyEffortShape` landed BEFORE
         // this block and correctly moved neither.)
-        let tail = Array(CommandRouter.allCommands.dropLast(24).suffix(8))
+        // ⚠️ m23-ct did EXACTLY THE SAME THING, which is why this warning is now
+        // load-bearing rather than historical: `note.play` was INSERTED next to
+        // `pad.previewEffort` (just after this block), so 26 → 27. Nothing
+        // landed at the tail and no grep for the count literal would have found
+        // this line. A THIRD sibling in that neighbourhood will move it again.
+        // ⚠️⚠️ **AND IT DID, ON THE VERY NEXT ITEM.** m23-cv inserted
+        // `chord.voice` next to `note.play` — the fourth verb in that
+        // neighbourhood — so 27 → 28. The prediction above was written by the
+        // m23-ct author and came true one item later; it is left standing rather
+        // than updated into the past tense, because a FIFTH sibling will move it
+        // again and the warning is the useful part. Only a FULL-SUITE run finds
+        // this: a filtered run of the chord tests was green while this line was
+        // red.
+        // ⚠️⚠️ **AND THE FIFTH SIBLING ARRIVED, EXACTLY AS PREDICTED.** m34-f
+        // step ② inserted `pad.playEffort` immediately after `chord.voice` — the
+        // fifth verb in that neighbourhood — so 28 → 29. Only a FULL-SUITE run
+        // found it: every filtered run of the m34-f tests was green while this
+        // line was red, which is the third consecutive item for which that is
+        // true. A SIXTH sibling will move it again; the warning stays.
+        // ⚠️⚠️ **AND THE SIXTH ARRIVED TOO — m34-l's `play.sustain`, immediately
+        // after `pad.playEffort`, so 29 → 30. That is FOUR consecutive items on
+        // which only a FULL-SUITE run found this line; a filtered run of the
+        // m34-l suites was green while it was red. The prediction has now been
+        // right five times running, so it is not a warning any more, it is the
+        // observed behaviour of this neighbourhood: anything that sounds live
+        // lands here, and this offset moves. A SEVENTH will move it again.**
+        // m23-q Phase 2 appended three more verbs at the true tail, widening
+        // this offset by three (159 -> 162... -> now dropLast(33)).
+        let tail = Array(CommandRouter.allCommands.dropLast(33).suffix(8))
         #expect(tail == ["reference.import", "reference.remove",
                          "reference.status", "reference.analyze",
                          "reference.setMonitor", "reference.setOffset",
                          "reference.setTrim", "reference.compare"])
-        #expect(CommandRouter.allCommands.count == 186)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail)
-        #expect(CommandRouter.allCommands.dropLast(4).last == "vc.importVoiceModel")  // m23-di-2a (ai.modelUnload was last at m23-dl)
-        #expect(CommandRouter.allCommands.dropLast(3).last == "transport.setStopAtContentEnd")  // m25-d
-        #expect(CommandRouter.allCommands.dropLast(2).last == "audio.profileFile")  // m25-z
-        #expect(CommandRouter.allCommands.dropLast().last == "clip.detectPitch")  // m23-ap-3
-        #expect(CommandRouter.allCommands.last == "edit.pasteClips")  // m26-k
+        #expect(CommandRouter.allCommands.count == 263)   // 159 -> 161 at m23-n3b -> 162 at m23-r4 -> 163 at m23-o1 -> 165 at m23-w -> 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail) -> 191 (m24-m leg A vc.convertClips, placed next to vc.convertVocals — its single-clip sibling — NOT at the tail) -> 193 (m24-n project.embeddedVoices next to project.snapshot/project.open, and vc.installEmbeddedVoice next to vc.importVoiceModel, both at the tail per the additive-at-end law) -> 194 (m23-ct note.play, placed next to note.audition/pad.previewEffort — the other 'sounds now, outside the timeline' verbs — NOT at the tail; a tail append reddened 19 end-relative assertions across 7 files on this item's first run) -> 195 (m23-cv chord.voice, a PURE read-only computation, placed next to note.play and NOT at the tail: LivePlayCommandTests pins note.play to pad.previewEffort + 1, so an insertion BEFORE it would redden that instead) -> 202 (m34-c instrument.listDownloadableSoundBanks/downloadSoundBank/soundBankDownloadStatus/cancelSoundBankDownload — the one-click SoundFont download, all four placed next to instrument.importSoundBank — their nearest sibling — and NOT at the tail, so every dropLast(N) window above stays true by construction; a tail placement was tried first and reddened 14 tests) -> 211 (m34-h-1 LIVE LOOPING looper.begin/armLayer/finishLayer/undoLayer/setLayerMuted/status/end, all seven placed immediately after transport.recordLayer/finishLayer — the verbs whose machinery the deck drives — and ~71 entries from the END, NOT at the tail, so every dropLast(N) window and suffix assertion above stays true by construction) -> 215 (M35 view.capture/view.selectClip/view.panelLayout/view.openEditor, the agent-facing VIEW surface, all four placed immediately after plugin.listOpenUIs and ~70 entries from the END, NOT at the tail) -> 218 (m39-f instrument.describeSynth, placed next to instrument.describeSampler, NOT at the tail) -> 231 at m39-dm (instrument.setDrumParam/describeDrumKit/listDrumPresets/loadDrumPreset — the drum machine's four verbs, placed next to instrument.describeSynth/describeSampler, their only siblings on this surface, and NOT at the tail, so every dropLast(N) window and suffix assertion stays true by construction) -> 234 at m23-q (clip.autoCorrectPitch/clip.clearPitchEdits/clip.getPitchEdits, appended at the tail) -> 237 at p2-c (view.openPitchEditor next to view.openEditor; clip.setNotePitch/clip.splitNote next to clip.sliceToSampler, NOT at the tail) -> 239 at m39-levels-2 wire (instrument.spreadSlice/instrument.setSpreadDirection, placed next to instrument.describeSampler, NOT at the tail) -> 241 at I7a (clip.setNoteCleared, placed next to clip.getPlayedPitch in the per-note door cluster, NOT at the tail) -> 243 at the I4 wire leg (clip.setNotePitches, placed next to clip.setNoteGain in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two added since I7a — U-D's clip.setNoteGain landed 242 without a matching entry appended here, so this suffix continues from 241, not 242) -> 244 at the I1 wire leg (clip.auditionNote, placed immediately after clip.setNotePitches — a deliberate departure from the tail-of-cluster rule, since this verb is not a per-note WRITER like its neighbours and no dropLast(N)/suffix-window pin anywhere depends on it landing at the tail — still beside clip.sliceToSampler) -> 245 at UB-2 (clip.findUnpitchedSounds, placed immediately after clip.auditionNote, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail) -> 247 at C5a-3/NT-L3 (clip.setNoteVibrato/clip.setNoteVibratos, placed immediately after clip.findUnpitchedSounds, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two verbs land together) -> 252 at NT-W (clip.setNoteFormant/clip.setFormantCorrection/clip.setNoteTransition/clip.setPitchTransitionSmoothness/clip.setNoteGlideFollow, placed immediately after clip.setNoteVibratos, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; five verbs land together) -> 253 at NT-W over NT-C C2 (clip.setConsonantProtection, placed immediately after clip.setNoteGlideFollow, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; NT-E2 has since landed (2026-09-26) -- the render mix is live) -> 263 at m39-tpl-6 (+7 template.* verbs: template.list/describe/apply/save/remove/import/export, placed right after playbox.generate, NOT at the tail)
+        // -> 187 (m31-f instrument.probeLiveness, placed next to instrument.describeSampler — its read-only instrument.* sibling — NOT at the tail)
+        // -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes — FAR from this reference block, so the dropLast(24) offset above is unaffected — NOT at the tail)
+        // -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes — same "FAR from this reference block" reasoning, VERIFIED by the full-suite run: this test's `tail` assertion at line 145 did NOT redden, only this count pin did — the dropLast(24) offset above is unaffected)
+        #expect(CommandRouter.allCommands.dropLast(9).last == "vc.importVoiceModel")  // m23-di-2a (ai.modelUnload was last at m23-dl)
+        #expect(CommandRouter.allCommands.dropLast(8).last == "transport.setStopAtContentEnd")  // m25-d
+        #expect(CommandRouter.allCommands.dropLast(7).last == "audio.profileFile")  // m25-z
+        #expect(CommandRouter.allCommands.dropLast(6).last == "clip.detectPitch")  // m23-ap-3
+        #expect(CommandRouter.allCommands.dropLast(5).last == "edit.pasteClips")  // m26-k
+        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice;
+        // m23-q Phase 2 then appended clip.autoCorrectPitch/
+        // clip.clearPitchEdits/clip.getPitchEdits AFTER those, at the new END
+        // (same law).
+        #expect(CommandRouter.allCommands.dropLast(4).last == "project.embeddedVoices")
+        #expect(CommandRouter.allCommands.dropLast(3).last == "vc.installEmbeddedVoice")
+        #expect(CommandRouter.allCommands.dropLast(2).last == "clip.autoCorrectPitch")
+        #expect(CommandRouter.allCommands.dropLast().last == "clip.clearPitchEdits")
+        #expect(CommandRouter.allCommands.last == "clip.getPitchEdits")
         // Additive: earlier neighbors untouched.
         #expect(CommandRouter.allCommands.contains("mixer.liveLoudness"))
         #expect(CommandRouter.allCommands.contains("clip.analyzeAudio"))

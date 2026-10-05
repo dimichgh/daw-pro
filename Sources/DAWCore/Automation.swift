@@ -25,6 +25,19 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
     case sendLevel(sendID: UUID)
     /// One built-in effect parameter; resolves through `EffectParamSpec.specs`.
     case effectParam(effectID: UUID, paramName: String)
+    /// One built-in instrument parameter on this track's instrument (m39-b);
+    /// resolves through `InstrumentParamSpec.specs`.
+    ///
+    /// ⭐ **NO id: a track has at most one instrument, so the target is
+    /// unambiguous.** The flat object is `{type:"instrumentParam",
+    /// param:"cutoffHz"}`, reusing the EXISTING `param` coding key — no new
+    /// key, no new id field.
+    ///
+    /// This case is the mechanism by which m39-b and m39-e agree BY
+    /// CONSTRUCTION rather than by coincidence: there is no modulation target
+    /// type at all, so modulation and automation address the same targets
+    /// through the same enum (`docs/design/2026-09-19-modulation-layer.md` §4).
+    case instrumentParam(paramName: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, sendId, effectId, param
@@ -33,7 +46,7 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
     /// The discriminator written to `type`. A String raw enum so an unknown
     /// discriminator on decode is a hard error (not a silent misread).
     private enum Discriminator: String, Codable {
-        case volume, pan, sendLevel, effectParam
+        case volume, pan, sendLevel, effectParam, instrumentParam
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -49,6 +62,9 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
         case .effectParam(let effectID, let paramName):
             try c.encode(Discriminator.effectParam, forKey: .type)
             try c.encode(effectID, forKey: .effectId)
+            try c.encode(paramName, forKey: .param)
+        case .instrumentParam(let paramName):
+            try c.encode(Discriminator.instrumentParam, forKey: .type)
             try c.encode(paramName, forKey: .param)
         }
     }
@@ -66,6 +82,8 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
             self = .effectParam(
                 effectID: try c.decode(UUID.self, forKey: .effectId),
                 paramName: try c.decode(String.self, forKey: .param))
+        case .instrumentParam:
+            self = .instrumentParam(paramName: try c.decode(String.self, forKey: .param))
         }
     }
 
@@ -95,8 +113,49 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
             if effect.kind == .delay, paramName == "sync" || paramName == "division" {
                 return nil
             }
+            // m39-ad: the saturator's `oversampling` is refused for the same
+            // reason in a different flavour. `SaturatorEffect.storeAutomatedParam`
+            // guards slots 0…2, so a lane on slot 3 would be a silent dead lane
+            // — but the reason it is guarded is stronger than the delay's: this
+            // kind's `latencySamples` DEPENDS on the factor (0 at 1, 32 at 2/4),
+            // and the PDC plan is rebuilt only on a main-actor parameter pass. A
+            // lane moving it from the render thread would leave the plan stale
+            // with every test still green (`SaturatorEffect` DESIGN §3).
+            //
+            // ⚠️⚠️ THE SAME PARAM NAME ON `.clipper` IS DELIBERATELY NOT REFUSED.
+            // That kind reports a CONSTANT 32 samples at every factor, so moving
+            // it from a lane is harmless and stepping it between sections is a
+            // real musical move. The asymmetry is the point: the refusal is
+            // about the LATENCY, not about the name.
+            if effect.kind == .saturator, paramName == "oversampling" {
+                return nil
+            }
+            // ⭐ m39-af — `.dynamicEQ` HAS NO ENTRY HERE, AND THE OMISSION IS A
+            // DECISION RATHER THAN AN OVERSIGHT. All 32 of its slots accept
+            // lanes (`DynamicEQEffect.storeAutomatedParam` guards `(0...31)`,
+            // the WHOLE table) because the only reasons this function refuses
+            // anything are absent from that kind: nothing about it needs tempo
+            // math off the render thread (the delay's reason), and its
+            // `latencySamples` is a LITERAL 0 at every setting of every param —
+            // minimum-phase IIR, no delay line, no lookahead — so there is no
+            // PDC plan a render-thread store could leave stale (the saturator's
+            // reason). Lookahead was rejected for exactly this: it would have
+            // made the latency parameter-dependent and forced a refusal here.
+            //
             // `.audioUnit` yields an empty spec table → `first(where:)` is nil.
             return EffectParamSpec.specs(for: effect.kind)
+                .first(where: { $0.name == paramName })?.range
+        case .instrumentParam(let paramName):
+            // m39-b: resolves through the ONE HOME, `InstrumentParamSpec.specs`
+            // (`Sources/DAWCore/InstrumentParams.swift`). nil — an unresolvable
+            // target, exactly like an unknown effect param — when the track
+            // carries no instrument at all (audio/bus tracks and the master
+            // strip), when the instrument is HOSTED (`.soundBank`/`.audioUnit`
+            // have an empty spec surface, the `.audioUnit` effect rule
+            // verbatim), or when the name is not in the kind's table.
+            guard !paramName.isEmpty, track.kind == .instrument else { return nil }
+            let descriptor = track.instrument ?? .default
+            return InstrumentParamSpec.specs(for: descriptor.kind)
                 .first(where: { $0.name == paramName })?.range
         }
     }

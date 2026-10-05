@@ -1,0 +1,112 @@
+{
+ "a4": 440,
+ "fifthPure": 701.9550008653874,
+ "fifthET": 700,
+ "thirdPure": 386.3137138648348,
+ "thirdET": 400,
+ "commaRatio": 1.0136432647705078,
+ "comma": 23.460010384649014,
+ "etNarrowing": 1.955000865387433,
+ "walk": [
+  {
+   "step": 0,
+   "rawCents": 0,
+   "cents": 0,
+   "octaves": 0
+  },
+  {
+   "step": 1,
+   "rawCents": 701.9550008653874,
+   "cents": 701.9550008653874,
+   "octaves": 0
+  },
+  {
+   "step": 2,
+   "rawCents": 1403.9100017307749,
+   "cents": 203.91000173077487,
+   "octaves": 1
+  },
+  {
+   "step": 3,
+   "rawCents": 2105.8650025961624,
+   "cents": 905.8650025961624,
+   "octaves": 1
+  },
+  {
+   "step": 4,
+   "rawCents": 2807.8200034615497,
+   "cents": 407.82000346154973,
+   "octaves": 2
+  },
+  {
+   "step": 5,
+   "rawCents": 3509.775004326937,
+   "cents": 1109.775004326937,
+   "octaves": 2
+  },
+  {
+   "step": 6,
+   "rawCents": 4211.730005192325,
+   "cents": 611.7300051923248,
+   "octaves": 3
+  },
+  {
+   "step": 7,
+   "rawCents": 4913.685006057712,
+   "cents": 113.68500605771169,
+   "octaves": 4
+  },
+  {
+   "step": 8,
+   "rawCents": 5615.6400069230995,
+   "cents": 815.6400069230995,
+   "octaves": 4
+  },
+  {
+   "step": 9,
+   "rawCents": 6317.595007788487,
+   "cents": 317.59500778848724,
+   "octaves": 5
+  },
+  {
+   "step": 10,
+   "rawCents": 7019.550008653874,
+   "cents": 1019.5500086538741,
+   "octaves": 5
+  },
+  {
+   "step": 11,
+   "rawCents": 7721.505009519262,
+   "cents": 521.5050095192619,
+   "octaves": 6
+  },
+  {
+   "step": 12,
+   "rawCents": 8423.46001038465,
+   "cents": 23.46001038464965,
+   "octaves": 7
+  }
+ ],
+ "walkBasePitch": 60,
+ "predict": {
+  "unison": 6.0030364990234375,
+  "fifthPure": 0,
+  "fifthET": 1.4897723485203187,
+  "thirdPure": 0,
+  "thirdET": 17.46104781497661
+ },
+ "partial": {
+  "fifth": 1320,
+  "third": 2200
+ },
+ "hz": {
+  "a": 440,
+  "commaA": 446.00303649902344,
+  "fifthPure": 660,
+  "fifthET": 659.2551138257398,
+  "thirdPure": 550,
+  "thirdET": 554.3652619537442
+ },
+ "ratioNum": 531441,
+ "ratioDen": 524288
+}

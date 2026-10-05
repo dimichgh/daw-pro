@@ -1,0 +1,15 @@
+{
+ "bpm": 120,
+ "beats": 48,
+ "program": 115,
+ "masterEffects": [
+  {
+   "kind": "gain",
+   "latencySamples": 0
+  },
+  {
+   "kind": "limiter",
+   "latencySamples": 240
+  }
+ ]
+}

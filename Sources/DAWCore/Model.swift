@@ -268,8 +268,19 @@ public struct ClipGainPoint: Codable, Sendable, Equatable {
 public enum MIDIControllerType: Hashable, Sendable, Codable {
     /// A Control Change stream; `controller` is the CC number 0...127
     /// (1 = mod wheel, 7 = channel volume, 10 = pan, 11 = expression,
-    /// 64 = sustain pedal…). Built-in instruments honour CC 64 (sustain); every
-    /// other CC is forwarded to hosted Audio Units (design-m16b §4.3).
+    /// 64 = sustain pedal…).
+    ///
+    /// ⚠️ **WHICH CCs AN INSTRUMENT ACTS ON DIFFERS BY INSTRUMENT, and this
+    /// comment used to get it wrong.** It read "built-in instruments honour CC
+    /// 64 (sustain); every other CC is forwarded to hosted Audio Units"
+    /// (design-m16b §4.3) — true of `polySynth`, but STALE for the sampler
+    /// since m27 gave it CC1/CC2/CC11 and parameter-gated crossfade/filter
+    /// controllers. Relying on the old sentence is how CC11 lanes authored
+    /// against one instrument silently became a broad attenuation under
+    /// another (m27-b). ⭐ **ONE HOME for the real answer, mirroring the
+    /// engine's own branches: `MIDIControllerRouting` — `routing(for:instrument:)`
+    /// and its `honors` / `honoredCCs` spellings. Ask it; do not re-state it
+    /// here, and do not start a second table.**
     case cc(controller: Int)
     /// Pitch bend; value 0...16383, center 8192 (±2 semitones on built-ins).
     case pitchBend
@@ -606,6 +617,138 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// `ClipDocument`, not this Codable — the field is threaded through
     /// `ClipDocument` init/encode/decode AND `runtimeState`.
     public var controllerLanes: [MIDIControllerLane]
+    /// Note-level pitch correction (m23-ap phase 1, design §7.1): the detected
+    /// note table plus the edits standing on it, in SOURCE-FILE seconds. `nil`
+    /// == ABSENT == today's behaviour EXACTLY; omitted from Codable when nil (a
+    /// pre-m23-ap clip stays byte-identical). `Clip.init` normalises an EMPTY
+    /// set to nil, so "no notes" and "never detected" are one state rather than
+    /// two that round-trip into each other.
+    ///
+    /// Source seconds are what make this survive trim / split / move / tempo
+    /// change without conversion, and what make take lanes free at the model
+    /// layer: `TakeLane.clip` IS a `Clip`.
+    ///
+    /// ✅ **THIS RENDERS. (Was "NOTHING RENDERS THIS YET" until 2026-09-22 —
+    /// three separate agents flagged that line as false on the same day, which
+    /// is what stale prose costs.)** `StretchRenderCache.Params` carries
+    /// `pitchEditSetHash`, `performRender` takes the curve branch when there
+    /// are edits, and the curve is latency-compensated by
+    /// `curveLatencyCompensation` (2379 frames at 48 kHz). E2 has run: on a
+    /// real dry vocal the curve path lands on the constant path's pitch to
+    /// within a quarter of a cent.
+    ///
+    /// ✅ **"DOES THIS CLIP RENDER" HAS ONE HOME: `rendersThroughStretchCache`
+    /// below (m23-ap-p2 p2-snapshot, 2026-09-24).** The widened predicate used
+    /// to live in `StretchRenderCache.needsRender` (this file was locked when
+    /// the render leg landed), and the snapshot gate in DAWControl kept asking
+    /// the NARROW `!isStretchIdentity` — so a tuned clip's render state, a
+    /// failed render included, never reached the wire. Both now ask the model.
+    /// `isStretchIdentity` itself was deliberately NOT widened: five callers
+    /// read it as "is this clip time-stretched or transposed" (quantize,
+    /// slice-to-sampler, the overview's `hasStretch`, MIDI export totals),
+    /// which a tuning does not make true. `paramsIdentityAgreesWithNeedsRender`
+    /// still pins the model's answer against `StretchRenderCache.Params`'s own
+    /// identity — two derivations, so it is not tautological.
+    ///
+    /// ✅ **CLOSED 2026-09-24 (contour-to-render): drift/vibrato shaping now
+    /// renders.** A set with `driftScale`/`vibratoScale` ≠ 1 (Hard Tune) is
+    /// rendered against the detected whole-file contour
+    /// (`PitchContourCache.renderContour` in DAWEngine). Only when detection
+    /// is unavailable, or the set came from another detector generation, does
+    /// it fall back to constant per-note offsets — and then the engine posts
+    /// a `clip-pitch-contour-unavailable` notice rather than staying silent.
+    ///
+    /// ⚠️ NOTE (the m12-f MIRROR-DTO lesson, as `gainEnvelope` and
+    /// `controllerLanes` both warn): the disk path is `ClipDocument`, not this
+    /// Codable — the field is threaded through `ClipDocument`
+    /// init/encode/decode AND **both** `ClipDocument`→`Clip` reconstructions
+    /// (`ProjectDocument.runtimeState` and `TakeGroupDocument.takeGroup`), or
+    /// every edit set silently vanishes on reopen.
+    ///
+    /// ⛔⛔ **THE CARRY SITES — READ THIS BEFORE ADDING A SETTER, AND BEFORE
+    /// ADDING ANY NEW PATH THAT REBUILDS A `Clip`.** Design §7.1 claims the edit
+    /// set "survives clip trim, split, move and tempo change" because it is in
+    /// source seconds. That is true of the COORDINATES and NOT automatic in the
+    /// CODE: several edit paths rebuild a `Clip` by enumerating its fields, and
+    /// a field omitted from such a list silently takes its default. Every one of
+    /// them below now threads this field, and
+    /// `Tests/DAWCoreTests/PitchEditCarryTests.swift` pins each one:
+    ///
+    ///  * `ProjectStore.splitClip` — **twice**, once per half
+    ///  * `ProjectStore.applyTrimWindow` — the journalled trim
+    ///  * `ProjectStore.clipTrimmedToWindow` — the un-journalled trim, reached
+    ///    by overlap resolution and the import paths
+    ///  * `ProjectStore.reidentified` — duplicate / paste, AND the split-off
+    ///    tails `arrange.insertBars` / `arrange.deleteBars` produce
+    ///  * `CompFlattener.flatten` (`Takes.swift`) — comp materialisation
+    ///  * `AudioQuantizePlan.makeSlice` (`AudioQuantize.swift`) — the chop
+    ///
+    /// ⚠️ **`ProjectStore.moveClips` IS NOT ON THIS LIST AND MUST NOT BE ADDED
+    /// TO IT.** An earlier census named it; that was WRONG. It never constructs
+    /// a `Clip` — the whole VALUE travels (`var landed = moving[i]`) and only
+    /// `startBeat` is written, so this field rides along for free. A regression
+    /// leg in the suite above guards that property, so a future refactor that
+    /// "tidies" the move into an explicit rebuild reddens instead of silently
+    /// becoming a seventh lossy site.
+    ///
+    /// Persistence is a SECOND pair of hand-maintained field lists and both are
+    /// threaded: `ProjectDocument.runtimeState` and
+    /// `TakeGroupDocument.takeGroup(bundleURL:warn:)`. §7.5 calls take lanes
+    /// "free" because `TakeLaneDocument.clip` is a `ClipDocument` — true of the
+    /// DTO, false of that reconstruction. That exact gap is how `gainEnvelope`
+    /// went missing from take lanes from m13-e until m16-b3.
+    ///
+    /// **The carry is VERBATIM at every site, and that is a decision, not
+    /// laziness.** Unlike `gainEnvelope` and `controllerLanes` — CLIP-RELATIVE
+    /// BEATS, which must be re-anchored by `windowedGainEnvelope` /
+    /// `windowedControllerLanes` — these segments are SOURCE-FILE-ABSOLUTE
+    /// SECONDS (`ClipPitchFrame.timeSeconds`: "geometry-free: trims/splits don't
+    /// move these numbers"). Re-anchoring them would silently de-tune every
+    /// clip to the right of a split while leaving a healthy-looking non-nil set
+    /// behind, and `startOffsetSeconds` already records the geometry change.
+    /// Neither is the set FILTERED to the surviving window: a segment outside
+    /// the window a clip plays is never evaluated and costs nothing, while a
+    /// trim or a split is reversible and discarded tuning is not.
+    ///
+    /// One deliberate NON-carry: `ProjectStore.convertClipsToVoice` builds its
+    /// clip from a `ClipConversionSource` descriptor (which has no such field),
+    /// lands it on a NEW track, and leaves the original clip untouched — so
+    /// nothing is lost, and the new audio is a different performance whose
+    /// `detectedHz` facts would not describe it. `ProjectStore.importClipFix`
+    /// is safe for a different reason worth stating: it keeps the ORIGINAL clip
+    /// whole as a take lane (`TakeLane(name: original.name, clip: original)`)
+    /// and rebuilds comp members through `CompFlattener.flatten`, so the
+    /// tuning reaches the comped result via the carry above rather than via a
+    /// field list of its own.
+    public var pitchEdits: PitchEditSet?
+    /// Lyrics typed for this clip's melody (p2-sing-d1, design
+    /// `docs/design/2026-09-27-p2-sing-integration.md` §3.1): the TEXT only.
+    /// Which word sings which note is derived from the current notes every
+    /// time (`LyricNoteAssigner`) and never stored, so a note edit cannot
+    /// leave a stale word-to-note record behind. `nil` == ABSENT == today's
+    /// behaviour EXACTLY; omitted from Codable when nil, so a clip without
+    /// lyrics encodes byte-identically to a pre-lyrics build
+    /// (`ClipLyricsCodableTests` pins the bytes). MIDI clips only: `init`
+    /// drops lyrics from a non-MIDI clip and normalises blank text to nil
+    /// (`ClipLyrics.normalized`), so "no lyrics" is one state. NOT render
+    /// material: nothing that keys or schedules a render reads it.
+    ///
+    /// In `Equatable` ON PURPOSE: `ProjectStore.performEdit` journals an edit
+    /// only when `captureEditState()` changes, so a lyrics-only edit must make
+    /// the clip unequal or it could never be undone.
+    ///
+    /// CARRIED everywhere a clip is saved or rebuilt (p2-sing-d1b), the m12-f
+    /// MIRROR-DTO lesson applied: `ClipDocument` (init, encode, decode, and
+    /// BOTH reconstructions, `ProjectDocument.runtimeState` and
+    /// `TakeGroupDocument.takeGroup`), and every rebuild site listed under
+    /// `pitchEdits`. Unlike `pitchEdits` the carry is not always verbatim: a
+    /// trim, duplicate or paste keeps the text exactly, while a split (and
+    /// the straddling clip of `insertBars` / `deleteBars`, and a comp member)
+    /// takes the words that start on its own notes
+    /// (`ClipLyrics.WordPlacement`), so no word is sung twice.
+    /// `ClipLyricsPersistenceTests`, `ClipLyricsRebuildTests` and
+    /// `ProjectStoreClipEditTests` pin every site.
+    public var lyrics: ClipLyrics?
 
     /// Per-clip gain bounds: a generous studio range, matching the fader's
     /// mental model (a clip can be pulled 72 dB down toward silence or pushed
@@ -624,11 +767,76 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     public var isMIDI: Bool { notes != nil }
 
     /// True when the stretch is a structural identity — ratio exactly 1 and no
-    /// pitch shift — so the engine (ii-d) bypasses rendering and plays the
-    /// original file byte-for-byte. `formantPreserve` alone (no pitch shift) is
-    /// still identity.
+    /// pitch shift. `formantPreserve` alone (no pitch shift) is still identity.
+    /// This answers "is this clip time-stretched or transposed", NOT "does the
+    /// engine render it": a tuned clip is stretch-identity and still renders.
+    /// For the engine's bypass question ask `rendersThroughStretchCache`.
     public var isStretchIdentity: Bool {
         stretchRatio == 1 && pitchShiftSemitones == 0
+    }
+
+    /// True when this clip carries pitch edits that would actually bend the
+    /// curve (m23-ap) — a set of freshly detected but UNTOUCHED notes reads
+    /// false, because it renders as nothing.
+    ///
+    /// §6.4's rule is that a set which renders as nothing must still hit
+    /// `OfflineStretcher.isIdentity` and play the original file byte-for-byte;
+    /// a set for which this is TRUE leaves the identity bypass. That rule is
+    /// wired: it lives in `rendersThroughStretchCache`, not in
+    /// `isStretchIdentity` (see there for why).
+    public var hasPitchEdits: Bool { !(pitchEdits?.isIdentity ?? true) }
+
+    /// True when this clip's tuning MOVES something: a note's pitch, its
+    /// drift or vibrato shape, a generated vibrato, its formant or its timing
+    /// (m23-ap I7b-2). It is `hasPitchEdits` WITHOUT THE LEVEL HALF — a clip
+    /// whose only edits clear notes or change their level reads false here
+    /// and true there.
+    ///
+    /// ⭐ **A DOOR, NOT A NEW RULE.** It is `PitchEditSet.isPitchIdentity`,
+    /// negated — the set predicate the render already bypasses on
+    /// (`StretchCurvePlan.make` builds no curve when it holds) — lifted onto
+    /// `Clip` with the `nil` answered once, exactly as `hasPitchEdits` lifts
+    /// `isIdentity`. So the words "TUNING APPLIED" (the note editor's header,
+    /// `PitchEditorClipBadge`) claim a retune exactly when the render has a
+    /// pitch curve to play; a clip that was only cleared or levelled says
+    /// "NOTES EDITED" instead.
+    ///
+    /// ⚠️ **NEVER A SUBSTITUTE FOR `hasPitchEdits`.** That one is a wire
+    /// contract (every pitch-edit verb's `hasPitchEdits`), offers Remove
+    /// Tuning, and decides whether the clip renders at all
+    /// (`rendersThroughStretchCache`) — a cleared note must still render,
+    /// through the level mask. This one answers only "was a pitch moved".
+    ///
+    /// ✅ DONE (mcp-lane, m23-ap I7b-2 wire leg, 2026-09-25): ON THE WIRE —
+    /// `hasTuningEdits` rides beside `hasPitchEdits` in
+    /// `CommandRouter.pitchEditsResponse` (every pitch-edit verb returns it;
+    /// `clip.getPitchEdits` is the read), additive, `hasPitchEdits` itself
+    /// unchanged. The MCP tool `clip_get_pitch_edits`'s description says
+    /// `hasPitchEdits && !hasTuningEdits` means the clip's only edits clear
+    /// notes or change their level ("NOTES EDITED" in the app). Wire test:
+    /// `hasTuningEditsThreeStates`
+    /// (`Tests/DAWControlTests/PitchCorrectionCommandTests.swift`).
+    public var hasTuningEdits: Bool { !(pitchEdits?.isPitchIdentity ?? true) }
+
+    /// Does the engine play this clip from a RENDER in the stretch cache
+    /// rather than straight off its source file? True for a time-stretch, a
+    /// transpose, or a tuning that bends the curve (`hasPitchEdits`).
+    ///
+    /// ⭐ **THE ONE HOME OF "DOES THIS CLIP RENDER" (m23-ap-p2 p2-snapshot).**
+    /// `StretchRenderCache.needsRender` (what the engine resolves, schedules
+    /// as silence while pending, and waits for before a bounce) forwards
+    /// here, and so does `project.snapshot`'s gate for the transient
+    /// `stretchRendering` / `stretchError` fields. Before this existed the two
+    /// sides asked different questions — the engine the wide one, the
+    /// snapshot `!isStretchIdentity` — and a TUNED clip's pending or FAILED
+    /// render was invisible on the wire. A third caller asks this property;
+    /// it does not re-derive the disjunction.
+    ///
+    /// When this is false the clip takes the identity bypass and plays its
+    /// source byte-for-byte (the null-case contract every stretch and pitch
+    /// byte gate pins).
+    public var rendersThroughStretchCache: Bool {
+        !isStretchIdentity || hasPitchEdits
     }
 
     /// Source-material window this clip consumes, in SECONDS, DERIVED from the
@@ -666,7 +874,9 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         formantPreserve: Bool = false,
         gainEnvelope: [ClipGainPoint] = [],
         controllerLanes: [MIDIControllerLane] = [],
-        takeGroupID: UUID? = nil
+        takeGroupID: UUID? = nil,
+        pitchEdits: PitchEditSet? = nil,
+        lyrics: ClipLyrics? = nil
     ) {
         self.id = id
         self.name = name
@@ -695,6 +905,16 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // above). A MIDI clip heals its lanes to canonical form (at most one lane
         // per type, sorted, points canonical). Empty stays empty.
         self.controllerLanes = notes == nil ? [] : Self.canonicalControllerLanes(controllerLanes)
+        // Pitch edits (m23-ap): an EMPTY set normalises to nil, so a caller that
+        // passes `PitchEditSet.empty` and a caller that passes nothing produce
+        // the SAME clip — otherwise an empty set would round-trip to nil through
+        // the omit-when-default encoder and break Equatable across a save. The
+        // set heals its own segments in `PitchEditSet.init`.
+        self.pitchEdits = (pitchEdits?.isEmpty ?? true) ? nil : pitchEdits
+        // Lyrics (p2-sing-d1) belong to a melody: a non-MIDI clip drops them
+        // (the notes-wins cousin, like `controllerLanes`), and blank text is
+        // nil, so "no lyrics" has one spelling and survives a save unchanged.
+        self.lyrics = notes == nil ? nil : ClipLyrics.normalized(lyrics)
     }
 
     /// Linear playback gain at `beat` (measured from the clip start): the static
@@ -891,6 +1111,8 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         case id, name, startBeat, lengthBeats, audioFileURL, notes, isAIGenerated
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
         case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupID
+        case pitchEdits
+        case lyrics
     }
 
     /// Decoding routes through the clamping `init`; every edit field tolerates
@@ -919,7 +1141,9 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
             formantPreserve: try c.decodeIfPresent(Bool.self, forKey: .formantPreserve) ?? false,
             gainEnvelope: try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope) ?? [],
             controllerLanes: try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes) ?? [],
-            takeGroupID: try c.decodeIfPresent(UUID.self, forKey: .takeGroupID)
+            takeGroupID: try c.decodeIfPresent(UUID.self, forKey: .takeGroupID),
+            pitchEdits: try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits),
+            lyrics: try c.decodeIfPresent(ClipLyrics.self, forKey: .lyrics)
         )
     }
 
@@ -954,6 +1178,15 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // Members carry their group marker; ordinary clips (nil) omit it, so a
         // pre-take clip stays byte-identical.
         try c.encodeIfPresent(takeGroupID, forKey: .takeGroupID)
+        // Pitch edits (m23-ap): written ONLY when the clip carries a non-empty
+        // set, so a clip without one carries no new key (byte-identical to a
+        // pre-m23-ap save). `init` already normalised empty to nil, so this is
+        // `encodeIfPresent` and not a second emptiness test that could disagree
+        // with the first.
+        try c.encodeIfPresent(pitchEdits, forKey: .pitchEdits)
+        // Lyrics (p2-sing-d1): written ONLY when present, so a clip without
+        // them carries no new key (byte-identical to a pre-lyrics save).
+        try c.encodeIfPresent(lyrics, forKey: .lyrics)
     }
 }
 
@@ -962,6 +1195,33 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
 /// TRIMMED (edge-trimmed, id preserved) or REMOVED (fully covered / a
 /// sub-minimum sliver). Both arrays are empty for a plain move onto free space.
 public struct ClipMoveResult: Sendable, Equatable {
+    public var clip: Clip
+    public var trimmedClipIDs: [UUID]
+    public var removedClipIDs: [UUID]
+
+    public init(clip: Clip, trimmedClipIDs: [UUID] = [], removedClipIDs: [UUID] = []) {
+        self.clip = clip
+        self.trimmedClipIDs = trimmedClipIDs
+        self.removedClipIDs = removedClipIDs
+    }
+}
+
+/// Outcome of `ProjectStore.importAudio(url:toTrack:atBeat:overwrite:)` (m33-j):
+/// the imported clip plus the ids of ordinary same-track residents the import's
+/// overlap policy TRIMMED (edge-trimmed, id preserved) or REMOVED (fully
+/// covered / a sub-minimum sliver) — the same two meanings `ClipMoveResult`
+/// gives them, deliberately spelled the same way so a caller reading one has
+/// read both.
+///
+/// ⭐ BOTH ARRAYS ARE EMPTY UNLESS THE CALLER PASSED `overwrite: true`. The
+/// default import REFUSES a placement that would touch a resident
+/// (`ProjectError.clipImportWouldOverlap`) rather than choosing which of the
+/// user's clips dies, so a non-empty array here is always something the caller
+/// explicitly asked for. This is NOT `ClipMoveResult`'s bargain, and the
+/// difference is the point: a move's footprint is the clip the caller can
+/// already see, while an import's footprint is the FILE's duration converted at
+/// the current tempo — unknowable before the call, so not consentable to.
+public struct ClipImportResult: Sendable, Equatable {
     public var clip: Clip
     public var trimmedClipIDs: [UUID]
     public var removedClipIDs: [UUID]
@@ -1193,6 +1453,33 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
     /// Empty on a track with no takes; additive like `automation`.
     public var takeGroups: [TakeGroup]
 
+    /// Modulation sources on this strip (m39-e). Empty on every strip with no
+    /// modulation, which is every strip in every project saved before m39-e —
+    /// and that is the whole byte-identity argument: a project with no
+    /// modulation carries no modulation, encodes no modulation key, and
+    /// renders through a code path no modulation branch has touched.
+    public var modulationSources: [ModulationSource]
+    /// Modulation routes on this strip (m39-e). `ModulationRoute.target` is the
+    /// SAME `AutomationTarget` automation uses — one home, so m39-b and m39-e
+    /// address the same targets by construction rather than by agreement.
+    public var modulationRoutes: [ModulationRoute]
+
+    /// Where this track's audio came from, when a voice conversion made it
+    /// (m24-n). nil on every ordinary track — see `VoiceProvenance` for why
+    /// this is a FACT and not a binding, a cache key, or a rights record.
+    ///
+    /// Two things read it and nothing else may: the save path, which embeds
+    /// exactly the voices named here, and the "what is this project carrying"
+    /// report. Playback, rendering, and every clip edit ignore it completely —
+    /// a converted track is a plain audio track.
+    public var voiceProvenance: VoiceProvenance?
+
+    /// How this track was SUNG, when a sing job made it (p2-sing-d2, design
+    /// §3.9). nil on every other track. A FACT, not a binding — see
+    /// `SungVocalProvenance`: playback, rendering, every clip edit and
+    /// `project.transpose` ignore it, and nothing may rewrite it.
+    public var sungVocalProvenance: SungVocalProvenance?
+
     /// Whether this track can be written out as a Standard MIDI File (m23-m3b).
     ///
     /// **The ONE home for MIDI-export eligibility.** Three places ask this same
@@ -1325,7 +1612,11 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         sends: [Send] = [],
         effects: [EffectDescriptor] = [],
         automation: [AutomationLane] = [],
-        takeGroups: [TakeGroup] = []
+        takeGroups: [TakeGroup] = [],
+        voiceProvenance: VoiceProvenance? = nil,
+        sungVocalProvenance: SungVocalProvenance? = nil,
+        modulationSources: [ModulationSource] = [],
+        modulationRoutes: [ModulationRoute] = []
     ) {
         self.id = id
         self.name = name
@@ -1343,6 +1634,10 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         self.effects = effects
         self.automation = automation
         self.takeGroups = takeGroups
+        self.voiceProvenance = voiceProvenance
+        self.sungVocalProvenance = sungVocalProvenance
+        self.modulationSources = Array(modulationSources.prefix(ModulationLimits.maxSources))
+        self.modulationRoutes = Array(modulationRoutes.prefix(ModulationLimits.maxRoutes))
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1350,6 +1645,12 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         case isAIGenerated, clips, instrument
         case outputBusID = "outputBusId"
         case sends, effects, automation, takeGroups
+        // m24-n. Same key on the wire, in the snapshot and on disk.
+        case voiceProvenance
+        // p2-sing-d2. Omitted when nil (the voiceProvenance rule).
+        case sungVocalProvenance
+        // m39-e. Omitted when empty (the takeGroups rule) — see `encode`.
+        case modulationSources, modulationRoutes
     }
 
     /// Routing/FX fields tolerate absence so pre-M4 payloads still decode;
@@ -1372,7 +1673,18 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
             sends: try c.decodeIfPresent([Send].self, forKey: .sends) ?? [],
             effects: try c.decodeIfPresent([EffectDescriptor].self, forKey: .effects) ?? [],
             automation: try c.decodeIfPresent([AutomationLane].self, forKey: .automation) ?? [],
-            takeGroups: try c.decodeIfPresent([TakeGroup].self, forKey: .takeGroups) ?? []
+            takeGroups: try c.decodeIfPresent([TakeGroup].self, forKey: .takeGroups) ?? [],
+            // Additive optional (m24-n): a pre-provenance payload has no key.
+            voiceProvenance: try c.decodeIfPresent(
+                VoiceProvenance.self, forKey: .voiceProvenance),
+            // Additive optional (p2-sing-d2): a pre-sing payload has no key.
+            sungVocalProvenance: try c.decodeIfPresent(
+                SungVocalProvenance.self, forKey: .sungVocalProvenance),
+            // Additive (m39-e): a pre-modulation payload has neither key.
+            modulationSources: try c.decodeIfPresent(
+                [ModulationSource].self, forKey: .modulationSources) ?? [],
+            modulationRoutes: try c.decodeIfPresent(
+                [ModulationRoute].self, forKey: .modulationRoutes) ?? []
         )
     }
 
@@ -1402,6 +1714,24 @@ public struct Track: Identifiable, Codable, Sendable, Equatable {
         // Omitted when empty (unlike automation) so a pre-take snapshot/wire
         // payload stays byte-identical — the `outputBusId`/`instrument` rule.
         if !takeGroups.isEmpty { try c.encode(takeGroups, forKey: .takeGroups) }
+        // Omitted when nil (the takeGroups/instrument rule) so every snapshot
+        // and wire payload for a track that was never voice-converted stays
+        // byte-identical to its pre-m24-n shape.
+        try c.encodeIfPresent(voiceProvenance, forKey: .voiceProvenance)
+        // p2-sing-d2: omitted when nil, so a track no sing job made encodes
+        // byte-identically to its pre-sing shape.
+        try c.encodeIfPresent(sungVocalProvenance, forKey: .sungVocalProvenance)
+        // m39-e — the takeGroups rule again, and here it is load-bearing for
+        // the milestone's headline gate: a project with no modulation must
+        // encode, decode and RENDER byte-identically to its pre-m39-e shape.
+        // Emitting `"modulationSources":[]` on every track would break the
+        // first half of that before a single sample was rendered.
+        if !modulationSources.isEmpty {
+            try c.encode(modulationSources, forKey: .modulationSources)
+        }
+        if !modulationRoutes.isEmpty {
+            try c.encode(modulationRoutes, forKey: .modulationRoutes)
+        }
     }
 }
 
@@ -1550,6 +1880,12 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
         /// hosting AU is an implementation detail — identity lives entirely
         /// in `soundBank`.
         case soundBank
+        /// The built-in 808/909-lineage synthesised drum machine (m39-dm):
+        /// eight fixed, named, monophonic one-shot voices. Identity lives
+        /// entirely in `drumKit`; `kind == .drumSynth && drumKit == nil` is
+        /// legal and renders the FACTORY KIT rather than silence — unlike
+        /// `.audioUnit`/`.soundBank`, nothing external has to resolve.
+        case drumSynth
     }
 
     public var kind: Kind
@@ -1569,24 +1905,37 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
     /// is legal and renders the silent placeholder — the
     /// componentless-`.audioUnit` rule.
     public var soundBank: SoundBankConfig?
+    /// Drum-machine kit (m39-dm; additive optional, carried across kind
+    /// switches like `sampler`/`audioUnit`/`soundBank`, so pre-drumSynth
+    /// project files still decode). `nil` reads as the factory 808 kit — see
+    /// `resolvedDrumKit`.
+    public var drumKit: DrumKitParams?
 
     public static let `default` = InstrumentDescriptor()
 
     /// The sampler params with the nil-default resolved.
     public var resolvedSampler: SamplerParams { sampler ?? SamplerParams() }
 
+    /// The drum kit with the nil-default resolved. ⚠️ Unlike `resolvedSampler`
+    /// (whose nil is an EMPTY, silent sampler), a nil kit resolves to the full
+    /// FACTORY KIT: a drum machine with no configuration is a playable 808, not
+    /// silence. Nothing external has to resolve for it to sound.
+    public var resolvedDrumKit: DrumKitParams { drumKit ?? DrumKitParams() }
+
     public init(
         kind: Kind = .polySynth,
         polySynth: PolySynthParams = PolySynthParams(),
         sampler: SamplerParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
-        soundBank: SoundBankConfig? = nil
+        soundBank: SoundBankConfig? = nil,
+        drumKit: DrumKitParams? = nil
     ) {
         self.kind = kind
         self.polySynth = polySynth
         self.sampler = sampler
         self.audioUnit = audioUnit
         self.soundBank = soundBank
+        self.drumKit = drumKit
     }
 }
 
@@ -1704,13 +2053,146 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// excludes 0 because it DIVIDES by the figure; here it only multiplies.)
     public var bendRangeSemitones: Double?
 
-    /// Poly (nil, the default and today's behaviour) or mono. ADDITIVE-OPTIONAL:
-    /// nil = `.poly`, which is byte-identical to the pre-existing engine.
+    /// Poly (nil, the default and today's behaviour), mono, or legato.
+    /// ADDITIVE-OPTIONAL: nil = `.poly`, which is byte-identical to the
+    /// pre-existing engine.
     public var voiceMode: SamplerVoiceMode?
+
+    /// m34-t GLIDE / PORTAMENTO: how long the pitch takes to travel from the
+    /// previous note to the new one, in seconds. nil or 0 = the pitch STEPS,
+    /// which is every pre-m34-t project's behaviour bit-for-bit.
+    ///
+    /// ⚠️ IT ONLY APPLIES IN A MONOPHONIC MODE (`.mono` or `.legato`) and is
+    /// IGNORED under `.poly` — deliberately, and this is a scope decision
+    /// rather than an oversight. "The previous note" is well defined only when
+    /// there is one line; under poly every voice would have to glide from
+    /// whichever note happened to be played last, which is a different feature
+    /// (poly portamento) with its own note-assignment rules. Refusing it here
+    /// is also what keeps `.poly` structurally unable to change — see
+    /// `SamplerVoiceMode` for the two modes it does reach.
+    ///
+    /// The ramp is EXPONENTIAL in the playback increment, i.e. LINEAR IN
+    /// SEMITONES: a slide from 440 Hz to 880 Hz is at 622.25 Hz (the geometric
+    /// mean) halfway through, not 660 Hz. That is what makes an octave slide
+    /// sound even, and it is the only choice under which two glides of the same
+    /// interval sound alike wherever on the keyboard they start.
+    public var glideTime: Double?
+
+    /// m34-w. WHAT `glideTime` MEANS — a flat duration, or a SPEED.
+    ///
+    /// ⭐ THE DEFECT THE USER HEARD BEFORE ASKING FOR THIS: under
+    /// `.constantTime` every transition takes the SAME time whatever its
+    /// distance, so a semitone crawls and an octave is rushed through at twelve
+    /// times the speed. Real portamento is closer to constant RATE — the pitch
+    /// moves at a roughly fixed speed and DISTANCE SETS DURATION. They asked
+    /// for it as *"allow range for slideTime"* and, asked to choose, picked
+    /// "speed scales with the leap" over a min/max humanize range.
+    ///
+    /// nil = `.constantTime` = the pre-m34-w behaviour bit-for-bit.
+    public var glideMode: SamplerGlideMode?
+
+    /// GLOBAL decay/sustain (m34-o) — the instrument-wide half of the envelope
+    /// that, until now, existed ONLY per zone.
+    ///
+    /// ⭐ THE DEFECT THESE END, stated as the user found it: *"when activating
+    /// sustain, the note should still eventually fade… currently it keeps
+    /// playing."* They are right, for a piano. A damper pedal stops the damper
+    /// falling; it does not feed the string energy. The correct model is that
+    /// **the pedal DEFERS THE RELEASE and the instrument's own decay does the
+    /// fading** — so a fading note needs an envelope that decays, and the
+    /// pedal must not invent a fade of its own (a second envelope owner is the
+    /// m25-r two-owners shape this tree has paid for twice).
+    ///
+    /// ⛔ AND HOLDING FOREVER IS CORRECT FOR SOME INSTRUMENTS. An organ, a
+    /// bowed pad, a synth pad genuinely does sustain under the pedal. THE
+    /// INSTRUMENT DECIDES, NOT THE PEDAL — which is exactly why this is a
+    /// per-instrument envelope field and not a property of `play.sustain`.
+    /// A hosted SF2 piano already decays correctly through its own bank
+    /// envelope (measured: GM program 0 "Acoustic Grand Piano" falls to
+    /// silence within 15 s under a held pedal, while program 19 "Church Organ"
+    /// holds flat — both correct).
+    ///
+    /// ⚠️ WHY THEY WERE MISSING AND WHY THAT MATTERED. `attack` and `release`
+    /// have had instrument globals since m19-b, and a zone leaving them nil
+    /// inherits the live global through the engine's `-1` sentinel. `decay`
+    /// and `sustain` had NO global at all: a zone leaving them nil resolved to
+    /// the hardcoded legacy pair (decay 0, sustain 1) — hold at peak forever —
+    /// and there was no instrument-wide knob to say otherwise. A user with a
+    /// 60-zone imported piano therefore had to author decay+sustain on all 60
+    /// zones; there was no one control. THAT is the "fade time configurable"
+    /// the report asks for, and this is where it lives, beside the rest of the
+    /// envelope rather than on the pedal.
+    ///
+    /// ADDITIVE-OPTIONAL on the `bendRangeSemitones` pattern: nil is NOT the
+    /// same wire shape as an explicit legacy value, so a pre-existing project's
+    /// JSON stays byte-identical on a round trip, and nil resolves through
+    /// `effectiveDecay`/`effectiveSustain` to exactly the pair the engine
+    /// hardcoded before — the pre-m34-o render, sample for sample.
+    ///
+    /// Precedence is unchanged and matches SFZ (region over global): a zone's
+    /// OWN `decay`/`sustain` still wins; nil now inherits THIS instead of the
+    /// hardcoded pair. Each half inherits INDEPENDENTLY — a zone may set
+    /// `sustain` and inherit `decay`, or the reverse.
+    public var decay: Double?
+    public var sustain: Double?
+
+    /// m34-q — HOW MANY NOTES THE SUSTAIN PEDAL KEEPS RINGING. nil = unlimited,
+    /// which is what the engine did before this field existed and therefore what
+    /// every project on disk means.
+    ///
+    /// ⭐ THE ASK, VERBATIM: *"can we then specify how many notes to hold and
+    /// fade the oldest ones?"* — asked about an organ patch, which under m34-o's
+    /// ruling correctly holds forever. This is the answer to that, and it is a
+    /// HOLD limit, not a polyphony override: it caps only the notes the PEDAL is
+    /// holding, never the notes whose keys are physically down.
+    ///
+    /// ⛔ AND IT DOES NOT MAKE THE PEDAL A SECOND ENVELOPE OWNER — the
+    /// distinction the m34-o ruling turns on, restated because the two look
+    /// alike from a distance. The cap decides WHEN a note's release begins,
+    /// which is the same thing a player decides by lifting a key early. The
+    /// ENVELOPE still decides what that release SOUNDS like: an evicted note
+    /// fades through the patch's own `release`, fast on an organ and long on a
+    /// piano. A pedal that imposed its own fade SHAPE would be the second owner
+    /// m34-o refuses; a pedal that lets go of a key never was.
+    ///
+    /// ⚠️ THE CAP BINDS AT THE NEXT NOTE-ON, which is when the ear can hear the
+    /// trade being made. Release five keys under the pedal with a cap of 2 and
+    /// then stop playing, and five notes go on ringing until the next note or
+    /// pedal-up; the following note-on trims all the way down in one go. Any
+    /// other timing would start a fade in a silence nobody played into.
+    ///
+    /// ADDITIVE-OPTIONAL on the `bendRangeSemitones` pattern: nil is not the
+    /// same wire shape as an explicit value, so a pre-existing project's JSON
+    /// round-trips byte-identically, and nil resolves through
+    /// `effectivePedalHoldLimit` to a cap no voice pool can reach.
+    public var pedalHoldLimit: Int?
+
+    /// PK-F2 (lane W7-PK) — A SLICE KIT: Chop to Sampler made these zones, so
+    /// each note plays one slice of a recording and is a trigger, not a pitch.
+    /// `project.transpose` skips a marked track the way it skips drums: moving
+    /// its notes would play different slices, not the same groove in a new
+    /// key. SET BY THE CHOP and never read off the wire — provenance, like
+    /// `sourcePath` (m26-h), so it rides through edits unchanged. Never guessed
+    /// from zone shapes: one-key zones are also how a drum multisample is laid
+    /// out. Read it through `isSliceKit`; set it through `markSliceKit()`.
+    ///
+    /// ADDITIVE-OPTIONAL on the `bendRangeSemitones` pattern: nil (every
+    /// sampler that was not chopped, every project saved before the key) never
+    /// encodes, so a pre-existing project's JSON stays byte-identical.
+    public var sliceKit: Bool?
 
     public static let attackRange: ClosedRange<Double> = 0...1
     public static let releaseRange: ClosedRange<Double> = 0.001...8
     public static let gainRange: ClosedRange<Double> = 0...1
+    /// The pair `decay`/`sustain == nil` resolves to: the engine's pre-m34-o
+    /// hardcoded literals. ONE home for the legacy law — the engine, the wire,
+    /// the describe verb and the tests read these rather than re-typing 0 and
+    /// 1, so they cannot drift apart.
+    ///
+    /// sustain 1 with decay 0 is "no decay stage": the level reaches peak and
+    /// stays, which is the hold every pre-m34-o sampler patch performs.
+    public static let defaultDecay: Double = 0
+    public static let defaultSustain: Double = 1
     /// m27: 0 = off (the nil default), 1 = CC1/CC2 attenuate to silence.
     public static let expressionModDepthRange: ClosedRange<Double> = 0...1
     /// m27 leg C: 0 = off (the nil default), 1 = the full low→high sweep.
@@ -1732,6 +2214,60 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// `BreathContour.Options` uses, so the authoring and playback figures are
     /// expressible over the same domain.
     public static let bendRangeSemitonesRange: ClosedRange<Double> = 0...48
+    /// m34-q. ONE HOME for the pedal-hold law — `PolySynthParams` aliases THIS
+    /// rather than repeating the literal, because the two built-ins must be
+    /// settable over the same domain or a figure legal on one instrument would
+    /// be refused on the other for no reason a user could see.
+    ///
+    /// The floor is 1, not 0: "the pedal holds nothing" is spelled by not
+    /// pressing the pedal, and a 0 that silently disabled CC 64 would be a
+    /// footgun sitting one keystroke away from the useful values. The ceiling of
+    /// 128 is past BOTH voice pools (16 and 64), so any figure above 64 is
+    /// structurally unreachable and therefore means exactly "unlimited" — the
+    /// value to send when a caller wants to undo a cap they set earlier.
+    public static let pedalHoldLimitRange: ClosedRange<Int> = 1...128
+    /// m34-t GLIDE/PORTAMENTO time, seconds, and what `glideTime == nil`
+    /// resolves to. 0 is legal and IS the default meaning: the pitch STEPS,
+    /// which is the pre-m34-t behaviour bit-for-bit (`.legato` at 0 is still a
+    /// real slur — no re-attack — it simply arrives at the new pitch in one
+    /// sample). The ceiling of 4 s is a musical one: past that a portamento
+    /// stops reading as one gesture and starts reading as a broken tuning.
+    public static let glideTimeRange: ClosedRange<Double> = 0...4
+
+    /// m34-w. THE REFERENCE INTERVAL for `.constantRate`, in semitones — the
+    /// distance `glideTime` buys. A leap of `glideRateReferenceSemitones` takes
+    /// exactly `glideTime` seconds; every other leap is proportional, so an
+    /// octave takes 6× a whole tone and a semitone takes half of one.
+    ///
+    /// ⭐⭐ IT IS 2 (A WHOLE TONE), AND THE NUMBER IS CALIBRATED, NOT PICKED FOR
+    /// TIDINESS. The project owner listened to three renders and approved
+    /// `glideTime: 0.12` under constant time, on a phrase whose slurred
+    /// intervals are 2 and 3 semitones (A4–C5–D5–E5–D5–C5–A4, four whole tones
+    /// and two minor thirds — `scripts/gates/_m34t-sax-legato-listen.mjs`).
+    /// The reference exists so that FLIPPING THE MODE KEEPS THE SOUND THEY
+    /// ALREADY PICKED: at R = 2 their four whole tones land on exactly 0.120 s
+    /// and their two minor thirds on 0.180 s.
+    ///
+    /// ⛔ THE TWO OBVIOUS UNITS BOTH FAIL THAT TEST, which is why neither was
+    /// taken. "Seconds per OCTAVE" would put their 2–3 semitone slurs at
+    /// 0.020–0.030 s — four to six times faster, and a 20 ms glide does not
+    /// read as a slide at all, so the mode would have silently discarded the
+    /// effect it was asked to improve. "Seconds per SEMITONE" would put them at
+    /// 0.240–0.360 s, two to three times slower. A whole tone is the nameable
+    /// musical interval nearest the approved phrase's mean slur (2.33
+    /// semitones), and it errs SLOW, which preserves a portamento; erring fast
+    /// destroys it.
+    public static let glideRateReferenceSemitones: Double = 2.0
+
+    /// m34-w. The widest leap `.constantRate` will bill for, in semitones —
+    /// the MIDI gamut, so it cannot bite a real note. It exists because the
+    /// engine derives one arming site's interval from an increment RATIO
+    /// (`12·log2(target/current)`) rather than from two note numbers: a
+    /// mis-tuned zone or a pathological ratio could otherwise ask for an
+    /// arbitrarily long ramp, and the clamp is what keeps the derived frame
+    /// count inside Int32 at every sample rate without a second, separate rule
+    /// living in the render thread.
+    public static let glideMaxIntervalSemitones: Double = 127.0
 
     public init(
         zones: [SamplerZone] = [],
@@ -1745,13 +2281,36 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         expressionFilterDepth: Double? = nil,
         expressionFilterCC: Int? = nil,
         bendRangeSemitones: Double? = nil,
-        voiceMode: SamplerVoiceMode? = nil
+        voiceMode: SamplerVoiceMode? = nil,
+        decay: Double? = nil,
+        sustain: Double? = nil,
+        pedalHoldLimit: Int? = nil,
+        // m34-t: APPENDED LAST on purpose. `SamplerDocument`'s
+        // `instrumentDescriptor` reconstruction calls this positionally-labeled,
+        // and the m34-s close-out records that argument order is declaration
+        // order — inserting in the middle silently re-binds nothing here, but
+        // every hand-written call site in the tree reads better appended.
+        glideTime: Double? = nil,
+        // m34-w: APPENDED LAST for the same m34-s reason `glideTime` was —
+        // argument order is declaration order, and `SamplerDocument`'s
+        // reconstruction calls this labelled-positionally.
+        glideMode: SamplerGlideMode? = nil,
+        // PK-F2: APPENDED LAST for the same m34-s reason as `glideTime`.
+        sliceKit: Bool? = nil
     ) {
         self.zones = zones
         self.oneShot = oneShot
         self.attack = attack.clamped(to: Self.attackRange)
         self.release = release.clamped(to: Self.releaseRange)
         self.gain = gain.clamped(to: Self.gainRange)
+        // Clamped to the ZONE's domains deliberately, not to new constants of
+        // their own: a global and a per-zone override must be expressible over
+        // the SAME range or one of them silently cannot say what the other can.
+        // (`SamplerZone.decayRange` is 0...8 with NO minimum floor — a present
+        // 0 stays legal and means "no decay stage".) nil stays nil so an
+        // untouched project's JSON round-trips byte-identically.
+        self.decay = decay.map { $0.clamped(to: SamplerZone.decayRange) }
+        self.sustain = sustain.map { $0.clamped(to: SamplerZone.sustainRange) }
         self.sourcePath = sourcePath
         self.displayName = displayName
         self.expressionModDepth = expressionModDepth.map {
@@ -1773,6 +2332,18 @@ public struct SamplerParams: Codable, Sendable, Equatable {
             $0.clamped(to: Self.bendRangeSemitonesRange)
         }
         self.voiceMode = voiceMode
+        // Clamp rather than reject, matching every other field here; nil stays
+        // nil so an untouched project's JSON round-trips byte-identically.
+        self.pedalHoldLimit = pedalHoldLimit.map { $0.clamped(to: Self.pedalHoldLimitRange) }
+        // m34-t: same contract. A NEGATIVE glide clamps to 0 (= step) rather
+        // than being refused, because 0 is a legal, meaningful value here and
+        // the nearest legal neighbour is therefore the honest answer.
+        self.glideTime = glideTime.map { $0.clamped(to: Self.glideTimeRange) }
+        // m34-w: nil stays nil, so a project that never chose a mode keeps a
+        // byte-identical JSON shape AND the pre-m34-w sound.
+        self.glideMode = glideMode
+        // PK-F2: nil stays nil, so an un-chopped sampler's JSON is unchanged.
+        self.sliceKit = sliceKit
     }
 
     /// The figure the ENGINE uses — the stored value, or the GM default. One
@@ -1781,23 +2352,152 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         bendRangeSemitones ?? Self.defaultBendRangeSemitones
     }
 
+    /// The global decay/sustain the ENGINE uses — the stored value, or the
+    /// pre-m34-o hardcoded legacy pair. Same one-accessor discipline as
+    /// `effectiveBendRangeSemitones`: the engine's snapshot, the wire's
+    /// describe verb and `SamplerGlobalUse` all read THESE, so "what does nil
+    /// mean" is answered in exactly one place.
+    ///
+    /// ⚠️ These are the value a zone inherits when its OWN field is nil — they
+    /// are NOT "the value every zone uses". A zone with its own `decay` wins
+    /// (SFZ region-over-global precedence, and this codebase's documented
+    /// design). `SamplerGlobalUse.decay(of:)` / `.sustain(of:)` is how a
+    /// caller finds out whether any zone is actually listening.
+    public var effectiveDecay: Double { decay ?? Self.defaultDecay }
+    public var effectiveSustain: Double { sustain ?? Self.defaultSustain }
+
     /// The mode the ENGINE uses — the stored value, or poly.
     public var effectiveVoiceMode: SamplerVoiceMode { voiceMode ?? .poly }
+
+    /// m34-t. The glide the ENGINE uses — the stored value, or 0 (step). Same
+    /// one-accessor discipline as `effectiveBendRangeSemitones`: 0 needs no
+    /// special case downstream, because a ramp of zero frames IS the snap.
+    public var effectiveGlideTime: Double { glideTime ?? 0 }
+
+    /// m34-t. Whether glide can reach the sound AT ALL: it needs both a time
+    /// and a monophonic mode. ONE home for that conjunction — the engine
+    /// snapshot, the wire's warning and the tests all read this, so "why is my
+    /// glide silent" is answered in exactly one place rather than three.
+    public var glideIsEffective: Bool {
+        effectiveGlideTime > 0 && effectiveVoiceMode.isMonophonic
+    }
+
+    /// m34-w. The glide mode the ENGINE uses — the stored value, or
+    /// `.constantTime` (today's behaviour). Same one-accessor discipline as
+    /// `effectiveVoiceMode`.
+    ///
+    /// ⚠️ MODE IS ORTHOGONAL TO EFFECTIVENESS. `glideIsEffective` is still
+    /// exactly "a time above zero AND a monophonic voice mode" — a rate-mode
+    /// glide is no more and no less audible than a time-mode one, and folding
+    /// the mode into that conjunction would make a true statement about the
+    /// mode masquerade as a statement about whether anything will be heard.
+    public var effectiveGlideMode: SamplerGlideMode { glideMode ?? .constantTime }
+
+    /// ⭐⭐ m34-w — THE ONE HOME for "how long does a leap of this many
+    /// semitones take". The engine derives its frame count from this rule, the
+    /// gates assert against it, and `docs`/SKILL prose quotes it, so the
+    /// implementation and the documentation cannot drift apart.
+    ///
+    /// · `.constantTime` → `effectiveGlideTime`, whatever the distance. That is
+    ///   the pre-m34-w behaviour, and the `interval` argument is IGNORED.
+    /// · `.constantRate` → `effectiveGlideTime × |interval| /
+    ///   glideRateReferenceSemitones`. A whole tone costs `glideTime`; an
+    ///   octave costs six times that; a semitone costs half.
+    ///
+    /// `interval` is signed (a downward slur is negative) and is used by its
+    /// magnitude: sliding down a fifth takes as long as sliding up one.
+    ///
+    /// ⚠️ CLAMPED TO THE MIDI GAMUT (0…127 semitones) before scaling. A ratio
+    /// arriving from a mis-tuned zone could otherwise ask for an arbitrarily
+    /// long ramp; 127 semitones is the widest leap a MIDI keyboard can express,
+    /// so the clamp cannot bite a real note while it keeps the derived frame
+    /// count safely inside Int32 at every sample rate.
+    public func glideDuration(forSemitones interval: Double) -> Double {
+        let time = effectiveGlideTime
+        guard effectiveGlideMode == .constantRate else { return time }
+        guard interval.isFinite else { return time }
+        let distance = min(abs(interval), Self.glideMaxIntervalSemitones)
+        return time * distance / Self.glideRateReferenceSemitones
+    }
+
+    /// The pedal-hold cap the ENGINE uses (m34-q). Same one-accessor discipline
+    /// as `effectiveBendRangeSemitones`: "what does nil mean" is answered in
+    /// exactly one place, and `Int.max` is the answer that needs no special
+    /// case downstream — a count of sounding voices can never reach it, so the
+    /// render thread's ordinary comparison IS the unlimited path.
+    public var effectivePedalHoldLimit: Int { pedalHoldLimit ?? Int.max }
 }
 
-/// How many notes the built-in sampler lets sound at once.
+/// How many notes the built-in sampler lets sound at once — and, since m34-t,
+/// whether a new note RE-ATTACKS or CONTINUES the one already sounding.
 ///
-/// `.mono` is **LAST-NOTE priority**, and that is the whole point rather than a
-/// default among several: a wind line is ONE airstream. The newest note is the
-/// one being played, and the previous pitch ends because the player moved —
-/// not because it lost a priority contest. Low- and high-note priority are
-/// keyboard-synth conventions for two-handed playing; on a melodic line they
-/// produce the wrong note every time the phrase turns around, and under the
-/// slight note OVERLAPS that legato writing needs they randomly refuse to move
-/// at all. Last-note degrades correctly: the overlap becomes the slur.
-public enum SamplerVoiceMode: String, Codable, Sendable {
+/// ⭐ m34-t — `.legato` IS THE THIRD CASE, AND THE DIFFERENCE FROM `.mono` IS
+/// THE WHOLE POINT RATHER THAN A REFINEMENT OF IT. `.mono` is voice STEALING:
+/// a new note-on puts the sounding voice into its release ramp and starts a
+/// NEW voice with a FRESH ATTACK. It changed which note wins; it did not
+/// remove the tongue, so a slurred sax pair still re-articulates on the second
+/// note. `.legato` is voice CONTINUATION: the sounding voice keeps its
+/// envelope exactly where it is and merely changes pitch, which is what a wind
+/// player does when they move a finger without re-tonguing.
+///
+/// ⛔ A LEGATO VOICE DOES NOT CHANGE ZONE. A slur is ONE continuous excitation,
+/// so the continued voice stays on the sample it started on and is retuned
+/// against THAT zone's root pitch. Timbre drift on a wide slurred interval is
+/// the documented, accepted limit — every hardware mono sampler has it, and the
+/// alternative (swapping the sample mid-slide) is an audible splice in the
+/// middle of the one gesture the mode exists to make seamless. A DETACHED note
+/// — one arriving with nothing sounding — triggers normally and gets normal
+/// zone mapping.
+///
+/// Both `.mono` and `.legato` are LAST-NOTE priority, and that is the whole
+/// point rather than a default among several: a wind line is ONE airstream. The
+/// newest note is the one being played, and the previous pitch ends because the
+/// player moved — not because it lost a priority contest. Low- and high-note
+/// priority are keyboard-synth conventions for two-handed playing; on a melodic
+/// line they produce the wrong note every time the phrase turns around, and
+/// under the slight note OVERLAPS that legato writing needs they randomly
+/// refuse to move at all. Last-note degrades correctly: the overlap becomes the
+/// slur.
+public enum SamplerVoiceMode: String, Codable, Sendable, CaseIterable {
     case poly
     case mono
+    case legato
+
+    /// ONE note at a time — true for BOTH mono modes. Every rule that is about
+    /// "one airstream" rather than about re-attack reads this: the note-off
+    /// discard, the choke arming, and whether glide can apply at all.
+    public var isMonophonic: Bool { self != .poly }
+
+    /// Whether a note-on CONTINUES the sounding voice instead of choking it and
+    /// re-attacking. Only `.legato`.
+    public var continuesVoices: Bool { self == .legato }
+}
+
+/// m34-w — WHAT THE BUILT-IN SAMPLER'S `glideTime` NUMBER MEANS.
+///
+/// ⭐ THE USER-VISIBLE DIFFERENCE, which is the whole item: under
+/// `.constantTime` a semitone and an octave take the SAME time, so the octave
+/// travels twelve times faster and stops sounding like the same gesture. Under
+/// `.constantRate` the pitch moves at a fixed SPEED and a wide leap takes
+/// proportionally longer — which is what a trombone slide, a fretless finger
+/// and a real portamento all actually do.
+///
+/// ⛔ `.constantTime` IS THE DEFAULT AND IS BIT-IDENTICAL TO PRE-m34-w. nil
+/// resolves here, so no existing project, render or golden hash moves.
+///
+/// The rate unit is documented on `SamplerParams.glideRateReferenceSemitones`
+/// and computed in exactly one place, `SamplerParams.glideDuration(forSemitones:)`.
+public enum SamplerGlideMode: String, Codable, Sendable, CaseIterable {
+    /// Every transition takes `glideTime` seconds, whatever the distance.
+    case constantTime
+    /// `glideTime` buys `SamplerParams.glideRateReferenceSemitones` semitones
+    /// (a whole tone); distance sets duration from there.
+    case constantRate
+
+    /// Whether duration scales with the interval. The render thread's snapshot
+    /// flattens the enum to this Bool, so the hot path branches on a plain
+    /// load rather than on an enum comparison.
+    public var scalesWithInterval: Bool { self == .constantRate }
 }
 
 /// One sampler key zone: an audio file mapped across a pitch span, played
@@ -1964,6 +2664,48 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
     /// Dynamic-layer crossfade (m27 leg B). nil = hard velocity/pitch
     /// switching, the pre-m27 law byte-for-byte. See `SamplerCrossfade`.
     public var crossfade: SamplerCrossfade?
+    /// Play this zone's span BACKWARDS (m32-d): the voice starts at the last
+    /// frame of `[startFrame, endFrame)` and reads toward `startFrame`, at the
+    /// same varispeed rate a forward voice would use. nil/false = forward, the
+    /// pre-m32-d law byte-for-byte.
+    ///
+    /// No reversed copy of the audio is ever made — this is read-backwards
+    /// INDEX MATH, so a reversed zone costs the same memory as a forward one
+    /// and many zones on one long file still hold ONE decoded copy (m32-a).
+    ///
+    /// ⛔ **v1 REVERSED ZONES IGNORE LOOPS.** A reversed zone plays its span
+    /// once; `loopMode`/`loopStart`/`loopEnd` are dropped at load (with a note
+    /// in the sampler's zone-load notes) rather than half-solved. Which end of
+    /// a backwards loop the crossfade belongs to, and what "sustain loop" means
+    /// played backwards, are real design questions this field does not answer.
+    ///
+    /// ⚠️ `attack`/`release` are NOT swapped, deliberately. They are authored
+    /// against PLAYBACK time, not source time, so a 10 ms release still trims
+    /// the tail you actually hear — which, on a reversed zone, is the source's
+    /// own attack transient.
+    public var reverse: Bool?
+    /// CHOKE group, 0…63 (m32-f). Starting a note on any zone in this group
+    /// ends every voice ALREADY SOUNDING from the same group — the open/closed
+    /// hi-hat convention, and the "tight re-chop" that stops chopped slices
+    /// ringing into each other. nil = no choke, the pre-m32-f law byte-for-byte.
+    ///
+    /// ⚠️⚠️ **NOT the same thing as `group`, and the two must never be
+    /// conflated.** `group` is a SELECTION rule applied at note-on — one zone
+    /// per group *fires* per trigger, which is what round-robin (`seqLength`/
+    /// `seqPosition`) and random layers (`randMin`/`randMax`) are built on.
+    /// Choke runs in the opposite direction: a new note ending an
+    /// already-sounding OLD one. A zone can carry both, independently.
+    ///
+    /// A choked voice is NOT hard-cut — that would be a gain step, i.e. a
+    /// click. It moves to its RELEASE stage from wherever its level had got
+    /// to, exactly as mono voice-mode's choke already does. The consequence,
+    /// stated rather than discovered: a zone with a 2 s `release` chokes
+    /// slowly. The fix is that zone's own `release` (chops generated by
+    /// `clip.sliceToSampler` already carry 10 ms, so they choke tight).
+    ///
+    /// Two zones in the same choke group LAYERED by ONE note-on do not choke
+    /// each other, and neither does the note that fires the choke.
+    public var chokeGroup: Int?
 
     public static let pitchRange: ClosedRange<Int> = 0...127
     /// m19-b (A5): 0...2 (+6 dB), relaxed from 0...1 — decode-safe for every
@@ -1979,6 +2721,10 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
     /// stage).
     public static let decayRange: ClosedRange<Double> = 0...8
     public static let sustainRange: ClosedRange<Double> = 0...1
+    /// m32-f: 0...63. The ceiling is not arbitrary — the engine tracks which
+    /// choke groups a single note-on has already fired in ONE `UInt64` bit
+    /// mask, which is allocation-free and one bit test in the trigger path.
+    public static let chokeGroupRange: ClosedRange<Int> = 0...63
 
     public init(
         id: UUID = UUID(),
@@ -2007,7 +2753,9 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
         loopMode: SamplerLoopMode? = nil,
         loopStart: Int? = nil,
         loopEnd: Int? = nil,
-        crossfade: SamplerCrossfade? = nil
+        crossfade: SamplerCrossfade? = nil,
+        reverse: Bool? = nil,
+        chokeGroup: Int? = nil
     ) {
         self.id = id
         self.audioFileURL = audioFileURL
@@ -2066,7 +2814,28 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
         // a persisted object that means nothing (and would break the
         // omit-when-nil zone shape the wire tests pin).
         self.crossfade = crossfade.flatMap { $0.isNoOp ? nil : $0 }
+        // m32-d: a plain Bool, so there is nothing to clamp. nil stays nil —
+        // "unset" and "explicitly false" are the same SOUND but not the same
+        // document, and the omit-when-nil wire/persistence shape depends on it.
+        self.reverse = reverse
+        // m32-f: clamp rather than reject, matching every other field here.
+        // nil stays nil = no choke.
+        self.chokeGroup = chokeGroup.map { $0.clamped(to: Self.chokeGroupRange) }
     }
+
+    /// The identity of this zone's SOURCE FILE, for every "do these two zones
+    /// share a file?" question in the tree. ONE HOME (m32-a): the sampler
+    /// loader's buffer dedup and `ProjectBundle.planMedia`'s media-copy dedup
+    /// MUST agree, or a project plays one way and reloads another.
+    ///
+    /// ⚠️ Deliberately NOT `resolvingSymlinksInPath`. It would catch more
+    /// aliases, but it stats the filesystem and — decisively — changing
+    /// `planMedia`'s key would change which `media/` basenames a save
+    /// produces, a live behaviour change on a shipped path. Known limitation:
+    /// two zones reaching one file through a symlink still get two copies. If
+    /// symlink resolution is ever wanted, both call sites move together
+    /// because they now read this one property.
+    public var sourceFileKey: String { audioFileURL.standardizedFileURL.path }
 
     public func contains(pitch: Int) -> Bool { pitch >= minPitch && pitch <= maxPitch }
 
@@ -2098,6 +2867,119 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
     /// Output gain, 0...1.
     public var gain: Double
 
+    /// m34-q — HOW MANY NOTES THE SUSTAIN PEDAL KEEPS RINGING. nil = unlimited
+    /// (today's behaviour). The synth's twin of `SamplerParams.pedalHoldLimit`,
+    /// which carries the full rationale; the law is deliberately ONE law across
+    /// both built-ins, so a user who learns it on one instrument has learned it
+    /// on the other.
+    ///
+    /// ⭐ THIS IS THIS TYPE'S FIRST ADDITIVE-OPTIONAL FIELD. Every other member
+    /// is a plain non-optional with a default, so `PolySynthParams` has always
+    /// encoded a fixed key set. Optional + nil keeps that true for projects that
+    /// never set it: synthesised `Codable` omits a nil key on encode and decodes
+    /// an absent one to nil, so an existing project's JSON is unchanged in both
+    /// directions (pinned by `PedalHoldLimitCodableTests`).
+    public var pedalHoldLimit: Int?
+
+    // MARK: - m39-g richness pass
+    //
+    // ⭐ THE ONE LAW GOVERNING EVERY FIELD BELOW: additive-optional, and nil
+    // means MUSICALLY NEUTRAL — not "a sensible value", but *the exact sound
+    // the pre-m39-g engine made*. A project saved before the richness pass
+    // renders BIT-IDENTICALLY after it, pinned by
+    // `PolySynthRenderIdentityTests` whose goldens were captured against the
+    // pristine engine. That is why none of these is a plain `Double` with a
+    // pretty default: a non-nil default would re-voice every project on disk.
+    //
+    // ⚠️ NEUTRALITY IS A PAIR PROPERTY IN TWO PLACES, and both are why the
+    // engine branches rather than multiplying by an identity factor:
+    // `unisonDetuneCents` does nothing at one voice, and `noiseColor` does
+    // nothing at zero level. Reading either alone as "the feature is on" is how
+    // the neutral path would acquire arithmetic it must not have.
+    //
+    // ⛔ DELIBERATELY NOT HERE: a filter envelope and any LFO. Both require a
+    // coefficient to move WHILE A NOTE SOUNDS, which breaks this instrument's
+    // "recompute only on parameter-generation change" contract — a render-path
+    // redesign, not a field. They are m39-e; see
+    // `docs/research/2026-09-19-synthesis-engines.md` §0 and §8.
+
+    /// Detuned sub-voices per note, 1...`maxUnisonVoices`. nil = 1 = today.
+    /// ⚠️ This multiplies OSCILLATOR cost per note, not the 16-voice polyphony
+    /// budget: one note still occupies one voice slot.
+    public var unisonVoices: Int?
+    /// Total detune SPREAD across the unison stack, in cents — the outermost
+    /// sub-voices sit at ±half this. Inert at one voice.
+    public var unisonDetuneCents: Double?
+    /// How far the unison stack spreads across the stereo field, 0 = mono
+    /// (centre), 1 = outermost sub-voices hard left/right. Inert at one voice.
+    ///
+    /// ⚠️ THE ONLY FIELD THAT CHANGES THE INSTRUMENT'S CHANNEL BEHAVIOUR: the
+    /// pre-m39-g synth renders channel 0 and copies it to every other channel,
+    /// and a default render MUST stay exactly that (asserted, not assumed).
+    public var unisonStereoSpread: Double?
+
+    /// Sub-oscillator level, 0...1, mixed under the main oscillator. nil = 0 =
+    /// no sub-oscillator at all (not "a silent one" — the engine skips it).
+    public var subLevel: Double?
+    /// Octaves below the main oscillator: -1 or -2. Inert at zero sub level.
+    public var subOctave: Int?
+    /// Sub-oscillator shape. nil = `.sine` — the house default for a sub, which
+    /// adds weight without adding harmonics that fight the main oscillator.
+    /// Inert at zero sub level.
+    public var subWaveform: Waveform?
+
+    /// Noise-layer level, 0...1, mixed in BEFORE the filter so the filter (and
+    /// its resonance) shapes it. nil = 0 = no noise source at all.
+    public var noiseLevel: Double?
+    /// Noise tilt: 0 = dark (low-passed), 0.5 = white, 1 = bright
+    /// (high-passed). Inert at zero noise level.
+    public var noiseColor: Double?
+
+    /// Analog-style oscillator drift depth, 0...1 → a slow per-voice random
+    /// walk of up to ±`driftMaxCents`. nil = 0 = perfectly stable pitch.
+    ///
+    /// ⚠️ Updated ONCE PER RENDER BLOCK, never per sample — this is what keeps
+    /// it on the right side of the coefficient contract (research §7.2).
+    public var drift: Double?
+
+    /// EXTRA filter resonance ABOVE the legacy `resonance` knob's ceiling,
+    /// 0...1, for self-oscillation-style screaming peaks.
+    ///
+    /// ⭐⭐ WHY THIS IS A SECOND FIELD RATHER THAN A WIDER `resonanceRange`:
+    /// `resonance` maps 0...1 to Q 0.5...10 and every project on disk was
+    /// voiced against THAT mapping. Widening the range would either re-scale
+    /// what a stored 0.7 SOUNDS like, or force a piecewise mapping that makes
+    /// the knob's own travel non-linear — and it would silently re-scale every
+    /// UI slider position too, since `PolySynthEditorModel` reads this range
+    /// verbatim. A separate, default-off field leaves the legacy mapping
+    /// literally untouched. (m39-g brief sanctioned exactly this fallback; the
+    /// bend-range decision is the precedent.)
+    public var resonanceBoost: Double?
+    /// Waveshaper drive into the filter, 0...1. nil = 0 = no waveshaper in the
+    /// path at all (the engine branches around it, it does not multiply by 1).
+    public var drive: Double?
+    /// How much note VELOCITY opens the filter, 0...1 → up to
+    /// `cutoffTrackMaxOctaves` octaves at full velocity. Applied once at
+    /// note-on.
+    public var velocityToCutoff: Double?
+    /// How much note PITCH tracks the filter, 0...1, where 1 is full 1:1
+    /// tracking relative to middle C. Applied once at note-on.
+    public var keyToCutoff: Double?
+
+    /// Per-note-on randomisation depth, 0...1 — small independent jitter on
+    /// pan, detune and cutoff so no two notes sound quite alike. nil = 0.
+    public var voiceJitter: Double?
+
+    /// Envelope segment curvature, -1...1. 0 (and nil) = the straight lines the
+    /// engine has always drawn. Positive bends toward a slow-start/fast-finish
+    /// attack and a fast-then-lingering decay/release (the "exponential" shape
+    /// real ADSRs have); negative bends the other way.
+    ///
+    /// ⚠️ This changes the per-sample step FORMULA only. Segment DURATIONS are
+    /// untouched — a 0.15 s release still reaches exact silence, and frees its
+    /// voice, at exactly 0.15 s.
+    public var envelopeCurve: Double?
+
     public static let attackRange: ClosedRange<Double> = 0.0005...5
     public static let decayRange: ClosedRange<Double> = 0.001...5
     public static let sustainRange: ClosedRange<Double> = 0...1
@@ -2105,6 +2987,46 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
     public static let cutoffRange: ClosedRange<Double> = 40...18_000
     public static let resonanceRange: ClosedRange<Double> = 0...1
     public static let gainRange: ClosedRange<Double> = 0...1
+    /// m34-q — an ALIAS, not a second literal: the pedal-hold domain has ONE
+    /// home, on `SamplerParams`. Re-typing `1...128` here is how the two
+    /// instruments would eventually disagree about what a legal cap is.
+    public static let pedalHoldLimitRange = SamplerParams.pedalHoldLimitRange
+
+    // MARK: - m39-g ranges
+    //
+    // ⛔ `maxUnisonVoices` IS LOAD-BEARING BEYOND VALIDATION: the engine
+    // allocates a fixed `16 × maxUnisonVoices` block of sub-voice state in
+    // `init` and indexes it on the render thread. This constant is its ONE
+    // home — the allocation and this range must never be able to disagree, so
+    // the engine reads THIS rather than re-typing an 8.
+    public static let maxUnisonVoices = 8
+    public static let unisonVoicesRange: ClosedRange<Int> = 1...maxUnisonVoices
+    public static let unisonDetuneCentsRange: ClosedRange<Double> = 0...50
+    public static let unisonStereoSpreadRange: ClosedRange<Double> = 0...1
+    public static let subLevelRange: ClosedRange<Double> = 0...1
+    public static let subOctaveRange: ClosedRange<Int> = -2...(-1)
+    public static let noiseLevelRange: ClosedRange<Double> = 0...1
+    public static let noiseColorRange: ClosedRange<Double> = 0...1
+    public static let driftRange: ClosedRange<Double> = 0...1
+    public static let resonanceBoostRange: ClosedRange<Double> = 0...1
+    public static let driveRange: ClosedRange<Double> = 0...1
+    public static let velocityToCutoffRange: ClosedRange<Double> = 0...1
+    public static let keyToCutoffRange: ClosedRange<Double> = 0...1
+    public static let voiceJitterRange: ClosedRange<Double> = 0...1
+    public static let envelopeCurveRange: ClosedRange<Double> = -1...1
+
+    /// Drift depth at `drift == 1`, in cents — the ± bound of the random walk.
+    /// Small on purpose: analog drift is a shimmer, not a vibrato.
+    public static let driftMaxCents = 12.0
+    /// How far full `velocityToCutoff` / `keyToCutoff` may move the cutoff, in
+    /// octaves. Stated once so the engine and any UI agree what "1" means.
+    public static let cutoffTrackMaxOctaves = 4.0
+    /// The pitch key tracking is measured FROM — middle C, so a patch voiced at
+    /// C3 keeps its cutoff and notes either side open/close around it.
+    public static let keyTrackCenterPitch = 60.0
+    /// Q at full `resonanceBoost`. The legacy knob's ceiling is 10; this is the
+    /// headroom above it that makes the filter ring like an oscillator.
+    public static let maxBoostedQ = 60.0
 
     public init(
         waveform: Waveform = .saw,
@@ -2114,7 +3036,23 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
         release: Double = 0.15,
         cutoffHz: Double = 8_000,
         resonance: Double = 0.1,
-        gain: Double = 0.8
+        gain: Double = 0.8,
+        pedalHoldLimit: Int? = nil,
+        unisonVoices: Int? = nil,
+        unisonDetuneCents: Double? = nil,
+        unisonStereoSpread: Double? = nil,
+        subLevel: Double? = nil,
+        subOctave: Int? = nil,
+        subWaveform: Waveform? = nil,
+        noiseLevel: Double? = nil,
+        noiseColor: Double? = nil,
+        drift: Double? = nil,
+        resonanceBoost: Double? = nil,
+        drive: Double? = nil,
+        velocityToCutoff: Double? = nil,
+        keyToCutoff: Double? = nil,
+        voiceJitter: Double? = nil,
+        envelopeCurve: Double? = nil
     ) {
         self.waveform = waveform
         self.attack = attack.clamped(to: Self.attackRange)
@@ -2124,6 +3062,195 @@ public struct PolySynthParams: Codable, Sendable, Equatable {
         self.cutoffHz = cutoffHz.clamped(to: Self.cutoffRange)
         self.resonance = resonance.clamped(to: Self.resonanceRange)
         self.gain = gain.clamped(to: Self.gainRange)
+        // Clamp rather than reject, exactly like the seven scalars above; nil
+        // stays nil, so a project that never set a cap keeps its wire shape.
+        self.pedalHoldLimit = pedalHoldLimit.map { $0.clamped(to: Self.pedalHoldLimitRange) }
+        // m39-g — same rule for all fifteen: clamp a value, pass nil through
+        // untouched. `nil` is not a number to clamp; it is "this project never
+        // opted in", and it has to stay distinguishable from an explicit zero
+        // on a round trip.
+        self.unisonVoices = unisonVoices.map { $0.clamped(to: Self.unisonVoicesRange) }
+        self.unisonDetuneCents = unisonDetuneCents.map {
+            $0.clamped(to: Self.unisonDetuneCentsRange) }
+        self.unisonStereoSpread = unisonStereoSpread.map {
+            $0.clamped(to: Self.unisonStereoSpreadRange) }
+        self.subLevel = subLevel.map { $0.clamped(to: Self.subLevelRange) }
+        self.subOctave = subOctave.map { $0.clamped(to: Self.subOctaveRange) }
+        self.subWaveform = subWaveform
+        self.noiseLevel = noiseLevel.map { $0.clamped(to: Self.noiseLevelRange) }
+        self.noiseColor = noiseColor.map { $0.clamped(to: Self.noiseColorRange) }
+        self.drift = drift.map { $0.clamped(to: Self.driftRange) }
+        self.resonanceBoost = resonanceBoost.map { $0.clamped(to: Self.resonanceBoostRange) }
+        self.drive = drive.map { $0.clamped(to: Self.driveRange) }
+        self.velocityToCutoff = velocityToCutoff.map {
+            $0.clamped(to: Self.velocityToCutoffRange) }
+        self.keyToCutoff = keyToCutoff.map { $0.clamped(to: Self.keyToCutoffRange) }
+        self.voiceJitter = voiceJitter.map { $0.clamped(to: Self.voiceJitterRange) }
+        self.envelopeCurve = envelopeCurve.map { $0.clamped(to: Self.envelopeCurveRange) }
+    }
+
+    /// The cap the ENGINE uses — the stored value, or `Int.max` for "no cap".
+    /// The twin of `SamplerParams.effectivePedalHoldLimit`, and the ONE place
+    /// this instrument answers "what does nil mean".
+    public var effectivePedalHoldLimit: Int { pedalHoldLimit ?? Int.max }
+
+    // MARK: - m39-g resolved values (the ONE place nil is interpreted)
+    //
+    // ⛔⛔ THESE CLAMP AS WELL AS RESOLVE, AND THE CLAMP IS A MEMORY-SAFETY
+    // BOUNDARY, NOT A COURTESY. `Codable`'s synthesised `init(from:)` assigns
+    // stored properties DIRECTLY — it never calls the clamping init above. So a
+    // project file carrying `"unisonVoices": 1000` (hand-edited, corrupted, or
+    // written by a future build with a wider range) reaches the render thread
+    // unclamped, where it would index past the end of a fixed allocation. The
+    // custom decoder below closes that door too; these accessors are the second
+    // lock, and the one the engine actually turns.
+    public var effectiveUnisonVoices: Int {
+        (unisonVoices ?? 1).clamped(to: Self.unisonVoicesRange)
+    }
+    public var effectiveUnisonDetuneCents: Double {
+        (unisonDetuneCents ?? 0).clamped(to: Self.unisonDetuneCentsRange)
+    }
+    public var effectiveUnisonStereoSpread: Double {
+        (unisonStereoSpread ?? 0).clamped(to: Self.unisonStereoSpreadRange)
+    }
+    public var effectiveSubLevel: Double {
+        (subLevel ?? 0).clamped(to: Self.subLevelRange)
+    }
+    public var effectiveSubOctave: Int {
+        (subOctave ?? -1).clamped(to: Self.subOctaveRange)
+    }
+    public var effectiveSubWaveform: Waveform { subWaveform ?? .sine }
+    public var effectiveNoiseLevel: Double {
+        (noiseLevel ?? 0).clamped(to: Self.noiseLevelRange)
+    }
+    public var effectiveNoiseColor: Double {
+        (noiseColor ?? 0.5).clamped(to: Self.noiseColorRange)
+    }
+    public var effectiveDrift: Double { (drift ?? 0).clamped(to: Self.driftRange) }
+    public var effectiveResonanceBoost: Double {
+        (resonanceBoost ?? 0).clamped(to: Self.resonanceBoostRange)
+    }
+    public var effectiveDrive: Double { (drive ?? 0).clamped(to: Self.driveRange) }
+    public var effectiveVelocityToCutoff: Double {
+        (velocityToCutoff ?? 0).clamped(to: Self.velocityToCutoffRange)
+    }
+    public var effectiveKeyToCutoff: Double {
+        (keyToCutoff ?? 0).clamped(to: Self.keyToCutoffRange)
+    }
+    public var effectiveVoiceJitter: Double {
+        (voiceJitter ?? 0).clamped(to: Self.voiceJitterRange)
+    }
+    public var effectiveEnvelopeCurve: Double {
+        (envelopeCurve ?? 0).clamped(to: Self.envelopeCurveRange)
+    }
+
+    // MARK: - m39-g "is this feature actually on" (the neutrality rules)
+    //
+    // Written here rather than in the engine because each one is a MODEL fact a
+    // caller (or a UI, or an agent) needs too: "I set detune and heard nothing"
+    // is answered by `unisonIsEffective`, not by reading the DSP.
+
+    /// Detune and spread do nothing at a single voice — the pair rule.
+    public var unisonIsEffective: Bool { effectiveUnisonVoices > 1 }
+    /// True only when the instrument will produce a genuinely STEREO signal.
+    /// A default render is channel-identical and must stay that way.
+    public var stereoSpreadIsEffective: Bool {
+        (unisonIsEffective && effectiveUnisonStereoSpread > 0) || effectiveVoiceJitter > 0
+    }
+    /// Octave and waveform do nothing at zero level — the same pair rule.
+    public var subIsEffective: Bool { effectiveSubLevel > 0 }
+    /// Colour does nothing at zero level.
+    public var noiseIsEffective: Bool { effectiveNoiseLevel > 0 }
+    public var driftIsEffective: Bool { effectiveDrift > 0 }
+    public var driveIsEffective: Bool { effectiveDrive > 0 }
+    public var envelopeCurveIsEffective: Bool { effectiveEnvelopeCurve != 0 }
+    /// Whether anything makes a voice's filter cutoff differ from the patch's.
+    public var cutoffIsPerVoice: Bool {
+        effectiveVelocityToCutoff > 0 || effectiveKeyToCutoff > 0 || effectiveVoiceJitter > 0
+    }
+
+    /// The filter Q the engine uses: the legacy mapping, EXACTLY as it has
+    /// always been, with the boost knob extending it above its ceiling.
+    ///
+    /// ⭐ `resonanceBoost == 0` returns `0.5 + resonance * 9.5` — the same
+    /// expression, evaluated the same way, so a project that never touched the
+    /// boost gets a bit-identical coefficient. That identity is the reason this
+    /// is a multiply-by-nothing branch rather than a blend.
+    public var effectiveQ: Double {
+        let base = 0.5 + resonance * 9.5
+        let boost = effectiveResonanceBoost
+        guard boost > 0 else { return base }
+        // Exponential, so the top of the knob is a usable ring rather than a
+        // narrow sliver at the very end of its travel.
+        return base * pow(Self.maxBoostedQ / 10.0, boost)
+    }
+
+    // MARK: - m39-g decoding
+    //
+    // ⛔ WHY THIS TYPE NOW HAS A HAND-WRITTEN DECODER, when the synthesised one
+    // served it for its whole life until m39-g. Two reasons, both paid for
+    // elsewhere in this codebase:
+    //
+    //  ① The synthesised decoder BYPASSES the clamping init entirely, so every
+    //    range above was advisory the moment a value arrived from JSON rather
+    //    than from Swift. That was survivable while every field was a scalar
+    //    the engine merely multiplied by. `unisonVoices` is not: it indexes a
+    //    fixed allocation on the render thread. Routing decode through
+    //    `self.init` makes the ranges real in both directions.
+    //
+    //  ② `subWaveform` decodes TOLERANTLY — as a String, resolved through
+    //    `init(rawValue:)`, with an unknown value becoming nil. This is
+    //    `SamplerZoneDocument.loopMode`'s law (m20-g), restated for
+    //    `voiceMode`/`glideMode` at m34-s/m34-w: a strict enum decode THROWS on
+    //    an unknown rawValue, and this decoder sits inside the project open —
+    //    so a fifth waveform added by a later build would make every project
+    //    using it unopenable in this one. The WHOLE document, not just a field.
+    //
+    // ⚠️ `waveform` is deliberately NOT given that tolerance here. It decodes
+    // strictly and is REQUIRED, exactly as the synthesised decoder made it,
+    // because changing a legacy field's failure behaviour is a separate
+    // decision from adding new ones — and this file's job today is to change
+    // nothing that already works.
+    private enum CodingKeys: String, CodingKey {
+        case waveform, attack, decay, sustain, release, cutoffHz, resonance, gain
+        case pedalHoldLimit
+        case unisonVoices, unisonDetuneCents, unisonStereoSpread
+        case subLevel, subOctave, subWaveform
+        case noiseLevel, noiseColor, drift
+        case resonanceBoost, drive, velocityToCutoff, keyToCutoff, voiceJitter
+        case envelopeCurve
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            waveform: try c.decode(Waveform.self, forKey: .waveform),
+            attack: try c.decode(Double.self, forKey: .attack),
+            decay: try c.decode(Double.self, forKey: .decay),
+            sustain: try c.decode(Double.self, forKey: .sustain),
+            release: try c.decode(Double.self, forKey: .release),
+            cutoffHz: try c.decode(Double.self, forKey: .cutoffHz),
+            resonance: try c.decode(Double.self, forKey: .resonance),
+            gain: try c.decode(Double.self, forKey: .gain),
+            pedalHoldLimit: try c.decodeIfPresent(Int.self, forKey: .pedalHoldLimit),
+            unisonVoices: try c.decodeIfPresent(Int.self, forKey: .unisonVoices),
+            unisonDetuneCents: try c.decodeIfPresent(Double.self, forKey: .unisonDetuneCents),
+            unisonStereoSpread: try c.decodeIfPresent(Double.self, forKey: .unisonStereoSpread),
+            subLevel: try c.decodeIfPresent(Double.self, forKey: .subLevel),
+            subOctave: try c.decodeIfPresent(Int.self, forKey: .subOctave),
+            // The tolerant hop: unknown rawValue → nil → the documented
+            // default, never a throw that fails the project open.
+            subWaveform: try c.decodeIfPresent(String.self, forKey: .subWaveform)
+                .flatMap(Waveform.init(rawValue:)),
+            noiseLevel: try c.decodeIfPresent(Double.self, forKey: .noiseLevel),
+            noiseColor: try c.decodeIfPresent(Double.self, forKey: .noiseColor),
+            drift: try c.decodeIfPresent(Double.self, forKey: .drift),
+            resonanceBoost: try c.decodeIfPresent(Double.self, forKey: .resonanceBoost),
+            drive: try c.decodeIfPresent(Double.self, forKey: .drive),
+            velocityToCutoff: try c.decodeIfPresent(Double.self, forKey: .velocityToCutoff),
+            keyToCutoff: try c.decodeIfPresent(Double.self, forKey: .keyToCutoff),
+            voiceJitter: try c.decodeIfPresent(Double.self, forKey: .voiceJitter),
+            envelopeCurve: try c.decodeIfPresent(Double.self, forKey: .envelopeCurve))
     }
 }
 
@@ -2165,6 +3292,30 @@ public struct TransportState: Codable, Sendable, Equatable {
     /// Bars of count-in clicks before a `record()` take begins, clamped to
     /// `countInBarsRange`. Count-in implies clicks: they sound even when the
     /// metronome itself is disabled.
+    ///
+    /// ⭐⭐ **DEFAULTS TO 1 (m23-cy), AND THAT DEFAULT IS THE WHOLE FEATURE.**
+    /// The mechanism shipped complete long ago — model, engine, wire verb and a
+    /// transport-bar stepper — behind a default of 0, so the user who needed it
+    /// had no reason to know it existed and reported the symptom it prevents:
+    /// *"the first note after you hit record is dropped."* It is dropped
+    /// because a take's `PlaybackAnchor` is scheduled slightly AHEAD of
+    /// `startTake` and `MIDICaptureSession` discards every pre-anchor note-on
+    /// (`MIDICaptureSession.swift:12`). A count-in does not rescue that note —
+    /// see below — it gives the player an AUDIBLE bar of clicks so they are
+    /// never playing before the anchor exists.
+    ///
+    /// ⚠️⚠️ **COUNT-IN DOES NOT MAKE AN EARLY NOTE SURVIVE; IT MOVES THE
+    /// ANCHOR LATER AND MARKS THE WAIT.** Measured live on staging 2026-08-30,
+    /// three arms, 120 BPM 4/4: with `countInBars: 1` a note struck 2321 ms
+    /// after `transport.record` landed at beat **0.488** (so the take EXCLUDES
+    /// the count-in); a note struck 428 ms after record — i.e. *during* the
+    /// count-in — recorded **nothing**; and with `countInBars: 0` a note struck
+    /// 13 ms after record also recorded **nothing**. Anything that reads this
+    /// field as "early notes are now safe" is wrong.
+    ///
+    /// ⛔ **A pre-anchor note is never rescued by synthesising a note-on at the
+    /// anchor** — a partial note is a lie, and that refusal is recorded in
+    /// m23-ct and in `ProjectStore.record()`.
     public var countInBars: Int
 
     /// The project's TEMPO MAP when it is non-trivial (m12-d) — nil for a
@@ -2224,7 +3375,12 @@ public struct TransportState: Codable, Sendable, Equatable {
         punchInBeat: Double = 0,
         punchOutBeat: Double = 4,
         isMetronomeEnabled: Bool = false,
-        countInBars: Int = 0
+        // ⭐ m23-cy: ONE home for the count-in default. This single literal is
+        // what `newProject()`, the store's own init and `TransportDocument`'s
+        // absent-key fallback all resolve to — see `countInBars`' doc above for
+        // why it is 1 and `TransportDocument.init(from:)` for what that means
+        // for a project file saved before this field existed.
+        countInBars: Int = 1
     ) {
         self.isPlaying = isPlaying
         self.isRecording = isRecording
@@ -2458,11 +3614,29 @@ public struct ProjectSaveResult: Codable, Sendable, Equatable {
     public var path: String
     public var mediaFilesCopied: Int
     public var warnings: [String]
+    /// How many voice models the bundle now carries (m24-n). nil — key omitted
+    /// — when the project names no voice at all, so every save response for a
+    /// project with no converted tracks stays byte-identical to its pre-m24-n
+    /// shape. Present and possibly 0 once provenance exists (0 meaning: the
+    /// track names a voice this machine does not have).
+    public var voicesEmbedded: Int?
+    /// Total bytes those voices occupy inside the bundle. Same absence rule.
+    public var voiceBytes: Int?
+    /// Bytes THIS save actually copied — 0 on an idempotent re-save. Same
+    /// absence rule. Reported separately from `voiceBytes` because "the project
+    /// carries 240 MB" and "this ⌘S just wrote 240 MB" are different facts and
+    /// a user chasing a slow save needs the second one.
+    public var voiceBytesCopied: Int?
 
-    public init(path: String, mediaFilesCopied: Int, warnings: [String]) {
+    public init(path: String, mediaFilesCopied: Int, warnings: [String],
+                voicesEmbedded: Int? = nil, voiceBytes: Int? = nil,
+                voiceBytesCopied: Int? = nil) {
         self.path = path
         self.mediaFilesCopied = mediaFilesCopied
         self.warnings = warnings
+        self.voicesEmbedded = voicesEmbedded
+        self.voiceBytes = voiceBytes
+        self.voiceBytesCopied = voiceBytesCopied
     }
 }
 

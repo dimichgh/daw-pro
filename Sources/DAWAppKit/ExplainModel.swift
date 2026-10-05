@@ -43,6 +43,18 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// honest entry for the whole card (the Voice/Effect-editor precedent — a
     /// single coherent surface, not a card per control).
     case exportDialog
+    /// The KEYS chip in the transport bar (m23-ct) — turns Musical Typing on and
+    /// off. ONE entry for the whole feature: the chip, the on-screen keyboard it
+    /// reveals, and the Z/X/C/V controls on it are a single coherent surface (the
+    /// `exportDialog` / Voice-editor precedent — a card per control would be four
+    /// cards saying one thing).
+    case musicalTyping
+    /// The LOOPER surface in the transport bar (m34-h-2) — the chip that opens a
+    /// live-looping session, and the lamp strip plus arm/finish/take-back/end
+    /// controls it becomes once one is open. ONE entry for the whole surface (the
+    /// `musicalTyping` precedent): the door and its controls are one workflow, and
+    /// six cards would say one thing six times.
+    case loopDeck
     /// The session vibe meter — the glowing orb near the master cluster (vm-b).
     /// Read-only status chrome, so it shows in both Simple and Pro transport modes.
     case vibeMeter
@@ -280,6 +292,15 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// no violet.
     case samplerEditor
 
+    // MARK: Pad grid (m39-pads)
+    /// **The 4×4 PAD GRID and the CHOP TO PADS card it is fed by.** ONE id for
+    /// both, the `samplerEditor` / `exportDialog` shared-control rule: the grid
+    /// and the card that fills it are a single coherent surface, and a user who
+    /// needs the grid explained needs the chop explained in the same breath.
+    /// NOT an AI surface in itself — no violet on the affordance — even though
+    /// an individual PAD goes violet when the material it holds is AI-made.
+    case padGrid
+
     // MARK: AI panels (violet affordances — Rule 3)
     case aiCopilot
     case aiSketchpad
@@ -329,8 +350,10 @@ public enum ExplainID: String, CaseIterable, Sendable {
     /// The per-voice TRAIN affordance in the Voice panel — real training
     /// arrives with a later update, and the copy says so honestly.
     case voiceTrain
-    /// The "Convert to Voice…" clip action + its sheet (m10-p-5) — one shared
-    /// id wherever the affordance renders.
+    /// The *Convert Voice…* clip action + its panel (m10-p-5, re-shaped at
+    /// m24-m leg B into the selection-driven action) — one shared id wherever
+    /// the affordance renders: the clip context menu, Edit ▸ Convert, and the
+    /// panel itself.
     case voiceConvert
 
     // MARK: Settings
@@ -413,6 +436,15 @@ public enum ExplainCatalog {
         .exportDialog: ExplainEntry(
             title: "Export Settings",
             body: "Chooses how your song is written out: one finished file, or a folder holding each part on its own. You pick how much detail to keep and which file type to use — and for the single file, whether to leave a track silent for a backing track. Your project is never changed."),
+        .musicalTyping: ExplainEntry(
+            title: "Musical Typing",
+            body: "Turns your computer keyboard into a piano: the letter keys play notes, and an on-screen keyboard appears so you can click them too. Z and X shift to lower or higher notes; C and V play softer or louder. Arm a track first and what you play is recorded."),
+        .padGrid: ExplainEntry(
+            title: "Pads",
+            body: "Turns a recording into sixteen squares you can play. CHOP cuts the clip you picked into pieces and puts each on its own pad. Click a pad, or press its letter key, to fire it — aim high for a louder hit. Z and X reach the next sixteen. Lit means sounding, dim means empty."),
+        .loopDeck: ExplainEntry(
+            title: "Looper",
+            body: "Builds a song by stacking short parts that repeat. Press LOOPER, arm a track, and play — what you played joins the loop and keeps going while you switch tracks and add the next part. The lamps show what is recording; the back arrow takes off the last part."),
         .vibeMeter: ExplainEntry(
             title: "Vibe Meter",
             body: "A living glow that shows the feel of your whole mix at a glance. It burns warm and low when the sound is deep and bassy, turns cool and airy when it is bright, and settles to a dim ember when things go quiet."),
@@ -618,10 +650,10 @@ public enum ExplainCatalog {
             title: "Poly Synth Controls",
             body: "The tuning panel for the built-in synth. Pick its basic wave shape, set how each note fades in and out, brighten or darken the tone with the filter, and set its level. Drag a knob to hear the change live; double-click resets it."),
 
-        // MARK: Sampler editor (m26-i)
+        // MARK: Sampler editor (m26-i; VOICE + GLIDE m34-u)
         .samplerEditor: ExplainEntry(
             title: "Sampler Controls",
-            body: "The tuning panel for the built-in sampler. The top row sets the whole instrument; the list below shows every sample and which keys it answers to. Pick one to change its tuning, envelope, level and looping. Drag a knob and let go to apply."),
+            body: "The tuning panel for the built-in sampler. The top rows set the whole instrument, including whether it plays chords, one note at a time, or slurred notes that slide together. The list below shows every sample; pick one to tune its pitch, envelope, level and looping."),
 
         // MARK: AI panels (violet affordances — Rule 3)
         .aiCopilot: ExplainEntry(
@@ -688,8 +720,8 @@ public enum ExplainCatalog {
             title: "Train Voice",
             body: "Teaches the voice engine to sing like the recordings in this set. Real training arrives with a coming update — until then this button explains that honestly instead of pretending."),
         .voiceConvert: ExplainEntry(
-            title: "Convert to Voice",
-            body: "Re-sings the chosen audio clip in the voice you pick and lands the result on a new track at the same spot. Your original clip stays untouched, and one undo removes the new take."),
+            title: "Convert Voice",
+            body: "Re-sings the clips you selected in the voice you pick, and lands the whole set on one new track at the same spots. Your originals stay untouched, and one undo removes the new track."),
 
         // MARK: Settings
         .settingsGear: ExplainEntry(

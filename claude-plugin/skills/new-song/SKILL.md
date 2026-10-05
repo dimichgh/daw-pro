@@ -63,6 +63,119 @@ first-pass effect chain. Sound-designer works AFTER composer on each track
 — there's no point tuning a sound before there's a performance to hear it
 against.
 
+### 2a. Solo wind and lead lines: say "slurred" in BOTH delegations
+
+⭐⭐ **A sax, flute, or solo lead line needs one instruction split across two
+agents, and either half alone does nothing.** This is the single most common
+way a melodic line here comes out sounding typed-in rather than played:
+
+- **composer** must write the notes **overlapping** — roughly 20-40 ms, about
+  0.02-0.05 beats at typical tempos (author it directly, or run
+  `clip_humanize` with `legatoOverlapBeats`) — **in short GROUPS, never right
+  across the phrase. See the hard limit immediately below; it is not optional.**
+- **sound-designer** must set the built-in sampler to
+  `{sampler: {voiceMode: "legato", glideTime: 0.12}}`.
+
+⛔⛔ **SLUR IN GROUPS OF 2-4 NOTES, THEN LEAVE A GAP. OVERLAPPING EVERY NOTE IN A
+PHRASE IS A DEFECT, NOT MAXIMUM SMOOTHNESS** — and it is the mistake this
+section previously invited. MEASURED 2026-09-01 on a real tenor-sax library:
+
+- **Nobody plays it that way.** A wind player tongues most notes and breathes
+  every couple of bars. A sixteen-note unbroken slur is not expressive, it is
+  physically impossible.
+- **The voice keeps ONE sample for the whole run.** A slurred voice does not
+  change zone (`SamplerInstrument.swift:38`, a deliberate limit) — it varispeeds
+  its original sample. Measured worst case: **13 semitones of stretch, 2.119×
+  playback rate.** That shifts the formants up an octave, and shifted-up formants
+  are heard as *a smaller instrument* — the user's word for the result was
+  "трубочка", a little pipe.
+- ⚠️ **AND THE SAMPLE RUNS OUT.** Zones are usually UNLOOPED. One run demanded
+  **22.50 s from a 5.80 s sample**; past the end the engine frees the voice, and
+  the next note re-triggers a fresh one. Measured cost is small — about **0.5 s
+  of micro-gaps across a 43 s part** — so this is a reason to keep slurs short,
+  not a catastrophe. (It is stated carefully because the first version of this
+  note claimed the phrase went *silent*; soloed RMS measurement disproved that.)
+
+**So: overlap by ~0.08 beats WITHIN a group of at most 3-4 notes; leave ~0.15-0.2
+beats of clean gap between groups (that is the tongue); leave ~0.5 beats at a
+phrase end (that is the breath).** Short groups also keep drift and sample burn
+small enough that neither defect above can bite. Tracked as **m34-y**.
+
+⭐ **A flat sustain reads as an ORGAN no matter how good the samples are.** Wind
+instruments are loud and soft *within* a note. After the notes are right, run
+`clip_apply_breath_contour` (CC11 dynamics + a delayed vibrato) — note velocity
+alone cannot express it, because it is fixed at note-on and a real player is
+still shaping the note after it starts.
+
+**Overlap without `legato` is a CHORD, not a slur** — a `poly` sampler simply
+opens a second voice. **`legato` without overlap has nothing to continue**, so
+every note still re-attacks. Only the pair produces a slur, and neither agent
+can see the other's half, which is why it is stated here rather than left to
+them.
+
+⛔⛔ **AND `mono` IS NOT A HALFWAY HOUSE — UNDER `mono` YOUR OVERLAPS DO NOTHING
+AT ALL.** Mono chokes the sounding voice and triggers a NEW one on every
+note-on, overlapped or not; only `.legato` continues a voice. So a part written
+with careful slur overlaps and played on `mono` re-attacks **every single note**,
+and the phrasing work is silently discarded. Cost when this was learned
+(2026-09-01): a whole four-take listening ladder whose held variable defeated its
+own axis, and the user reporting *"one can clearly hear start of note like it was
+triggered by pressing key"* — correctly — about all four.
+
+⛔⛔⛔ **A WIND INSTRUMENT IS MONOPHONIC. IF TWO VOICES EVER SOUND AT ONCE IT
+STOPS BEING A WIND INSTRUMENT — CHECK THE RELEASE AGAINST THE NOTE SPACING
+BEFORE ANYTHING ELSE.** One player has one air column; two simultaneous notes is
+not a slur, it is a chord, and the ear hears an electronic pad. This is the
+single highest-value check on any sax/flute/trumpet part.
+
+⭐ **HOW IT WAS FOUND (2026-09-01), because the method generalises:** the user
+said of one take *"10 and 11 seconds of sax is sax"* and theremin elsewhere.
+Counting sounding voices against their own timestamps: **10.5 s and 11.0 s = ONE
+voice; 16 s and 20 s = TWO.** Perfect correlation. **A defect that varies
+moment-to-moment must come from something that varies moment-to-moment** — that
+is what turns a vague "sounds wrong" into a measurement.
+
+⛔ **THE SECOND VOICE IS USUALLY A TAIL, NOT A NOTE.** An imported library
+routinely carries a **0.5 s release**. Solo lines run ~0.6 s per note, so every
+note is still sounding when the next starts — as an extra voice under `poly`, and
+as the choke ramp under `mono`. MEASURED on a 43 s part: a 0.5 s release leaves
+**17.4 s — about 40 % of the solo — with two voices sounding.** At 100 ms it is
+3.0 s; at 50 ms, 1.5 s.
+
+**So, for any monophonic instrument:** use `mono` or `legato` (never `poly`); read
+the ACTUAL release from `instrument_describe_sampler`'s **`effectiveGlobals`**
+(the stored global is usually inert — every imported zone overrides it); and if
+release approaches the note spacing, patch it down with
+`zonePatches [{id, release}]`. ⚠️ **And do not write overlapping notes for a mono
+part** — under `mono` an overlap buys only a choke; what joins notes is the
+release.
+
+⛔⛔ **A GAP SHORTER THAN THE RELEASE IS NOT SILENCE — IT IS AN AMPLITUDE STEP,
+AND IT IS LOUDER THAN ANY ATTACK YOU COULD SOFTEN.** Check the release before
+choosing a gap: at 92 BPM a 0.18-beat "tongued gap" is 117 ms against a **0.5 s**
+release, so the departing note is still at ~40 % when the next one snaps back to
+full sustain. **The seam you hear is that step, not the instrument's attack** —
+which is why skipping the sample's recorded attack (`startFrame`) barely helped.
+Either make the gap longer than the release, or do not leave a gap at all and let
+the breath contour articulate with DYNAMICS instead of silence. The latter is
+what a wind player actually does, and it is the project owner's own instruction:
+*"It should sustain while breathing dynamic could be adjusted … to keep it
+human."*
+
+⭐ **`voiceMode: "legato"` + `glideTime: 0.12` is the project owner's own
+choice, made by ear** (2026-08-31): they were played one sax phrase three ways
+— `mono`, `legato`, and `legato` + glide — and picked the third. Start there on
+a wind line rather than working up to it. ⚠️ **It is a starting point, not a
+constant**: validated on a GM tenor sax at 100 BPM, so a faster line wants a
+shorter glide.
+
+⚠️ **Built-in `sampler` ONLY.** On `soundBank` or a hosted `audioUnit`, a
+note-off carries no note id, so the voice cannot be continued — those paths can
+only *mask* the re-attack under the previous note's tail. If the brief needs a
+real slur, the lead must be on the built-in sampler. ⚠️ And `glideTime` is
+**silently ignored under `poly`** — `instrument_describe_sampler` reports
+`glideEffective`, so check it rather than assuming the setting took.
+
 ## 3. Structure pass (arranger)
 
 Delegate to **arranger** to true up the arrangement once parts exist:
@@ -76,7 +189,9 @@ producer set in step 1.
 Delegate to **mix-engineer** for levels, pans, buses/sends, sidechain, and
 automation, then a master-chain pass (typically an `eq` then a `limiter`).
 Ask for a `mixer_master_analysis`/`render_measure_loudness` read at the end
-of this step so you know where the mix stands before finishing.
+of this step so you know where the mix stands before finishing (mix-engineer
+carries playback-only transport now, so it can start playback itself for
+this rather than handing back to producer just to take a reading).
 
 ## 5. Finish (finisher)
 

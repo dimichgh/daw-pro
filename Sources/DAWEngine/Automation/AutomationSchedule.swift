@@ -280,7 +280,8 @@ final class AutomationSchedule {
         headSeconds: Double, cycleSeconds: Double,
         fromCycle: Int = 0, throughCycle: Int,
         tempoMap: TempoMap, sampleRate: Double,
-        generation: UInt64, mode: Mode, timelineID: UInt64
+        generation: UInt64, mode: Mode, timelineID: UInt64,
+        requireAnchor: Bool = false
     ) -> AutomationSchedule? {
         func unrolled(_ points: [AutomationPoint]) -> [AutomationBreakpoint] {
             guard !points.isEmpty else { return [] }
@@ -310,7 +311,7 @@ final class AutomationSchedule {
             (effectID: lane.effectID, paramSlot: lane.paramSlot,
              points: unrolled(lane.points))
         }
-        guard !volume.isEmpty || !pan.isEmpty
+        guard requireAnchor || !volume.isEmpty || !pan.isEmpty
             || effectTracks.contains(where: { !$0.points.isEmpty }) else { return nil }
         return AutomationSchedule(generation: generation, mode: mode,
                                   sampleRate: sampleRate,
@@ -326,7 +327,15 @@ final class AutomationSchedule {
                       effectParamLanes: [EffectParamLaneSpec] = [],
                       fromBeat: Double, tempoMap: TempoMap, sampleRate: Double,
                       generation: UInt64, mode: Mode,
-                      timelineID: UInt64? = nil) -> AutomationSchedule? {
+                      timelineID: UInt64? = nil,
+                      // m39-e: a strip whose only automation is a volume/pan
+                      // MODULATION ROUTE has no points but still needs the
+                      // schedule's ANCHOR — `quantumStart` is how the render
+                      // side learns the transport position. An empty-point
+                      // schedule is inert for automation by construction (every
+                      // stage guards `count > 0`), so this cannot change any
+                      // existing render.
+                      requireAnchor: Bool = false) -> AutomationSchedule? {
         let volume = volumeLane.map {
             buildBreakpoints(points: $0.points, fromBeat: fromBeat,
                              tempoMap: tempoMap, sampleRate: sampleRate)
@@ -340,7 +349,7 @@ final class AutomationSchedule {
              points: buildBreakpoints(points: lane.points, fromBeat: fromBeat,
                                       tempoMap: tempoMap, sampleRate: sampleRate))
         }
-        guard !volume.isEmpty || !pan.isEmpty
+        guard requireAnchor || !volume.isEmpty || !pan.isEmpty
             || effectTracks.contains(where: { !$0.points.isEmpty }) else { return nil }
         return AutomationSchedule(generation: generation, mode: mode,
                                   sampleRate: sampleRate,

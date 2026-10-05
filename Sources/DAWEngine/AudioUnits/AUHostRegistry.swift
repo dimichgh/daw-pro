@@ -765,7 +765,10 @@ public final class AUHostRegistry {
             guard let config = descriptor.soundBank else { return nil }
             return PrepareKey(component: Self.auSamplerComponent, sampleRate: sampleRate,
                               stateData: nil, soundBankAddress: config.address)
-        case .testTone, .polySynth, .sampler:
+        // `.drumSynth` is a BUILT-IN kind: nothing to instantiate, no AU to
+        // host, no component to resolve. It joins the built-ins rather than the
+        // hosted pair.
+        case .testTone, .polySynth, .sampler, .drumSynth:
             return nil
         }
     }

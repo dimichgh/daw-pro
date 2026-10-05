@@ -179,7 +179,8 @@ struct SamplerZoneWireTests {
         let zone = try #require(response.result?["sampler"]?["zones"]?.arrayValue?.first)
         for key in ["tuneCents", "pan", "ampVelTrack", "oneShot", "startFrame",
                     "endFrame", "attack", "decay", "sustain", "release",
-                    "loopMode", "loopStart", "loopEnd"] {         // + m20-g
+                    "loopMode", "loopStart", "loopEnd",           // + m20-g
+                    "reverse", "chokeGroup"] {                    // + m32-d, m32-f
             #expect(zone[key] == nil, "legacy zone must not emit '\(key)'")
         }
     }

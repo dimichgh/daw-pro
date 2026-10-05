@@ -1,0 +1,127 @@
+{
+  "set": "mod-gater",
+  "description": "m39-e modulation layer, ONE axis: gate rate. A sustained chord held through the whole clip, chopped by a square LFO routed to track volume — the classic trance-gate gesture, and the first thing the modulation layer makes possible that no amount of parameter-tweaking could. Free-running Hz only: tempo-synced divisions are refused at the domain boundary until m39-c generalises the sync resolver, so these rates are in Hz rather than note divisions.\n\nPOLARITY, which is counter-intuitive and was measured: on a .volume target the source's HIGH value is the CUT, not the boost. The LFO is unipolar (bipolar:false, output 0..1) and the route depth is NEGATIVE, so the square's high half closes the gate and its low half leaves the fader where it is. pulseWidth is therefore the CLOSED fraction.",
+  "variants": [
+    {
+      "name": "no-gate",
+      "role": "control",
+      "axis": "no modulation at all — the sustained chord, untouched",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Pad", "kind": "instrument" }, "as": "pad" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$pad", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.02, "decay": 0.3, "sustain": 0.9, "release": 0.4,
+          "cutoffHz": 2200, "resonance": 0.12, "gain": 0.75,
+          "unisonVoices": 6, "unisonDetuneCents": 14, "unisonStereoSpread": 0.7,
+          "subLevel": 0.3, "subOctave": -1, "subWaveform": "sine"
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$pad", "atBeat": 0,
+          "notes": [
+            { "pitch": 48, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 55, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 64, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 67, "startBeat": 0, "lengthBeats": 8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "slow-2hz",
+      "axis": "square LFO at 2 Hz — a slow pulse, roughly one chop per half-note at 120 BPM",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Pad", "kind": "instrument" }, "as": "pad" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$pad", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.02, "decay": 0.3, "sustain": 0.9, "release": 0.4,
+          "cutoffHz": 2200, "resonance": 0.12, "gain": 0.75,
+          "unisonVoices": 6, "unisonDetuneCents": 14, "unisonStereoSpread": 0.7,
+          "subLevel": 0.3, "subOctave": -1, "subWaveform": "sine"
+        } },
+        { "command": "mod.addSource", "params": {
+          "trackId": "$pad", "kind": "lfo", "name": "Gate",
+          "waveform": "square", "rateHz": 2, "pulseWidth": 0.5,
+          "edgeMs": 3, "bipolar": false
+        }, "as": "gate" },
+        { "command": "mod.addRoute", "params": {
+          "trackId": "$pad", "sourceId": "$gate", "target": "volume", "depth": -0.6
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$pad", "atBeat": 0,
+          "notes": [
+            { "pitch": 48, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 55, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 64, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 67, "startBeat": 0, "lengthBeats": 8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "medium-4hz",
+      "axis": "square LFO at 4 Hz — one chop per beat at 120 BPM; the classic gate feel",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Pad", "kind": "instrument" }, "as": "pad" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$pad", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.02, "decay": 0.3, "sustain": 0.9, "release": 0.4,
+          "cutoffHz": 2200, "resonance": 0.12, "gain": 0.75,
+          "unisonVoices": 6, "unisonDetuneCents": 14, "unisonStereoSpread": 0.7,
+          "subLevel": 0.3, "subOctave": -1, "subWaveform": "sine"
+        } },
+        { "command": "mod.addSource", "params": {
+          "trackId": "$pad", "kind": "lfo", "name": "Gate",
+          "waveform": "square", "rateHz": 4, "pulseWidth": 0.5,
+          "edgeMs": 3, "bipolar": false
+        }, "as": "gate" },
+        { "command": "mod.addRoute", "params": {
+          "trackId": "$pad", "sourceId": "$gate", "target": "volume", "depth": -0.6
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$pad", "atBeat": 0,
+          "notes": [
+            { "pitch": 48, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 55, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 64, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 67, "startBeat": 0, "lengthBeats": 8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "fast-8hz",
+      "axis": "square LFO at 8 Hz — one chop per eighth-note at 120 BPM; stutter territory",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Pad", "kind": "instrument" }, "as": "pad" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$pad", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.02, "decay": 0.3, "sustain": 0.9, "release": 0.4,
+          "cutoffHz": 2200, "resonance": 0.12, "gain": 0.75,
+          "unisonVoices": 6, "unisonDetuneCents": 14, "unisonStereoSpread": 0.7,
+          "subLevel": 0.3, "subOctave": -1, "subWaveform": "sine"
+        } },
+        { "command": "mod.addSource", "params": {
+          "trackId": "$pad", "kind": "lfo", "name": "Gate",
+          "waveform": "square", "rateHz": 8, "pulseWidth": 0.5,
+          "edgeMs": 3, "bipolar": false
+        }, "as": "gate" },
+        { "command": "mod.addRoute", "params": {
+          "trackId": "$pad", "sourceId": "$gate", "target": "volume", "depth": -0.6
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$pad", "atBeat": 0,
+          "notes": [
+            { "pitch": 48, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 55, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 64, "startBeat": 0, "lengthBeats": 8 },
+            { "pitch": 67, "startBeat": 0, "lengthBeats": 8 }
+          ]
+        } }
+      ]
+    }
+  ]
+}

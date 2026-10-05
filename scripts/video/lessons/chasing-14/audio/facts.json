@@ -1,0 +1,150 @@
+{
+ "bpm": 100,
+ "bars": 16,
+ "seconds": 38.4,
+ "notes": 318,
+ "parts": [
+  {
+   "name": "Pad",
+   "volume": 0.088,
+   "notes": 48
+  },
+  {
+   "name": "Bass",
+   "volume": 0.44,
+   "notes": 80
+  },
+  {
+   "name": "Drums",
+   "volume": 1.04,
+   "notes": 174
+  },
+  {
+   "name": "Lead",
+   "volume": 0.068,
+   "notes": 16
+  }
+ ],
+ "dry": {
+  "maxShortTermLufs": -18.128211591571674,
+  "loudnessRangeLu": 3.6281438578776672,
+  "integratedLufs": -20.482388721412534,
+  "truePeakDbtp": -2.185856201457105,
+  "maxMomentaryLufs": -14.92400791675027
+ },
+ "ladder": [
+  {
+   "target": -14,
+   "gainDb": 6.4823887214125335,
+   "gainLinear": 2.109208127125373,
+   "tag": "g14",
+   "measured": {
+    "maxShortTermLufs": -11.645822953363824,
+    "loudnessRangeLu": 3.628143855696857,
+    "truePeakDbtp": 4.296532652763758,
+    "maxMomentaryLufs": -8.44161927790113,
+    "integratedLufs": -14.00000008244581
+   }
+  },
+  {
+   "target": -11,
+   "gainDb": 9.482388721412534,
+   "gainLinear": 2.979335668988033,
+   "tag": "g11",
+   "measured": {
+    "maxShortTermLufs": -8.645822530789058,
+    "integratedLufs": -10.99999966233687,
+    "loudnessRangeLu": 3.628143860783437,
+    "maxMomentaryLufs": -5.441618859428355,
+    "truePeakDbtp": 7.2965332975383195
+   }
+  },
+  {
+   "target": -8,
+   "gainDb": 12.482388721412534,
+   "gainLinear": 4.208423490479348,
+   "tag": "g8",
+   "measured": {
+    "loudnessRangeLu": 3.628143853017738,
+    "maxShortTermLufs": -5.645822614167906,
+    "truePeakDbtp": 10.296532871580602,
+    "integratedLufs": -7.99999974402317,
+    "maxMomentaryLufs": -2.4416189412150353
+   }
+  },
+  {
+   "target": -5,
+   "gainDb": 15.482388721412534,
+   "gainLinear": 5.944556183974419,
+   "tag": "g5",
+   "measured": {
+    "integratedLufs": -4.99999992326245,
+    "maxShortTermLufs": -2.6458227935456797,
+    "maxMomentaryLufs": 0.5583808830432874,
+    "truePeakDbtp": 13.296532877231549,
+    "loudnessRangeLu": 3.6281438566223825
+   }
+  }
+ ],
+ "limiterOnly": {
+  "gainDb": 6.4823887214125335,
+  "ceilingDb": -1,
+  "releaseMs": 120,
+  "truePeak": true,
+  "measured": {
+   "integratedLufs": -15.150685058450756,
+   "maxShortTermLufs": -12.892224963286518,
+   "maxMomentaryLufs": -11.102568100197102,
+   "truePeakDbtp": -0.9999982485594738,
+   "loudnessRangeLu": 3.4864102339674528
+  }
+ },
+ "mastered": {
+  "gainDb": 7.162529583701124,
+  "measured": {
+   "maxShortTermLufs": -12.316174306954174,
+   "integratedLufs": -14.053556601430648,
+   "truePeakDbtp": -0.9999984559194651,
+   "maxMomentaryLufs": -11.099250977517691,
+   "loudnessRangeLu": 3.1900410377651394
+  },
+  "compressor": {
+   "thresholdDb": -18,
+   "ratio": 2,
+   "attackMs": 20,
+   "releaseMs": 180,
+   "kneeDb": 6,
+   "makeupDb": 6
+  },
+  "ceilingDb": -1,
+  "releaseMs": 120,
+  "truePeak": true
+ },
+ "loudwar": {
+  "gainDb": 40.88225366576123,
+  "measured": {
+   "maxShortTermLufs": -7.093784359749626,
+   "integratedLufs": -8.65610790175129,
+   "truePeakDbtp": -0.9589099045796733,
+   "maxMomentaryLufs": -6.152358774347843,
+   "loudnessRangeLu": 1.5873222161273794
+  },
+  "compressor": {
+   "thresholdDb": -18,
+   "ratio": 2,
+   "attackMs": 20,
+   "releaseMs": 180,
+   "kneeDb": 6,
+   "makeupDb": 6
+  },
+  "ceilingDb": -1,
+  "note": "two gain stages: one insert clamps at +24.08 dB"
+ },
+ "restoreCheck": {
+  "maxShortTermLufs": -12.316174306954174,
+  "integratedLufs": -14.053556601430648,
+  "truePeakDbtp": -0.9999984559194651,
+  "maxMomentaryLufs": -11.099250977517691,
+  "loudnessRangeLu": 3.1900410377651394
+ }
+}

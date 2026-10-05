@@ -1,0 +1,5 @@
+camera: the clip's own plan, 30s, 900 frames at 30 fps
+Strings  notes= 48  sounding total 111.60s  rod up 111.60s  ON SCREEN 111.60s  = 100.0 % of the notes' own duration   worst single note 100.0 % (dur 2.26s)
+Bass     notes=  8  sounding total 31.00s  rod up 31.00s  ON SCREEN 31.00s  = 100.0 % of the notes' own duration   worst single note 100.0 % (dur 4.66s)
+Lead     notes= 65  sounding total 18.80s  rod up 18.80s  ON SCREEN 18.80s  = 100.0 % of the notes' own duration   worst single note 100.0 % (dur 0.25s)
+Stabs    notes= 24  sounding total 3.00s  rod up 3.00s  ON SCREEN 3.00s  = 100.0 % of the notes' own duration   worst single note 100.0 % (dur 0.13s)

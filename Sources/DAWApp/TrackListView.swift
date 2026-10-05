@@ -609,13 +609,51 @@ struct TrackRow: View {
         }
     }
 
+    // MARK: - A voice model dragged onto this header (m24-m leg C)
+
+    /// This row's live verdict while a voice model hovers it — nil when the drag
+    /// is over another row or over nothing.
+    ///
+    /// Read from `AppModel`, never from local `@State`: the hover has to be
+    /// reachable from `debug.voiceModelDrop` or the affordance cannot be
+    /// photographed, and a state no capture can stage cannot satisfy "a UI phase
+    /// is not done until someone has looked at it".
+    private var voiceDropVerdict: VoiceConvertDropVerdict? {
+        guard let hover = model.voiceModelDropHover, hover.trackID == track.id else { return nil }
+        return hover.verdict
+    }
+
+    /// The drop chip — the ONE thing that reports a drop affordance was drawn.
+    ///
+    /// It reports its own appearance to the model (`noteVoiceDropChipRendered`),
+    /// which is the m23-v drawing-layer rule applied literally: delete the chip
+    /// and nothing is left claiming a chip exists, so a seam can never go green
+    /// on an affordance that was never painted.
+    @ViewBuilder
+    private var voiceDropChip: some View {
+        if let verdict = voiceDropVerdict {
+            VoiceModelDropChip(verdict: verdict)
+                .transition(.opacity)
+                .onAppear { model.noteVoiceDropChipRendered(trackID: track.id,
+                                                            accepts: verdict.accepted) }
+                .onDisappear { model.noteVoiceDropChipRemoved(trackID: track.id) }
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // ON THE HEADER ROW ITSELF, never on this VStack: an expanded track
             // also carries its takes and automation sections here, and centring
             // the chip on the whole card would drift it downward the more of the
             // track is unfolded.
+            //
+            // ⭐ THE DROP CHIP RIDES THE SAME SLOT, and ABOVE the ack bubble: a
+            // drag in flight is the more urgent of the two, and both are
+            // children of the row they name, so neither can be drawn on an
+            // innocent neighbour (the geometry bug `trackClickAckBubble`'s doc
+            // records).
             row.overlay(alignment: .trailing) { trackClickAckBubble }
+                .overlay(alignment: .trailing) { voiceDropChip }
             if isTakesExpanded {
                 TakeTrackControls(track: track)
             }
@@ -640,12 +678,25 @@ struct TrackRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay(
             RoundedRectangle(cornerRadius: 7).stroke(
-                isDragging
-                    ? DAWTheme.playback.opacity(0.7)
-                    : (track.isAIGenerated ? DAWTheme.ai.opacity(0.35) : DAWTheme.hairline),
+                // A VOICE MODEL HOVERING WINS THE STROKE (m24-m leg C) — it is
+                // the most momentary of the three states and the only one the
+                // user is waiting on an answer from. Violet when it will be
+                // taken, amber when it will not; `VoiceModelDropInk` owns both.
+                // ⚠️ It must not be mistaken for an AI track AT REST, which is
+                // the term right below it: that stroke is ai@0.35 with NO glow,
+                // this one is ai@0.9 UNDER a bloom, and static chrome never
+                // glows — so a glowing card can only mean "right now, this one".
+                voiceDropVerdict.map { VoiceModelDropInk.ink(for: $0).stroke }
+                    ?? (isDragging
+                        ? DAWTheme.playback.opacity(0.7)
+                        : (track.isAIGenerated ? DAWTheme.ai.opacity(0.35) : DAWTheme.hairline)),
                 lineWidth: 1
             )
         )
+        // The accepting bloom (leg C). Refusal returns intensity 0 — nothing is
+        // being invited, so nothing glows.
+        .glow(DAWTheme.ai, radius: 8,
+              intensity: voiceDropVerdict.map { VoiceModelDropInk.ink(for: $0).glowIntensity } ?? 0)
         // Picked up: the card LIFTS off the panel — a cyan rim, a soft glow and
         // a cast shadow, all earned by the drag and gone the instant it ends
         // (Rule 3: nothing static glows). The offset follows the pointer so the
@@ -654,6 +705,38 @@ struct TrackRow: View {
         .shadow(color: .black.opacity(isDragging ? 0.45 : 0),
                 radius: isDragging ? 10 : 0, y: isDragging ? 4 : 0)
         .offset(y: dragOffsetY ?? 0)
+        // ⭐ THE DROP TARGET (m24-m leg C) — a voice model dragged out of the
+        // Voice panel's list onto this track header.
+        //
+        // ⚠️ **ON THE WHOLE CARD, and the visual answer on the HEADER ROW.** An
+        // expanded track carries its takes and automation sections here too, and
+        // they are still that track: a drag that goes dead over the bottom half
+        // of a tall row is the invisible-hit-region failure with extra steps.
+        // The chip and the stroke stay where the track's NAME is, so the row that
+        // answers is always the row you can read.
+        //
+        // ⚠️ **NO COORDINATES ANYWHERE ON THIS PATH.** The destination is
+        // attached to the row that owns it, so "the affordance appeared on the
+        // wrong track" is not expressible — no ladder read, no index lookup, no
+        // arithmetic to get wrong. That is the `trackClickAckBubble` lesson,
+        // which cost a measured mis-attribution bug, applied before it could
+        // happen a second time; it is also why `debug.voiceModelDrop` takes a
+        // `trackId` and not an x/y, unlike `debug.arrangeDrop`.
+        //
+        // ⚠️ A REFUSED DROP RETURNS **false** — SwiftUI then rejects it and
+        // nothing opens. The row has already said why in amber; the standard
+        // drag cursor still reads as accepting over a refusing row, which is a
+        // known and accepted limit of `dropDestination` (there is no API to
+        // decline a hover for a type you accept), and the reason the row's own
+        // answer has to be unmissable.
+        .dropDestination(for: VoiceModelDragPayload.self) { payloads, _ in
+            guard let voice = payloads.first else { return false }
+            return model.performVoiceModelDrop(trackID: track.id, voiceID: voice.voiceID)
+        } isTargeted: { targeted in
+            // The SAME handler `debug.voiceModelDrop` calls — the staged path
+            // and the real path are one function, not two that agree.
+            model.voiceModelDropHoverChanged(trackID: targeted ? track.id : nil)
+        }
         // RENDERED FROM THE MODEL (m23-m3b), never from inline conditions.
         // `TrackHeaderMenu.items` decides WHICH items exist and what each says;
         // this builder only binds them to their actions. An AppKit context-menu

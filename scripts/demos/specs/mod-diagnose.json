@@ -1,0 +1,523 @@
+{
+  "set": "mod-diagnose",
+  "description": "DIAGNOSTIC, not a listening demo. The mod-gater set rendered all four variants BYTE-IDENTICAL, so a square LFO routed to .volume had zero effect on an offline bounce. Every link in the chain reads correct on inspection (store writes tracks[].modulationRoutes; renderMixdown's track copy preserves them; beginSession arms armOfflineAutomation then calls applyParameters twice; publishModulation runs every pass; AutomationRenderer.apply has an applyModulationWithoutSchedule branch) \u2014 so reading has run out of road and this set measures instead.\n\nWHY VOLUME 0.5 IS THE WHOLE TRICK. At the default 1.0 the two candidate failures are indistinguishable. PlaybackGraph.swift:1637 pins the mixer to 1 when a route claims .volume and hands the base level to ModulationStage; pinning 1.0 over a base of 1.0 is a no-op, so 'the stage never ran' and 'the route never reached the graph' BOTH render byte-identical to the control. At 0.5 they separate and point in opposite directions.\n\nHOW TO READ THE RESULT:\n  \u00b7 modulated-vol05 == control-vol05  -> the route never reached applyParameters (modulates() false, or the routes were dropped between store and graph). Store/plumbing side.\n  \u00b7 modulated-vol05 == reference-vol10 -> the pin FIRED but the stage is inert: mixer forced to 1, nothing put the 0.5 back. Renderer/snapshot side.\n  \u00b7 modulated-vol05 differs from both, with a visible gate  -> modulation works and mod-gater failed for some other reason.\n  \u00b7 lane-vol05 == control-vol05 -> POSITIVE CONTROL FAILED: offline volume automation does not render here at all, and modulation is not the story. Nothing above can be concluded until this one moves.\n\nADDENDUM after the first run. modulated-vol05 came back BYTE-IDENTICAL to control-vol05, and the read-back proved the store holds volume=0.5, one enabled square LFO at 4 Hz and one enabled route to .volume at depth -0.6 at the moment of render. That rules out the store. It does NOT rule out as much as first thought: the original decision table was wrong. A unipolar square at phaseDeg 0 evaluates to 0, and 0.5 + (-0.6 x 0) = 0.5 is EXACTLY the control, so 'the stage ran but the LFO is frozen at zero' is byte-identical to 'the route never arrived'. The two phase180 probes below start the LFO HIGH so those cases finally separate.",
+  "variants": [
+    {
+      "name": "control-vol05",
+      "role": "control",
+      "axis": "track volume 0.5, no modulation, no automation \u2014 the floor every other variant is measured against",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75
+          }
+        },
+        {
+          "command": "track.setVolume",
+          "params": {
+            "trackId": "$pad",
+            "volume": 0.5
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "reference-vol10",
+      "axis": "track volume 1.0, no modulation \u2014 the +6 dB reference. If the modulated variant matches THIS, the mixer pin fired and the stage did nothing.",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75
+          }
+        },
+        {
+          "command": "track.setVolume",
+          "params": {
+            "trackId": "$pad",
+            "volume": 1.0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "lane-vol05",
+      "axis": "POSITIVE CONTROL \u2014 volume 0.5 plus an ordinary automation LANE ramping 1.0 to 0.0 across the clip. This exercises the same render-stage gain machinery modulation borrows, with no modulation involved. It MUST differ from control-vol05.",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75
+          }
+        },
+        {
+          "command": "track.setVolume",
+          "params": {
+            "trackId": "$pad",
+            "volume": 0.5
+          }
+        },
+        {
+          "command": "automation.addLane",
+          "params": {
+            "trackId": "$pad",
+            "target": "volume"
+          },
+          "as": "volLane"
+        },
+        {
+          "command": "automation.setPoints",
+          "params": {
+            "trackId": "$pad",
+            "laneId": "$volLane",
+            "points": [
+              {
+                "beat": 0,
+                "value": 1.0
+              },
+              {
+                "beat": 8,
+                "value": 0.0
+              }
+            ]
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "modulated-vol05",
+      "axis": "THE MEASUREMENT \u2014 volume 0.5 plus a 4 Hz square LFO routed to .volume at depth -0.6, exactly the mod-gater configuration that produced no effect",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75
+          }
+        },
+        {
+          "command": "track.setVolume",
+          "params": {
+            "trackId": "$pad",
+            "volume": 0.5
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$pad",
+            "kind": "lfo",
+            "name": "Gate",
+            "waveform": "square",
+            "rateHz": 4,
+            "pulseWidth": 0.5,
+            "edgeMs": 3,
+            "bipolar": false
+          },
+          "as": "gate"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$pad",
+            "sourceId": "$gate",
+            "target": "volume",
+            "depth": -0.6
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "phase180-negative",
+      "axis": "FROZEN-LFO PROBE. Identical to modulated-vol05 but phaseDeg=180, so a unipolar square starts HIGH (1) instead of low (0). Frozen -> constant gain 0.5+(-0.6)= -0.1, clamped to 0 -> NEAR SILENCE. Running -> audible gating. Identical to control-vol05 -> the route never reached the graph at all.",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75
+          }
+        },
+        {
+          "command": "track.setVolume",
+          "params": {
+            "trackId": "$pad",
+            "volume": 0.5
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$pad",
+            "kind": "lfo",
+            "name": "Gate",
+            "waveform": "square",
+            "rateHz": 4,
+            "pulseWidth": 0.5,
+            "edgeMs": 3,
+            "bipolar": false,
+            "phaseDeg": 180
+          },
+          "as": "gate"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$pad",
+            "sourceId": "$gate",
+            "target": "volume",
+            "depth": -0.6
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "phase180-positive",
+      "axis": "FROZEN-LFO PROBE, the other direction. phaseDeg=180 with depth +0.5: frozen-high -> constant gain 1.0, which should match reference-vol10 (+6 dB over control). Running -> gating between 0.5 and 1.0. Identical to control-vol05 -> route never arrived.",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.3,
+            "sustain": 0.9,
+            "release": 0.4,
+            "cutoffHz": 2200,
+            "resonance": 0.12,
+            "gain": 0.75
+          }
+        },
+        {
+          "command": "track.setVolume",
+          "params": {
+            "trackId": "$pad",
+            "volume": 0.5
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$pad",
+            "kind": "lfo",
+            "name": "Gate",
+            "waveform": "square",
+            "rateHz": 4,
+            "pulseWidth": 0.5,
+            "edgeMs": 3,
+            "bipolar": false,
+            "phaseDeg": 180
+          },
+          "as": "gate"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$pad",
+            "sourceId": "$gate",
+            "target": "volume",
+            "depth": 0.5
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 8
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 8
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

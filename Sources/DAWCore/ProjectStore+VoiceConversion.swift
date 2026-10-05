@@ -104,12 +104,25 @@ extension ProjectStore {
     /// requiring a track id — `vc.convertVocals` takes only `clipId`, unlike
     /// the two-key `trackId`+`clipId` shape `ai.fixClipRegion` uses.
     ///
-    /// Honest scope (m10-p-4 design point 4): this hands back the clip's FULL
-    /// backing recording — trims/stretch/`startOffsetSeconds` are NOT applied
-    /// to what actually gets converted. Fine for the canonical flow (a
-    /// freshly imported/generated full-length stem clip); a trimmed or
-    /// time-stretched clip still converts its whole underlying source file,
-    /// not just the visible region.
+    /// ⚠️⚠️ **NOT THE CONVERSION SEAM ANY MORE (m24-o).** This hands back the
+    /// clip's FULL BACKING RECORDING: trims, `startOffsetSeconds` and
+    /// `stretchRatio` are NOT applied. That was fine for the flow it was built
+    /// for — a freshly imported full-length stem — and silently WRONG for the
+    /// flow the user described: comped, trimmed clips, several per track,
+    /// converting to the untrimmed takes landed at the clip start beats. The
+    /// user's 2026-08-13 ruling reclassified it from a documented limitation
+    /// to a **defect**, and the fix is
+    /// `extractClipAudioForConversion(clipId:)` — an offline render of that
+    /// ONE clip over its own window. Every path that feeds a converter uses
+    /// that one now: `vc.convertVocals`' clipId form, `vc.convertClips`, and
+    /// `VoicePanelModel.convertClip`.
+    ///
+    /// What is left here is the one job the full recording IS right for:
+    /// resolving a clip to a FILE TO COPY. `VoicePanelModel.addClipAsSample`
+    /// puts that file in a training dataset, where the backing take — not a
+    /// rendered excerpt — is the natural material. Kept (not deleted) for that
+    /// caller and because the wire never renames or removes live behaviour.
+    /// ⭐ If you are adding a new CONVERSION caller, you want the other one.
     ///
     /// - Throws: `clipNotFound` if no track holds `clipId`;
     ///   `voiceConversionRequiresAudioClip` if the clip is a MIDI clip (or,

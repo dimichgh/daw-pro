@@ -579,4 +579,622 @@ struct AutomationEngineTests {
         // slope is 1/96 000 ≈ 1.04e-5 per frame — the only slack allowed.
         #expect(crossDiff < 2e-5)
     }
+
+    // MARK: - m39-e — the modulation takeover stage (P2)
+    //
+    // ⚠️ These live in THIS suite rather than a new one on purpose. The
+    // `MainActorOccupancySiteTests` Leg C census is AT its 380 cap with zero
+    // slack and its validating campaign is unrunnable; a new `@MainActor`
+    // suite would force a fourth unbacked bump. `AutomationRenderer.apply` is
+    // exactly this suite's subject — the modulation stage is a branch inside
+    // it — so this is the honest home, not a hiding place.
+
+    /// Builds a publishable snapshot straight from the domain model, through
+    /// the same builder `PlaybackGraph.applyParameters` uses.
+    private func modulationSnapshot(
+        sources: [ModulationSource], routes: [ModulationRoute],
+        baseVolume: Double = 1, basePan: Double = 0,
+        effects: [EffectDescriptor] = [], originSample: Int64 = 0,
+        positionValid: Bool = true, generation: UInt64 = 1
+    ) -> ModulationSnapshot? {
+        ModulationSnapshotBuilder.build(
+            strip: ModulationSnapshotBuilder.Strip(
+                sources: sources, routes: routes, effects: effects,
+                baseVolume: baseVolume, basePan: basePan),
+            generation: generation, timelineID: 1, sampleRate: Self.sampleRate,
+            originSample: originSample, positionValid: positionValid)
+    }
+
+    /// The ANCHOR-ONLY schedule a strip gets when its only automation is a
+    /// modulation route: no points, just the position mapping.
+    private func anchorSchedule(generation: UInt64 = 1) -> AutomationSchedule {
+        AutomationSchedule(generation: generation, mode: .offline,
+                           sampleRate: Self.sampleRate,
+                           volumePoints: [], panPoints: [])
+    }
+
+    /// ⭐⭐ THE SINGLE MOST VALUABLE TEST IN THE CONTRACT'S LIST (§11.2 test 2).
+    ///
+    /// A ZERO-DEPTH route must render BIT-IDENTICALLY to no route at all. It
+    /// proves the takeover stage reproduces the automation stage's arithmetic
+    /// exactly, which is the one place a silent tonal regression could hide:
+    /// `√2·cos(π/4)` is NOT bit-exactly 1.0, so a stage that "multiplied by
+    /// unity" at centre pan would move the last bit of every sample.
+    ///
+    /// ITS OWN CONTROL IS BUILT IN: depth 1e-6 must DIFFER. A bit-comparison
+    /// that has never failed is indistinguishable from one that compares
+    /// nothing.
+    @Test("⭐ m39-e: a ZERO-DEPTH route on volume AND pan is bit-identical to no route — control: 1e-6 differs")
+    func zeroDepthRouteIsBitIdenticalToNoRoute() throws {
+        let frames = 512
+        let noRoute = AutomationRenderer()
+        noRoute.publish(anchorSchedule())
+        let baseline = try applyQuantum(noRoute, frames: frames,
+                                        timestamp: offlineTimestamp(sample: 0))
+
+        let lfo = ModulationSource(kind: .lfo,
+                                   params: .lfo(LFOSourceParams(waveform: .sine, rateHz: 5)))
+        func render(depth: Double) throws -> [[Float]] {
+            let renderer = AutomationRenderer()
+            renderer.publish(anchorSchedule())
+            renderer.publishModulation(modulationSnapshot(
+                sources: [lfo],
+                routes: [ModulationRoute(sourceID: lfo.id, target: .volume, depth: depth),
+                         ModulationRoute(sourceID: lfo.id, target: .pan, depth: depth)]))
+            return try applyQuantum(renderer, frames: frames,
+                                    timestamp: offlineTimestamp(sample: 0))
+        }
+
+        let zero = try render(depth: 0)
+        var differingAtZero = 0
+        for channel in 0..<2 {
+            for frame in 0..<frames
+            where zero[channel][frame].bitPattern != baseline[channel][frame].bitPattern {
+                differingAtZero += 1
+            }
+        }
+        let tiny = try render(depth: 1e-6)
+        var differingAtTiny = 0
+        for channel in 0..<2 {
+            for frame in 0..<frames
+            where tiny[channel][frame].bitPattern != baseline[channel][frame].bitPattern {
+                differingAtTiny += 1
+            }
+        }
+        print("[measured] m39-e zero-depth identity: depth 0 → \(differingAtZero) differing "
+              + "bit patterns of \(frames * 2); depth 1e-6 → \(differingAtTiny)")
+        #expect(differingAtZero == 0)
+        #expect(differingAtTiny > 0,
+                "the CONTROL: if a 1e-6 depth changes nothing, this comparison compares nothing")
+    }
+
+    /// ⭐ §3.2 — POSITION-ABSOLUTE DETERMINISM, the test that catches someone
+    /// "optimising" the evaluator with a phase register.
+    ///
+    /// Render a span in one pass, and render its TAIL from a fresh renderer
+    /// after a seek. The overlapping samples must be BIT-EXACT: every source
+    /// is a function of the transport position, so a seek lands on exactly the
+    /// value a full playthrough would have had.
+    @Test("⭐ m39-e §3.2: a SEEK lands bit-exactly where a full playthrough would have — no phase register")
+    func positionAbsoluteDeterminismAcrossASeek() throws {
+        let frames = 512
+        // ⚠️ AUTHORED THE IDIOMATIC WAY ON PURPOSE (§7.3): unipolar source,
+        // attenuation-only depth. A BIPOLAR source at this depth saturates
+        // `Track.volumeRange`'s +6.02 dB ceiling at BOTH positions, and two
+        // saturated values are equal — which silently disarms this test's own
+        // control. Measured: the control read 0 differing samples until the
+        // fixture stopped clipping.
+        let lfo = ModulationSource(
+            kind: .lfo, params: .lfo(LFOSourceParams(waveform: .sawUp, rateHz: 3.7,
+                                                     phaseDeg: 40, bipolar: false)))
+        let route = ModulationRoute(sourceID: lfo.id, target: .volume, depth: -0.4)
+
+        // Pass A — four contiguous quanta from the project start.
+        let whole = AutomationRenderer()
+        whole.publish(anchorSchedule())
+        whole.publishModulation(modulationSnapshot(sources: [lfo], routes: [route],
+                                                   originSample: 0))
+        var passA: [[Float]] = []
+        for quantum in 0..<4 {
+            passA.append(try applyQuantum(
+                whole, frames: frames,
+                timestamp: offlineTimestamp(sample: Double(quantum * frames)))[0])
+        }
+
+        // Pass B — a fresh renderer SEEKED to quantum 2. Its schedule epoch
+        // latches at its own first pull, so the roll-relative position starts
+        // at 0 again; `originSample` is what makes the SOURCE agree.
+        let seeked = AutomationRenderer()
+        seeked.publish(anchorSchedule(generation: 2))
+        seeked.publishModulation(modulationSnapshot(
+            sources: [lfo], routes: [route],
+            originSample: Int64(2 * frames), generation: 2))
+        var passB: [[Float]] = []
+        for quantum in 0..<2 {
+            passB.append(try applyQuantum(
+                seeked, frames: frames,
+                timestamp: offlineTimestamp(sample: Double(quantum * frames)))[0])
+        }
+
+        var differing = 0
+        for quantum in 0..<2 {
+            for frame in 0..<frames
+            where passA[quantum + 2][frame].bitPattern != passB[quantum][frame].bitPattern {
+                differing += 1
+            }
+        }
+        print("[measured] m39-e seek determinism: \(differing) differing bit patterns of "
+              + "\(frames * 2) across the seek")
+        #expect(differing == 0)
+        // Control: without the origin the seeked pass restarts the phase, and
+        // the comparison MUST redden — otherwise it is comparing nothing.
+        let unanchored = AutomationRenderer()
+        unanchored.publish(anchorSchedule(generation: 3))
+        unanchored.publishModulation(modulationSnapshot(
+            sources: [lfo], routes: [route], originSample: 0, generation: 3))
+        let restarted = try applyQuantum(unanchored, frames: frames,
+                                         timestamp: offlineTimestamp(sample: 0))[0]
+        var restartedDiffering = 0
+        for frame in 0..<frames
+        where passA[2][frame].bitPattern != restarted[frame].bitPattern {
+            restartedDiffering += 1
+        }
+        #expect(restartedDiffering > 0,
+                Comment(rawValue: "the CONTROL: a phase that restarted at the seek MUST "
+                    + "differ from the playthrough, or this test cannot detect a phase "
+                    + "register"))
+    }
+
+    /// §3.2's DECLARED EXCEPTION, asserted rather than assumed: the same seek
+    /// test on an `envelopeFollower` route must FAIL. A determinism test that
+    /// passes for every source is a broken test.
+    @Test("m39-e §3.2: the envelopeFollower is the ONE source a seek does NOT reproduce")
+    func followerIsTheDeclaredNonDeterministicException() throws {
+        let frames = 512
+        let follower = ModulationSource(
+            kind: .envelopeFollower,
+            params: .envelopeFollower(EnvelopeFollowerSourceParams(
+                detector: .peak, attackMs: 40, releaseMs: 200, floorDb: -60)))
+        let route = ModulationRoute(sourceID: follower.id, target: .volume, depth: -0.5)
+
+        func render(quanta: Int, generation: UInt64) throws -> [Float] {
+            let renderer = AutomationRenderer()
+            renderer.publish(anchorSchedule(generation: generation))
+            renderer.publishModulation(modulationSnapshot(
+                sources: [follower], routes: [route], generation: generation))
+            var last: [Float] = []
+            for quantum in 0..<quanta {
+                last = try applyQuantum(
+                    renderer, frames: frames,
+                    timestamp: offlineTimestamp(sample: Double(quantum * frames)))[0]
+            }
+            return last
+        }
+        let warmed = try render(quanta: 4, generation: 10)      // detector caught up
+        let cold = try render(quanta: 1, generation: 11)        // started here
+        var differing = 0
+        for frame in 0..<frames where warmed[frame].bitPattern != cold[frame].bitPattern {
+            differing += 1
+        }
+        print("[measured] m39-e follower non-determinism: \(differing) differing bit "
+              + "patterns of \(frames) between a warmed and a cold detector")
+        #expect(differing > 0,
+                Comment(rawValue: "the follower is DECLARED history-dependent; if a partial "
+                    + "render matched a full one, the detector is not running at all"))
+    }
+
+    /// §7.3 — summation order is the PUBLISHED ROUTE ARRAY ORDER. Float
+    /// addition is not associative, so an unspecified order would make a
+    /// render non-reproducible. Same routes, same order → bit-exact.
+    @Test("m39-e §7.3: three routes on one target sum in the published array order, bit-exactly")
+    func summationOrderIsPinned() throws {
+        let frames = 256
+        let a = ModulationSource(kind: .lfo,
+                                 params: .lfo(LFOSourceParams(waveform: .sine, rateHz: 1.3)))
+        let b = ModulationSource(kind: .lfo,
+                                 params: .lfo(LFOSourceParams(waveform: .triangle, rateHz: 7.1)))
+        let c = ModulationSource(kind: .macro, params: .macro(MacroSourceParams(value: 0.37)))
+        let depths = [-0.31, -0.17, -0.23]
+        func render(order: [Int], generation: UInt64) throws -> [Float] {
+            let sources = [a, b, c]
+            let routes = order.map {
+                ModulationRoute(sourceID: sources[$0].id, target: .volume, depth: depths[$0])
+            }
+            let renderer = AutomationRenderer()
+            renderer.publish(anchorSchedule(generation: generation))
+            renderer.publishModulation(modulationSnapshot(
+                sources: sources, routes: routes, baseVolume: 0.8, generation: generation))
+            return try applyQuantum(renderer, frames: frames,
+                                    timestamp: offlineTimestamp(sample: 0))[0]
+        }
+        let forward = try render(order: [0, 1, 2], generation: 20)
+        let again = try render(order: [0, 1, 2], generation: 21)
+        for frame in 0..<frames {
+            #expect(forward[frame].bitPattern == again[frame].bitPattern,
+                    "the SAME order must reproduce bit-exactly")
+        }
+        // The order is load-bearing, not incidental: a different array order
+        // is a different (legal) sum, and the test says so rather than
+        // pretending float addition is associative.
+        let reversed = try render(order: [2, 1, 0], generation: 22)
+        var differing = 0
+        for frame in 0..<frames
+        where forward[frame].bitPattern != reversed[frame].bitPattern {
+            differing += 1
+        }
+        // Reported, not asserted: three small addends often DO sum identically
+        // in any order. The load-bearing assertion is the one above — the
+        // PUBLISHED order reproduces bit-exactly, every time.
+        print("[measured] m39-e summation order: reordering three routes moved "
+              + "\(differing) of \(frames) bit patterns")
+    }
+
+    /// ⚠️ THE SINGLE MOST LIKELY IMPLEMENTATION BUG IN THE CONTRACT (§7.3):
+    /// applying the knob TWICE. The stage carries the base because the mixer
+    /// node has been neutralised; a stage that multiplied on top of the node
+    /// would square it.
+    @Test("⚠️ m39-e §7.3: the stage carries the base ONCE — a 0.5 fader with a neutral route is 0.5, not 0.25")
+    func theKnobIsNotAppliedTwice() throws {
+        let frames = 64
+        let macro = ModulationSource(kind: .macro, params: .macro(MacroSourceParams(value: 0)))
+        let renderer = AutomationRenderer()
+        renderer.publish(anchorSchedule())
+        renderer.publishModulation(modulationSnapshot(
+            sources: [macro],
+            routes: [ModulationRoute(sourceID: macro.id, target: .volume, depth: -1)],
+            baseVolume: 0.5))
+        let out = try applyQuantum(renderer, frames: frames,
+                                   timestamp: offlineTimestamp(sample: 0))
+        print("[measured] m39-e base-once: fader 0.5, macro 0 at depth -1 → \(out[0][0])")
+        #expect(out[0][0] == 0.5, "0.25 would mean the knob was applied twice")
+        #expect(out[1][0] == 0.5)
+    }
+
+    /// §7.8 — STOPPED TRANSPORT. There is no schedule, so there is no
+    /// position: `lfo` and `stepSequencer` hold NEUTRAL while `macro` keeps
+    /// ruling. This is the workflow an agent uses to dial a sound in before
+    /// pressing play, and tidying the snapshot's lifecycle into symmetry with
+    /// the schedule's would silently kill it.
+    @Test("m39-e §7.8: stopped — a macro still rules the fader, an LFO holds neutral")
+    func stoppedTransportKeepsMacrosLiveAndHoldsPositionSourcesNeutral() throws {
+        let frames = 64
+        let macro = ModulationSource(kind: .macro, params: .macro(MacroSourceParams(value: 1)))
+        let lfo = ModulationSource(kind: .lfo,
+                                   params: .lfo(LFOSourceParams(waveform: .sine, rateHz: 5)))
+        // No schedule published at all — the stopped state.
+        let macroRenderer = AutomationRenderer()
+        macroRenderer.publishModulation(modulationSnapshot(
+            sources: [macro],
+            routes: [ModulationRoute(sourceID: macro.id, target: .volume, depth: -0.25)],
+            baseVolume: 1, positionValid: false))
+        let macroOut = try applyQuantum(macroRenderer, frames: frames,
+                                        timestamp: offlineTimestamp(sample: 0))
+        let expected = Float(ModulationDepthLaw.volumeGain(base: 1, sum: -0.25))
+        print("[measured] m39-e stopped macro: \(macroOut[0][0]) (expected \(expected))")
+        #expect(abs(macroOut[0][0] - expected) < 1e-6)
+        // depth -0.25 × the 48 dB full-scale window = exactly -12 dB.
+        let macroDb = 20 * log10(Double(macroOut[0][0]))
+        #expect(abs(macroDb + 12) < 0.01, Comment(rawValue: "measured \(macroDb) dB"))
+
+        let lfoRenderer = AutomationRenderer()
+        lfoRenderer.publishModulation(modulationSnapshot(
+            sources: [lfo],
+            routes: [ModulationRoute(sourceID: lfo.id, target: .volume, depth: -1)],
+            baseVolume: 1, positionValid: false))
+        let lfoOut = try applyQuantum(lfoRenderer, frames: frames,
+                                      timestamp: offlineTimestamp(sample: 0))
+        // Neutral (0 offset) → the fader sits at its knob value, bit-exactly,
+        // so a stopped strip sounds like its knobs.
+        for frame in 0..<frames {
+            #expect(lfoOut[0][frame] == 1.0, "an LFO with no transport position must hold neutral")
+        }
+    }
+
+    /// §7.2.0's polarity convention, measured on the RENDER path rather than
+    /// only asserted in the depth law: `[1, 0, 1, 0]` under the mandatory
+    /// negative depth gates the DOWNBEAT silent, and `[0, 1, 0, 1]` opens on it.
+    @Test("m39-e §7.2.0: the step-gate polarity is what the amendment says it is, in rendered samples")
+    func stepGatePolarityIsMeasuredNotAssumed() throws {
+        let frames = 64
+        func firstSample(steps: [Double], generation: UInt64) throws -> Float {
+            let source = ModulationSource(
+                kind: .stepSequencer,
+                params: .stepSequencer(StepSequencerSourceParams(steps: steps, rateHz: 4,
+                                                                 edgeMs: 0)))
+            let renderer = AutomationRenderer()
+            renderer.publish(anchorSchedule(generation: generation))
+            renderer.publishModulation(modulationSnapshot(
+                sources: [source],
+                routes: [ModulationRoute(sourceID: source.id, target: .volume, depth: -1)],
+                generation: generation))
+            return try applyQuantum(renderer, frames: frames,
+                                    timestamp: offlineTimestamp(sample: 0))[0][0]
+        }
+        let obvious = try firstSample(steps: [1, 0, 1, 0], generation: 30)
+        let corrected = try firstSample(steps: [0, 1, 0, 1], generation: 31)
+        print("[measured] m39-e step polarity — [1,0,1,0] downbeat = \(obvious), "
+              + "[0,1,0,1] downbeat = \(corrected)")
+        #expect(obvious < 0.01, "[1,0,1,0] CLOSES on the downbeat — the amendment's point")
+        #expect(corrected == 1.0, "[0,1,0,1] is OPEN on the downbeat, bit-exactly the knob")
+    }
+
+
+    // MARK: - m39-e RT-safety: ABSOLUTE ZERO heap allocation on the stage
+    //
+    // The `InsertSpectrumChainTests` probe, verbatim: `malloc_logger` is
+    // libmalloc's hook behind `MallocStackLogging`/`leaks`, resolved with
+    // `dlsym` so no C shim is needed. It fires on EVERY malloc AND free, so a
+    // transient allocation is counted twice rather than cancelling out —
+    // which is the whole point. Unavailable is a FAILURE, never a skip: a
+    // silently absent probe is exactly the vacuity this leg exists to prevent.
+
+    private typealias ModMallocLoggerFn =
+        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
+
+    /// Heap cells, NOT Swift stored properties: the hook runs INSIDE malloc
+    /// with its locks held, so it must never allocate and never trip a lazy
+    /// global initializer.
+    private nonisolated(unsafe) static let modEventCount =
+        UnsafeMutablePointer<Int>.allocate(capacity: 1)
+    private nonisolated(unsafe) static let modWatchedThread =
+        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
+
+    private static let modEventHook: ModMallocLoggerFn = { _, _, _, _, _, _ in
+        var tid: UInt64 = 0
+        pthread_threadid_np(nil, &tid)  // no allocation, safe under malloc
+        if tid == AutomationEngineTests.modWatchedThread.pointee {
+            AutomationEngineTests.modEventCount.pointee &+= 1
+        }
+    }
+
+    private static func modMallocLoggerSlot() -> UnsafeMutablePointer<ModMallocLoggerFn?>? {
+        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
+                              "malloc_logger") else { return nil }
+        return raw.assumingMemoryBound(to: ModMallocLoggerFn?.self)
+    }
+
+    private static func modMallocEvents(
+        slot: UnsafeMutablePointer<ModMallocLoggerFn?>, _ body: () -> Void
+    ) -> Int {
+        pthread_threadid_np(nil, &modWatchedThread.pointee)
+        modEventCount.pointee = 0
+        let previous = slot.pointee
+        slot.pointee = modEventHook
+        body()
+        slot.pointee = previous
+        return modEventCount.pointee
+    }
+
+    /// §3.4 — the modulation stage and evaluator allocate NOTHING on the
+    /// render path. Every source kind is exercised in one pass, including the
+    /// stateful follower and the step sequencer (whose steps live in the
+    /// snapshot's flat pool precisely so no `Array` is touched here), plus the
+    /// effect-param store (P3) which walks the target table.
+    ///
+    /// ⚠️ The `while`-not-`for` law this pins is not style: the measured note
+    /// at `EffectChainProcessor.swift:402-412` records that at `-Onone` a
+    /// `Range` iteration raises ~2 malloc/free events PER ITERATION inside the
+    /// render path. The test suite builds at `-Onone`, so a `for i in 0..<n`
+    /// anywhere in the evaluator would light this up in the thousands.
+    @Test("⭐ m39-e §3.4: the modulation stage + evaluator raise ZERO malloc/free events per quantum")
+    func modulationStageAllocatesNothing() throws {
+        let slot = try #require(
+            Self.modMallocLoggerSlot(),
+            Comment(rawValue: "malloc_logger is unavailable — the probe cannot run, and a "
+                + "skipped allocation gate is worse than no gate"))
+        let frames = 512
+        let lfo = ModulationSource(kind: .lfo,
+                                   params: .lfo(LFOSourceParams(waveform: .square, rateHz: 6,
+                                                                pulseWidth: 0.3, edgeMs: 4,
+                                                                bipolar: false)))
+        let hold = ModulationSource(kind: .lfo,
+                                    params: .lfo(LFOSourceParams(waveform: .sampleHold,
+                                                                 rateHz: 9, edgeMs: 2,
+                                                                 bipolar: false, seed: 77)))
+        let steps = ModulationSource(
+            kind: .stepSequencer,
+            params: .stepSequencer(StepSequencerSourceParams(steps: [0, 1, 0.5, 0.25, 1, 0],
+                                                             rateHz: 8, edgeMs: 3)))
+        let macro = ModulationSource(kind: .macro,
+                                     params: .macro(MacroSourceParams(value: 0.6)))
+        let follower = ModulationSource(
+            kind: .envelopeFollower,
+            params: .envelopeFollower(EnvelopeFollowerSourceParams(detector: .rms)))
+        let sources = [lfo, hold, steps, macro, follower]
+        let routes = sources.map {
+            ModulationRoute(sourceID: $0.id, target: .volume, depth: -0.12)
+        } + [ModulationRoute(sourceID: lfo.id, target: .pan, depth: 0.4)]
+
+        let renderer = AutomationRenderer()
+        renderer.publish(anchorSchedule())
+        renderer.publishModulation(try #require(modulationSnapshot(
+            sources: sources, routes: routes, baseVolume: 0.7, basePan: -0.2)))
+
+        let buffer = try stereoBuffer(frames: frames, fill: 0.5)
+        var ts = offlineTimestamp(sample: 0)
+        // WARM-UP outside the probe: first-touch lazy globals, the buffer's own
+        // COW, and the Testing framework's machinery are not the subject.
+        renderer.apply(bufferList: buffer.mutableAudioBufferList,
+                       frameCount: frames, timestamp: &ts)
+
+        var events = 0
+        let list = buffer.mutableAudioBufferList
+        events = Self.modMallocEvents(slot: slot) {
+            var quantum = 0
+            while quantum < 8 {
+                var stamp = AudioTimeStamp()
+                stamp.mSampleTime = Double(quantum * frames)
+                stamp.mFlags = .sampleTimeValid
+                renderer.apply(bufferList: list, frameCount: frames, timestamp: &stamp)
+                quantum += 1
+            }
+        }
+        print("[measured] m39-e allocation probe: \(events) malloc/free events across 8 "
+              + "quanta of a 5-source, 6-route strip (volume + pan takeover, follower "
+              + "detector, step pool)")
+        #expect(events == 0)
+
+        // ⭐ POSITIVE CONTROL: the probe must be able to SEE an allocation, or
+        // a zero above means the hook never fired.
+        let control = Self.modMallocEvents(slot: slot) {
+            var sink: [Int] = []
+            var index = 0
+            while index < 64 {
+                sink.append(index)
+                index += 1
+            }
+            _ = sink.count
+        }
+        print("[measured] m39-e allocation probe CONTROL: \(control) events from a "
+              + "deliberate heap allocation")
+        #expect(control > 0, "the probe itself is blind — the zero above proves nothing")
+    }
+
+    // MARK: - m39-e: the base the takeover carries must not go stale
+
+    /// ⚠️ The trap this pins. A `.volume` route pins `mixer.outputVolume` to 1
+    /// and hands the fader to `ModulationStage`, which multiplies
+    /// `base × modulation` with `base` BAKED INTO THE SNAPSHOT. The graph has a
+    /// macro fast path that, when the `structural` key is unchanged, stores one
+    /// atomic per macro instead of republishing. If `baseVolume` / `basePan`
+    /// were excluded from the structural key, a fader move under a live route
+    /// would take that fast path and the fader would be DEAD — silently, with
+    /// audio still playing at the stale gain.
+    ///
+    /// So: a base move must break structural equality (no fast path), and a
+    /// macro move must NOT (fast path taken). Both directions are asserted,
+    /// because only asserting one of them would pass on a key that ignored
+    /// everything.
+    @Test("m39-e: a fader move under a live route breaks the structural key, a macro move does not")
+    func modulationPublishKeySeparatesBaseFromMacro() throws {
+        let macro = ModulationSource(kind: .macro, params: .macro(MacroSourceParams(value: 0.25)))
+        let route = ModulationRoute(sourceID: macro.id, target: .volume, depth: -0.25)
+        func key(baseVolume: Double, basePan: Double = 0,
+                 macroValue: Double = 0.25) -> PlaybackGraph.ModulationPublishKey {
+            var source = macro
+            source.params = .macro(MacroSourceParams(value: macroValue))
+            return PlaybackGraph.ModulationPublishKey(
+                strip: ModulationSnapshotBuilder.Strip(
+                    sources: [source], routes: [route],
+                    baseVolume: baseVolume, basePan: basePan),
+                originSample: 0, positionValid: false)
+        }
+        let reference = key(baseVolume: 1)
+        let faderMoved = key(baseVolume: 0.5)
+        let panMoved = key(baseVolume: 1, basePan: -0.4)
+        let macroMoved = key(baseVolume: 1, macroValue: 0.9)
+
+        #expect(reference != faderMoved)
+        #expect(reference.structural != faderMoved.structural,
+                "a fader move MUST republish — the stage carries the base")
+        #expect(reference.structural != panMoved.structural,
+                "a pan-knob move MUST republish for the same reason")
+        // The fast path, proven to still exist: a macro move differs, but
+        // NOT structurally, so the graph stores one atomic instead of
+        // rebuilding a snapshot.
+        #expect(reference != macroMoved)
+        #expect(reference.structural == macroMoved.structural)
+    }
+
+    /// And the base actually REACHES the snapshot the render thread reads —
+    /// the key test above would pass against a builder that hardcoded 1.0.
+    @Test("m39-e: the published snapshot carries the strip's base volume, not a constant")
+    func modulationSnapshotCarriesTheBase() throws {
+        let macro = ModulationSource(kind: .macro, params: .macro(MacroSourceParams(value: 0)))
+        let route = ModulationRoute(sourceID: macro.id, target: .volume, depth: -0.25)
+        func baseValue(_ volume: Double) throws -> Double {
+            let snapshot = try #require(ModulationSnapshotBuilder.build(
+                strip: ModulationSnapshotBuilder.Strip(
+                    sources: [macro], routes: [route], baseVolume: volume),
+                generation: 1, timelineID: 1, sampleRate: Self.sampleRate,
+                originSample: 0, positionValid: false))
+            let index = snapshot.volumeTargetIndex
+            #expect(index >= 0)
+            return snapshot.targets[Int(index)].baseValue
+        }
+        let unity = try baseValue(1.0)
+        let half = try baseValue(0.5)
+        print("[measured] m39-e snapshot base volume: 1.0 → \(unity), 0.5 → \(half)")
+        #expect(unity == 1.0)
+        #expect(half == 0.5)
+    }
+
+    // MARK: - m39-e regression: the modulation anchor must survive roll start
+
+    /// ⭐ THE GATE THAT WAS MISSING, and the reason it had to render.
+    ///
+    /// m39-e shipped with 24 tests that published a `ModulationSnapshot`
+    /// STRAIGHT to an `AutomationRenderer`. Every one passed. All of them
+    /// tested the stage; none tested the PUBLICATION, and the defect lived in
+    /// the publication: `startAllPlayers` rebuilt each strip's schedule from
+    /// `activeAutomationLanes` alone, saw a strip with no lanes, and published
+    /// NIL — wiping the anchor-only schedule `applyParameters` had just
+    /// published. With no schedule the render path takes
+    /// `applyModulationWithoutSchedule`, where position-dependent sources hold
+    /// NEUTRAL, so an LFO on the fader contributed exactly zero and a gated
+    /// render came back BYTE-IDENTICAL to an ungated one — live and offline.
+    ///
+    /// ⛔ A TEST THAT ONLY CALLS `applyParameters` PASSES BOTH BEFORE AND AFTER
+    /// THE FIX: that pass publishes the anchor correctly; roll start is what
+    /// destroyed it. This test therefore goes through a real render, which is
+    /// the only path that reaches `startAllPlayers`.
+    @Test("LFO routed to volume survives roll start and changes the render")
+    func volumeModulationSurvivesRollStartInOfflineRender() throws {
+        let fixtures = try TestSignals.fixtures()
+        let clip = Clip(name: "cos", startBeat: 0, lengthBeats: 4,
+                        audioFileURL: fixtures.cos1k48)
+        let plain = Track(name: "A", kind: .audio, clips: [clip])
+
+        // A source with NO route: the byte-identity claim at this file's
+        // `apply(...)` doc says an unrouted strip is structurally untouched.
+        let lfo = ModulationSource(
+            kind: .lfo, name: "Gate",
+            params: .lfo(LFOSourceParams(waveform: .square, rateHz: 4,
+                                         pulseWidth: 0.5, bipolar: false)))
+        var sourceOnly = plain
+        sourceOnly.modulationSources = [lfo]
+
+        // The same source, now ROUTED to the fader. Unipolar square with a
+        // NEGATIVE depth: the high half closes the gate.
+        var gated = sourceOnly
+        gated.modulationRoutes = [ModulationRoute(sourceID: lfo.id, target: .volume,
+                                                  depth: -0.5)]
+
+        let tempo = TempoMap(constantBPM: 120)
+        func render(_ track: Track) throws -> RenderedAudio {
+            try OfflineRenderer(sampleRate: Self.sampleRate).render(
+                tracks: [track], tempoMap: tempo, durationSeconds: 1.0)
+        }
+        let a = try render(plain)
+        let unrouted = try render(sourceOnly)
+        let b = try render(gated)
+
+        // POSITIVE CONTROL: this is a real render, not silence — without it a
+        // "the two differ" assertion could be satisfied by noise on nothing,
+        // and a "bit-identical" one by two silent buffers.
+        let peak = a.channelData.flatMap { $0 }.map(abs).max() ?? 0
+        #expect(peak > 0.4)
+
+        // An unrouted source changes nothing at all.
+        #expect(bitDiffCount(a, unrouted) == 0)
+
+        // THE ASSERTION THE OLD CODE FAILED: routed modulation must reach the
+        // render. Pre-fix this was 0 differing samples out of ~96,000.
+        let diffs = bitDiffCount(a, b)
+        func rms(_ audio: RenderedAudio) -> Double {
+            var sum = 0.0, n = 0
+            for channel in audio.channelData {
+                for sample in channel { sum += Double(sample) * Double(sample); n += 1 }
+            }
+            return n == 0 ? 0 : (sum / Double(n)).squareRoot()
+        }
+        let plainRMS = rms(a), gatedRMS = rms(b)
+        print("[measured] volume modulation through a real render: \(diffs) differing "
+              + "samples, RMS \(plainRMS) -> \(gatedRMS) (peak \(peak))")
+        #expect(diffs > 0)
+        // A 50%-duty gate at depth -0.5 removes real energy — this fails if the
+        // route is present but the sources are holding neutral.
+        #expect(gatedRMS < plainRMS * 0.95)
+    }
+
 }

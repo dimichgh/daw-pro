@@ -1,0 +1,25 @@
+{
+ "stageStarts": {
+  "00-open-talk": 4.0,
+  "01-project-talk": 64.64,
+  "01-project-play": 98.4,
+  "02-invisible-talk": 110.4,
+  "02-invisible-play": 167.04,
+  "03-control-talk": 186.007,
+  "04-quiet-talk": 240.247,
+  "05-listen-talk": 294.647,
+  "05-listen-play": 347.767,
+  "06-lift-talk": 357.867,
+  "06-lift-play": 405.067,
+  "07-meter-talk": 415.167,
+  "08-before-talk": 478.367,
+  "08-before-play": 525.087,
+  "09-after-talk": 531.087,
+  "09-after-play": 538.767,
+  "10-reveal-talk": 544.767,
+  "11-shape-talk": 612.767,
+  "12-pump-talk": 664.287,
+  "13-close-talk": 712.607
+ },
+ "totalFromSegments": 763.287
+}

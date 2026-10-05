@@ -1,0 +1,397 @@
+{
+  "markers" : [
+    {
+      "beat" : 0,
+      "id" : "UUID-001",
+      "name" : "Intro"
+    },
+    {
+      "beat" : 32,
+      "id" : "UUID-002",
+      "name" : "Loop A"
+    },
+    {
+      "beat" : 96,
+      "id" : "UUID-003",
+      "name" : "Loop B"
+    },
+    {
+      "beat" : 160,
+      "id" : "UUID-004",
+      "name" : "Loop A"
+    },
+    {
+      "beat" : 224,
+      "id" : "UUID-005",
+      "name" : "Outro"
+    }
+  ],
+  "masterVolume" : 1,
+  "name" : "Untitled Session",
+  "savedAt" : "1970-01-01T00:00:00Z",
+  "schemaVersion" : 1,
+  "tracks" : [
+    {
+      "clips" : [
+
+      ],
+      "effects" : [
+        {
+          "eq" : {
+            "highShelfFreq" : 8000,
+            "highShelfGainDb" : 0,
+            "lowShelfFreq" : 100,
+            "lowShelfGainDb" : 2,
+            "peak1Freq" : 500,
+            "peak1GainDb" : 0,
+            "peak1Q" : 1,
+            "peak2Freq" : 4000,
+            "peak2GainDb" : 2,
+            "peak2Q" : 1
+          },
+          "id" : "UUID-006",
+          "kind" : "eq"
+        },
+        {
+          "compressor" : {
+            "attackMs" : 30,
+            "detectorFreqHz" : 6500,
+            "detectorMode" : 0,
+            "detectorQ" : 2,
+            "kneeDb" : 6,
+            "makeupDb" : 0,
+            "mix" : 1,
+            "ratio" : 4,
+            "releaseMs" : 100,
+            "thresholdDb" : -18
+          },
+          "id" : "UUID-007",
+          "kind" : "compressor"
+        }
+      ],
+      "id" : "UUID-008",
+      "instrument" : {
+        "kind" : "soundBank",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        },
+        "soundBank" : {
+          "bankLSB" : 0,
+          "bankMSB" : 120,
+          "displayName" : "Standard Drum Kit",
+          "program" : 0,
+          "source" : "gm"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Kit",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "id" : "UUID-009",
+      "instrument" : {
+        "kind" : "soundBank",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        },
+        "soundBank" : {
+          "bankLSB" : 0,
+          "bankMSB" : 121,
+          "displayName" : "Acoustic Bass",
+          "program" : 32,
+          "source" : "gm"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Upright",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "effects" : [
+        {
+          "eq" : {
+            "highShelfFreq" : 8000,
+            "highShelfGainDb" : -1.5,
+            "lowShelfFreq" : 100,
+            "lowShelfGainDb" : 1,
+            "peak1Freq" : 500,
+            "peak1GainDb" : 0,
+            "peak1Q" : 1,
+            "peak2Freq" : 3000,
+            "peak2GainDb" : 0,
+            "peak2Q" : 1
+          },
+          "id" : "UUID-010",
+          "kind" : "eq"
+        }
+      ],
+      "id" : "UUID-011",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Synth Lead",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "id" : "UUID-012",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Pad",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "effects" : [
+        {
+          "eq" : {
+            "highShelfFreq" : 10000,
+            "highShelfGainDb" : 2,
+            "lowShelfFreq" : 100,
+            "lowShelfGainDb" : -3,
+            "peak1Freq" : 3000,
+            "peak1GainDb" : 2.5,
+            "peak1Q" : 1,
+            "peak2Freq" : 3000,
+            "peak2GainDb" : 0,
+            "peak2Q" : 1
+          },
+          "id" : "UUID-013",
+          "kind" : "eq"
+        },
+        {
+          "compressor" : {
+            "attackMs" : 10,
+            "detectorFreqHz" : 6500,
+            "detectorMode" : 0,
+            "detectorQ" : 2,
+            "kneeDb" : 6,
+            "makeupDb" : 0,
+            "mix" : 1,
+            "ratio" : 3,
+            "releaseMs" : 100,
+            "thresholdDb" : -18
+          },
+          "id" : "UUID-014",
+          "kind" : "compressor"
+        }
+      ],
+      "id" : "UUID-015",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "audio",
+      "name" : "Lead Vocal",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "id" : "UUID-016",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "audio",
+      "name" : "Room Mic",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "effects" : [
+        {
+          "eq" : {
+            "highShelfFreq" : 10000,
+            "highShelfGainDb" : 1,
+            "lowShelfFreq" : 80,
+            "lowShelfGainDb" : -2,
+            "peak1Freq" : 800,
+            "peak1GainDb" : 2,
+            "peak1Q" : 1,
+            "peak2Freq" : 3500,
+            "peak2GainDb" : -2.5,
+            "peak2Q" : 1.5
+          },
+          "id" : "UUID-017",
+          "kind" : "eq"
+        },
+        {
+          "compressor" : {
+            "attackMs" : 15,
+            "detectorFreqHz" : 6500,
+            "detectorMode" : 0,
+            "detectorQ" : 2,
+            "kneeDb" : 6,
+            "makeupDb" : 0,
+            "mix" : 1,
+            "ratio" : 3,
+            "releaseMs" : 120,
+            "thresholdDb" : -16
+          },
+          "id" : "UUID-018",
+          "kind" : "compressor"
+        }
+      ],
+      "id" : "UUID-019",
+      "instrument" : {
+        "kind" : "soundBank",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        },
+        "soundBank" : {
+          "bankLSB" : 0,
+          "bankMSB" : 121,
+          "displayName" : "Brass Section",
+          "program" : 61,
+          "source" : "gm"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Arrangement",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+        {
+          "id" : "UUID-020",
+          "isAIGenerated" : false,
+          "lengthBeats" : 32,
+          "media" : null,
+          "name" : "Intro",
+          "notes" : [
+
+          ],
+          "startBeat" : 0
+        },
+        {
+          "id" : "UUID-021",
+          "isAIGenerated" : false,
+          "lengthBeats" : 64,
+          "media" : null,
+          "name" : "Loop A",
+          "notes" : [
+
+          ],
+          "startBeat" : 32
+        },
+        {
+          "id" : "UUID-022",
+          "isAIGenerated" : false,
+          "lengthBeats" : 64,
+          "media" : null,
+          "name" : "Loop B",
+          "notes" : [
+
+          ],
+          "startBeat" : 96
+        },
+        {
+          "id" : "UUID-023",
+          "isAIGenerated" : false,
+          "lengthBeats" : 64,
+          "media" : null,
+          "name" : "Loop A",
+          "notes" : [
+
+          ],
+          "startBeat" : 160
+        },
+        {
+          "id" : "UUID-024",
+          "isAIGenerated" : false,
+          "lengthBeats" : 32,
+          "media" : null,
+          "name" : "Outro",
+          "notes" : [
+
+          ],
+          "startBeat" : 224
+        }
+      ],
+      "id" : "UUID-025",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Arrangement",
+      "pan" : 0,
+      "volume" : 1
+    }
+  ],
+  "transport" : {
+    "countInBars" : 1,
+    "isLoopEnabled" : true,
+    "isMetronomeEnabled" : false,
+    "isPunchEnabled" : false,
+    "loopEndBeat" : 256,
+    "loopStartBeat" : 0,
+    "positionBeats" : 0,
+    "punchInBeat" : 0,
+    "punchOutBeat" : 4,
+    "tempoBPM" : 78,
+    "timeSignature" : {
+      "beatUnit" : 4,
+      "beatsPerBar" : 4
+    }
+  }
+}

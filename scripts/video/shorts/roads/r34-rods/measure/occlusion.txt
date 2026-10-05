@@ -1,0 +1,57 @@
+V1-bass-thin-tall-lit-not-emitting   t=31   road 0 Figure  visible=1138054 hidden=      0  occluded=0.00 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+V1-bass-thin-tall-lit-not-emitting   t=31   road 1 Tenor   visible=1282495 hidden=      0  occluded=0.00 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+V1-bass-thin-tall-lit-not-emitting   t=101  road 0 Figure  visible= 990026 hidden=   2156  occluded=0.22 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+V1-bass-thin-tall-lit-not-emitting   t=101  road 1 Tenor   visible=1344693 hidden=   2392  occluded=0.18 %   bright=  2928 hidden=     0 occludedBright=0.00 %
+V1-bass-thin-tall-lit-not-emitting   t=129  road 0 Figure  visible=1004190 hidden=    728  occluded=0.07 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+V1-bass-thin-tall-lit-not-emitting   t=129  road 1 Tenor   visible=1204025 hidden=   2524  occluded=0.21 %   bright=  1990 hidden=     0 occludedBright=0.00 %
+V2-bass-thick-short-emitting         t=31   road 0 Figure  visible=1138054 hidden=      0  occluded=0.00 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+V2-bass-thick-short-emitting         t=31   road 1 Tenor   visible=1282495 hidden=      0  occluded=0.00 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+V2-bass-thick-short-emitting         t=101  road 0 Figure  visible= 990026 hidden=   2311  occluded=0.23 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+V2-bass-thick-short-emitting         t=101  road 1 Tenor   visible=1344693 hidden=   3280  occluded=0.24 %   bright=  2928 hidden=     0 occludedBright=0.00 %
+V2-bass-thick-short-emitting         t=129  road 0 Figure  visible=1004190 hidden=   2785  occluded=0.28 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+V2-bass-thick-short-emitting         t=129  road 1 Tenor   visible=1204025 hidden=   3522  occluded=0.29 %   bright=  1990 hidden=     0 occludedBright=0.00 %
+V3-bass-and-tenor-thin-tall          t=31   road 0 Figure  visible=1138054 hidden=   2495  occluded=0.22 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+V3-bass-and-tenor-thin-tall          t=101  road 0 Figure  visible= 990026 hidden=   3184  occluded=0.32 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+V3-bass-and-tenor-thin-tall          t=129  road 0 Figure  visible=1004190 hidden=   2007  occluded=0.20 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+V4-bass-height-from-duration         t=31   road 0 Figure  visible=1138054 hidden=      0  occluded=0.00 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+V4-bass-height-from-duration         t=31   road 1 Tenor   visible=1282495 hidden=      0  occluded=0.00 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+V4-bass-height-from-duration         t=101  road 0 Figure  visible= 990026 hidden=   3034  occluded=0.31 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+V4-bass-height-from-duration         t=101  road 1 Tenor   visible=1344693 hidden=   3357  occluded=0.25 %   bright=  2928 hidden=     0 occludedBright=0.00 %
+V4-bass-height-from-duration         t=129  road 0 Figure  visible=1004190 hidden=   1125  occluded=0.11 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+V4-bass-height-from-duration         t=129  road 1 Tenor   visible=1204025 hidden=   4594  occluded=0.38 %   bright=  1990 hidden=     0 occludedBright=0.00 %
+V5-bass-strong-colour-separation     t=31   road 0 Figure  visible=1138054 hidden=      0  occluded=0.00 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+V5-bass-strong-colour-separation     t=31   road 1 Tenor   visible=1282495 hidden=      0  occluded=0.00 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+V5-bass-strong-colour-separation     t=101  road 0 Figure  visible= 990026 hidden=   2381  occluded=0.24 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+V5-bass-strong-colour-separation     t=101  road 1 Tenor   visible=1344693 hidden=   2731  occluded=0.20 %   bright=  2928 hidden=     0 occludedBright=0.00 %
+V5-bass-strong-colour-separation     t=129  road 0 Figure  visible=1004190 hidden=   1237  occluded=0.12 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+V5-bass-strong-colour-separation     t=129  road 1 Tenor   visible=1204025 hidden=   2948  occluded=0.24 %   bright=  1990 hidden=     0 occludedBright=0.00 %
+V6-bass-rod-replaces-disk            t=31   road 0 Figure  visible=1138054 hidden=      0  occluded=0.00 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+V6-bass-rod-replaces-disk            t=31   road 1 Tenor   visible=1282495 hidden=      0  occluded=0.00 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+V6-bass-rod-replaces-disk            t=101  road 0 Figure  visible= 990026 hidden=   2261  occluded=0.23 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+V6-bass-rod-replaces-disk            t=101  road 1 Tenor   visible=1344693 hidden=   2572  occluded=0.19 %   bright=  2928 hidden=     0 occludedBright=0.00 %
+V6-bass-rod-replaces-disk            t=129  road 0 Figure  visible=1004190 hidden=   1125  occluded=0.11 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+V6-bass-rod-replaces-disk            t=129  road 1 Tenor   visible=1204025 hidden=   2769  occluded=0.23 %   bright=  1990 hidden=     0 occludedBright=0.00 %
+V7-bass-rods-standing-ahead          t=31   road 0 Figure  visible=1138054 hidden=      0  occluded=0.00 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+V7-bass-rods-standing-ahead          t=31   road 1 Tenor   visible=1282495 hidden=    379  occluded=0.03 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+V7-bass-rods-standing-ahead          t=101  road 0 Figure  visible= 990026 hidden=   2196  occluded=0.22 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+V7-bass-rods-standing-ahead          t=101  road 1 Tenor   visible=1344693 hidden=   2697  occluded=0.20 %   bright=  2928 hidden=     0 occludedBright=0.00 %
+V7-bass-rods-standing-ahead          t=129  road 0 Figure  visible=1004190 hidden=    900  occluded=0.09 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+V7-bass-rods-standing-ahead          t=129  road 1 Tenor   visible=1204025 hidden=   2574  occluded=0.21 %   bright=  1990 hidden=     0 occludedBright=0.00 %
+V8-standing-ahead-at-V5-colour       t=31   road 0 Figure  visible=1138054 hidden=      0  occluded=0.00 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+V8-standing-ahead-at-V5-colour       t=31   road 1 Tenor   visible=1282495 hidden=    379  occluded=0.03 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+V8-standing-ahead-at-V5-colour       t=101  road 0 Figure  visible= 990026 hidden=   2196  occluded=0.22 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+V8-standing-ahead-at-V5-colour       t=101  road 1 Tenor   visible=1344693 hidden=   2697  occluded=0.20 %   bright=  2928 hidden=     0 occludedBright=0.00 %
+V8-standing-ahead-at-V5-colour       t=129  road 0 Figure  visible=1004190 hidden=    900  occluded=0.09 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+V8-standing-ahead-at-V5-colour       t=129  road 1 Tenor   visible=1204025 hidden=   2574  occluded=0.21 %   bright=  1990 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=31   road 0 Figure  visible=1138054 hidden=   5590  occluded=0.49 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=31   road 1 Tenor   visible=1282495 hidden=  50131  occluded=3.91 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=101  road 0 Figure  visible= 990026 hidden=  78777  occluded=7.96 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=101  road 1 Tenor   visible=1344693 hidden= 298006  occluded=22.16 %   bright=  2928 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=129  road 0 Figure  visible=1004190 hidden=  37037  occluded=3.69 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=129  road 1 Tenor   visible=1204025 hidden=  99075  occluded=8.23 %   bright=  1990 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=31   road 0 Figure  visible=1138054 hidden= 236050  occluded=20.74 %   bright= 10740 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=31   road 1 Tenor   visible=1282495 hidden= 365987  occluded=28.54 %   bright=  4206 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=101  road 0 Figure  visible= 990026 hidden= 419641  occluded=42.39 %   bright=  4429 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=101  road 1 Tenor   visible=1344693 hidden= 790021  occluded=58.75 %   bright=  2928 hidden=  2928 occludedBright=100.00 %
+PLANT-fat-rod-positive-control       t=129  road 0 Figure  visible=1004190 hidden= 238427  occluded=23.74 %   bright=  2920 hidden=     0 occludedBright=0.00 %
+PLANT-fat-rod-positive-control       t=129  road 1 Tenor   visible=1204025 hidden= 406956  occluded=33.80 %   bright=  1990 hidden=  1990 occludedBright=100.00 %

@@ -37,6 +37,14 @@ final class FakePitchDetectionEngine: AudioEngineControlling {
     var lastConfidenceThreshold: Double?
     var lastSilenceFloorDbfs: Double?
 
+    // swift-app review, 2026-09-24 (C-F3 race re-check): a hook invoked
+    // right before `detectPitch` returns, so a test can simulate "something
+    // else wrote to the store WHILE detection was still running" — the exact
+    // gap `autoCorrectClipPitch` opens between its pre-check and its write.
+    // `nil` (the default) changes no existing test's behaviour: nothing ran
+    // through this hook before this field existed.
+    var beforeReturning: (() -> Void)?
+
     func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
                      confidenceThreshold: Double,
                      silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
@@ -46,7 +54,31 @@ final class FakePitchDetectionEngine: AudioEngineControlling {
         lastDurationSeconds = durationSeconds
         lastConfidenceThreshold = confidenceThreshold
         lastSilenceFloorDbfs = silenceFloorDbfs
+        beforeReturning?()
         return stubResult
+    }
+
+    // m23-ap C-0c (`clip.getPlayedPitch`): the render's own whole-file
+    // contour door. Defaults to `.detected(stubResult)` — the SAME frames
+    // `detectPitch` returns — rather than the protocol's own `.unavailable`
+    // default, so any test built on `stubResult` (or `makeMelodicEngine()`/
+    // `makeLongNoteEngine()` in `PitchCorrectionCommandTests.swift`) gets a
+    // CONSISTENT render contour for free with no extra setup. Purely
+    // ADDITIVE: no existing test calls `renderPitchContour` (nothing
+    // exercised the seam before C-0c), so this default cannot change any
+    // test's observed behaviour — set `renderContourToReturn` explicitly
+    // for a test that needs `.unavailable`/`.analysisVersionMismatch`
+    // instead.
+    var renderContourCalls = 0
+    var lastRenderContourURL: URL?
+    var lastRenderContourAnalysisVersion: Int?
+    var renderContourToReturn: PitchRenderContour?
+
+    func renderPitchContour(inFileAt url: URL, analysisVersion: Int) async -> PitchRenderContour {
+        renderContourCalls += 1
+        lastRenderContourURL = url
+        lastRenderContourAnalysisVersion = analysisVersion
+        return renderContourToReturn ?? .detected(stubResult)
     }
 
     func prepare() throws { isRunning = true }
@@ -361,7 +393,15 @@ struct ClipDetectPitchCommandTests {
         // longer the tail itself, but the additive-at-end law only requires
         // it stay UNMOVED relative to what came before it, which the
         // profileIndex < pitchIndex check above still proves.
-        #expect(all.last == "edit.pasteClips", "additive-at-end law (now one past clip.detectPitch)")
-        #expect(all.dropLast().last == "clip.detectPitch", "clip.detectPitch is unmoved, just no longer the tail")
+        #expect(all.dropLast(5).last == "edit.pasteClips", "additive-at-end law (now three past clip.detectPitch)")
+        // m24-n appended project.embeddedVoices then vc.installEmbeddedVoice;
+        // m23-q Phase 2 appended clip.autoCorrectPitch / clip.clearPitchEdits
+        // / clip.getPitchEdits AFTER those, at the new END (same law).
+        #expect(all.dropLast(4).last == "project.embeddedVoices")
+        #expect(all.dropLast(3).last == "vc.installEmbeddedVoice")
+        #expect(all.dropLast(2).last == "clip.autoCorrectPitch")
+        #expect(all.dropLast().last == "clip.clearPitchEdits")
+        #expect(all.last == "clip.getPitchEdits")
+        #expect(all.dropLast(6).last == "clip.detectPitch", "clip.detectPitch is unmoved, just no longer the tail")
     }
 }

@@ -1,0 +1,4 @@
+file '/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-3/frames/q_06-lift-play.png'
+file '/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-3/frames/q_05-listen-play.png'
+file '/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-3/frames/q_08-before-play.png'
+file '/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-3/frames/q_09-after-play.png'

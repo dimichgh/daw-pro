@@ -1,0 +1,15 @@
+[
+ {
+  "index": "vocal_0_4080",
+  "language": "English",
+  "time": [
+   0,
+   4080
+  ],
+  "duration": "0.24 0.60 0.30 0.30 0.60 0.60 1.20 0.24",
+  "text": "<SP> hold me me me <SP> now <SP>",
+  "phoneme": "<SP> en_HH-OW1-L-D en_M-IY1 en_M-IY1 en_M-IY1 <SP> en_N-AW1 <SP>",
+  "note_pitch": "0 64 65 67 69 0 67 0",
+  "note_type": "1 2 2 2 2 1 2 1"
+ }
+]

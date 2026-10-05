@@ -24,8 +24,35 @@ import Foundation
 /// and RE-SEEK BY BOUNDED BINARY SEARCH — a mid-playback republish (point
 /// edits during playback, NO restart) lands on the correct segment in
 /// O(log n) without replaying the array.
+/// ## m39-e — the modulation snapshot rides HERE, in this type, deliberately
+///
+/// `ModulationStage` is OWNED by the automation renderer rather than inserted
+/// at the three `automation.apply` call sites named in the design's §3.3. The
+/// placement semantics are identical — the stage runs exactly where
+/// `automation.apply` runs, which is what that section actually requires — and
+/// nesting it buys two invariants by construction rather than by review:
+///
+///  · **Never two stages, never a stage on the wrong side of the chain.** The
+///    master strip's fader is pre-chain (`stagePlacement.volumePreChain`) and
+///    every other strip's is post-chain; a stage glued to `apply` is always on
+///    the fader's side, at all three sites, with zero call-site edits.
+///  · **One slot, two consumers.** P3 composes modulation into the value
+///    `storeEffectParams` already computes, and that method lives here, so the
+///    snapshot has to be reachable from this object regardless. A second
+///    publish slot elsewhere would be a second thing to keep in sync.
+///
+/// The modulation slot's lifecycle DIVERGES from the schedule's on purpose:
+/// see `ModulationSnapshot`'s type doc. It is published by `applyParameters`
+/// and is NOT unpublished by `stopAllPlayers()`.
 final class AutomationRenderer: @unchecked Sendable {
     private let slot: UnsafeMutablePointer<daw_atomic_ptr>
+    /// m39-e: the published `ModulationSnapshot`, same publication discipline
+    /// as `slot` (retained by the slot, borrowed by the render thread, retired
+    /// on the main actor for ≥ 1 s).
+    private let modulationSlot: UnsafeMutablePointer<daw_atomic_ptr>
+    /// m39-e: the per-sample volume/pan takeover and the render-thread home of
+    /// the envelope follower's detector state.
+    let modulationStage = ModulationStage()
     /// Host-tick → seconds factor, precomputed in init so the render path
     /// never calls mach_timebase_info (no syscalls on the render thread).
     private let ticksToSeconds: Double
@@ -48,10 +75,14 @@ final class AutomationRenderer: @unchecked Sendable {
 
     // Main-actor-only retire bin (EffectChainProcessor discipline verbatim).
     private var retired: [(schedule: AutomationSchedule, retiredAt: ContinuousClock.Instant)] = []
+    private var retiredModulation:
+        [(snapshot: ModulationSnapshot, retiredAt: ContinuousClock.Instant)] = []
 
     init() {
         slot = .allocate(capacity: 1)
         daw_atomic_ptr_init(slot)
+        modulationSlot = .allocate(capacity: 1)
+        daw_atomic_ptr_init(modulationSlot)
         effectCursors = .allocate(capacity: AutomationSchedule.maxEffectParamTracks)
         effectCursors.initialize(repeating: -1, count: AutomationSchedule.maxEffectParamTracks)
         var timebase = mach_timebase_info_data_t()
@@ -66,6 +97,10 @@ final class AutomationRenderer: @unchecked Sendable {
             Unmanaged<AutomationSchedule>.fromOpaque(raw).release()
         }
         slot.deallocate()
+        if let raw = daw_atomic_ptr_exchange(modulationSlot, nil) {
+            Unmanaged<ModulationSnapshot>.fromOpaque(raw).release()
+        }
+        modulationSlot.deallocate()
         effectCursors.deallocate()
     }
 
@@ -93,6 +128,43 @@ final class AutomationRenderer: @unchecked Sendable {
         }
     }
 
+    /// m39-e: publishes `snapshot` (nil unpublishes). Identical discipline to
+    /// `publish(_:)` — the slot holds a +1 retain, the displaced snapshot goes
+    /// to a retire bin and is released only when older than 1 s.
+    ///
+    /// ⛔ `stopAllPlayers()` must NOT call this with nil. The modulation
+    /// snapshot lives across stop by design (§7.8); its position-dependent
+    /// sources go neutral because the SCHEDULE is gone, which is how the
+    /// render path learns there is no transport position — not because the
+    /// snapshot was withdrawn.
+    @MainActor
+    func publishModulation(_ snapshot: ModulationSnapshot?) {
+        let now = ContinuousClock.now
+        let newRaw = snapshot.map { UnsafeMutableRawPointer(Unmanaged.passRetained($0).toOpaque()) }
+        if let oldRaw = daw_atomic_ptr_exchange(modulationSlot, newRaw) {
+            retiredModulation.append(
+                (Unmanaged<ModulationSnapshot>.fromOpaque(oldRaw).takeRetainedValue(), now))
+        }
+        retiredModulation.removeAll { $0.retiredAt.duration(to: now) > .seconds(1) }
+    }
+
+    /// Main-actor borrow of the live modulation snapshot (test seam, and the
+    /// seam `mod.setMacro`'s one-atomic-store path writes through).
+    @MainActor
+    var currentModulation: ModulationSnapshot? {
+        daw_atomic_ptr_load(modulationSlot).map {
+            Unmanaged<ModulationSnapshot>.fromOpaque($0).takeUnretainedValue()
+        }
+    }
+
+    /// Render-thread borrow — no retain/release; the retire bin guarantees the
+    /// lifetime exactly as it does for the schedule.
+    @inline(__always)
+    private func borrowedModulation() -> ModulationSnapshot? {
+        guard let raw = daw_atomic_ptr_load(modulationSlot) else { return nil }
+        return Unmanaged<ModulationSnapshot>.fromOpaque(raw).takeUnretainedValue()
+    }
+
     // MARK: - Render surface (render thread; also called directly by unit tests)
 
     /// Applies the published volume/pan automation IN PLACE over
@@ -111,9 +183,29 @@ final class AutomationRenderer: @unchecked Sendable {
     /// θ = (pan+1)·π/4 — continuous through 0, ±3 dB at the edges) applied to
     /// stereo deinterleaved buffers; pan == 0 across the whole quantum
     /// SHORT-CIRCUITS so every existing bit-exact null test stays green.
+    /// m39-e: when a modulation route addresses `.volume` or `.pan` the
+    /// automation stage for that target is SKIPPED and `ModulationStage` takes
+    /// it over per sample (§3.3). A strip with no route never reaches any of
+    /// that — the two `targetIndex` reads below are integer compares against
+    /// -1, and the whole modulation branch is dead code for every existing
+    /// project, which is what makes byte-identity structural rather than
+    /// arithmetic.
     func apply(bufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int,
                timestamp: UnsafePointer<AudioTimeStamp>) {
-        guard frameCount > 0, let raw = daw_atomic_ptr_load(slot) else { return }
+        guard frameCount > 0 else { return }
+        let modulation = borrowedModulation()
+        guard let raw = daw_atomic_ptr_load(slot) else {
+            // No automation schedule. Pre-m39-e this returned immediately and
+            // it still does — UNLESS modulation has taken a target over, which
+            // is the stopped-transport macro / follower case (§7.8): there is
+            // no transport position, so position-dependent sources hold
+            // neutral while a macro keeps ruling the fader.
+            if let modulation, !modulation.isEmpty {
+                applyModulationWithoutSchedule(bufferList: bufferList, frameCount: frameCount,
+                                               modulation: modulation)
+            }
+            return
+        }
         let schedule = Unmanaged<AutomationSchedule>.fromOpaque(raw).takeUnretainedValue()
         adoptGeneration(of: schedule)
         // Defensive nil: no valid host time → this quantum can't be placed on
@@ -123,8 +215,30 @@ final class AutomationRenderer: @unchecked Sendable {
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
         let windowEnd = renderStart + Int64(frameCount)
 
+        let volumeTarget = modulation?.volumeTargetIndex ?? -1
+        let panTarget = modulation?.panTargetIndex ?? -1
+        if let modulation, !modulation.isEmpty {
+            // Detectors first: the stage's per-sample sums read the level this
+            // pass produces, and P1/P3 read it one quantum later.
+            modulationStage.detect(snapshot: modulation, buffers: buffers,
+                                   frameCount: frameCount)
+        }
+        // Project-absolute position: the schedule anchor is the ROLL start,
+        // not project zero, so an LFO would otherwise restart its phase on
+        // every play press.
+        let position = (modulation?.originSample ?? 0) &+ renderStart
+        let positionValid = modulation?.positionValid ?? false
+
         // Volume stage.
-        if schedule.volumePoints.count > 0 {
+        if volumeTarget >= 0, let modulation {
+            let base = laneChord(points: schedule.volumePoints, cursor: &volumeCursor,
+                                 start: renderStart, end: windowEnd,
+                                 fallback: modulation.targets[Int(volumeTarget)].baseValue)
+            modulationStage.applyVolume(
+                buffers: buffers, frameCount: frameCount, snapshot: modulation,
+                targetIndex: volumeTarget, baseStart: base.start, baseEnd: base.end,
+                positionStart: position, positionValid: positionValid)
+        } else if schedule.volumePoints.count > 0 {
             let gainStart = AutomationSchedule.value(
                 at: renderStart, points: schedule.volumePoints, cursor: &volumeCursor)
             let gainEnd = AutomationSchedule.value(
@@ -135,13 +249,61 @@ final class AutomationRenderer: @unchecked Sendable {
 
         // Pan stage (stereo deinterleaved only — the graph-wide format; any
         // other layout skips, leaving audio untouched).
-        if schedule.panPoints.count > 0 {
+        if panTarget >= 0, let modulation {
+            let base = laneChord(points: schedule.panPoints, cursor: &panCursor,
+                                 start: renderStart, end: windowEnd,
+                                 fallback: modulation.targets[Int(panTarget)].baseValue)
+            modulationStage.applyPan(
+                buffers: buffers, frameCount: frameCount, snapshot: modulation,
+                targetIndex: panTarget, baseStart: base.start, baseEnd: base.end,
+                positionStart: position, positionValid: positionValid)
+        } else if schedule.panPoints.count > 0 {
             let panStart = AutomationSchedule.value(
                 at: renderStart, points: schedule.panPoints, cursor: &panCursor)
             let panEnd = AutomationSchedule.value(
                 at: windowEnd, points: schedule.panPoints, cursor: &panCursor)
             applyPan(panStart: panStart, panEnd: panEnd,
                      buffers: buffers, frameCount: frameCount)
+        }
+    }
+
+    /// The base the depth law offsets, chorded across the quantum: the
+    /// automation lane's value when a lane is active on this target, otherwise
+    /// the published knob value. "Modulation offsets whatever is IN CONTROL;
+    /// it never competes with it" (§7.3).
+    @inline(__always)
+    private func laneChord(points: UnsafeBufferPointer<AutomationBreakpoint>,
+                           cursor: inout Int, start: Int64, end: Int64,
+                           fallback: Double) -> (start: Double, end: Double) {
+        guard points.count > 0 else { return (fallback, fallback) }
+        return (AutomationSchedule.value(at: start, points: points, cursor: &cursor),
+                AutomationSchedule.value(at: end, points: points, cursor: &cursor))
+    }
+
+    /// Stopped transport (or a strip whose only automation is modulation):
+    /// there is no schedule and therefore no position. Position-dependent
+    /// sources hold neutral; `macro` and `envelopeFollower` keep ruling.
+    private func applyModulationWithoutSchedule(
+        bufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int,
+        modulation: ModulationSnapshot
+    ) {
+        let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
+        modulationStage.detect(snapshot: modulation, buffers: buffers, frameCount: frameCount)
+        let volumeTarget = modulation.volumeTargetIndex
+        if volumeTarget >= 0 {
+            let base = modulation.targets[Int(volumeTarget)].baseValue
+            modulationStage.applyVolume(
+                buffers: buffers, frameCount: frameCount, snapshot: modulation,
+                targetIndex: volumeTarget, baseStart: base, baseEnd: base,
+                positionStart: 0, positionValid: false)
+        }
+        let panTarget = modulation.panTargetIndex
+        if panTarget >= 0 {
+            let base = modulation.targets[Int(panTarget)].baseValue
+            modulationStage.applyPan(
+                buffers: buffers, frameCount: frameCount, snapshot: modulation,
+                targetIndex: panTarget, baseStart: base, baseEnd: base,
+                positionStart: 0, positionValid: false)
         }
     }
 
@@ -168,6 +330,16 @@ final class AutomationRenderer: @unchecked Sendable {
         adoptGeneration(of: schedule)
         guard let renderStart = quantumStart(of: schedule, timestamp: timestamp),
               let snapshot = chain.renderSnapshot else { return }
+        // m39-e P3: modulation composes into the value this method already
+        // computes, and `storeAutomatedParam(slot:value:)` is UNCHANGED. The
+        // `(start, end)` ramp migration was priced (11 effects + 1 protocol
+        // default + 2 no-op conformers + 7 test files) and DECLINED: a
+        // `(start, end)` pair is still a chord across the quantum, so it
+        // solves zipper and does not solve edge accuracy (§6.3).
+        let modulation = borrowedModulation()
+        let modulatesEffects = modulation.map { !$0.isEmpty && $0.hasEffectTargets } ?? false
+        let position = (modulation?.originSample ?? 0) &+ renderStart
+        let positionValid = modulation?.positionValid ?? false
         snapshot.units.withUnsafeBufferPointer { units in
             for trackIndex in 0..<tracks.count {
                 let track = tracks[trackIndex]
@@ -179,9 +351,23 @@ final class AutomationRenderer: @unchecked Sendable {
                 }
                 guard unitIndex >= 0 else { continue }  // missing effect: inert
                 var cursor = effectCursors[trackIndex]
-                let value = AutomationSchedule.value(
+                var value = AutomationSchedule.value(
                     at: renderStart, points: track.points, cursor: &cursor)
                 effectCursors[trackIndex] = cursor
+                if modulatesEffects, let modulation {
+                    let targetIndex = ModulationEvaluator.targetIndex(
+                        forEffect: track.effectID, paramSlot: track.paramSlot,
+                        snapshot: modulation)
+                    if targetIndex >= 0 {
+                        // T2: ONE evaluation per quantum, at the quantum start
+                        // — the same cadence the store already runs at. The
+                        // per-param honesty about what that costs musically
+                        // lives in `EffectParamSpec.modulatable`, not here.
+                        value = ModulationEvaluator.modulated(
+                            base: value, forTargetAt: targetIndex, snapshot: modulation,
+                            atSample: position, positionValid: positionValid)
+                    }
+                }
                 units[unitIndex].instance.storeAutomatedParam(
                     slot: Int(track.paramSlot), value: value)
             }

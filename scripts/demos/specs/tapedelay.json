@@ -1,0 +1,353 @@
+{
+  "set": "tapedelay",
+  "description": "m39-n, the .tapeDelay insert, FREE-MS MODE: a tape echo whose repeats WOBBLE IN PITCH. Every variant plays the IDENTICAL six-note plucked figure (A3-E4-C4-A4-E4-C5 over four bars at 120 BPM, then silence so you can hear the trail) so nothing but the one parameter differs.\n\nTHE ONE AXIS IS `wowDepthMs`, and it runs 0 -> 2.5 (the shipped default) -> 8 (the ceiling). timeMs (375), feedback (0.65), mix (0.5), wowRateHz (1.2), flutterDepthMs (0.1), saturationDrive (0.45) and highCutHz (4000) are byte-for-byte identical in all three effect variants. Variant 1 has no effect at all.\n\nWHAT A TAPE DELAY ACTUALLY IS, because it is not the `delay` kind with a nicer name. A digital delay stores your sound and plays it back a fixed number of samples later - a perfect copy, at a perfectly steady pitch, forever. A tape machine recorded your sound onto a moving strip of tape and read it back off a second head further along. Everything that made that physical is what you are listening for here: the motor never ran at exactly one speed, so the gap between the heads kept changing slightly, so the playback PITCH kept sagging and recovering. That slow sag is WOW. The tape also saturated when you pushed it, and lost its top end a little more on every pass, so an old tape echo dissolves into a warm blur instead of piling up as a stack of identical copies. ⛔ The `delay` kind CANNOT do the pitch part, at any setting - it holds its delay as a whole number of samples, so a drift of a fraction of a sample is not a tuning problem there, it is unrepresentable. That is why this is a separate effect and not a new knob on the old one.\n\nWHAT TO LISTEN FOR. Variant 1 is the bare phrase, so you know what is being added. In 'wow-none' the machine runs true: you get the echo, the warmth and the darkening repeats, but every repeat comes back at the pitch it went in at. It is the clean, almost digital end of the effect - and it is a genuinely useful setting, not a broken one. In 'wow-default' the trail starts to BREATHE: listen past about four seconds, where the dry notes have stopped and only the repeats are left, and the held C at the end of the phrase drifts flat and back up again about once a second. It is the sound of a machine that has been used. In 'wow-maximum' the same drift is three times as wide - about half a semitone at its deepest - and it stops sounding like character and starts sounding like a fault, in the way a warped record does. Some people want exactly that. The question is which of the three you want.\n\nMEASURED, so 'it wobbles' is not the whole claim (peak pitch deviation, closed form from `TapeDelayParams.wowCents`, and confirmed by pitch-tracking the C5 repeats in these exact files between 4.6 s and 9.5 s): wow-none 0 cents predicted, 28.8 cents peak-to-peak measured; wow-default 16.2 cents predicted (32.4 peak-to-peak), 40.7 measured; wow-maximum 51.4 cents predicted (102.8 peak-to-peak), 99.8 measured. ⚠️ THE 28.8 IN THE FIRST ROW IS THE INSTRUMENT'S FLOOR, NOT THE EFFECT'S: the tail is polyphonic (repeats of six different notes overlap), so a pitch tracker reading a 64 ms window across two overlapping repeats wanders by tens of cents whatever the transport is doing. On a single sustained tone the same measurement lands within 0.1 cents of the closed form - that is `DAWEngineTests/TapeDelayTests` L3, and it is the clean version of this number. Read the three rows as a ratio, not as absolutes: the axis rises 1.0x -> 1.4x -> 3.5x.\n\nWHAT WOULD MAKE THIS HARD TO HEAR. Three honest things. (1) Wow is a PITCH change, and pitch needs something held to be heard in - that is why the phrase ends on a longer note and why the interesting four seconds are the ones after the playing stops. On a busy mix with nothing sustained, a tape delay's wow is felt as 'looseness' rather than heard as pitch. (2) All three effect variants carry the same small amount of FLUTTER (0.1 ms, about 5 cents) - the faster, grainier cousin of wow - because flutter is not the axis and had to be held constant. So 'wow-none' is not perfectly sterile; it has a trace of shimmer. Setting flutterDepthMs to 0 as well gives a dead-steady tape. (3) highCutHz is at 4000 in all three, which is a well-worn machine: the repeats are deliberately dull. If you are auditioning on a phone speaker the dry notes and the repeats will sit closer together in tone than they do on headphones.\n\nLOUDNESS, STATED SO IT IS NOT MISTAKEN FOR THE AXIS (all measured on these exact renders, EBU R128 integrated). The three on-axis variants are -30.4, -30.6 and -30.6 LUFS; the median is -30.6, so the widest offset is 0.2 LU - well inside the 1.0 LU rule, which is expected, because a pitch modulation moves no energy. The no-effect CONTROL sits at -26.6 LUFS, +4.0 LU above that median, and that gap is arithmetic rather than a mix decision: at mix 0.5 the dry signal is halved, and the half it is replaced by is a stack of repeats that have each been rolled off at 4 kHz and compressed by the tape drive, so they carry less energy than the dry they displaced. Do not pick the control because it is louder; it is there to tell you what was added.",
+  "variants": [
+    {
+      "name": "no-tape",
+      "axis": "no tape delay at all - the bare plucked phrase, so you know what is being added",
+      "role": "control",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.004,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.22,
+            "cutoffHz": 6000,
+            "resonance": 0.2,
+            "gain": 0.62,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 64,
+                "startBeat": 1.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 69,
+                "startBeat": 4.0,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 64,
+                "startBeat": 5.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 72,
+                "startBeat": 7.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "wow-none",
+      "axis": "wowDepthMs 0: a perfectly steady transport. Still a tape echo - saturated, rolled off, with a trace of flutter - but the repeats hold their pitch dead still.",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.004,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.22,
+            "cutoffHz": 6000,
+            "resonance": 0.2,
+            "gain": 0.62,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 64,
+                "startBeat": 1.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 69,
+                "startBeat": 4.0,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 64,
+                "startBeat": 5.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 72,
+                "startBeat": 7.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "tapeDelay",
+            "params": {
+              "timeMs": 375,
+              "feedback": 0.65,
+              "mix": 0.5,
+              "wowDepthMs": 0,
+              "wowRateHz": 1.2,
+              "flutterDepthMs": 0.1,
+              "saturationDrive": 0.45,
+              "highCutHz": 4000
+            }
+          },
+          "as": "tape"
+        }
+      ]
+    },
+    {
+      "name": "wow-default",
+      "axis": "wowDepthMs 2.5 (the shipped default): a gentle seasick drift. 16.2 cents of peak pitch deviation.",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.004,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.22,
+            "cutoffHz": 6000,
+            "resonance": 0.2,
+            "gain": 0.62,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 64,
+                "startBeat": 1.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 69,
+                "startBeat": 4.0,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 64,
+                "startBeat": 5.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 72,
+                "startBeat": 7.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "tapeDelay",
+            "params": {
+              "timeMs": 375,
+              "feedback": 0.65,
+              "mix": 0.5,
+              "wowDepthMs": 2.5,
+              "wowRateHz": 1.2,
+              "flutterDepthMs": 0.1,
+              "saturationDrive": 0.45,
+              "highCutHz": 4000
+            }
+          },
+          "as": "tape"
+        }
+      ]
+    },
+    {
+      "name": "wow-maximum",
+      "axis": "wowDepthMs 8 (the ceiling): a machine that needs servicing. 51.5 cents of peak pitch deviation - half a semitone.",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.004,
+            "decay": 0.32,
+            "sustain": 0.0,
+            "release": 0.22,
+            "cutoffHz": 6000,
+            "resonance": 0.2,
+            "gain": 0.62,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 64,
+                "startBeat": 1.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 69,
+                "startBeat": 4.0,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 64,
+                "startBeat": 5.5,
+                "lengthBeats": 0.5
+              },
+              {
+                "pitch": 72,
+                "startBeat": 7.0,
+                "lengthBeats": 1.0
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "tapeDelay",
+            "params": {
+              "timeMs": 375,
+              "feedback": 0.65,
+              "mix": 0.5,
+              "wowDepthMs": 8.0,
+              "wowRateHz": 1.2,
+              "flutterDepthMs": 0.1,
+              "saturationDrive": 0.45,
+              "highCutHz": 4000
+            }
+          },
+          "as": "tape"
+        }
+      ]
+    }
+  ]
+}

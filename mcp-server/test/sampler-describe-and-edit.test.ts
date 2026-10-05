@@ -228,12 +228,53 @@ test("instrument_set_sampler_param requires trackId, param, and value (schema la
 
 test("instrument_set_sampler_param rejects a param not in the enum (schema layer)", async () => {
   const trackId = randomUUID();
+  // ⚠️ m34-o CHANGED THIS TEST'S EXAMPLE, and the reason is the point. It used
+  // to send `param: "sustain"` and assert it was refused, on the stated ground
+  // that "sustain is a polySynth field, not a sampler global". That ground is
+  // no longer true: m34-o gave the sampler instrument-level `decay`/`sustain`
+  // so a patch can be made to FADE, which it previously could not be except by
+  // authoring both fields on every zone. Leaving the old example would have
+  // pinned the absence of a shipped feature.
+  //
+  // The test's PURPOSE is unchanged — an out-of-enum param must be refused at
+  // the schema layer, before the bridge — so it now names `cutoffHz`, a real
+  // polySynth field that genuinely is NOT a sampler global.
   const result = (await client.callTool({
     name: "instrument_set_sampler_param",
-    arguments: { trackId, param: "sustain", value: 0.5 },
+    arguments: { trackId, param: "cutoffHz", value: 800 },
   })) as any;
-  assert.ok(result.isError, "sustain is a polySynth field, not a sampler global — not a valid param here");
+  assert.ok(result.isError, "cutoffHz is a polySynth field, not a sampler global — not a valid param here");
   assert.equal(calls.length, 0);
+});
+
+test("m34-o instrument_set_sampler_param forwards decay and sustain — the fade controls", async () => {
+  // The other half of the change above: the two new globals must actually
+  // REACH THE WIRE. A test that only stopped refusing them would prove nothing.
+  for (const [param, value] of [["decay", 4], ["sustain", 0]] as const) {
+    calls.length = 0;
+    const trackId = randomUUID();
+    const result = (await client.callTool({
+      name: "instrument_set_sampler_param",
+      arguments: { trackId, param, value },
+    })) as any;
+    assert.ok(!result.isError, `${param} must be accepted: ${JSON.stringify(result)}`);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.command, "track.setInstrument");
+    assert.deepEqual(calls[0]!.params, { trackId, sampler: { [param]: value } });
+  }
+});
+
+test("m34-o track_set_instrument carries sampler decay/sustain through to the wire", async () => {
+  calls.length = 0;
+  const trackId = randomUUID();
+  const result = (await client.callTool({
+    name: "track_set_instrument",
+    arguments: { trackId, kind: "sampler", sampler: { decay: 6, sustain: 0 } },
+  })) as any;
+  assert.ok(!result.isError, JSON.stringify(result));
+  assert.equal(calls.length, 1);
+  assert.equal((calls[0]!.params["sampler"] as any).decay, 6);
+  assert.equal((calls[0]!.params["sampler"] as any).sustain, 0);
 });
 
 test("instrument_set_sampler_param rejects a non-number/non-boolean value at the schema layer", async () => {
@@ -349,6 +390,42 @@ test("instrument_set_sampler_zones accepts {id, release}/{id, attack}/{id, oneSh
     })) as any;
     assert.ok(!result.isError, `patching ${JSON.stringify(patch)} must be accepted: ${JSON.stringify(result)}`);
     assert.deepEqual(calls[0]!.params, { trackId, sampler: { zonePatches: [patch] } });
+  }
+});
+
+// M32's new per-zone fields. `samplerZoneSchema` is `.strict()` and
+// `samplerZonePatchSchema` reuses its `.shape`, so a field missing from the
+// schema is REJECTED at the MCP boundary and never reaches the app — the
+// Swift side can be perfectly wired and an agent still cannot use it. Each
+// case carries its own positive control (a typo of the same field), because
+// "the call succeeded" only means something if a near-miss fails.
+test("M32 per-zone fields pass the strict zone schema and forward verbatim; a typo of each is rejected", async () => {
+  const trackId = randomUUID();
+
+  for (const [field, value] of [["reverse", true], ["chokeGroup", 3]] as const) {
+    const zoneId = randomUUID();
+    queuedResult = { kind: "sampler", sampler: { zones: [] } };
+    calls = [];
+    const accepted = (await client.callTool({
+      name: "instrument_set_sampler_zones",
+      arguments: { trackId, zones: [{ id: zoneId, [field]: value }] },
+    })) as any;
+    assert.ok(!accepted.isError, `${field} must reach the app: ${JSON.stringify(accepted)}`);
+    assert.deepEqual(calls[0]!.params, {
+      trackId,
+      sampler: { zonePatches: [{ id: zoneId, [field]: value }] },
+    });
+
+    // Positive control: the same value under a misspelling must be refused,
+    // which is what proves the acceptance above was the schema knowing the
+    // field rather than the schema accepting anything.
+    calls = [];
+    const typo = (await client.callTool({
+      name: "instrument_set_sampler_zones",
+      arguments: { trackId, zones: [{ id: zoneId, [`${field}X`]: value }] },
+    })) as any;
+    assert.ok(typo.isError, `a typo of ${field} must be rejected, not silently dropped`);
+    assert.equal(calls.length, 0);
   }
 });
 
@@ -579,4 +656,40 @@ test("all three sampler tools have a non-empty title and pass the beginner-reada
     assert.ok(tool.title && tool.title.trim().length > 0, `${name} has a title`);
     assert.ok((tool.description as string).trim().length >= 40, `${name}'s description clears the length bar`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// W7-SMP — the setter warns when the global it wrote is inert
+// ---------------------------------------------------------------------------
+
+test("W7-SMP: instrument_set_sampler_param's description says the reply WARNS when every zone overrides the global", () => {
+  const tool = tools.find((t) => t.name === "instrument_set_sampler_param");
+  assert.ok(tool, "instrument_set_sampler_param is registered");
+  const description = tool.description as string;
+  assert.match(description, /every zone sets its own value/, "names the cause");
+  assert.match(description, /still stored/, "says the write itself still lands");
+  assert.match(description, /`warnings`/, "names the reply key an agent must read");
+  assert.match(description, /effectiveGlobals/, "names where the per-zone fix is spelled out");
+});
+
+test("W7-SMP: instrument_set_sampler_param hands the app's `warnings` and `effectiveGlobals` back verbatim", async () => {
+  const trackId = randomUUID();
+  const warning =
+    "release: the stored global (3.4465) is NOT what you'll hear — every zone overrides it; " +
+    "the engine actually applies 0.5. See effectiveGlobals.release.";
+  queuedResult = {
+    kind: "sampler",
+    sampler: { oneShot: false, attack: 0.001, release: 3.4465, gain: 0.8, zones: [] },
+    warnings: [warning],
+    effectiveGlobals: { release: { global: 3.4465, globalIsInert: true, effectiveValues: [0.5] } },
+  };
+  const result = (await client.callTool({
+    name: "instrument_set_sampler_param",
+    arguments: { trackId, param: "release", value: 3.4465 },
+  })) as any;
+  assert.ok(!result.isError, JSON.stringify(result));
+  const body = parseJSON(result);
+  assert.deepEqual(body.warnings, [warning]);
+  assert.equal(body.effectiveGlobals.release.globalIsInert, true);
+  assert.deepEqual(calls[0]!.params, { trackId, sampler: { release: 3.4465 } });
 });

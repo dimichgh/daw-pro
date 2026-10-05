@@ -1,0 +1,20 @@
+{
+  "title": "DAW Pro — the new drum machine and effects, and a track built start to finish",
+  "description": "DAW Pro is a macOS digital audio workstation built so an AI agent can drive it as well as a person can. This is a tour of what shipped in the latest round, and then one track being built from an empty project.\n\nWHAT'S IN IT\n• A drum machine of our own — 75 parameters, five kits, no samples\n• Twenty-two insert effects, including a dynamic EQ, and a modulation layer underneath them\n• One 64-bar track assembled start to finish, on camera\n• Three variants of that track, one axis apart\n\nTHE THREE VARIANTS\nThey share the same drum machine, the same kit, the same drum patterns, the same effect chain, the same 64-bar structure and the same tempo. Only the melody changes — so a preference between them is real information rather than a reaction to six things moving at once.\n\nTwo of those melodies are not ours. \"Mountain King\" is Grieg (1875) and \"Fate\" is Beethoven (1808), both long in the public domain. Their pitches were traced from the LilyPond source text Mutopia publishes beside its engravings, rather than read off an image. Beethoven's continuation past the four-bar motif is ours, and the film says so out loud rather than letting you assume otherwise.\n\nAN HONEST NOTE\nThe narration is a synthetic voice.\n\nThe film also has a chapter about what is still missing, not only about what works. One gap it names: the app's automation lane editor can currently draw only volume and pan, so the 64-bar filter sweep — the single most important gesture in the track — cannot be shown on screen at all. The render proves the sweep is there; the picture beside those words simply cannot show it.\n\nMade with DAW Pro.",
+  "tags": [
+    "DAW Pro",
+    "music production",
+    "drum machine",
+    "synthesizer",
+    "audio software",
+    "macOS",
+    "Grieg",
+    "Beethoven",
+    "In the Hall of the Mountain King",
+    "music software demo"
+  ],
+  "categoryId": "10",
+  "privacyStatus": "private",
+  "containsSyntheticMedia": true,
+  "madeForKids": false
+}

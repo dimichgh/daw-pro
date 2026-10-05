@@ -124,6 +124,25 @@ private func arraySchema(_ description: String, items: JSONValue) -> JSONValue {
     ])
 }
 
+/// m39-tpl-6: a template — either an id (from template.list) or a whole
+/// template object to preview/apply inline. No single JSON Schema "type"
+/// describes both, so this is a `oneOf`, mirroring mcp-server's
+/// `z.union([z.string(), z.record(...)])` for the same param (design §6.1).
+/// The object branch is deliberately bare (no declared properties): the
+/// Copilot catalog has no schema vocabulary for "any object", and
+/// `TrackSetTemplateCodec` — not this schema — is the real validator, so a
+/// misspelled key inside an inline template is still refused by path at the
+/// wire, never silently dropped here.
+private func templateParamSchema(_ description: String) -> JSONValue {
+    .object([
+        "description": .string(description),
+        "oneOf": .array([
+            .object(["type": .string("string")]),
+            .object(["type": .string("object")]),
+        ]),
+    ])
+}
+
 /// Shared by clip.addMIDI/clip.setNotes — one MIDI note. Mirrors
 /// mcp-server's `noteSchema` (index.ts): `pitch`/`startBeat` required,
 /// `velocity`/`lengthBeats` optional with the store's own defaults
@@ -236,7 +255,7 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "transport.setMetronome",
-            description: "Enable or disable the metronome click; countInBars sets how many bars of count-in click play before recording starts.",
+            description: "Enable or disable the metronome click; countInBars sets how many bars of count-in click play before recording starts. New projects default to 1 bar; a project that stored a different value, including 0, keeps it. A count-in does NOT rescue an early note — it DELAYS the take's anchor by that many bars, and anything played during the count-in is discarded; what it gives the player is an audible cue for when the take really starts.",
             schema: schemaObject([
                 ("enabled", booleanSchema("True to enable the metronome click, false to disable it.")),
                 ("countInBars", integerSchema(
@@ -384,12 +403,17 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "track.setInstrument",
-            description: "Select or tweak the instrument on an instrument track — this is what makes its MIDI clips audible. kind picks the instrument; omitted fields keep their current value. (Sampler/Audio-Unit configuration is not available through the copilot — use the app UI for those.)",
+            description: "Select or tweak the instrument on an instrument track — this is what makes its MIDI clips audible. kind picks the instrument; omitted fields keep their current value. ⚠️ Only polySynth and drumSynth can be CONFIGURED from here. drumSynth needs no setup at all — it plays a full 808 kit the moment you select it, on notes 36-43 (kick, snare, closed hat, open hat, clap, tom, rim, cymbal), and its 75 parameters are reachable with instrument.setDrumParam. sampler, soundBank and audioUnit are switchable because each track remembers the settings it was last given in the app, so switching back restores them — but on a track that has never been set up in the app, switching to one of those SUCCEEDS AND PLAYS NOTHING (a sampler with no zones is a legal, silent state). If the user has not configured that instrument in the app UI, pick polySynth or drumSynth, or tell them to set it up there first.",
             schema: schemaObject([
                 ("trackId", stringSchema("Id of the instrument track, from project.snapshot.")),
                 ("kind", stringSchema(
                     "Which instrument to use. Omit to keep the current instrument.",
-                    enumValues: ["testTone", "polySynth", "audioUnit"])),
+                    // ⛔ m39-dm — A HAND-WRITTEN LIST THE COMPILER CANNOT SEE.
+                    // A kind missing here is unselectable by the in-app copilot
+                    // while working perfectly everywhere else.
+                    // `CopilotCatalogTests` pins it against `Kind.allCases`.
+                    enumValues: ["testTone", "polySynth", "sampler", "audioUnit",
+                                 "soundBank", "drumSynth"])),
                 ("waveform", stringSchema(
                     "polySynth oscillator waveform: saw (bright/buzzy), square (hollow), triangle (mellow), sine (pure/soft). Omit to keep the current value.",
                     enumValues: ["saw", "square", "triangle", "sine"])),
@@ -458,6 +482,21 @@ public enum CopilotToolCatalog {
                     minimum: 10, maximum: 5_000)),
             ], required: ["trackId", "pitches"])
         ),
+        // ⚠️ m23-ct's `note.play` is DELIBERATELY NOT HERE, and this is a
+        // decision rather than an oversight. It is the HELD sibling of
+        // `note.audition` above: it does not release itself, and a forgotten
+        // release lands the note in the take with the wrong length. The in-app
+        // Copilot is a conversational agent with no gesture to end, and it has
+        // no reason to record BY PLAYING — it composes with `clip.addMIDI` /
+        // `clip.setNotes`, which are already here. `note.audition` (self-
+        // releasing) already covers "let me hear this" on this surface.
+        // ⚠️ It is NOT in `neverInclude` either: that set means "structurally
+        // must never be exposed" (project lifecycle, destructive edits, the
+        // Copilot's own session verbs), which this is not. If a future cycle
+        // teaches this surface release discipline, adding it is legitimate —
+        // `transport.panic` is already in this catalog, so a stuck note is
+        // recoverable from here. Adding it moves the `v1.count` pin in
+        // `CopilotCatalogTests`.
         CopilotTool(
             command: "clip.setNotes",
             description: "Replace a MIDI clip's ENTIRE note array — the only note-editing primitive. Pass an empty array to clear the clip.",
@@ -467,6 +506,49 @@ public enum CopilotToolCatalog {
                     "The clip's complete new note array (replaces all existing notes), up to 4096 entries.",
                     items: noteItemSchema)),
             ], required: ["clipId", "notes"])
+        ),
+        CopilotTool(
+            command: "clip.repeatNotes",
+            description: "Copy a note window (or an explicit note selection) into the SAME clip, count times, periodBeats apart — write one bar and repeat it instead of authoring every repeated note yourself. Beats are clip-relative and the window is half-open, like clip.setNotes' own note positions. transposeSemitones shifts pitches CHROMATICALLY (not diatonic, not key-aware) per copy. Returns counts and geometry only, never a note array — read the result with clip.getNotes.",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to repeat notes within, from project.snapshot.")),
+                ("fromBeat", numberSchema("Only select source notes with startBeat >= this (clip-relative). Mutually exclusive with noteIds.")),
+                ("toBeat", numberSchema("Only select source notes with startBeat < this (clip-relative, half-open). Mutually exclusive with noteIds.")),
+                ("noteIds", arraySchema(
+                    "An explicit set of note ids to repeat, instead of a fromBeat/toBeat window.",
+                    items: stringSchema("A note id from clip.getNotes."))),
+                ("periodBeats", numberSchema("Beats between the start of each copy. Must be > 0.")),
+                ("count", integerSchema("How many copies to make.", minimum: 1, maximum: 512)),
+                ("firstCopyAtBeat", numberSchema("Clip-relative start of copy 1. Omit to place it immediately after the source window, periodBeats later.")),
+                ("transposeSemitones", arraySchema(
+                    "Chromatic pitch shift per copy in semitones — one value to apply to every copy, or exactly `count` values for one per copy.",
+                    items: integerSchema("A semitone offset."))),
+                ("extendClip", booleanSchema("Whether a copy landing past the clip's end grows the clip to cover it. Defaults to true.")),
+            ], required: ["clipId", "periodBeats", "count"])
+        ),
+        CopilotTool(
+            command: "clip.patchNotes",
+            description: "Change pitch/velocity/startBeat/lengthBeats on SPECIFIC notes in a MIDI clip, by id, without resubmitting the clip's other notes — the tool for 'raise the velocity of these notes' or 'shorten these notes for legato' on a clip too big to whole-array-replace. NOT clip.setNotes: that replaces the ENTIRE note array (can add/remove/reorder; anything you omit is GONE). patchNotes can only ever change fields on notes that already exist — it never creates or removes one. Get real note ids from clip.getNotes first. Each update entry needs id plus at least one of pitch/velocity/startBeat/lengthBeats; an id not in the clip refuses the WHOLE call, naming it — nothing is partially applied. One call is one undo step. Returns counts only (updated, totalNotes, latentNotesPastClipEnd), never a note array — read changed notes back with clip.getNotes. Does NOT grow the clip: a patched startBeat/lengthBeats landing past the clip's end stores fine but won't sound (see latentNotesPastClipEnd).",
+            schema: schemaObject([
+                ("clipId", stringSchema("Id of the MIDI clip to edit, from project.snapshot.")),
+                ("update", arraySchema(
+                    "Notes to update, by id. May be empty (a no-op).",
+                    items: schemaObject([
+                        ("id", stringSchema("Id of an EXISTING note in this clip, from clip.getNotes. Must already exist.")),
+                        ("pitch", integerSchema(
+                            "New MIDI pitch, 0-127. Omit to leave the pitch unchanged.",
+                            minimum: 0, maximum: 127)),
+                        ("velocity", integerSchema(
+                            "New note-on velocity, 1-127. Omit to leave it unchanged.",
+                            minimum: 1, maximum: 127)),
+                        ("startBeat", numberSchema(
+                            "New start position in beats, RELATIVE TO THE CLIP'S START. Omit to leave it unchanged.",
+                            minimum: 0)),
+                        ("lengthBeats", numberSchema(
+                            "New duration in beats. Must be > 0. Omit to leave it unchanged.",
+                            minimum: 0)),
+                    ], required: ["id"]))),
+            ], required: ["clipId", "update"])
         ),
         CopilotTool(
             command: "clip.move",
@@ -875,7 +957,7 @@ public enum CopilotToolCatalog {
 
         CopilotTool(
             command: "mixer.setMasterVolume",
-            description: "Set the master output gain of the whole mix as a linear gain multiplier, where 1.0 is unity gain (0 dB).",
+            description: "Set the master output gain of the whole mix as a linear gain multiplier, where 1.0 is unity gain (0 dB). Values above 2.0 clamp to 2.0 and the response says so in warnings; when a mix needs more than +6 dB of makeup, add a gain insert at index 0 of the master chain instead (its gainLinear reaches 16, +24.08 dB).",
             schema: schemaObject([
                 ("volume", numberSchema(
                     "Linear master gain, 0-2, where 1 = unity gain (0 dB). This is linear gain, not decibels.",
@@ -936,8 +1018,11 @@ public enum CopilotToolCatalog {
             schema: schemaObject([
                 ("trackId", stringSchema("Id of the track or bus to add the effect to, OR the string \"master\" for the master output chain.")),
                 ("kind", stringSchema(
-                    "Which built-in effect to add. On the master chain only these built-ins are allowed.",
-                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer"])),
+                    "Which built-in effect to add. On the master chain only these built-ins are allowed. ⛔ There is NO \"deEsser\" kind: a de-esser IS a compressor whose detector only listens to the sibilant band, so add a \"compressor\" and set its detectorMode to 1 with detectorFreqHz on the 'sss' (5000-9000 Hz on most voices).",
+                    enumValues: ["gain", "eq", "compressor", "limiter", "reverb", "delay", "saturator", "gate", "chorus", "bassEnhancer", "bitCrusher", "djFilter", "ringMod", "flanger",
+                                        "hallReverb", "tapeDelay", "stereoWidth", "phaser",
+                                        "transientShaper", "freqShifter", "clipper",
+                                        "dynamicEQ"])),
                 ("index", integerSchema("Position in the chain, 0 = processed first. Omit to append at the end; out-of-range values clamp.", minimum: 0)),
             ], required: ["trackId", "kind"])
         ),
@@ -951,7 +1036,7 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "fx.setParam",
-            description: "Change one named parameter of an effect on a track, a bus, or the master output chain — the way to ride an FX knob (e.g. a limiter's ceilingDb, a compressor's ratio, an eq band's gain). Pass trackId as a track/bus id from project.snapshot, or the string \"master\" for the master output chain. Call fx.describe first to see each kind's exact parameter names, ranges, defaults, and units. Out-of-range values clamp. Applies live without interrupting playback. Returns the updated insert chain.",
+            description: "Change one named parameter of an effect on a track, a bus, or the master output chain — the way to ride an FX knob (e.g. a limiter's ceilingDb, a compressor's ratio, an eq band's gain). Pass trackId as a track/bus id from project.snapshot, or the string \"master\" for the master output chain. Call fx.describe first to see each kind's exact parameter names, ranges, defaults, and units. Out-of-range values clamp rather than erroring, and the response carries a warnings sentence saying so when they do — that key is absent when your value fit. A gain insert's gainLinear runs 0-16 (up to +24.08 dB), wide enough to lift quiet General-MIDI material to a streaming level in ONE stage; follow a big boost with a limiter, since the gain stage has no protection of its own. Applies live without interrupting playback. Returns the updated insert chain.",
             schema: schemaObject([
                 ("trackId", stringSchema("Id of the track or bus that owns the effect, OR the string \"master\" for the master output chain.")),
                 ("effectId", stringSchema("Id of the effect to change, from fx.add's result or project.snapshot.")),
@@ -1013,6 +1098,29 @@ public enum CopilotToolCatalog {
                 ("address", stringSchema("The parameter's address — the exact decimal string from au.describeParams for THIS instance. Never guessed, never reused across instances.")),
                 ("value", numberSchema("New value; out-of-range values clamp to the parameter's [minValue, maxValue] from au.describeParams.")),
             ], required: ["trackId", "address", "value"])
+        ),
+
+        // MARK: hosted-AU presets (2) — m23-cw: au.describeParams let an agent
+        // TUNE a patch; without these it could never START from one, which is
+        // how every real instrument's usable sound space is actually reached.
+
+        CopilotTool(
+            command: "au.listPresets",
+            description: "List the presets a hosted Audio Unit ships with — the ready-made patches its developer authored (\"Cathedral\", \"Bright Pad\", \"Hard\"), plus any the user has saved. Use this BEFORE au.describeParams when the user asks for a sound rather than a setting: starting from the right preset and nudging two knobs beats dialling a patch from scratch, and it is what a human would do. Pass trackId alone for the track's AU instrument, or trackId + effectId for an AU insert effect. Preset NUMBERS are how you load one (au.loadPreset) and they belong to this plugin only — never guess one and never reuse a number across different plugins. A plugin that ships no presets answers with empty lists and hasFactoryPresets:false — that is a normal, successful answer and not an error; many perfectly good plugins (most of Apple's built-in effects, for instance) simply have none, so fall back to au.describeParams/au.setParam and say so plainly rather than reporting a failure. currentPreset tells you what the plugin is on right now, and its `source` field is worth reading: \"factory\" or \"user\" means it is sitting on that listed preset, while \"unlisted\" means its current sound did not come from the lists — typically a fresh plugin nobody has chosen a preset on, or a project that was saved and reopened (the sound is restored exactly, but the plugin no longer claims a preset number). Built-in effects and the built-in Poly Synth are NOT Audio Units and have no presets here.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track hosting the AU, from project.snapshot. Omit effectId to target the track's AU instrument.")),
+                ("effectId", stringSchema("Id of an AU insert effect on that track, from fx.add's result or project.snapshot. Omit for the track's AU instrument.")),
+            ], required: ["trackId"])
+        ),
+        CopilotTool(
+            command: "au.loadPreset",
+            description: "Load one of a hosted Audio Unit's own presets — the fast way to give the user a usable sound (\"make the reverb a cathedral\", \"use the plugin's Bright Pad patch\"). Call au.listPresets first and pass EITHER presetNumber (exact, always unambiguous — prefer this) OR presetName, never both. If you pass a name it must match a real preset's name; a name that matches two presets is refused rather than guessed, so pass the number instead when that happens. Applies immediately without interrupting playback, and it survives saving and reopening the project. It is NOT undoable — the same as if the user had picked the preset in the plugin's own window — so if they might want the old sound back, tell them which preset was loaded before you change it (au.listPresets reports currentPreset). The response's `preset` is what the plugin ACTUALLY ended up on, read back from the plugin itself: trust it over what you asked for, because some plugins rename or adjust what they were handed. After loading you can fine-tune with au.describeParams/au.setParam — preset first, knobs second.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the track hosting the AU, from project.snapshot. Omit effectId to target the track's AU instrument.")),
+                ("effectId", stringSchema("Id of an AU insert effect on that track. Omit for the track's AU instrument.")),
+                ("presetNumber", integerSchema("The preset's number from au.listPresets for THIS plugin. Factory presets are 0 or above; user-saved presets are negative. Pass this OR presetName, not both.")),
+                ("presetName", stringSchema("The preset's exact name from au.listPresets. Pass this OR presetNumber, not both; presetNumber is preferred because names can repeat.")),
+            ], required: ["trackId"])
         ),
 
         // MARK: render (2)
@@ -1149,6 +1257,32 @@ public enum CopilotToolCatalog {
                     "A General MIDI percussion note (0-127) to resolve within a drum-kit track. Only meaningful together with trackId, on a track whose instrument is a percussion kit.",
                     minimum: 0, maximum: 127)),
             ])
+        ),
+
+        // MARK: template (3, m39-tpl-6)
+
+        CopilotTool(
+            command: "template.list",
+            description: "List every available multi-instrument template — built-in starting points (e.g. a lo-fi chill kit, a pop band) plus anything saved — with its id, name, summary, genres, track count, and whether it needs mixer routing or AudioUnit plug-ins. Call this before template.apply or template.describe to see what's on offer.",
+            schema: schemaObject([])
+        ),
+        CopilotTool(
+            command: "template.describe",
+            description: "Preview a multi-instrument template without changing the song: every track it would add, in plain language (name, kind, what it plays), plus whether it uses mixer routing (sends/buses). Use this before template.apply to show the user what a template contains, or to compare templates.",
+            schema: schemaObject([
+                ("template", templateParamSchema(
+                    "A template's id (from template.list), or a whole template object to preview one that is not saved.")),
+            ], required: ["template"])
+        ),
+        CopilotTool(
+            command: "template.apply",
+            description: "Add every track from a multi-instrument template to the song in one step — instruments, mixer presets, sends and routing all set up together — as a single undo (one call to edit.undo removes all of it). Set dryRun to true to preview the result first without changing the song (the same information template.describe gives).",
+            schema: schemaObject([
+                ("template", templateParamSchema(
+                    "A template's id (from template.list), or a whole template object to apply directly.")),
+                ("dryRun", booleanSchema(
+                    "Preview what applying this template would do, without changing the song. Defaults to false.")),
+            ], required: ["template"])
         ),
     ]
 

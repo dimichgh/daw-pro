@@ -164,7 +164,7 @@ public enum EditorMaximize {
     /// stranding is total.
     ///
     /// ⚠️ Escape is claimed **only while maximized**. Outside the mode this returns
-    /// false and both mounts report `.ignored`, so Escape keeps propagating exactly
+    /// false and every mount reports `.ignored`, so Escape keeps propagating exactly
     /// as it does today — the rename fields in `TrackListView` and
     /// `TimelineLanesView` are unaffected, and no new key is swallowed.
     ///
@@ -175,10 +175,19 @@ public enum EditorMaximize {
     /// unreachable, because both can be reached by the RETAINED-FOCUS path that
     /// `isModalPresented`'s own doc comment describes: focus asserted on the
     /// workspace does not necessarily move when an inline `.overlay` opens.
+    ///
+    /// ⭐ **A FORWARDER SINCE m23-ap I4.** Escape's order now lives in ONE
+    /// ladder for both editors (`EditorEscapeLadder`): a live gesture and a
+    /// selection each take the press before the mode does. This asks the ladder
+    /// the mode's own question — nothing held, nothing selected — so its truth
+    /// table is unchanged (`EditorMaximizeTests.escapeTruthTable` passes across
+    /// the change unedited) and there is no second spelling of the rule.
     public static func escapeExits(maximized: Bool,
                                    modalPresented: Bool,
                                    textEditing: Bool) -> Bool {
-        maximized && !modalPresented && !textEditing
+        EditorEscapeLadder.resolve(gestureLive: false, hasSelection: false,
+                                   maximized: maximized,
+                                   blocked: modalPresented || textEditing) == .exitMaximize
     }
 
     // MARK: - The toggle's two faces

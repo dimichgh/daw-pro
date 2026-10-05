@@ -1,0 +1,514 @@
+#!/usr/bin/env python3
+"""Assemble a narrated demo film from a manifest, stills, loops and bursts.
+
+Each stage becomes up to two beats:
+
+  TALK — the narration, over the PREVIOUS stage's audio ducked to a bed, while
+         the stage's stills cut on a timer. The bed is what makes a slideshow
+         feel continuous instead of like a stack of separate clips.
+  PLAY — the stage's own audio, clean and full level, under real footage of the
+         transport running (a "burst") when there is any.
+
+    python3 assemble.py --manifest m.json --vo vo/ --out film.mp4 \
+                        --shots shots/ --loops loops/ --bursts bursts/
+
+Manifest shape (only `id` is required):
+
+    {"video": {"width":1920,"height":1080,"fps":30,"cut":5.0,
+               "bed":0.16,"playMax":14.0},
+     "stages":[{"id":"intro","narration":"...",
+                "shots":["a.png","b.png"],   # relative to --shots
+                "cut":3.4,                   # override the global cut
+                "holdLast":true,             # stop cycling; hold the last still
+                "loop":"intro.wav",          # relative to --loops
+                "bedEligible": false,        # optional; default true. false =
+                                             # this audio is a DEMONSTRATION,
+                                             # not music: do not carry it under
+                                             # the next stage's narration.
+                "burst":"intro"}]}           # a dir under --bursts with meta.json
+"""
+import argparse, json, os, re, subprocess, sys
+
+
+def run(a):
+    p = subprocess.run(a, capture_output=True, text=True)
+    if p.returncode != 0:
+        raise SystemExit(f"FAILED {' '.join(a[:8])}\n{p.stderr[-1800:]}")
+    return p.stdout
+
+
+def dur(p):
+    return float(run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                      "-of", "csv=p=0", p]).strip())
+
+
+class Film:
+    def __init__(self, cfg, dirs):
+        self.W = cfg.get("width", 1920)
+        self.H = cfg.get("height", 1080)
+        self.FPS = cfg.get("fps", 30)
+        self.CUT = cfg.get("cut", 5.0)
+        self.BED = cfg.get("bed", 0.16)
+        self.PLAY_MAX = cfg.get("playMax", 14.0)
+        self.__dict__.update(dirs)
+        # Letterbox rather than crop: panels are the content, and cropping eats
+        # the numbers at the edges of a card.
+        self.VF = (f"scale={self.W}:{self.H}:force_original_aspect_ratio=decrease,"
+                   f"pad={self.W}:{self.H}:(ow-iw)/2:(oh-ih)/2:color=0x0a0e14,"
+                   f"fps={self.FPS},format=yuv420p,setsar=1")
+        self.NORM = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,aformat=channel_layouts=stereo"
+
+    # ---------------------------------------------------------------- video
+    @staticmethod
+    def _crop_expr(z, to, dur):
+        """Build a crop= for a zoom, in FRACTIONS of the source (0-1).
+
+        `z` is [x, y, w, h] to sit on. `to` optionally gives a second position
+        to travel to over `dur` seconds -- a PAN across the window.
+
+        ⚠ TWO ffmpeg facts, both learned the hard way here:
+        ① A comma inside min() MUST be escaped, or it ends crop's argument list
+          and ffmpeg reports the rest of the expression as a missing FILTER --
+          an error that reads like the filter does not exist.
+        ② crop's w/h are evaluated ONCE, at configure time; only x/y are
+          per-frame. So a moving crop can PAN but cannot ZOOM, and asking for a
+          size that changes with t fails with "Error when evaluating the
+          expression" rather than being silently ignored. A zoom that changes
+          scale needs zoompan, which re-scales every frame and shimmers on UI
+          text. These films therefore CUT to a zoom and pan within it -- which
+          is what a screencast does anyway.
+        The pan keeps `z`'s size and moves only the top-left corner.
+        """
+        w, h = z[2], z[3]
+        if not to:
+            return f"crop=iw*{w:.6f}:ih*{h:.6f}:iw*{z[0]:.6f}:ih*{z[1]:.6f}"
+        k = f"min(1\\,t/{max(dur, 0.001):.3f})"          # 0 -> 1 across the shot
+        px = f"(({z[0]:.6f})+(({to[0]:.6f})-({z[0]:.6f}))*{k})"
+        py = f"(({z[1]:.6f})+(({to[1]:.6f})-({z[1]:.6f}))*{k})"
+        return f"crop=iw*{w:.6f}:ih*{h:.6f}:iw*{px}:ih*{py}"
+
+    def stills(self, shots, total, out, cut=None, hold_last=False):
+        n = max(1, round(total / (cut or self.CUT)))
+        if hold_last:
+            seq = [shots[min(i, len(shots) - 1)] for i in range(n)]
+        else:
+            seq = [shots[i % len(shots)] for i in range(n)]
+        each = total / n
+        ins, filt, labels = [], [], []
+        for i, s in enumerate(seq):
+            # A shot is a path, or {"path": ..., "zoom": [x,y,w,h], "to": [...]}
+            # with the boxes given as FRACTIONS of the source image so a region
+            # survives a change of capture resolution.
+            z = to = None
+            if isinstance(s, dict):
+                z, to, s = s.get("zoom"), s.get("to"), s["path"]
+            # ⚠ THE LAST STILL IS DELIBERATELY OVER-LONG, and the output is
+            # then trimmed to `total` below. libx264 at -r FPS emits
+            # round(each*FPS) frames per input, so each still is up to half a
+            # frame short or long; over the eighteen stages of the compressor
+            # lesson those roundings summed to 521 ms of video-shorter-than-
+            # audio and verify.py's a/v drift gate REFUSED THE FILM. `burst()`
+            # has always trimmed to an exact `total`; this path never did.
+            ins += ["-loop", "1", "-t", f"{(each + 0.5) if i == n - 1 else each:.3f}",
+                    "-i", s]
+            pre = (self._crop_expr(z, to, each) + ",") if z else ""
+            filt.append(f"[{i}:v]{pre}{self.VF}[v{i}]")
+            labels.append(f"[v{i}]")
+        filt.append("".join(labels) + f"concat=n={n}:v=1:a=0[o]")
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ins,
+             "-filter_complex", ";".join(filt), "-map", "[o]",
+             "-t", f"{total:.3f}", "-c:v", "libx264",
+             "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+             "-r", str(self.FPS), out])
+
+    def labelled(self, video, text, colour, out):
+        """Burn a BEFORE/AFTER badge into the top-left of a built segment."""
+        import sys as _s, os as _o
+        _s.path.insert(0, _o.path.dirname(_o.path.abspath(__file__)))
+        from brand import badge
+        png = _o.path.join(self.work, f"_badge_{text.lower()}.png")
+        if not _o.path.exists(png):
+            badge(text, colour, png)
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", video,
+             "-i", png, "-filter_complex",
+             # ⚠ Placement has been wrong twice. The top-left corner is the app's
+             # own title bar, so a badge there covers the project name; and the
+             # MIDDLE of the frame is where a floating effect editor opens, so a
+             # badge at H*0.46 sat squarely on the EQ curve the A/B exists to
+             # show. This band -- centred, low, above the transport bar -- is
+             # empty in the mixer, the arrange view and the panel shots alike.
+             "[0:v][1:v]overlay=(W-w)/2:H*0.82:format=auto,format=yuv420p,setsar=1[v]",
+             "-map", "[v]", "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+             "-pix_fmt", "yuv420p", "-r", str(self.FPS), out])
+
+    def burst(self, name, total, out):
+        d = os.path.join(self.bursts, name)
+        meta = json.load(open(f"{d}/meta.json"))
+        clip = os.path.join(self.work, f"_b_{name}.mp4")
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-framerate", f"{meta['fps']:.4f}", "-i", f"{d}/f%04d.png",
+             "-vf", self.VF, "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+             "-pix_fmt", "yuv420p", clip])
+        blen = dur(clip)
+        lst = os.path.join(self.work, f"_b_{name}.txt")
+        # ⚠ ffmpeg resolves concat entries RELATIVE TO THE LIST FILE, so a
+        # relative clip path here becomes segments/segments/... Always absolute.
+        open(lst, "w").write("".join(f"file '{os.path.abspath(clip)}'\n"
+                                     for _ in range(max(1, int(total / blen) + 1))))
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat",
+             "-safe", "0", "-i", lst, "-t", f"{total:.3f}", "-c:v", "libx264",
+             "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
+             "-r", str(self.FPS), out])
+
+    # ---------------------------------------------------------------- audio
+    def talk_audio(self, vo, bed, out):
+        vlen = dur(vo)
+        ins, filt = ["-i", vo], [f"[0:a]{self.NORM}[vo]"]
+        if bed:
+            ins += ["-stream_loop", "-1", "-i", bed]
+            filt += [f"[1:a]atrim=0:{vlen:.3f},volume={self.BED},"
+                     f"afade=t=in:st=0:d=0.8,"
+                     f"afade=t=out:st={max(vlen - 1.5, 0):.3f}:d=1.5,"
+                     f"aresample=48000,aformat=channel_layouts=stereo[bd]",
+                     # ⚠ normalize=0 IS LOAD-BEARING. ffmpeg's amix divides EVERY input by the
+                     # number of inputs, so the default silently took 6.02 dB off the
+                     # NARRATION -- the one signal already loudness-normalised to a
+                     # target one line above -- every time a bed was present. MEASURED as
+                     # a 4.4-6.0 dB drop on bedded stages against unbedded ones in the
+                     # same film, by building one video twice with only the bed flag
+                     # changed. The bed already has its own explicit `volume={self.BED}`;
+                     # amix must mix, not re-level.
+                     "[vo][bd]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[o]"]
+        else:
+            filt += ["[vo]anull[o]"]
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *ins,
+             "-filter_complex", ";".join(filt), "-map", "[o]",
+             "-c:a", "pcm_s16le", "-ac", "2", out])
+        # ⚠ RETURN WHAT WAS WRITTEN, NOT WHAT WAS ASKED FOR. This used to return
+        # `vlen`, the narration wav's own duration -- but loudnorm is a dynamic
+        # filter with lookahead and the MIXED file it writes here is reliably
+        # 20-130 ms LONGER. The still track was then built to the shorter figure,
+        # so every talk segment came out video-short, and across the compressor
+        # lesson's eighteen stages that summed to 865 ms of a/v drift and
+        # verify.py refused the film. Measure the artefact.
+        return dur(out)
+
+    def play_audio(self, wav, out, normalize=True):
+        """Trim, fade and level one play segment.
+
+        ⚠ `normalize=False` EXISTS BECAUSE loudnorm DESTROYS A LOUDNESS LESSON.
+        self.NORM is a SINGLE-PASS loudnorm, which is dynamic: MEASURED on the
+        compressor lesson's makeup A/B, a pair that really differed by 2.1 LU
+        (-26.7 vs -24.6) came out of it at -17.3 vs -18.8 -- the difference was
+        not merely flattened, it was INVERTED, so the quieter take played back
+        louder. A film whose whole point is "the compressed one is louder, and
+        louder wins every blind A/B" cannot be assembled through that.
+
+        A stage sets "normalize": false and pre-gains its own wavs with ONE
+        static gain shared across the pair, so the relative levels that ARE the
+        measurement survive to the viewer. Default stays true: every other film
+        wants its segments levelled.
+        """
+        n = min(dur(wav), self.PLAY_MAX)
+        tail = self.NORM if normalize else "aresample=48000,aformat=channel_layouts=stereo"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", wav,
+             "-af", f"atrim=0:{n:.3f},asetpts=PTS-STARTPTS,afade=t=in:st=0:d=0.15,"
+                    f"afade=t=out:st={max(n - 1.0, 0):.3f}:d=1.0,{tail}",
+             "-c:a", "pcm_s16le", "-ac", "2", out])
+        return dur(out)          # same reason as talk_audio: measure, don't assume
+
+    def mux(self, v, a, out):
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", v, "-i", a,
+             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+             "-shortest", out])
+
+
+def true_peak(path):
+    """dBTP of a rendered file, via ebur128. None if it cannot be read.
+
+    ⚠ `-v error` SUPPRESSES the ebur128 summary, which logs at INFO -- asking
+    for the number and silencing the thing that prints it. -hide_banner keeps
+    it."""
+    p = subprocess.run(["ffmpeg", "-hide_banner", "-i", path,
+                        "-af", "ebur128=peak=true", "-f", "null", "-"],
+                       capture_output=True, text=True)
+    m = re.findall(r"Peak:\s*(-?\d+\.?\d*)", p.stderr)
+    return float(m[-1]) if m else None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--manifest", required=True)
+    ap.add_argument("--vo", required=True, help="dir of <stage-id>.wav narration")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--shots", default="shots")
+    ap.add_argument("--loops", default="loops")
+    ap.add_argument("--bursts", default="bursts")
+    ap.add_argument("--work", default="segments")
+    # Brand furniture. Both are produced by brand.py with the SAME encoder
+    # flags as the body, so the final concat can stay -c copy.
+    ap.add_argument("--intro", help="clip to place before the film")
+    ap.add_argument("--outro", help="clip to place after the film")
+    a = ap.parse_args()
+
+    man = json.load(open(a.manifest))
+    os.makedirs(a.work, exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    film = Film(man.get("video", {}),
+                dict(shots=a.shots, loops=a.loops, bursts=a.bursts, work=a.work))
+
+    def resolve(p, root):
+        """A shot is a path, or {"path":…, "zoom":[…], "to":[…]} for a zoom.
+
+        ⚠ The dict form was added for the session films and it reaches HERE
+        before it reaches stills(): both this and the os.path.exists filter
+        below would raise TypeError on a dict, so the zoom support has to be
+        threaded through the resolver too, not just the renderer."""
+        if isinstance(p, dict):
+            return {**p, "path": resolve(p["path"], root)}
+        return p if os.path.isabs(p) else os.path.join(root, p)
+
+    def shot_path(s):
+        return s["path"] if isinstance(s, dict) else s
+
+    parts, prev_loop, missing = [], None, []
+    # ⚠ WHERE EACH A/B HALF LANDS IN THE FINISHED FILM. verify.py's A/B
+    # separation gate needs to find the halves in the DELIVERABLE, not in the
+    # work dir -- a check that only fires while intermediates happen to still
+    # exist is exactly the documented-but-not-gated shape that let cut 1 of the
+    # compressor lesson ship. Keyed by segment path; offsets are computed from
+    # the REAL durations after concat, never from the requested ones.
+    ab_marks = {}
+    for st in man["stages"]:
+        sid = st["id"]
+        vo = os.path.join(a.vo, f"{sid}.wav")
+
+        shots = [resolve(s, a.shots) for s in st.get("shots", [])]
+        shots = [s for s in shots if os.path.exists(shot_path(s))]
+        if not shots:
+            missing.append(f"{sid}: no stills")
+            continue
+
+        tlen = plen = 0.0
+        if os.path.exists(vo):
+            ta = os.path.join(a.work, f"{sid}-talk.wav")
+            tv = os.path.join(a.work, f"{sid}-talk.mp4")
+            tm = os.path.join(a.work, f"{sid}-talk-mux.mp4")
+            tlen = film.talk_audio(vo, prev_loop, ta)
+            film.stills(shots, tlen, tv, st.get("cut"), st.get("holdLast", False))
+            film.mux(tv, ta, tm)
+            parts.append(tm)
+        else:
+            missing.append(f"{sid}: no narration wav")
+
+        # ---------------------------------------------------------------- A/B
+        # A fix you only hear once is an assertion. Alternating the SAME passage
+        # unfixed and fixed, twice, is the only way a listener can actually
+        # judge it -- and the badges say which one is playing.
+        ab = st.get("ab")
+        if ab:
+            before_wav = resolve(ab["before"], a.loops)
+            after_wav = resolve(st["loop"], a.loops)
+            half = float(ab.get("seconds", 5.5))
+            for cycle in range(int(ab.get("cycles", 2))):
+                for tag, wav, bname, col in (
+                    ("BEFORE", before_wav, ab.get("beforeBurst"), (255, 184, 77)),
+                    ("AFTER",  after_wav,  st.get("burst", sid),  (93, 255, 159))):
+                    stem = os.path.join(a.work, f"{sid}-ab{cycle}-{tag.lower()}")
+                    pa, pv, pl, pm = (stem + ".wav", stem + ".mp4",
+                                      stem + "-lab.mp4", stem + "-mux.mp4")
+                    saved, film.PLAY_MAX = film.PLAY_MAX, half
+                    n = film.play_audio(wav, pa, st.get("normalize", True))
+                    film.PLAY_MAX = saved
+                    bdir = os.path.join(a.bursts, bname) if bname else None
+                    if bdir and os.path.exists(os.path.join(bdir, "meta.json")):
+                        film.burst(bname, n, pv)
+                    else:
+                        # `beforeShots`/`afterShots` let each half show its own
+                        # stills -- an untouched EQ panel against the moved
+                        # one. Without it both halves show the same picture
+                        # and only the badge distinguishes them, which reads
+                        # as a stuck video on a subtle fix.
+                        half_shots = shots
+                        key = "beforeShots" if tag == "BEFORE" else "afterShots"
+                        if ab.get(key):
+                            hs = [resolve(x, a.shots) for x in ab[key]]
+                            hs = [x for x in hs if os.path.exists(shot_path(x))]
+                            if hs:
+                                half_shots = hs
+                        film.stills(half_shots, n, pv, st.get("cut"))
+                    film.labelled(pv, tag, col, pl)
+                    film.mux(pl, pa, pm)
+                    parts.append(pm)
+                    ab_marks[pm] = {"stage": sid, "tag": tag, "cycle": cycle,
+                                    "wav": os.path.abspath(wav),
+                                    "normalize": bool(st.get("normalize", True))}
+                    plen += n
+            prev_loop = after_wav if st.get("bedEligible", True) else None
+            print(f"  {sid:22s} talk {tlen:6.1f}s + A/B {plen:5.1f}s  "
+                  f"({int(ab.get('cycles',2))} x before/after)", flush=True)
+            continue
+
+        loop = resolve(st["loop"], a.loops) if st.get("loop") else None
+        if loop and os.path.exists(loop):
+            pa = os.path.join(a.work, f"{sid}-play.wav")
+            pv = os.path.join(a.work, f"{sid}-play.mp4")
+            pm = os.path.join(a.work, f"{sid}-play-mux.mp4")
+            # ⚠ PER-STAGE playMax. The film-wide cap exists to stop a long
+            # loop droning; a stage whose play segment is a RENDERED CHART is
+            # the opposite case — its length is fixed by the chart, and the
+            # global cap silently truncates it mid-sweep, leaving a playhead
+            # that stops moving while the audio keeps going. The A/B path
+            # already borrows PLAY_MAX this way.
+            saved, film.PLAY_MAX = film.PLAY_MAX, float(st.get("playMax", film.PLAY_MAX))
+            plen = film.play_audio(loop, pa, st.get("normalize", True))
+            film.PLAY_MAX = saved
+            bdir = os.path.join(a.bursts, st.get("burst", sid))
+            if os.path.exists(os.path.join(bdir, "meta.json")):
+                film.burst(st.get("burst", sid), plen, pv)
+            else:
+                film.stills(shots, plen, pv, st.get("cut"))
+            film.mux(pv, pa, pm)
+            parts.append(pm)
+            # ⚠ A DEMONSTRATION IS NOT A BED. Carrying the previous stage's
+            # audio under the next narration is right for MUSIC and wrong for
+            # everything else: in the tuning lesson a pair of beating test
+            # tones kept droning under the speaker, which is both distracting
+            # and something no real production would do. A stage whose audio is
+            # a measurement rather than a piece of music sets
+            # "bedEligible": false and the bed simply stops when it stops.
+            prev_loop = loop if st.get("bedEligible", True) else None
+
+        print(f"  {sid:22s} talk {tlen:6.1f}s + play {plen:5.1f}s  "
+              f"stills={len(shots)}  burst={'yes' if plen and os.path.exists(os.path.join(a.bursts, st.get('burst', sid), 'meta.json')) else 'no'}",
+              flush=True)
+
+    if not parts:
+        raise SystemExit("nothing to assemble")
+    intro = a.intro or man.get("intro")
+    outro = a.outro or man.get("outro")
+    # ⚠ Do NOT precompute both positions: inserting the intro shifts every
+    # later index by one, which silently puts the end card SECOND TO LAST.
+    # Intro goes in first, outro is appended afterwards.
+    for label, clip in (("intro", intro), ("outro", outro)):
+        if not clip:
+            continue
+        if not os.path.exists(clip):
+            raise SystemExit(f"--{label}: no such file {clip}")
+        # ⚠ concat -c copy does NOT error on mismatched streams, it glitches on
+        # playback. Refuse rather than ship a card that stutters.
+        probe = lambda p, s: run(["ffprobe", "-v", "error", "-select_streams", s,
+            "-show_entries", "stream=width,height,r_frame_rate,pix_fmt,sample_aspect_ratio"
+            if s == "v:0" else "stream=codec_name,sample_rate,channels",
+            "-of", "csv=p=0", p]).strip()
+        for s in ("v:0", "a:0"):
+            if probe(clip, s) != probe(parts[0], s):
+                raise SystemExit(
+                    f"--{label} stream mismatch ({s}):\n  card: {probe(clip, s)}"
+                    f"\n  film: {probe(parts[0], s)}\nRe-render it with brand.py.")
+        parts.insert(0, clip) if label == "intro" else parts.append(clip)
+        print(f"  {label:22s} {dur(clip):5.1f}s")
+    lst = os.path.join(a.work, "_all.txt")
+    open(lst, "w").write("".join(f"file '{os.path.abspath(p)}'\n" for p in parts))
+    run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat",
+         "-safe", "0", "-i", lst, "-c", "copy", a.out])
+
+    # Offsets accumulated from each part's MEASURED duration, in final order,
+    # so intro cards and any inserted clip are counted like everything else.
+    if ab_marks:
+        tl, t = [], 0.0
+        for pth in parts:
+            d = dur(pth)
+            if pth in ab_marks:
+                tl.append(dict(ab_marks[pth], startSec=round(t, 3),
+                               endSec=round(t + d, 3)))
+            t += d
+        json.dump({"film": os.path.abspath(a.out), "abHalves": tl},
+                  open(a.out + ".timeline.json", "w"), indent=1)
+        print(f"  timeline               {len(tl)} A/B halves -> {a.out}.timeline.json")
+
+    # ⚠ LOCK THE TWO STREAMS TOGETHER, and do it HERE rather than per segment.
+    # `mux` uses -shortest with -c:v copy, so every segment's video is truncated
+    # to a FRAME BOUNDARY at or before its audio end. That bias is small and it
+    # is ALWAYS THE SAME SIGN, so it accumulates: MEASURED across the compressor
+    # lesson's 44 segments it ran -6.7 to -126.7 ms each and summed to 875 ms,
+    # and verify.py's a/v drift gate refused to ship the film.
+    #
+    # Two earlier fixes to this failed and are worth not repeating: trimming the
+    # STILLS track to an exact `total` (the truncation happens after that, in
+    # mux) and having talk_audio return the written file's duration instead of
+    # the vo's (they are equal — loudnorm does not change length here). The
+    # fault is in mux, and the cheapest correct place to repair it is once, on
+    # the finished concat, by CLONING THE LAST FRAME out to the audio end rather
+    # than cutting the audio — the tail of the outro card is real audio and
+    # truncating it would be trading a gate failure for a content loss.
+    def _sdur(stream):
+        return float(run(["ffprobe", "-v", "error", "-select_streams", stream,
+                          "-show_entries", "stream=duration",
+                          "-of", "default=nw=1:nk=1", a.out]).strip())
+    vd, ad = _sdur("v:0"), _sdur("a:0")
+    if ad - vd > 1.0 / film.FPS:
+        tmp = a.out + ".sync.mp4"
+        run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", a.out,
+             "-vf", f"tpad=stop_mode=clone:stop_duration={ad - vd + 0.5:.3f}",
+             "-t", f"{ad:.3f}", "-c:v", "libx264", "-preset", "medium",
+             "-crf", "20", "-pix_fmt", "yuv420p", "-r", str(film.FPS),
+             "-c:a", "copy", tmp])
+        os.replace(tmp, a.out)
+        print(f"  a/v sync     video {vd:.3f}s -> audio {ad:.3f}s "
+              f"(padded {(ad - vd) * 1000:.0f} ms of held last frame)")
+
+    # ⚠ TRUE-PEAK BACKSTOP. `loudnorm`'s single-pass TP= is a target, not a
+    # guarantee: percussive material sails past it. The Amen lesson came out of
+    # the concat at -0.3 dBTP against a -1.0 ceiling, and the only reason anyone
+    # noticed is that verify.py measures the finished file.
+    # The fix is a STATIC trim, not a limiter -- if the peak is 0.7 dB too high,
+    # turn the whole film down 0.7 dB. Nothing is compressed, no transient is
+    # reshaped, and the film that ships is the film that was mixed.
+    # ⚠⚠ TWO DEFECTS FIXED HERE, BOTH MEASURED ON A REAL BUILD (HWB2, 2026-09-05),
+    # where this loop OSCILLATED and then failed the build outright:
+    #   +0.60 -> -0.80 -> -0.70 -> -0.90 -> -0.40, the peak RISING after a
+    #   downward trim.
+    # ① It aimed at EXACTLY the ceiling. AAC is lossy and its decoded
+    #    inter-sample peaks are not the peaks you encoded, so a file trimmed to
+    #    land on -1.00 comes back over it about half the time -- forever. Aim
+    #    BELOW the ceiling and one pass converges.
+    # ② Every retry re-encoded the ALREADY-TRIMMED file, so attempt n was the
+    #    nth AAC generation, each adding its own error to the thing being
+    #    measured. The trim is now always applied ONCE to a kept pristine copy
+    #    with a running total, so the film that ships is one generation from the
+    #    concat no matter how many attempts it took.
+    CEIL, MARGIN = -1.0, 0.5
+    tp = true_peak(a.out)
+    if tp is not None and tp > CEIL:
+        pristine = a.out + ".pretrim.mp4"
+        os.replace(a.out, pristine)
+        total = 0.0
+        for attempt in range(4):
+            total += (CEIL - MARGIN) - tp
+            tmp = a.out + ".tp.mp4"
+            run(["ffmpeg", "-v", "error", "-y", "-i", pristine,
+                 "-af", f"volume={total:.2f}dB", "-c:v", "copy", "-c:a", "aac",
+                 "-b:a", "192k", tmp])
+            os.replace(tmp, a.out)
+            was, tp = tp, true_peak(a.out)
+            print(f"  true peak   {was:+.2f} -> total trim {total:.2f} dB -> {tp:+.2f} dBTP"
+                  f"{'' if tp is not None and tp <= CEIL else '  (still over — retrying)'}")
+            if tp is None or tp <= CEIL:
+                break
+        os.remove(pristine)
+    if tp is not None and tp > -0.95:
+        raise SystemExit(f"true-peak trim would not converge: {tp:+.2f} dBTP")
+
+    print(f"\nWROTE {a.out}\n{dur(a.out):.1f}s from {len(parts)} clips")
+    if missing:
+        # Loud, because a missing narration wav silently shortens the film and
+        # nothing else would tell you which line went absent.
+        print("\nWARNINGS:")
+        for m in missing:
+            print("  -", m)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

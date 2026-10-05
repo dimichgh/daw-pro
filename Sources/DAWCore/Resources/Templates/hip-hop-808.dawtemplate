@@ -1,0 +1,28 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "hip-hop-808",
+  "name": "Hip-Hop 808",
+  "summary": "An 808 drum kit with a deep synth sub-bass under it, soft keys and a pad, and one room reverb to share.",
+  "songForm": "hip-hop",
+  "genres": ["hip-hop", "r-and-b"],
+  "tracks": [
+    { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 0.5,
+      "instrument": { "kind": "drumSynth", "drumPreset": "808", "drumKit": { "noteLayout": "gm" } },
+      "sends": [ { "bus": "room", "level": 0.1 } ] },
+    { "key": "sub-bass", "name": "808 Bass", "kind": "instrument", "volume": 0.71,
+      "instrument": { "kind": "polySynth", "waveform": "sine", "attack": 0.002, "decay": 1.5, "sustain": 0.3,
+                      "release": 0.4, "drive": 0.4 } },
+    { "key": "keys", "name": "Keys", "kind": "instrument", "volume": 0.83, "mixerPreset": "warm-keys",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 4 } },
+      "sends": [ { "bus": "room", "level": 0.25 } ] },
+    { "key": "pad", "name": "Pad", "kind": "instrument", "volume": 0.44,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 89 } },
+      "sends": [ { "bus": "room", "level": 0.3 } ] },
+    { "key": "vocal", "name": "Vocal", "kind": "audio", "mixerPreset": "vocal-presence",
+      "sends": [ { "bus": "room", "level": 0.15 } ] },
+    { "key": "room", "name": "Room", "kind": "bus",
+      "inserts": [ { "kind": "reverb", "params": { "mix": 1, "roomSize": 0.4 } } ] }
+  ]
+}

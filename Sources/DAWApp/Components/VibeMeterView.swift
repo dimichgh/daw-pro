@@ -5,8 +5,9 @@ import DAWAppKit
 /// The **session vibe meter** — the app's signature "glowing instrument" (M8 vm-b;
 /// VISION.md:16). One coherent glowing orb (NOT a bar-graph spectrum) that reads the
 /// whole mix's feel at a glance: a bilaterally-symmetric spectral silhouette around a
-/// hot ember core, drawn on `Canvas` at 60 fps via an UNPAUSED
+/// hot ember core, drawn on `Canvas` and ticked at 60 fps via an UNPAUSED
 /// `TimelineView(.periodic)` (see `pollInterval` for the law and the measured rate).
+/// It re-DRAWS only a visibly new frame (`VibeOrbFrameGate`, WF-F1).
 ///
 /// The mapping (all perceptual math is headless in `DAWAppKit.VibeMeterModel`, tested):
 /// - **brightness** (short-term level) → the core's size and glow — loud blazes, quiet
@@ -26,8 +27,10 @@ struct VibeMeterView: View {
     /// preferred over the live engine poll. A closure, so no engine coupling here.
     var snapshot: () -> MasterAnalysisSnapshot
 
-    /// Reports the smoothed state of every frame this view actually DRAWS (the
-    /// `LiveLayerWitness` seam, m23-r3b) — nil in previews and unit hosts. A frozen
+    /// Reports the smoothed state of every frame this view TICKS (the
+    /// `LiveLayerWitness` seam, m23-r3b) — nil in previews and unit hosts. Since
+    /// WF-F1 a tick redraws only when the frame visibly changed; the drawn frame
+    /// is always within `VibeOrbFrameGate.tolerance` of what is reported. A frozen
     /// meter is pixel-identical to a live one until the data moves, so this is the
     /// only way "the orb is still ticking" is checkable from outside the process.
     var onFrame: ((VibeMeterModel) -> Void)?
@@ -76,18 +79,17 @@ struct VibeMeterView: View {
         TimelineView(.periodic(from: .now, by: Self.pollInterval)) { timeline in
             let state = smoother.advance(to: timeline.date, snapshot: snapshot())
             let _ = onFrame?(state)   // `let _` — a bare call is a ViewBuilder expression
-            let rgb = Self.components(for: state)
-            let color = Color(.sRGB, red: rgb.r, green: rgb.g, blue: rgb.b, opacity: 1)
-            // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
-            // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
-            let phase = smoother.phase
-            Canvas { @Sendable context, size in
-                Self.draw(state, phase: phase, in: &context,
-                          size: size, rgb: rgb, color: color)
-            }
-            // The wide house-recipe halo (docs/DESIGN-LANGUAGE.md "Glow recipe"),
-            // intensity following the core brightness — dim ember → blazing core.
-            .glow(color, radius: 9, intensity: state.isDormant ? 0.18 : 0.30 + state.brightness * 0.45)
+            // ⛔ TICK ≠ DRAW (WF-F1). The orb TICKS every frame — the smoother and
+            // the witness above run 60/s, always (the m23-r3b law: a live layer is
+            // never paused). It DRAWS only a visibly new frame: `frameToDraw()`
+            // hands back the frame already on screen while nothing visible moved,
+            // the Equatable face then compares equal, and SwiftUI skips its render.
+            // Without this every tick re-displayed the orb's small RenderBox layer,
+            // and with the display asleep or the screen locked each display waited
+            // on the main thread for a commit that is never displayed
+            // (`waitForCommitId`, ~25–30 ms each) — `VibeOrbFrameGate` has the
+            // measurement. Do NOT "simplify" this back to an inline Canvas.
+            VibeOrbFace(frame: smoother.frameToDraw()).equatable()
         }
         .accessibilityLabel("Session vibe")
         .accessibilityValue(accessibilityValue)
@@ -217,15 +219,47 @@ struct VibeMeterView: View {
     }
 }
 
+/// The orb as a pure function of ONE drawn frame (WF-F1). `Equatable`, so when
+/// `VibeOrbFrameGate` hands back the frame already on screen SwiftUI skips this
+/// view entirely — no Canvas render, no RenderBox display, no commit.
+struct VibeOrbFace: View, Equatable {
+    let frame: VibeOrbFrame
+
+    nonisolated static func == (a: VibeOrbFace, b: VibeOrbFace) -> Bool { a.frame == b.frame }
+
+    var body: some View {
+        let state = frame.model
+        let phase = frame.phase
+        let rgb = VibeMeterView.components(for: state)
+        let color = Color(.sRGB, red: rgb.r, green: rgb.g, blue: rgb.b, opacity: 1)
+        // CANVAS CONTRACT (m16-a): renderer closures are @Sendable — value captures
+        // only, computed before the closure. See docs/research/design-m16a-canvas-crash.md.
+        Canvas { @Sendable context, size in
+            VibeMeterView.draw(state, phase: phase, in: &context,
+                               size: size, rgb: rgb, color: color)
+        }
+        // The wide house-recipe halo (docs/DESIGN-LANGUAGE.md "Glow recipe"),
+        // intensity following the core brightness — dim ember → blazing core.
+        .glow(color, radius: 9, intensity: state.isDormant ? 0.18 : 0.30 + state.brightness * 0.45)
+    }
+}
+
 /// Non-observable scratch smoother held in the view's `@State`. Advancing it inside
 /// the `TimelineView` closure mutates fields (no reassignment, no `@Observable`), so
 /// it schedules no invalidation — the timeline alone drives the next frame. Also
 /// carries the shimmer phase, advanced by real elapsed time so motion is frame-rate
-/// independent.
+/// independent, and the frame gate that decides what is DRAWN (WF-F1).
 final class VibeSmoother {
     private(set) var model = VibeMeterModel()
     private(set) var phase: Double = 0
     private var lastDate: Date?
+    private var gate = VibeOrbFrameGate()
+
+    /// The frame to draw on this tick: the current state when it differs VISIBLY
+    /// from what is on screen, else the on-screen frame, bit-identical (WF-F1).
+    func frameToDraw() -> VibeOrbFrame {
+        gate.frame(for: model, phase: phase)
+    }
 
     /// Advances the model + shimmer phase toward `snapshot` over the real elapsed time
     /// since the last frame (capped, so a stalled/paused frame can't snap the visual),

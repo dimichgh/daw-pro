@@ -86,6 +86,14 @@ public final class ProjectStore {
     /// omit-when-empty — the `masterEffects` triple-mirror discipline (store +
     /// snapshot + disk DTO, m12-f).
     public private(set) var masterAutomation: [AutomationLane] = []
+    /// MASTER modulation (m39-e) — the `masterEffects` / `masterAutomation`
+    /// twin, and the strip an agent reaches with `trackId: "master"`. Rides
+    /// `EditState`, persists additively, omit-when-empty.
+    /// Setters are module-`internal` so `ProjectStore+Modulation` mutates them
+    /// inside `performEdit` (the `grooveTemplates` precedent) while callers
+    /// outside DAWCore stay read-only.
+    public internal(set) var masterModulationSources: [ModulationSource] = []
+    public internal(set) var masterModulationRoutes: [ModulationRoute] = []
     /// Project-level GROOVE palette (M5 iii-g, spec §6): extracted templates,
     /// referenced BY VALUE at quantize time (so deleting one never dangles a
     /// reference). Default empty; undo covers add/remove (it rides `EditState`).
@@ -313,6 +321,20 @@ public final class ProjectStore {
             // the engine, so playhead pushes cannot cause feedback loops.
             engine?.playheadHandler = { [weak self] beats in
                 self?.transport.positionBeats = beats
+                // m34-h-1 LIVE LOOPING: the loop deck's quantized launches and
+                // its runway extension ride THIS observation, so they work
+                // headless and on the wire with no view attached — unlike
+                // `refreshLiveTakeRegion`, which is a pure view concern and is
+                // driven from `ContentView`.
+                //
+                // ⚠️ **THE "NEVER CALLS BACK INTO THE ENGINE" INVARIANT ABOVE
+                // STILL HOLDS, AND `refreshLoopDeck` IS BUILT TO KEEP IT.** The
+                // decision it makes here is pure arithmetic over beats; the one
+                // thing that reaches the engine (firing `recordLayer` /
+                // `finishLayer` at a boundary) is dispatched on a hopped
+                // main-actor `Task`, precisely so this closure never re-enters
+                // a `@MainActor` engine that is mid-playhead-tick.
+                self?.refreshLoopDeck()
             }
             // End-of-content stop (m25-d): the engine tells us it reached the
             // pre-computed bound; WE own transport state, so the stop lands on
@@ -327,6 +349,12 @@ public final class ProjectStore {
             // chip both read. Always pushed on the main actor.
             engine?.engineNoticeHandler = { [weak self] event in
                 self?.recordEngineNotice(event)
+            }
+            // I1: the render cache's commit signal. A note audition waiting for
+            // its clip's render plays the moment that render lands, never at
+            // the app's 10 Hz status poll. Always pushed on the main actor.
+            engine?.setClipRenderCompleteHandler { [weak self] clipID in
+                self?.clipRenderDidComplete(clipID: clipID)
             }
             // The m28-knob controller feed (see ProjectStore+MIDIControl). NOT
             // an unconditional install: subscribing CREATES the CoreMIDI client
@@ -352,8 +380,9 @@ public final class ProjectStore {
     /// empty).
     public private(set) var engineNotices: [EngineNotice] = []
 
-    /// Ring bound: at most this many DISTINCT codes are retained (16 — the
-    /// engine currently posts 6 codes, so the cap is generous headroom, and
+    /// Ring bound: at most this many DISTINCT codes are retained (16 — 10
+    /// codes are posted today, censused on `EngineNoticeEvent.code` 2026-09-24,
+    /// so the cap is still headroom, and
     /// the popover list stays readable). Overflow evicts the STALEST entry
     /// (smallest `lastAt` — the least-recently-posted code), keeping live
     /// problems visible.
@@ -453,6 +482,24 @@ public final class ProjectStore {
     @ObservationIgnored public var referenceImportsDirectory =
         ProjectStore.referenceImportsDefault()
 
+    /// This machine's RVC voice store (m24-n) — the directory a save READS to
+    /// embed the voices a track's `voiceProvenance` names, and that
+    /// `installEmbeddedVoice` writes a project's embedded copy back into.
+    ///
+    /// Production: exactly `VoiceStore.directory`, the same
+    /// `<Application Support>/DAWPro/VoiceModels/` that `vc.importVoiceModel`
+    /// writes and that the RVC sidecar is pointed at via `RVC_VOICES_DIR`. One
+    /// home, one computation — a second expression here is the shape that
+    /// embeds from a directory the converter never scans.
+    ///
+    /// Under a detected Swift test process the default redirects to a
+    /// per-process temp root (`voiceStoreDefault()`), so a test that never
+    /// mentions this property still cannot read — or, via
+    /// `installEmbeddedVoice`, WRITE — the user's real voice models. Remains a
+    /// public seam so tests can point it at a fixture.
+    @ObservationIgnored public var voiceStoreDirectory =
+        ProjectStore.voiceStoreDefault()
+
     /// In-flight AI clip fixes, jobId-keyed (M6 v-b). In-memory only: cleared by
     /// project.open/new, not persisted (a pending fix does not survive relaunch
     /// — re-run ai.fixClipRegion). Observed so the future UI can badge it; the
@@ -529,6 +576,25 @@ public final class ProjectStore {
         /// nil = today's linear take, landed verbatim. `transport.setLoop`
         /// refuses mid-record, so the freeze is exact like the map's.
         let loop: LoopTakeWindow?
+        /// m34-h: the recording-session generation this take belongs to. A
+        /// completion whose generation no longer matches lands NOTHING — the
+        /// project was replaced (open/new/recover) while the take was in
+        /// flight, so its clips would belong to a project that is gone.
+        ///
+        /// ⭐ THIS REPLACED AN IDENTITY CHECK AGAINST THE SHARED
+        /// `pendingTake` SLOT, AND THE DIFFERENCE IS THE WHOLE POINT OF
+        /// LAYERING. Take N's completion is asynchronous (writer queue → main
+        /// actor), so with layers, take N+1 is ALREADY in the slot by the time
+        /// take N lands — comparing against the slot would drop every layer
+        /// but the last. The generation only moves on a project boundary,
+        /// which is the condition actually being tested.
+        let sessionGeneration: Int
+        /// m34-h-1 LIVE LOOPING: non-nil exactly when this take is a loop-deck
+        /// LAYER pass. The linear landing below is bypassed for a fold-and-tile
+        /// landing (`landDeckLayer`) — the same shape `pending.loop` uses to
+        /// reach `finishLoopTake`, and for the same reason: the geometry is
+        /// frozen at record start, so a deck edited mid-take cannot move it.
+        var deck: DeckTakeWindow?
     }
 
     /// The frozen loop window of a loop-cycle take (m15-b). `cycleSeconds` is
@@ -541,7 +607,43 @@ public final class ProjectStore {
         let cycleSeconds: Double
     }
 
+    /// The most recently started take, for diagnostics and for `record()`'s
+    /// own failure path. ⚠️ NOT the authority for landing a take: each take's
+    /// completion carries its OWN `PendingTake` (m34-h), because with live
+    /// layering several takes can be in flight at once.
     @ObservationIgnored private var pendingTake: PendingTake?
+
+    /// The PROVISIONAL take region the arrange draws while a take is rolling
+    /// (m34-a-2) — nil whenever nothing should be drawn, which is most of the
+    /// time. Observed, because the lanes render it.
+    ///
+    /// ⭐ **CACHED HERE RATHER THAN COMPUTED IN THE VIEW BECAUSE COMPUTING IT
+    /// READS THE ENGINE**, and a view that polled the engine mid-`body` would
+    /// be a second engine caller on a path SwiftUI may run any number of times
+    /// per frame. `refreshLiveTakeRegion()` is the ONE writer; the view reads
+    /// this value and decides nothing.
+    ///
+    /// ⛔ It is deliberately NOT part of `Project`: it is never encoded, never
+    /// undone, and never seen by `performEdit`. See `ProvisionalTakeRegion`.
+    public private(set) var liveTakeRegion: ProvisionalTakeRegion?
+
+    /// LIVE LOOPING (m34-h-1) — the open loop-deck session, or nil when the
+    /// app is not live-looping. Observed, because the deck strip's lamps render
+    /// from it and nothing else.
+    ///
+    /// ⛔ **DELIBERATELY NOT PART OF `Project`**, exactly like `liveTakeRegion`:
+    /// it is never encoded, never undone and never seen by `performEdit`. The
+    /// LAYERS it records are ordinary clips that are all three; the SESSION is
+    /// a performance mode, and a saved project that reopened mid-session with a
+    /// half-armed layer pointing at a take that no longer exists would be a
+    /// wedge with no user-visible cause.
+    ///
+    /// ⚠️ Written by `ProjectStore+LoopDeck.swift` only — `internal(set)` for
+    /// that reason, since a Swift extension cannot declare stored state.
+    public internal(set) var loopDeck: LoopDeck?
+    /// Bumped whenever the recording session identity changes (open/new/
+    /// recover). See `PendingTake.sessionGeneration`.
+    @ObservationIgnored private var recordingSessionGeneration = 0
     @ObservationIgnored private var takeCounter = 0
     @ObservationIgnored private var cachedSessionRecordingDir: URL?
 
@@ -564,6 +666,16 @@ public final class ProjectStore {
         cachedSessionRecordingDir = nil
         takeCounter = 0
         pendingTake = nil
+        // m34-h: any take still in flight belongs to the OUTGOING project and
+        // must not land in the incoming one. Bumping here is what its
+        // completion compares against.
+        recordingSessionGeneration &+= 1
+        // m34-h-1: the deck's layers point at track and clip ids in the
+        // OUTGOING project. Carrying it into a new/opened one would leave every
+        // lamp pointing at nothing, and a `looper.undoLayer` would search for a
+        // clip that had never existed here. The session is a performance mode,
+        // not project content — it does not survive a project boundary.
+        loopDeck = nil
     }
 
     public init(
@@ -655,6 +767,23 @@ public final class ProjectStore {
         engine?.setEndStop(beat: armedEndStop)
     }
 
+    /// Re-arms the bound after a change that is NOT project content.
+    ///
+    /// ⚠️ **A LIVE-LOOPING SESSION IS A PERFORMANCE MODE, NOT A DOCUMENT EDIT**
+    /// (m34-h-1). Opening one suspends the content-end bound and closing one
+    /// re-arms it, so the bound must be recomputed at both — but routing that
+    /// through `performEdit` would fire its unconditional `markDirty()` and
+    /// flag an untouched project as unsaved, prompting to save a document
+    /// nobody changed. (It would NOT have polluted the undo stack: `loopDeck`
+    /// is outside `captureEditState`, so the no-op body journals nothing. The
+    /// dirty flag was the only leak, and it was silent.)
+    ///
+    /// The bound itself is still computed in exactly ONE place — this is a
+    /// second door to `refreshEndStop()`, not a second policy.
+    func refreshEndStopAfterModeChange() {
+        refreshEndStop()
+    }
+
     /// Clears the armed bound on BOTH sides. Used where a bound must provably
     /// not survive — stop, and the start of a take.
     private func disarmEndStop() {
@@ -668,7 +797,18 @@ public final class ProjectStore {
         TransportEndStop.bound(
             contentEndBeat: contentEndBeat,
             positionBeats: transport.positionBeats,
-            isEnabled: stopAtContentEnd,
+            // ⭐⭐ m34-h-1 — **AN OPEN LOOP-DECK SESSION SUSPENDS THE
+            // CONTENT-END BOUND, AND THAT IS THE FEATURE, NOT A CONCESSION.**
+            // "The music never stops" is the whole of live looping; a transport
+            // that stopped itself the moment the playhead ran off the end of
+            // the tiled material would end the session with no user action and
+            // no visible cause. The runway extension (`LoopDeckScheduler`)
+            // normally keeps the playhead well inside the material, so this is
+            // the second of two independent guards, not the only one — and it
+            // is expressed through `isEnabled` so `TransportEndStop.bound`'s
+            // signature and every existing caller stay byte-identical.
+            // Re-armed by `endLoopDeck()` and by `stop()`.
+            isEnabled: stopAtContentEnd && loopDeck == nil,
             isRecording: transport.isRecording,
             isLoopActive: TransportEndStop.isLoopActive(transport))
     }
@@ -685,6 +825,10 @@ public final class ProjectStore {
 
     public func play() {
         guard !transport.isPlaying else { return }
+        // I1: a transport start stops a sounding note audition and drops one
+        // waiting for its render. The transport plays the edit in context; a
+        // second voice on top would double the vocal.
+        clipNoteAudition.transportDidStart(engine: engine)
         transport.isPlaying = true
         if let engine {
             try? engine.prepare()
@@ -706,7 +850,26 @@ public final class ProjectStore {
     }
 
     public func stop() {
+        // m23-ap I1 UI hooks (the RT review's H5): Stop silences a sounding
+        // note audition, and it does so BEFORE the guard below on purpose. A
+        // note audition only ever sounds with the transport STOPPED (every door
+        // refuses while it rolls, and `play()` stops one), so behind the guard
+        // this line could never reach the one case it exists for. That case is
+        // `transport.stop` on the wire and any Stop control: the transport
+        // bar's own button is a play/pause toggle, whose play half already
+        // stops the audition (`play()` → `transportDidStart`). A slowed clip
+        // plays up to 6 SOURCE seconds, stretched — hence a stop door at all.
+        // Idempotent: with nothing sounding the engine has nothing to fade.
+        stopClipNoteAudition()
         guard transport.isPlaying || transport.isRecording else { return }
+        // m34-h-1: a QUEUED deck layer is waiting for a boundary the stopped
+        // transport will never reach, and nothing ticks while stopped — so it
+        // would sit armed forever and refuse every later arm. A layer that is
+        // already ROLLING is left alone on purpose: `stopRecording` below
+        // finalizes it and it lands through `landDeckLayer` like any other.
+        // The SESSION itself survives a stop — the grid is still valid on the
+        // next play, and ending it is `looper.end`'s job.
+        cancelQueuedDeckPass()
         let wasRecording = transport.isRecording
         transport.isPlaying = false
         transport.isRecording = false
@@ -717,6 +880,27 @@ public final class ProjectStore {
         // TAKE) still live.
         disarmEndStop()
         if wasRecording {
+            // ⛔⛔ **A STAND-DOWN MUST NEVER OUTLIVE ITS TAKE — THE PEDAL LIFTS
+            // BEFORE THE TAKE IS FINALIZED (m34-l), AND THE ORDER IS THE WHOLE
+            // POINT.** `stopRecording` runs `MIDICaptureSession.finish`, which
+            // flushes each lane's suppressed tail and closes it. Lift after that
+            // and the closing CC 64 = 0 has no session to reach: the clip's
+            // sustain lane ends at 127, and because CC 64 is one of the types
+            // `MIDIControllerType.resetsAtClipOnset` deliberately does NOT clear
+            // at a clip boundary, every clip that plays after it inherits a
+            // pedal nobody pressed. Lifting here puts the 0 in the lane at the
+            // moment it actually happened.
+            //
+            // ⚠️ DELIBERATELY NOT ON A PLAIN PLAYBACK STOP. Stopping a jam is
+            // not the end of a performance, the latch is the user's explicit
+            // choice, and its lamp is lit — turning it off underneath them would
+            // be a state change with no cause they can see. A take ENDING is
+            // different: it closes a record, and a record must be closed
+            // honestly.
+            //
+            // Structural no-op when the pedal was never pressed: `liftSustain`
+            // returns immediately on `!sustainDown` and pushes nothing.
+            livePlay.liftSustain(engine: engine)
             // stopRecording halts playback internally AND finalizes the take —
             // calling stopPlayback here would tear the transport down twice.
             engine?.stopRecording()
@@ -730,6 +914,11 @@ public final class ProjectStore {
             trackMeters[key] = .silence
         }
         masterMeter = .silence
+        // m34-a-2: the provisional take region dies with the take, on this edge
+        // rather than on the next transport tick — a stopped transport produces
+        // no further position changes, so a tick-only refresh would leave the
+        // last frame's region painted over a lane until something else moved.
+        refreshLiveTakeRegion()
     }
 
     public func seek(toBeats beats: Double) throws {
@@ -1009,7 +1198,8 @@ public final class ProjectStore {
             recordStartBeats: transport.positionBeats,
             tempoMap: transport.tempoMap,
             takeNumber: take,
-            loop: loopWindow
+            loop: loopWindow,
+            sessionGeneration: recordingSessionGeneration
         )
         takeCounter = take
         // MIDI-only takes create no capture file at all.
@@ -1036,7 +1226,25 @@ public final class ProjectStore {
         // take is starting and the engine is necessarily running; the order is
         // matched anyway so the two sites cannot teach opposite lessons.
         padPreview.stop(engine: engine)
+        // m23-ct: a live-played note held across record start is not merely
+        // hygiene, it is a CORRECTNESS requirement. A take starts silent and
+        // `MIDICaptureSession` DROPS every pre-anchor note-on, so a key still
+        // down when the take opens would be heard and never captured — exactly
+        // the lie audition's release exists to prevent. It is RELEASED, never
+        // rescued with a synthesised note-on at the anchor: the session's own
+        // doc calls a partial note a lie. The user re-presses.
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
+        // I1: a take starts with no note audition sounding or waiting.
+        clipNoteAudition.transportDidStart(engine: engine)
         transport.isRecording = true
         transport.isPlaying = true
         // ⚠️⚠️ m25-d — RECORDING MUST NEVER STOP AT CONTENT END. Recording past
@@ -1060,7 +1268,10 @@ public final class ProjectStore {
         do {
             try engine.startTake(transport, audioURL: url,
                                  captureMIDI: !armedInstrumentIDs.isEmpty) { [weak self] result in
-                self?.finishTake(result)
+                // m34-h: the take's OWN pending record rides the closure. See
+                // `PendingTake.sessionGeneration` for why reading the shared
+                // slot here is wrong the moment layering exists.
+                self?.finishTake(result, pending: pending)
             }
         } catch {
             transport.isRecording = false
@@ -1079,22 +1290,309 @@ public final class ProjectStore {
         return error
     }
 
+    /// Publishes a recording-path diagnostic without throwing. `recordFailure`'s
+    /// sibling for the paths that DISCARD rather than refuse — an empty deck
+    /// layer, a launch that could not start (m34-h-1) — where the caller is a
+    /// scheduler with nobody to throw to and the message is the only trace the
+    /// performer gets. `lastRecordingError` is `public private(set)`, so the
+    /// loop-deck extension reaches it through here rather than by widening it.
+    func noteRecordingError(_ message: String?) {
+        lastRecordingError = message
+    }
+
+    // MARK: - The growing take region (m34-a-2)
+
+    /// The take in flight, as it was SNAPSHOTTED at record start — nil when no
+    /// take has been started since the last project boundary.
+    ///
+    /// ⚠️ **THIS IS NOT A LIFETIME.** `pendingTake` survives the stop, because
+    /// the writer finalizes asynchronously and the most recent take is kept for
+    /// diagnostics. Callers that want "is a take rolling" must read
+    /// `transport.isRecording`; `TakeRegionPreview.region` takes both for that
+    /// reason.
+    public var pendingTakeInfo: PendingTakeInfo? {
+        pendingTake.map {
+            PendingTakeInfo(instrumentTrackIDs: $0.armedInstrumentTrackIDs,
+                            audioTrackIDs: $0.armedTrackIDs,
+                            startBeat: $0.recordStartBeats,
+                            takeNumber: $0.takeNumber,
+                            isLoopTake: $0.loop != nil)
+        }
+    }
+
+    /// Recomputes `liveTakeRegion` from the take snapshot, the engine's live
+    /// capture extent and the transport. Cheap (one optional engine read plus
+    /// the pure rule) and idempotent, so it is safe to call from the transport
+    /// tick — which is what drives it, at the same ~30 Hz cadence and from the
+    /// same observation path as follow-the-playhead (m34-a-1).
+    ///
+    /// ⚠️ **IT IS ALSO CALLED ON EVERY RECORDING-STATE EDGE**, not only from
+    /// the tick: `stop()` and `finishLayer()` end a take without necessarily
+    /// producing another position change, so a tick-only refresh would leave
+    /// the last frame's region on screen until something else moved. The
+    /// region must be gone the instant the take is.
+    public func refreshLiveTakeRegion() {
+        let next = TakeRegionPreview.region(pending: pendingTakeInfo,
+                                            extent: engine?.liveTakeExtent(),
+                                            playheadBeat: transport.positionBeats,
+                                            isRecording: transport.isRecording)
+        // Guarded so a ~30 Hz poll only publishes an OBSERVED change. Without
+        // this every tick would dirty an `@Observable` property with an equal
+        // value and re-render the whole arrange 30×/second during a take.
+        if next != liveTakeRegion { liveTakeRegion = next }
+    }
+
+    /// LIVE LOOPING (m34-h phase 1) — finish the rolling take and land it,
+    /// WITHOUT stopping the transport. The performer closes a layer and the
+    /// music keeps running; `record()`'s counterpart, `stop()`, tears both down
+    /// together and stays exactly as it was.
+    ///
+    /// The take lands through the SAME `finishTake` completion `record()` uses,
+    /// so a layer is ONE `performEdit("Record Take N")` and ONE undo step. It
+    /// arrives asynchronously (the writer finalizes on its own queue), exactly
+    /// as it does on the stop path — the clip is NOT on the timeline when this
+    /// method returns.
+    ///
+    /// ⚠️ **THE END-STOP BOUND IS DELIBERATELY LEFT DISARMED HERE.** A take
+    /// runs with no content-end bound by law (m25-d), and re-arming it at this
+    /// instant would arm it against the content end as it stands BEFORE the
+    /// layer has landed — i.e. a bound in the past, which would stop the music.
+    /// Stopping the music is the one thing this feature exists to prevent. The
+    /// bound re-arms by itself one step later: `finishTake` lands the clip
+    /// inside `performEdit`, and `performEdit` calls `refreshEndStop()` with
+    /// the new content end. The cost, stated rather than discovered: a take
+    /// that lands nothing (empty capture) leaves playback unbounded until the
+    /// next edit or transport transition.
+    public func finishLayer() throws {
+        guard let engine else {
+            throw recordFailure(.engineUnavailable)
+        }
+        guard transport.isRecording else {
+            throw recordFailure(.transportBusy(
+                "not recording — start a layer with transport.recordLayer (or transport.record) first"
+            ))
+        }
+        // ⚠️ THE RETURN VALUE IS THE CONTRACT, NOT A COURTESY. `false` means
+        // the engine closed NOTHING — it has no such capability, or no take was
+        // actually rolling. Clearing `isRecording` on a `false` would leave the
+        // store believing the layer had landed while the engine kept capturing
+        // into a take nobody would ever collect: a silently lost performance.
+        guard engine.finishTakeKeepingPlayback() else {
+            throw recordFailure(.transportBusy(
+                "this engine cannot finish a take without stopping playback — use transport.stop instead"
+            ))
+        }
+        transport.isRecording = false
+        // m34-a-2: this layer's provisional region ends with this layer. The
+        // transport keeps rolling, so a tick would clear it a frame later
+        // anyway — but a frame of a region belonging to a take that has already
+        // closed is exactly the ghost this feature must not have.
+        refreshLiveTakeRegion()
+        // `transport.isPlaying` is deliberately NOT cleared, `playbackTask` is
+        // deliberately NOT cancelled, and the meters are deliberately NOT
+        // darkened — the three things `stop()` does that would end the music.
+    }
+
+    /// LIVE LOOPING (m34-h phase 1) — start the NEXT layer against playback
+    /// that is already running. `record()`'s sibling for a transport that is
+    /// rolling; `record()` itself is untouched and still refuses unless
+    /// stopped.
+    ///
+    /// ⭐ THIS IS A NEW ENTRY POINT, NOT A RELAXED GUARD. `record()`'s
+    /// `!transport.isPlaying` precondition carries real meaning — an ordinary
+    /// take reschedules the graph from the record position — and weakening it
+    /// would silently change what every existing caller gets. The two paths
+    /// have opposite preconditions and reach different engine primitives.
+    ///
+    /// The layer's capture is aligned onto the ALREADY-RUNNING anchor, so
+    /// nothing currently sounding is stopped, rescheduled or re-anchored.
+    ///
+    /// ⚠️ **COUNT-IN DOES NOT APPLY TO A LAYER, BY DESIGN.** The music already
+    /// playing is the count — this is what every hardware and software looper
+    /// does — and the layer path never reaches the code that implements a
+    /// count-in. Refusing instead would break this method for every user, since
+    /// the project default is one bar (m23-cy). Pinned by test, not left
+    /// emergent.
+    ///
+    /// ⛔ **REFUSED WHILE THE LOOP IS ENABLED (v1).** Recording INTO a loop
+    /// region is overdub, which this app does not model, and the transport's
+    /// beat is modular under a loop while every capture clock is linear — see
+    /// `AudioEngine.startTakeInPlayback`. Refused for punch for the same
+    /// "untested combination" reason the m15-b loop × punch gate uses.
+    public func recordLayer() throws {
+        try startLayerTake(deckWindow: nil)
+    }
+
+    /// `recordLayer()`'s body, with the ONE seam a loop-deck pass needs: the
+    /// frozen `DeckTakeWindow` that turns the landing from "verbatim clip" into
+    /// "fold and tile" (m34-h-1). Every guard, every teaching error and every
+    /// engine call below is `recordLayer()`'s, unchanged — the deck adds a
+    /// field to `PendingTake` and nothing else to this path.
+    func startLayerTake(deckWindow: DeckTakeWindow?) throws {
+        guard let engine else {
+            throw recordFailure(.engineUnavailable)
+        }
+        // The mirror image of `record()`'s guard, and deliberately spelled out
+        // rather than shared: a layer needs a transport that IS rolling and is
+        // NOT already capturing.
+        guard transport.isPlaying else {
+            throw recordFailure(.transportBusy(
+                "nothing is playing — press play first, or use transport.record to record from a stop"
+            ))
+        }
+        guard !transport.isRecording else {
+            throw recordFailure(.transportBusy(
+                "already recording a layer — finish it with transport.finishLayer first"
+            ))
+        }
+        let armedAudioIDs = tracks.filter { $0.kind == .audio && $0.isArmed }.map(\.id)
+        let armedInstrumentIDs = tracks.filter { $0.kind == .instrument && $0.isArmed }.map(\.id)
+        guard !armedAudioIDs.isEmpty || !armedInstrumentIDs.isEmpty else {
+            throw recordFailure(.noArmedTracks)
+        }
+        // Refused store-side as well as engine-side, on purpose: the store's
+        // teaching error is what a user or an agent actually reads, and the
+        // engine's guard is what makes the refusal true even for a caller that
+        // reaches the engine directly.
+        guard !transport.isLoopEnabled else {
+            throw recordFailure(.invalidLoopRange(
+                "cannot record a layer while the loop is enabled — disable the loop first "
+                + "(transport.setLoop). Recording into a loop region is overdub, which is not "
+                + "supported yet; loop-cycle takes (transport.record) record ALTERNATE TAKES of "
+                + "one part, not stacked layers."
+            ))
+        }
+        guard !transport.isPunchEnabled else {
+            throw recordFailure(.invalidPunchRange(
+                "cannot record a layer with a punch window enabled — disable punch first "
+                + "(transport.setPunch)"
+            ))
+        }
+        // Audio-capture gates, verbatim from `record()`: a MIDI-only layer must
+        // never fire the microphone prompt.
+        if !armedAudioIDs.isEmpty {
+            switch engine.recordPermission {
+            case .denied:
+                throw recordFailure(.recordPermissionDenied)
+            case .undetermined:
+                engine.requestRecordPermission { _ in }
+                throw recordFailure(.recordPermissionPending)
+            case .granted:
+                break
+            }
+        }
+
+        let take = takeCounter + 1
+        let pending = PendingTake(
+            armedTrackIDs: armedAudioIDs,
+            armedInstrumentTrackIDs: armedInstrumentIDs,
+            // The live playhead. It is up to one display tick (~33 ms) behind
+            // the engine's own clock; the engine translates it onto the running
+            // anchor and the writer's `startOffsetSeconds` reports the true gap,
+            // so the clip still lands where capture really began. The error
+            // self-corrects and does not accumulate across layers.
+            recordStartBeats: transport.positionBeats,
+            tempoMap: transport.tempoMap,
+            takeNumber: take,
+            // Never a loop-cycle take: the loop is refused above. A layer is
+            // "another part, kept", not "another attempt at one part".
+            loop: nil,
+            sessionGeneration: recordingSessionGeneration,
+            // m34-h-1: frozen here, at the same instant as the tempo map and
+            // the record-start beat, so a deck whose origin or cycle length
+            // changes later cannot move a take that is already rolling.
+            deck: deckWindow
+        )
+        takeCounter = take
+        let url: URL? = armedAudioIDs.isEmpty
+            ? nil
+            : sessionRecordingDir.appendingPathComponent("take-\(take).wav")
+
+        lastRecordingError = nil
+        pendingTake = pending
+        // The silent-start block, verbatim from `record()` and for the SAME
+        // correctness reason, not hygiene: a take starts silent, and
+        // `MIDICaptureSession` drops every pre-anchor note-on, so anything held
+        // when the layer opens would be heard and never captured. Order is
+        // load-bearing — see `record()` for the full argument.
+        padPreview.stop(engine: engine)
+        livePlay.stopAll(engine: engine)
+        audition.stopAll(engine: engine)
+        transport.isRecording = true
+        // m25-d: a rolling take must never stop at content end — recording past
+        // the end of existing material is the entire point. Same explicit
+        // disarm `record()` performs, for the same reason.
+        disarmEndStop()
+        do {
+            try engine.startTakeInPlayback(transport, audioURL: url,
+                                           captureMIDI: !armedInstrumentIDs.isEmpty) { [weak self] result in
+                self?.finishTake(result, pending: pending)
+            }
+        } catch {
+            // Playback is NOT torn down on a failed layer start — it was
+            // running before this call and the caller never asked to stop it.
+            // Only the recording intent is wound back.
+            transport.isRecording = false
+            pendingTake = nil
+            lastRecordingError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+            // The bound was disarmed above for a take that never started;
+            // playback continues, so restore it for the transport as it stands.
+            refreshEndStop()
+            throw error
+        }
+    }
+
     /// Engine completion for one finalized take: turn the capture file into
     /// one clip per (still-existing) armed audio track AND the captured MIDI
     /// into one clip per (still-existing) armed instrument track — all inside
     /// ONE `performEdit("Record Take N")`, so a recorded take is one undo
     /// step. Or surface the failure.
-    private func finishTake(_ result: Result<TakeResult, Error>) {
-        let pending = pendingTake
-        pendingTake = nil
+    private func finishTake(_ result: Result<TakeResult, Error>, pending: PendingTake) {
+        // ⭐ EVERY take ending funnels through here, so the provisional region
+        // (m34-a-2) is retired here rather than at the two USER-initiated edges
+        // alone. `stop()` and `finishLayer()` do not cover the endings the
+        // ENGINE starts by itself — `abortRecordingNoInput` (the dead-input
+        // watchdog) and `endTakeOnFatalConfigurationChange` (device unplug) —
+        // and on those paths playback dies engine-side, so no transport tick
+        // ever fires the refresh either. A region already drawn (notes were
+        // played before the abort) would linger over an empty lane until the
+        // user's next transport action. `defer` because this function has four
+        // exits, INCLUDING the stale-generation guard above the switch: a call
+        // at the closing brace would miss three of them. Idempotent by design —
+        // `refreshLiveTakeRegion` recomputes from current state and publishes
+        // only on a real change, so the m34-h case where take N+1 is already
+        // rolling recomputes N+1's region rather than clearing it.
+        defer { refreshLiveTakeRegion() }
+        // Release the shared slot only if it still holds THIS take. With live
+        // layering (m34-h) take N+1 may already own it, and clearing it would
+        // make the store forget a take that is genuinely still rolling.
+        if pendingTake?.takeNumber == pending.takeNumber { pendingTake = nil }
+        // The project was replaced while this take was in flight: its clips
+        // belong to a session that no longer exists. Drop them — including the
+        // error branch, which would otherwise write a stale
+        // `lastRecordingError` onto the incoming project.
+        guard pending.sessionGeneration == recordingSessionGeneration else { return }
         switch result {
         case .success(let take):
-            guard let pending else { return }  // no take in flight — stale completion
             // Loop-cycle take (m15-b): the ONE linear capture slices into
             // per-cycle lanes — the linear path below stays byte-identical
             // for every non-loop take (the G3 era pin).
             if let loop = pending.loop {
                 finishLoopTake(take, pending: pending, loop: loop)
+                return
+            }
+            // m34-h-1 LIVE LOOPING: a deck LAYER folds into one cycle and tiles
+            // forward, rather than landing verbatim. Placed here, beside the
+            // loop-take branch, because the two are the same kind of exception
+            // to the same linear landing — and BEFORE the geometry below, which
+            // a deck layer never uses.
+            if let window = pending.deck {
+                landDeckLayer(take,
+                              window: window,
+                              instrumentTrackIDs: pending.armedInstrumentTrackIDs,
+                              recordStartBeats: pending.recordStartBeats,
+                              takeNumber: pending.takeNumber)
                 return
             }
             let audio = take.audio
@@ -1170,6 +1668,12 @@ public final class ProjectStore {
         case .failure(let error):
             lastRecordingError = (error as? LocalizedError)?.errorDescription
                 ?? error.localizedDescription
+            // m34-h-1: a deck pass whose take FAILED never reaches
+            // `landDeckLayer`, so its pending slot would stay `.closing`
+            // forever and every later arm would be refused with "a layer is
+            // already armed". The deck must survive a failed pass, not wedge on
+            // one.
+            if pending.deck != nil { abandonDeckPass() }
         }
     }
 
@@ -1611,6 +2115,17 @@ public final class ProjectStore {
     /// key press and the `note.audition` wire verb all run through it.
     @ObservationIgnored public let audition = AuditionController()
 
+    /// THE live-play policy home (m23-ct) — musical typing, the on-screen
+    /// keyboard and the `note.play` wire verb all run through it. Sibling of
+    /// `audition`, NOT a mode of it: see `LivePlayController` for why.
+    @ObservationIgnored public let livePlay = LivePlayController()
+
+    /// THE clip-note audition policy home (I1): hearing a vocal note from the
+    /// render playback plays. The note editor's press and release doors and
+    /// the wire's audition verb all run through it. See `ClipNoteAudition.swift`
+    /// and `ProjectStore+NoteAudition.swift`.
+    @ObservationIgnored public let clipNoteAudition = ClipNoteAuditionController()
+
     /// THE CC→target mapping home (m28-knob) — one table, one engine
     /// subscription, the `audition` idiom. Engine-free; handed the engine per
     /// call. See `ProjectStore+MIDIControl.swift`.
@@ -1641,7 +2156,120 @@ public final class ProjectStore {
             throw ProjectError.transportBusy("cannot audition while recording — stop the take first")
         }
         try validateAuditionTarget(trackID: trackID, pitches: pitches, velocity: velocity)
+        // m23-ct arbitration mirror: one live-note owner at a time. Both
+        // controllers write the SAME engine-side `auditionVoices` ledger, so a
+        // held typed note and a piano-roll drag would ping-pong over it at
+        // 500 ms. Placed AFTER validation so a rejected call changes nothing.
+        if livePlay.isHolding { livePlay.stop(engine: engine) }
         return audition.set(trackID: trackID, pitches: pitches, velocity: velocity, engine: engine)
+    }
+
+    /// LIVE PLAY (m23-ct): sounds exactly `pitches` on `trackID` right now AND,
+    /// when a take is rolling on that armed instrument track, records them into
+    /// it. SET semantics: `[]` releases. Held until the caller says otherwise
+    /// (or the render side's 3 s watchdog / the controller's 30 s ceiling cuts
+    /// it), so a typing surface calls this on every key edge and the controller
+    /// diffs.
+    ///
+    /// ⭐⭐ **DELIBERATELY NOT REFUSED WHILE RECORDING — THAT SINGLE DIFFERENCE
+    /// IS THE WHOLE REASON THIS METHOD EXISTS BESIDE `auditionPitches`.**
+    /// Audition's `transportBusy` refusal is documented as *"Policy, not
+    /// mechanism (the audition ring is structurally unreachable from the
+    /// capture ring)"*: it refuses because audition is heard-but-not-captured,
+    /// and sounding something during a take that the take will not contain is
+    /// a lie. **This path IS captured**, so the assumption that refusal protects
+    /// is TRUE here rather than false.
+    ///
+    /// ⛔ **DO NOT "HARMONISE" THE TWO.** Adding a recording guard here makes
+    /// `MIDICaptureSession`, `transport.record`, punch and take comping
+    /// permanently unreachable for a user with no hardware controller — which
+    /// is this user, verbatim: *"no physical keyboard."* And relaxing
+    /// audition's guard is worse in the other direction: a piano-roll DRAG
+    /// would become capturable, silently fabricating notes into a take the
+    /// user never played.
+    ///
+    /// The `captureIntoTake` verdict is computed HERE because this is the only
+    /// layer that knows arm state. The engine narrows it (is a take actually
+    /// capturing MIDI, does a session exist) but never widens it.
+    @discardableResult
+    public func playLiveNotes(trackID: UUID, pitches: [Int],
+                              velocity: Int = AuditionController.defaultVelocity) throws
+        -> LivePlayResult {
+        // Computed for the RELEASE path too, never hardcoded false: an empty
+        // set is what closes the take's open notes, and a release that skipped
+        // the take would leave a note to clamp at the end of the recording.
+        let captureIntoTake = transport.isRecording
+            && tracks.first(where: { $0.id == trackID })
+                .map { $0.isArmed && $0.kind == .instrument } == true
+
+        // Stopping is ALWAYS allowed, and always unvalidated: a refusal here
+        // would strand a voice whose track was deleted or re-kinded mid-hold.
+        if pitches.isEmpty {
+            let outcome = livePlay.set(trackID: trackID, pitches: [], velocity: 0,
+                                       captureIntoTake: captureIntoTake, engine: engine)
+            return LivePlayResult(trackID: trackID, pitches: [], velocity: 0, outcome: outcome)
+        }
+        // The SAME validation audition runs, unchanged — one home for "is this
+        // a legal thing to sound on this track".
+        try validateAuditionTarget(trackID: trackID, pitches: pitches, velocity: velocity)
+        // Arbitration: one live-note owner at a time (see `auditionPitches`).
+        // After validation, so a rejected call changes nothing.
+        if audition.isHolding { audition.stop(engine: engine) }
+        let outcome = livePlay.set(trackID: trackID, pitches: pitches, velocity: velocity,
+                                   captureIntoTake: captureIntoTake, engine: engine)
+        return LivePlayResult(trackID: trackID,
+                              pitches: LivePlayController.clampPitches(pitches),
+                              velocity: min(LivePlayController.velocityRange.upperBound,
+                                            max(LivePlayController.velocityRange.lowerBound,
+                                                velocity)),
+                              outcome: outcome)
+    }
+
+    /// THE SUSTAIN PEDAL (m34-l): presses or lifts CC 64 on `trackID` right now
+    /// AND, when a take is rolling on that armed instrument track, records the
+    /// edge into the take's controller lane.
+    ///
+    /// ⭐⭐ **THIS IS THE ANSWER TO "WHY DOES THE SOUND STOP WHEN I LIFT MY
+    /// FINGER".** A real piano's dampers fall on key release; the damper pedal
+    /// holds them off. Both built-in instruments and the hosted sound-bank path
+    /// implement exactly that — MEASURED, not read off a doc string: with CC 64
+    /// held, a note's key-up left the voice at full level (polySynth −16.54,
+    /// sampler −13.94, GM sound bank −23.05 momentary LUFS) where the same
+    /// key-up without the pedal read silent.
+    ///
+    /// ⛔ **NOT `playLiveExpression`, AND THE DIVERGENCE IS THE DESIGN.** That
+    /// method's gesture machine (`PadPreviewController`) permits one open
+    /// gesture and auto-releases it at 30 s — correct for a drag, fatal for a
+    /// latch. Everything BELOW it is shared: this reaches
+    /// `AudioEngine.setLiveExpression`, the same m34-f funnel that sounds a
+    /// controller and feeds the rolling take, by the same call.
+    ///
+    /// ⛔ **THE PRESS IS VALIDATED, THE LIFT NEVER IS.** Gate the ons, never
+    /// gate the offs: a lift whose track was deleted or re-kinded mid-hold must
+    /// still reach the engine, or the pedal is stuck with nothing on screen
+    /// explaining it.
+    @discardableResult
+    public func playLiveSustain(trackID: UUID, down: Bool) throws -> LiveSustainResult {
+        // Computed for the LIFT path too, never hardcoded false — the
+        // `playLiveNotes` rule: `LivePlayController` prefers the verdict from
+        // the PRESS on a lift, and can only do that if this layer keeps
+        // supplying one.
+        let captureIntoTake = transport.isRecording
+            && tracks.first(where: { $0.id == trackID })
+                .map { $0.isArmed && $0.kind == .instrument } == true
+        if down {
+            // The SAME target validation a note-on runs, minus the pitch/
+            // velocity clauses a pedal has no equivalent of — one home for "is
+            // this a legal strip to play".
+            guard let track = tracks.first(where: { $0.id == trackID }) else {
+                throw ProjectError.trackNotFound(trackID)
+            }
+            guard track.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(track.kind)
+            }
+        }
+        return livePlay.setSustain(trackID: trackID, down: down,
+                                   captureIntoTake: captureIntoTake, engine: engine)
     }
 
     /// One-shot audition that releases itself after `durationMs` — the wire's
@@ -1661,6 +2289,9 @@ public final class ProjectStore {
                 "durationMs must be \(AuditionController.durationRangeMs.lowerBound)…"
                 + "\(AuditionController.durationRangeMs.upperBound) ms — got \(durationMs)")
         }
+        // m23-ct arbitration: a one-shot ALSO opens an audition hold, so it must
+        // take the live-note ledger the same way `auditionPitches` does.
+        if livePlay.isHolding { livePlay.stop(engine: engine) }
         return audition.oneShot(trackID: trackID, pitches: pitches, velocity: velocity,
                                 durationMs: durationMs, engine: engine)
     }
@@ -1676,9 +2307,20 @@ public final class ProjectStore {
     /// `AudioEngine.previewController` answers by STARTING THE AUDIO HARDWARE, on
     /// the app-resign-active path, to send a controller to silence.
     public func stopAllAudition() {
+        // I1: a note audition sounding or waiting for its render stops too.
+        clipNoteAudition.stop(engine: engine)
         // A pad gesture left open across a project boundary would park a
         // controller on a strip nobody is looking at any more (breath pad P6).
         padPreview.stop(engine: engine)
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
     }
 
@@ -1721,6 +2363,65 @@ public final class ProjectStore {
                                       expressionCC: expressionCC, engine: engine)
     }
 
+    /// LIVE EXPRESSION (m34-f step ②): streams one effort value to `trackID`'s
+    /// instrument as a live controller AND, when a take is rolling on that
+    /// armed instrument track, records it into the take's controller lane.
+    ///
+    /// ⭐⭐ **DELIBERATELY NOT REFUSED WHILE RECORDING — THAT SINGLE DIFFERENCE
+    /// IS THE WHOLE REASON THIS METHOD EXISTS BESIDE `previewEffort`.** It is
+    /// the `auditionPitches` / `playLiveNotes` split, verbatim, one axis over.
+    /// `previewEffort`'s `transportBusy` refusal is documented for audition's
+    /// reason exactly — *"anything a user hears during a take is reasonably
+    /// assumed to be IN the take"* — and that assumption is FALSE for a preview
+    /// and TRUE here. This path IS captured, so the thing the refusal protects
+    /// against cannot happen.
+    ///
+    /// ⛔ **DO NOT "HARMONISE" THE TWO.** Adding a recording guard here puts
+    /// the user's own hand-shaped dynamics permanently out of reach of a take —
+    /// which is the entire feature. Relaxing `previewEffort`'s guard is worse in
+    /// the other direction: an agent auditioning a shape mid-take would silently
+    /// write expression the user never performed.
+    ///
+    /// ⭐ **ONE GESTURE STATE MACHINE, TWO ENTRY POLICIES** — and that is the
+    /// deliberate departure from the `AuditionController`/`LivePlayController`
+    /// sibling pattern. Those two hold different mechanism over two engine-side
+    /// ledgers that genuinely fight, so `ProjectStore` arbitrates between them.
+    /// The pad has ONE physical strip and ONE parked-value invariant
+    /// (`PadPreviewController`'s rule 3), whose entire guarantee is that exactly
+    /// one owner knows what is parked. A second controller would exist only to
+    /// need arbitration against the first.
+    ///
+    /// The `captureIntoTake` verdict is computed HERE, the `playLiveNotes` way,
+    /// because this is the only layer that knows arm state. It is fixed at
+    /// `begin` for the life of the gesture; see `PadPreviewController`.
+    @discardableResult
+    public func playLiveExpression(
+        trackID: UUID, value: Double, phase: PadPreviewPhase,
+        expressionCC: Int = PadPreviewController.defaultExpressionCC) throws
+        -> PadPreviewResult {
+        // ⚠️ Computed on EVERY call including `.end`, never hardcoded — but
+        // only CONSULTED at `begin` (`PadPreviewController` fixes it for the
+        // gesture). Computing it here anyway keeps the verdict's ONE definition
+        // beside `playLiveNotes`', where a future reader can compare them.
+        let captureIntoTake = transport.isRecording
+            && tracks.first(where: { $0.id == trackID })
+                .map { $0.isArmed && $0.kind == .instrument } == true
+
+        if phase != .end {
+            // The SAME target validation `previewEffort` runs, minus its
+            // recording refusal — one home for "is this a legal strip to move".
+            guard let track = tracks.first(where: { $0.id == trackID }) else {
+                throw ProjectError.trackNotFound(trackID)
+            }
+            guard track.kind == .instrument else {
+                throw ProjectError.instrumentRequiresInstrumentTrack(track.kind)
+            }
+        }
+        return try padPreview.preview(trackID: trackID, effort: value, phase: phase,
+                                      expressionCC: expressionCC,
+                                      captureIntoTake: captureIntoTake, engine: engine)
+    }
+
     /// PANIC (m23-af) — the user's and the agent's way out of a stuck note.
     /// Returns how many instrument renderers were asked for all-notes-off.
     ///
@@ -1749,6 +2450,22 @@ public final class ProjectStore {
     /// verb exists for. Panicking mid-take must also keep the take rolling.
     @discardableResult
     public func panic() -> Int {
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        // I1 (RT review H2): the clip-note audition too. `audition.stopAll`
+        // below silences its VOICE (through the engine) but never cleared the
+        // controller, so a release still waiting for its render played up to
+        // 8 s later. This drops that wait, a drag step waiting behind a span
+        // render, and cancels a span render in flight. It touches neither the
+        // live-play nor the audition ledger, so the m23-ct order holds.
+        clipNoteAudition.stop(engine: engine)
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         return engine?.allNotesOff() ?? 0
     }
@@ -2015,7 +2732,10 @@ public final class ProjectStore {
         guard masterEffects.count < Self.maxEffectsPerChain else {
             throw ProjectError.chainFull(Self.maxEffectsPerChain)
         }
-        let effect = EffectDescriptor(kind: kind)
+        // ⭐ `newlyAdded` — the one home for a new insert's starting params. A
+        // new CLIPPER carries explicit params (1× oversampling, the 2026-09-20
+        // ruling) so it can never be mistaken for a pre-ruling one on reload.
+        let effect = EffectDescriptor.newlyAdded(kind: kind)
         let count = masterEffects.count
         let insertAt = min(max(0, index ?? count), count)
         performEdit("Add \(Self.effectDisplayName(kind)) to Master") {
@@ -2093,7 +2813,7 @@ public final class ProjectStore {
         performEdit("Set \(Self.effectDisplayName(kind)) Parameter",
                     key: "fx.param:master:\(effectID.uuidString):\(name)") {
             if let ei = masterEffects.firstIndex(where: { $0.id == effectID }) {
-                Self.applyEffectParam(&masterEffects[ei], name: name, value: clamped)
+                masterEffects[ei].applySetting(name, clamped)
             }
             engine?.masterEffectsChanged(masterEffects)
         }
@@ -2364,7 +3084,10 @@ public final class ProjectStore {
     ///     engine map is UUID-keyed and reconcile's signature is a dictionary,
     ///     so the reconcile is a no-op and nothing announces. Guarding it would
     ///     refuse mid-take an edit that cannot reach audio at all.
-    private func requireRoutingMutationAllowed(_ action: String) throws {
+    /// Module-internal (not private) since m39-tpl-2, the `performEdit`
+    /// precedent: `ProjectStore+Templates.swift` refuses a routed template
+    /// mid-take through this SAME guard.
+    func requireRoutingMutationAllowed(_ action: String) throws {
         guard !transport.isRecording else {
             throw ProjectError.transportBusy(
                 "cannot \(action) while recording — stop first")
@@ -2397,7 +3120,23 @@ public final class ProjectStore {
         case .sampler:   return a.resolvedSampler.zones != b.resolvedSampler.zones
         case .audioUnit: return a.audioUnit?.component != b.audioUnit?.component
         case .soundBank: return a.soundBank?.address != b.soundBank?.address
-        case .testTone, .polySynth: return false
+        // ⭐ m39-dm — `.drumSynth` FOLLOWS THE POLY-SYNTH RULE, NOT THE SAMPLER
+        // RULE, AND THAT IS A DECISION RATHER THAN A DEFAULT.
+        //
+        // A kit edit is a parameter overlay delivered as an atomic snapshot
+        // publish; it maps to the SAME engine node. Verified against the engine
+        // rather than assumed: `PlaybackGraph.InstrumentTrackKey` carries
+        // `kind`, `samplerZones`, `audioUnitComponent`, `soundBank` and `clips`
+        // — NO drum payload — so the graph does not rebuild on a kit change and
+        // this function must not claim it does.
+        //
+        // Returning `true` here would look harmless and would cost the user
+        // real behaviour: on any ROUTED strip (bus output, a send, or feeding a
+        // sidechain) `setInstrument` would then hit
+        // `requireRoutingMutationAllowed`, which throws `transportBusy` while
+        // recording. Every drum knob turn would refuse mid-take, with a
+        // sensible-looking error, for no reason.
+        case .testTone, .polySynth, .drumSynth: return false
         }
     }
 
@@ -2464,19 +3203,13 @@ public final class ProjectStore {
     /// (import/clip family precedent): unknown track → `trackNotFound`; a bus
     /// source → `busRoutingFixed` (buses always output to master in v0); a
     /// missing destination → `trackNotFound`; a non-bus destination → `notABus`.
+    /// Those rules have ONE home, `RoutingRules.checkOutput` (m39-tpl-2a.2),
+    /// which the template builder runs too.
     public func setTrackOutput(id: UUID, busID: UUID?) throws {
         try requireRoutingMutationAllowed("change a track's output")  // m13-c
-        guard let index = tracks.firstIndex(where: { $0.id == id }) else {
-            throw ProjectError.trackNotFound(id)
-        }
-        guard tracks[index].kind != .bus else { throw ProjectError.busRoutingFixed }
-        if let busID {
-            guard let destIndex = tracks.firstIndex(where: { $0.id == busID }) else {
-                throw ProjectError.trackNotFound(busID)
-            }
-            guard tracks[destIndex].kind == .bus else { throw ProjectError.notABus(busID) }
-        }
-        let name = tracks[index].name
+        try RoutingRules.checkOutput(of: id, to: busID, in: tracks)
+        // The rules above proved the track exists; the fallback is a label only.
+        let name = trackName(id) ?? id.uuidString
         editTrack(id: id, label: "Set '\(name)' Output") { $0.outputBusID = busID }
     }
 
@@ -2485,24 +3218,17 @@ public final class ProjectStore {
     /// missing destination → `trackNotFound`; non-bus destination → `notABus`; a
     /// second send to the same bus → `duplicateSend` (which also bounds send count
     /// by bus count). `level` clamps to `Send.levelRange` through `Send.init`.
+    /// Those rules have ONE home, `RoutingRules.checkSend` (m39-tpl-2a.2), which
+    /// the template builder runs too.
     @discardableResult
     public func addSend(toTrack id: UUID, busID: UUID, level: Double = 1) throws -> Send {
         try requireRoutingMutationAllowed("add a send")  // m13-c
-        guard let index = tracks.firstIndex(where: { $0.id == id }) else {
-            throw ProjectError.trackNotFound(id)
-        }
-        guard tracks[index].kind != .bus else { throw ProjectError.busRoutingFixed }
-        guard let destIndex = tracks.firstIndex(where: { $0.id == busID }) else {
-            throw ProjectError.trackNotFound(busID)
-        }
-        guard tracks[destIndex].kind == .bus else { throw ProjectError.notABus(busID) }
-        guard !tracks[index].sends.contains(where: { $0.destinationBusID == busID }) else {
-            throw ProjectError.duplicateSend(busID)
-        }
+        try RoutingRules.checkSend(from: id, to: busID, in: tracks)
         let send = Send(destinationBusID: busID, level: level)
-        let trackName = tracks[index].name
-        let busName = tracks[destIndex].name
-        editTrack(id: id, label: "Add Send '\(trackName)' → '\(busName)'") { $0.sends.append(send) }
+        // The rules above proved both tracks exist; the fallbacks are labels only.
+        let sourceName = trackName(id) ?? id.uuidString
+        let busName = trackName(busID) ?? busID.uuidString
+        editTrack(id: id, label: "Add Send '\(sourceName)' → '\(busName)'") { $0.sends.append(send) }
         return send
     }
 
@@ -2574,6 +3300,37 @@ public final class ProjectStore {
         switch kind {
         case .eq: return "EQ"
         case .bassEnhancer: return "Bass Enhancer"
+        case .bitCrusher: return "Bit Crusher"
+        case .djFilter: return "DJ Filter"
+        case .ringMod: return "Ring Mod"
+        case .hallReverb: return "Hall Reverb"
+        case .tapeDelay: return "Tape Delay"
+        case .stereoWidth: return "Stereo Width"
+        case .phaser: return "Phaser"
+        // ⛔ m39-y. WITHOUT THIS LINE the `default:` below ships it as
+        // "TransientShaper" in every undo label — a cosmetic-looking bug that
+        // the compiler, `effect-kind-surface.mjs` (whole-file PRESENCE) and
+        // every existing test pass. `TransientShaperStoreTests` asserts it
+        // directly, because nothing else can.
+        case .transientShaper: return "Transient Shaper"
+        // ⛔ m39-z. Same trap, and this one ALSO has to fit the mixer's 85 pt
+        // insert-label budget: "Frequency Shifter" MEASURES 88.156 pt and does
+        // NOT fit, so the shipped name is "Frequency Shift" (78.153 pt).
+        // `InsertLabelBudgetTests` sweeps `Kind.allCases` and is the instrument.
+        case .freqShifter: return "Frequency Shift"
+        // ⛔ m39-ac. The `default:` arm below would ship this one as "Clipper"
+        // ANYWAY — `clipper`.capitalised IS the display name — so this line
+        // looks redundant and is not: a kind that relies on the default is a
+        // kind whose display name is an ACCIDENT of its raw value, and the
+        // next rename (or the next kind whose raw value is `deEsser`) inherits
+        // the bug this arm exists to prevent. `EffectChainStoreTests` pins it.
+        case .clipper: return "Clipper"
+        // ⛔⛔ m39-af, AND THIS ONE IS THE `default:` ARM'S OWN PREDICTION COMING
+        // TRUE: `dynamicEQ`.capitalised is "DynamicEQ", which is plausible
+        // enough to survive review and wrong in every undo label and every
+        // store-side display. Both display-name functions need it (the other is
+        // `MixerFormat.effectDisplayName`); the compiler catches neither.
+        case .dynamicEQ: return "Dynamic EQ"
         default: return kind.rawValue.prefix(1).uppercased() + kind.rawValue.dropFirst()
         }
     }
@@ -2599,8 +3356,12 @@ public final class ProjectStore {
         guard kind != .audioUnit || audioUnit != nil else {
             throw ProjectError.audioUnitEffectRequiresComponent
         }
-        let effect = EffectDescriptor(kind: kind,
-                                      audioUnit: kind == .audioUnit ? audioUnit : nil)
+        // ⭐ `newlyAdded` — the one home for a new insert's starting params
+        // (see `addMasterEffect`). ⛔ Do not go back to `EffectDescriptor(kind:)`
+        // here: for a clipper that builds a NO-params descriptor, which
+        // `resolvedClipper` reads as a pre-ruling clipper at 4×.
+        let effect = EffectDescriptor.newlyAdded(kind: kind,
+                                                 audioUnit: kind == .audioUnit ? audioUnit : nil)
         let name = tracks[ti].name
         let count = tracks[ti].effects.count
         let insertAt = min(max(0, index ?? count), count)
@@ -2708,7 +3469,7 @@ public final class ProjectStore {
         editTrack(id: trackID, label: "Set \(Self.effectDisplayName(kind)) Parameter",
                   key: "fx.param:\(trackID.uuidString):\(effectID.uuidString):\(name)") {
             if let ei = $0.effects.firstIndex(where: { $0.id == effectID }) {
-                Self.applyEffectParam(&$0.effects[ei], name: name, value: clamped)
+                $0.effects[ei].applySetting(name, clamped)
             }
         }
         return tracks[ti].effects[ei]
@@ -2739,51 +3500,9 @@ public final class ProjectStore {
         guard let ei = tracks[ti].effects.firstIndex(where: { $0.id == effectID }) else {
             throw ProjectError.effectNotFound(effectID)
         }
-        let kind = tracks[ti].effects[ei].kind
-        guard kind == .compressor || kind == .gate else {
-            throw ProjectError.sidechainUnsupportedEffect(kind)
-        }
-        if let sourceTrackID {
-            // Destination strip must physically own a ChainHostAU insert
-            // point (audio/bus sandwich) — instrument strips walk their chain
-            // inside the source node, which has no input bus for a key edge.
-            guard tracks[ti].kind == .audio || tracks[ti].kind == .bus else {
-                throw ProjectError.sidechainUnsupportedTrack(tracks[ti].kind)
-            }
-            guard let si = tracks.firstIndex(where: { $0.id == sourceTrackID }) else {
-                throw ProjectError.trackNotFound(sourceTrackID)
-            }
-            guard tracks[si].kind != .bus else {
-                throw ProjectError.sidechainUnsupportedSource(
-                    "'\(tracks[si].name)' is a bus — bus key sources are deferred in v1; key from a source track feeding it instead")
-            }
-            // One key input per strip (v1): a DIFFERENT effect already keyed
-            // on this strip rejects; re-keying the same effect is fine.
-            if let taken = tracks[ti].effects.first(where: {
-                $0.id != effectID && $0.sidechainSourceTrackID != nil
-            }) {
-                throw ProjectError.sidechainOneSourcePerStrip(
-                    "strip '\(tracks[ti].name)' already has a keyed \(taken.kind.rawValue) (effect \(taken.id.uuidString)) — one sidechain key per strip in v1; clear it first")
-            }
-            // Cycle validation BEFORE the edit commits: the new key edge
-            // source → destination must not close an existing signal path
-            // destination → … → source (AVAudioEngine graph cycles are
-            // undefined behavior; rejected here, never discovered there).
-            if let cycle = SidechainGraph.cyclePath(
-                ifKeying: trackID, from: sourceTrackID, tracks: tracks) {
-                let names = cycle.map { id in
-                    tracks.first(where: { $0.id == id })?.name ?? id.uuidString
-                }
-                let sourceName = tracks[si].name
-                // `names` runs destination → … → source; the new key edge
-                // source → destination closes it — show the full loop.
-                let path = (names + [tracks[ti].name]).joined(separator: " → ")
-                throw ProjectError.sidechainWouldCreateCycle(
-                    trackID == sourceTrackID
-                        ? "a strip cannot key itself — '\(sourceName)' is the keyed strip"
-                        : "sidechain would create a feedback cycle: '\(tracks[ti].name)' already feeds '\(sourceName)' (\(path)) — keying it from '\(sourceName)' closes the loop")
-            }
-        }
+        // m39-tpl-1: the key rules are `SidechainRules.check` (SidechainRules.swift),
+        // pure over track values so a template's keys are judged by the same code.
+        try SidechainRules.check(keying: trackID, effect: effectID, from: sourceTrackID, in: tracks)
         let name = tracks[ti].name
         editTrack(id: trackID, label: "Set Sidechain on '\(name)'") {
             if let ei = $0.effects.firstIndex(where: { $0.id == effectID }) {
@@ -2828,6 +3547,22 @@ public final class ProjectStore {
                 throw ProjectError.automationTargetNotSupported(
                     "Audio Unit effect-parameter automation is not supported in v0")
             }
+        case .instrumentParam:
+            // m39-b lands the TARGET (addressing, persistence, wire shape) and
+            // shares m39-e's delivery slot for MODULATION. A hand-drawn
+            // instrument automation LANE is a third thing and needs a
+            // render-side lane-delivery path that does not exist:
+            // `AutomationRenderer.storeEffectParams` walks the effect chain
+            // snapshot and there is no equivalent for `track.instrument`
+            // (design §10 H3 — "the delivery path is the larger half").
+            // Refused HONESTLY rather than stored as a lane that would look
+            // live and do nothing, which is this tree's characteristic failure
+            // mode. Modulating an instrument param works TODAY: `mod.addRoute`.
+            throw ProjectError.automationTargetNotSupported(
+                "instrument-parameter automation lanes are not supported yet — "
+                + "there is no render-side lane delivery for track.instrument. "
+                + "To modulate an instrument parameter now, use mod.addRoute "
+                + "with target {type:\"instrumentParam\", param:\"…\"}.")
         case .volume, .pan:
             break
         }
@@ -2916,162 +3651,6 @@ public final class ProjectStore {
         return tracks[ti].automation[li]
     }
 
-    /// Writes a validated, already-clamped parameter into an effect descriptor.
-    /// The per-kind name→field mapping — the single place the control/wire name
-    /// resolves onto a model field. New kinds (iv) extend this switch. The value
-    /// is already clamped to the spec range, which matches each struct's own
-    /// clamping init, so field writes stay in-model-range by construction.
-    private static func applyEffectParam(_ effect: inout EffectDescriptor, name: String, value: Double) {
-        switch effect.kind {
-        case .gain:
-            if name == "gainLinear" { effect.gain = GainParams(gainLinear: value) }
-        case .eq:
-            var params = effect.resolvedEQ
-            switch name {
-            case "lowShelfFreq": params.lowShelfFreq = value
-            case "lowShelfGainDb": params.lowShelfGainDb = value
-            case "peak1Freq": params.peak1Freq = value
-            case "peak1GainDb": params.peak1GainDb = value
-            case "peak1Q": params.peak1Q = value
-            case "peak2Freq": params.peak2Freq = value
-            case "peak2GainDb": params.peak2GainDb = value
-            case "peak2Q": params.peak2Q = value
-            case "highShelfFreq": params.highShelfFreq = value
-            case "highShelfGainDb": params.highShelfGainDb = value
-            // m22-a EQ v2. Setting an HP/LP frequency ACTIVATES that filter
-            // (nil freq = off); slopes snap to 12/24; `*Enabled` is binary on
-            // the numeric surface (the pingPong precedent, ≥ 0.5 = on).
-            // Enabling an HP/LP that has no corner yet materializes the spec
-            // default (20 Hz / 20 kHz) so the toggle is never a silent no-op.
-            case "highPassFreq": params.highPassFreq = value
-            case "highPassSlopeDbPerOct": params.highPassSlopeDbPerOct = EQParams.snapSlope(value)
-            case "highPassEnabled":
-                let on = value >= 0.5
-                params.highPassEnabled = on
-                if on, params.highPassFreq == nil {
-                    params.highPassFreq = EQParams.highPassFreqRange.lowerBound
-                }
-            case "lowPassFreq": params.lowPassFreq = value
-            case "lowPassSlopeDbPerOct": params.lowPassSlopeDbPerOct = EQParams.snapSlope(value)
-            case "lowPassEnabled":
-                let on = value >= 0.5
-                params.lowPassEnabled = on
-                if on, params.lowPassFreq == nil {
-                    params.lowPassFreq = EQParams.lowPassFreqRange.upperBound
-                }
-            case "lowShelfQ": params.lowShelfQ = value
-            case "highShelfQ": params.highShelfQ = value
-            case "lowShelfEnabled": params.lowShelfEnabled = value >= 0.5
-            case "peak1Enabled": params.peak1Enabled = value >= 0.5
-            case "peak2Enabled": params.peak2Enabled = value >= 0.5
-            case "highShelfEnabled": params.highShelfEnabled = value >= 0.5
-            default: return
-            }
-            effect.eq = params
-        case .compressor:
-            var params = effect.resolvedCompressor
-            switch name {
-            case "thresholdDb": params.thresholdDb = value
-            case "ratio": params.ratio = value
-            case "attackMs": params.attackMs = value
-            case "releaseMs": params.releaseMs = value
-            case "kneeDb": params.kneeDb = value
-            case "makeupDb": params.makeupDb = value
-            // m23-ck parallel compression: 1 fully wet (the default), 0 a
-            // bit-exact bypass. Already clamped to 0…1 by the spec range.
-            case "mix": params.mix = value
-            default: return
-            }
-            effect.compressor = params
-        case .limiter:
-            var params = effect.resolvedLimiter
-            switch name {
-            case "ceilingDb": params.ceilingDb = value
-            case "releaseMs": params.releaseMs = value
-            case "truePeak": params.truePeak = value >= 0.5
-            default: return
-            }
-            effect.limiter = params
-        case .reverb:
-            var params = effect.resolvedReverb
-            switch name {
-            case "roomSize": params.roomSize = value
-            case "damping": params.damping = value
-            case "mix": params.mix = value
-            case "preDelayMs": params.preDelayMs = value
-            case "width": params.width = value
-            default: return
-            }
-            effect.reverb = params
-        case .delay:
-            var params = effect.resolvedDelay
-            switch name {
-            case "timeMs": params.timeMs = value
-            case "feedback": params.feedback = value
-            case "mix": params.mix = value
-            // pingPong snaps to 0/1 through the clamping init (numeric bool);
-            // the rebuild carries the m22-f fields so a pingPong write can
-            // never silently drop sync/division.
-            case "pingPong": params = DelayParams(timeMs: params.timeMs,
-                                                  feedback: params.feedback,
-                                                  mix: params.mix, pingPong: value,
-                                                  highCutHz: params.highCutHz,
-                                                  sync: params.sync,
-                                                  division: params.division)
-            case "highCutHz": params.highCutHz = value
-            // m22-f tempo sync: binary on the numeric surface (the pingPong
-            // precedent, ≥ 0.5 = on); division rides as its length in beats
-            // and snaps to the nearest legal note value.
-            case "sync": params.sync = value >= 0.5
-            case "division": params.division = NoteDivision.nearest(toBeats: value)
-            default: return
-            }
-            effect.delay = params
-        case .saturator:
-            var params = effect.resolvedSaturator
-            switch name {
-            case "driveDb": params.driveDb = value
-            case "mix": params.mix = value
-            case "outputDb": params.outputDb = value
-            default: return
-            }
-            effect.saturator = params
-        case .gate:
-            var params = effect.resolvedGate
-            switch name {
-            case "thresholdDb": params.thresholdDb = value
-            case "attackMs": params.attackMs = value
-            case "holdMs": params.holdMs = value
-            case "releaseMs": params.releaseMs = value
-            default: return
-            }
-            effect.gate = params
-        case .chorus:
-            var params = effect.resolvedChorus
-            switch name {
-            case "rateHz": params.rateHz = value
-            case "depthMs": params.depthMs = value
-            case "mix": params.mix = value
-            default: return
-            }
-            effect.chorus = params
-        case .bassEnhancer:
-            var params = effect.resolvedBassEnhancer
-            switch name {
-            case "crossoverHz": params.crossoverHz = value
-            case "amount": params.amount = value
-            case "mix": params.mix = value
-            default: return
-            }
-            effect.bassEnhancer = params
-        case .audioUnit:
-            // Unreachable: specs(for: .audioUnit) is empty, so name validation
-            // in setEffectParam rejects every name first. AU params are not
-            // on the generic surface in v0.
-            return
-        }
-    }
-
     /// Sets the built-in instrument for an INSTRUMENT track. PARTIAL update for
     /// the poly-synth knobs: any nil argument keeps the track's current value, so
     /// a single knob edit overlays exactly one field onto the current descriptor
@@ -3105,9 +3684,48 @@ public final class ProjectStore {
         cutoffHz: Double? = nil,
         resonance: Double? = nil,
         gain: Double? = nil,
+        pedalHoldLimit: Int? = nil,
+        // m39-g richness pass. ⛔⛔ EVERY ONE OF THESE MUST BE PASSED THROUGH IN
+        // THE REBUILD BELOW, AND THE REBUILD IS AN EXPLICIT INITIALISER CALL
+        // THAT COMPILES FINE WITHOUT THEM. A field accepted here and not named
+        // there is not "ignored" — it is DESTROYED on every unrelated call,
+        // with a success response. See the overlay block for the full note and
+        // `InstrumentStoreTests.richnessSurvivesAnUnrelatedKnobEdit` for the
+        // pin. Adding a sixteenth field means editing BOTH lists.
+        unisonVoices: Int? = nil,
+        unisonDetuneCents: Double? = nil,
+        unisonStereoSpread: Double? = nil,
+        subLevel: Double? = nil,
+        subOctave: Int? = nil,
+        subWaveform: PolySynthParams.Waveform? = nil,
+        noiseLevel: Double? = nil,
+        noiseColor: Double? = nil,
+        drift: Double? = nil,
+        resonanceBoost: Double? = nil,
+        drive: Double? = nil,
+        velocityToCutoff: Double? = nil,
+        keyToCutoff: Double? = nil,
+        voiceJitter: Double? = nil,
+        envelopeCurve: Double? = nil,
         sampler: SamplerParams? = nil,
         audioUnit: AudioUnitConfig? = nil,
-        soundBank: SoundBankConfig? = nil
+        soundBank: SoundBankConfig? = nil,
+        // ⛔⛔ m39-dm — THE DRUM KIT IS **TWO** ARGUMENTS, NOT SEVENTY-FIVE,
+        // AND THAT IS THE WHOLE POINT.
+        //
+        // This signature already carries 22 optionals, and the doc comment
+        // above records that every one of them must be hand-mirrored in the
+        // rebuild below or it DESTROYS ITSELF on every unrelated call. Seventy-
+        // five more would make that mirror-pair unmaintainable by construction
+        // — well past the point where a human can keep two lists in sync.
+        //
+        // So the kit travels wholesale (`drumKit`, the sampler/AU/soundBank
+        // precedent) or one NAME at a time (`drumParam`), and the overlay below
+        // is a `var` + in-place mutation rather than an initialiser argument
+        // list. A struct you mutate cannot drop a field it does not mention;
+        // an initialiser list can, silently, on every call.
+        drumKit: DrumKitParams? = nil,
+        drumParam: (name: String, value: Double)? = nil
     ) throws -> InstrumentDescriptor? {
         guard let index = tracks.firstIndex(where: { $0.id == id }) else { return nil }
         guard tracks[index].kind == .instrument else {
@@ -3135,6 +3753,36 @@ public final class ProjectStore {
         // one implies its kind when kind is omitted.
         let current = tracks[index].instrument ?? .default
         let p = current.polySynth
+        // ⭐⭐ m39-dm — THE DRUM OVERLAY IS A `var` + IN-PLACE MUTATION, AND
+        // THAT SHAPE IS A DESIGN CONSTRAINT RATHER THAN A STYLE CHOICE.
+        //
+        // The poly-synth rebuild below is an explicit initialiser call, which
+        // is why it needs 25 hand-mirrored `?? p.field` lines and why the file
+        // warns that a twenty-sixth "WILL COMPILE, SHIP, AND DELETE ITSELF".
+        // With 75 drum parameters that pattern is not maintainable by anyone.
+        //
+        // A struct you MUTATE cannot drop a field it does not mention. So the
+        // kit starts as whatever the track already had, takes a wholesale
+        // replacement if one was given, then takes a single named overlay if
+        // one was given — and a 76th parameter added to `DrumKitParams`
+        // tomorrow rides through all three paths with no edit here at all.
+        var kit = current.drumKit
+        if let drumKit {
+            var replacement = drumKit
+            replacement.clampAll()
+            kit = replacement
+        }
+        if let drumParam {
+            // `nil` means the track has never been given a kit; start from the
+            // factory one so a single-parameter edit works on a fresh track.
+            var overlaid = kit ?? DrumKitParams()
+            // A false return is an unknown name: leave the kit exactly as it
+            // was rather than storing a half-applied edit. The control layer
+            // reports the refusal.
+            if overlaid.setValue(drumParam.value, forParamName: drumParam.name) {
+                kit = overlaid
+            }
+        }
         let resolved = InstrumentDescriptor(
             kind: kind ?? (audioUnit != nil ? .audioUnit
                            : soundBank != nil ? .soundBank : current.kind),
@@ -3146,11 +3794,55 @@ public final class ProjectStore {
                 release: release ?? p.release,
                 cutoffHz: cutoffHz ?? p.cutoffHz,
                 resonance: resonance ?? p.resonance,
-                gain: gain ?? p.gain
+                gain: gain ?? p.gain,
+                // m34-q: the same overlay rule as the seven above — omitting it
+                // keeps whatever cap the track already had, so tuning one knob
+                // never quietly lifts a limit the user set.
+                pedalHoldLimit: pedalHoldLimit ?? p.pedalHoldLimit,
+                // ⛔⛔ m39-g — THE FIFTEEN RICHNESS FIELDS, AND WHY EVERY ONE OF
+                // THEM IS SPELLED OUT HERE RATHER THAN LEFT TO A DEFAULT.
+                //
+                // This is an EXPLICIT initialiser call, so a field omitted here
+                // does not inherit `p`'s value — it takes `PolySynthParams`'
+                // own `nil` default, on EVERY call, and the method returns
+                // success. While these fields were unsettable that was
+                // invisible (nothing could put a value there to lose). The
+                // moment the wire could set them it became DATA LOSS with a
+                // success response: a user brightens the filter and their
+                // unison stack, sub-oscillator and drive are gone. That is
+                // m33-j's shape exactly (`clip.addAudio` deleted the clips it
+                // overlapped and answered OK), and it is the reason
+                // `InstrumentStoreTests.richnessSurvivesAnUnrelatedKnobEdit`
+                // was written BEFORE this block and watched to fail: all
+                // fifteen reddened, the `cutoffHz` control passed.
+                //
+                // ⚠️ A SIXTEENTH FIELD ADDED TO `PolySynthParams` AND NOT ADDED
+                // HERE WILL COMPILE, SHIP, AND DELETE ITSELF. The whole-struct
+                // equality assertion in that test is the only thing that
+                // catches it; keep it.
+                unisonVoices: unisonVoices ?? p.unisonVoices,
+                unisonDetuneCents: unisonDetuneCents ?? p.unisonDetuneCents,
+                unisonStereoSpread: unisonStereoSpread ?? p.unisonStereoSpread,
+                subLevel: subLevel ?? p.subLevel,
+                subOctave: subOctave ?? p.subOctave,
+                subWaveform: subWaveform ?? p.subWaveform,
+                noiseLevel: noiseLevel ?? p.noiseLevel,
+                noiseColor: noiseColor ?? p.noiseColor,
+                drift: drift ?? p.drift,
+                resonanceBoost: resonanceBoost ?? p.resonanceBoost,
+                drive: drive ?? p.drive,
+                velocityToCutoff: velocityToCutoff ?? p.velocityToCutoff,
+                keyToCutoff: keyToCutoff ?? p.keyToCutoff,
+                voiceJitter: voiceJitter ?? p.voiceJitter,
+                envelopeCurve: envelopeCurve ?? p.envelopeCurve
             ),
             sampler: sampler ?? current.sampler,
             audioUnit: audioUnit ?? current.audioUnit,
-            soundBank: soundBank ?? current.soundBank
+            soundBank: soundBank ?? current.soundBank,
+            // ⛔ `kit` is ALREADY the overlaid value (see the block above). It
+            // must be named here or the drum machine joins the list of things
+            // this initialiser silently deletes on every unrelated call.
+            drumKit: kit
         )
         // m13-c: an instrument-NODE rebuild (kind/zones/AU/sound-bank change)
         // on a ROUTED strip tears the node down through the reconcile
@@ -3171,11 +3863,16 @@ public final class ProjectStore {
     /// throws and records no undo entry): the source must resolve to an
     /// existing file (`SoundBankLibrary.resolve`, shared with the engine's
     /// pre-instantiation check) carrying an `.sf2`/`.dls` extension
-    /// (case-insensitive).
-    private func validateSoundBank(_ config: SoundBankConfig) throws {
+    /// (case-insensitive). Module-internal since m39-tpl-2 (the `performEdit`
+    /// precedent): `applyTemplate` checks a template's banks through it.
+    func validateSoundBank(_ config: SoundBankConfig) throws {
         let url = try soundBankLibrary.resolve(config.source)
         let ext = url.pathExtension.lowercased()
-        guard ext == "sf2" || ext == "dls" else {
+        // ⛔ m31-g: this is one of the gates that makes a DISCOVERED-but-
+        // unsupported bank (`.sf3`) unselectable. It rejects by extension and
+        // never reads `SoundBankInfo.unsupportedReason`, so listing a format
+        // can never accidentally make it loadable.
+        guard SoundBankLibrary.isSupportedExtension(ext) else {
             throw ProjectError.importFailed(
                 "sound bank must be a .sf2 or .dls file — got \(url.lastPathComponent)")
         }
@@ -3186,7 +3883,9 @@ public final class ProjectStore {
     /// `importAudio`. An empty zones array is a silent sampler — legal, and it
     /// needs no media service. A non-empty array with no media service wired up
     /// throws `mediaServiceUnavailable`, exactly like an import attempt.
-    private func validateSamplerZones(_ zones: [SamplerZone]) throws {
+    /// Module-internal since m39-tpl-2 (the `performEdit` precedent):
+    /// `applyTemplate` checks a template's zone files through it.
+    func validateSamplerZones(_ zones: [SamplerZone]) throws {
         guard !zones.isEmpty else { return }
         guard let media else { throw ProjectError.mediaServiceUnavailable }
         for zone in zones {
@@ -3285,9 +3984,70 @@ public final class ProjectStore {
         }
     }
 
-    /// Target validation for the AU parameter surface — the
-    /// `requirePluginTarget` (plugin.openUI) taxonomy with AU-parameters
-    /// wording: track exists; a named effect must exist ON that track with
+    // MARK: - Hosted-AU preset surface (au.listPresets / au.loadPreset, m23-cw)
+
+    /// Everything the hosted AU behind a track slot says about its own presets.
+    /// Same target model and validation as `describeAudioUnitParams` —
+    /// `effectID` names an `.audioUnit` insert ON `trackID`, nil targets the
+    /// track's `.audioUnit` INSTRUMENT — and the same status-naming teaching
+    /// error for a target with no `.ready` instance. Returns the list plus the
+    /// selection's display name for the wire's `componentName` echo. Pure read:
+    /// no model mutation, no undo entry, no `tracksDidChange`.
+    public func listAudioUnitPresets(trackID: UUID, effectID: UUID?) throws
+        -> (componentName: String, presets: HostedAUPresetList) {
+        let resolved = try resolveHostedAUTarget(trackID: trackID, effectID: effectID)
+        guard let engine else { throw ProjectError.engineUnavailable }
+        guard let presets = try engine.listHostedAUPresets(resolved.target) else {
+            throw hostedAUNotReadyError(resolved.target)
+        }
+        return (resolved.componentName, presets)
+    }
+
+    /// Load one of the hosted AU's OWN presets, live.
+    ///
+    /// ⚠️ THE m23-bx-1 LAW, and this verb is the one most likely to be
+    /// "optimised" into breaking it: a hosted plug-in's live state lives in
+    /// `AUHostRegistry`, NEVER in the model. This method deliberately writes
+    /// NOTHING to `tracks` — not `stateData`, not anything. Two independent
+    /// reasons, either one fatal:
+    ///   • a `stateData` write goes stale the moment the user turns a knob in
+    ///     the vendor's window, which is precisely the split that made an
+    ///     export render a patch nobody had heard (see
+    ///     `tracksWithLiveAudioUnitState`, MEASURED −39.0 vs −70.0 LUFS);
+    ///   • `stateData` is part of `AUHostRegistry.prepareKey`, so writing it
+    ///     would change the prepare identity and force a re-instantiate that
+    ///     DISCARDS the very preset being loaded.
+    /// Save, render, bounce and stem export all already read the live state
+    /// through `tracksWithLiveAudioUnitState()`, and a preset load is MEASURED
+    /// to change the AU's `fullStateForDocument`, so the preset survives
+    /// save/reload by composition rather than by a second mechanism.
+    ///
+    /// Deliberately NO undo step, for the same reason `setAudioUnitParam` has
+    /// none: this is parity with picking a preset in the vendor's own window,
+    /// which the model never sees either. Returns the preset ACTUALLY in
+    /// effect afterwards (the engine's read-back, not the request).
+    @discardableResult
+    public func loadAudioUnitPreset(trackID: UUID, effectID: UUID?,
+                                    selector: HostedAUPresetSelector) throws
+        -> (componentName: String, preset: HostedAUCurrentPreset) {
+        let resolved = try resolveHostedAUTarget(trackID: trackID, effectID: effectID)
+        guard let engine else { throw ProjectError.engineUnavailable }
+        do {
+            let preset = try engine.loadHostedAUPreset(resolved.target, selector: selector)
+            return (resolved.componentName, preset)
+        } catch HostedAUPresetError.noHostedAU {
+            throw hostedAUNotReadyError(resolved.target)
+        }
+    }
+
+    /// Target validation for BOTH hosted-AU surfaces — the parameter pair and
+    /// (m23-cw) the preset pair, which share this ONE home deliberately rather
+    /// than growing a second, drifting copy of the taxonomy. The wording says
+    /// "AU parameters" throughout because that is where it was born; every
+    /// message still teaches the right thing for a preset call (the target is
+    /// not a hosted Audio Unit, and here is the built-in surface to use
+    /// instead). It is the `requirePluginTarget` (plugin.openUI) taxonomy:
+    /// track exists; a named effect must exist ON that track with
     /// kind `.audioUnit`; no effectID targets the track's `.audioUnit`
     /// instrument. `.soundBank` REDIRECTS (LAW L3: `SoundBankConfig` is the
     /// single source of truth — AUSampler tree edits would be silently lost
@@ -3389,6 +4149,13 @@ public final class ProjectStore {
         engine?.clipStretchStatus(trackID: trackID, clipID: clipID)
     }
 
+    /// p2-ren Stage B′ (nil when running headless) — surfaced in snapshots as
+    /// the transient `renderAudible` field, beside `stretchRendering` /
+    /// `stretchError` above.
+    public func renderAudible(trackID: UUID, clipID: UUID) -> ClipRenderAudible? {
+        engine?.renderAudible(trackID: trackID, clipID: clipID)
+    }
+
     // MARK: - Insert-effect latency (engine forwarders)
 
     /// Fixed latency of one live insert-effect instance as the engine reports
@@ -3439,8 +4206,54 @@ public final class ProjectStore {
     /// Imports an on-disk audio file as a clip on the given track. The file's
     /// duration is converted to beats at the current tempo; the clip lands at
     /// `atBeat` if given, otherwise appended after the last existing clip.
+    ///
+    /// REFUSES rather than overwriting: see the `overwrite:` twin below, which
+    /// this delegates to with `overwrite: false`. Kept at its original
+    /// signature and return type so every existing call site compiles
+    /// unchanged; only the OVERLAP outcome moved (m33-j).
     @discardableResult
     public func importAudio(url: URL, toTrack id: UUID, atBeat: Double? = nil) throws -> Clip {
+        try importAudio(url: url, toTrack: id, atBeat: atBeat, overwrite: false).clip
+    }
+
+    /// Imports an on-disk audio file as a clip on the given track, choosing what
+    /// happens when the placement collides with an ordinary same-track resident.
+    ///
+    /// ⛔ **`overwrite: false` (the default everywhere) REFUSES the collision**
+    /// with `ProjectError.clipImportWouldOverlap`, naming the resident, BEFORE
+    /// any mutation — nothing is journaled, no clip is touched, and the caller
+    /// gets a beat it can safely append at. m33-j: this verb used to run the
+    /// overlap policy and DISCARD its report, so two imports at `atBeat: 0` left
+    /// ONE clip, the first id dead, both calls returning a normal success.
+    /// Measured 2026-08-29 through the live `clip.addAudio` router.
+    ///
+    /// WHY REFUSE HERE WHEN `moveClip` TRIMS. Two reasons, and the second is the
+    /// deciding one:
+    ///  1. The collision is MANUFACTURED by this call — the
+    ///     `clipsWouldOverlapOnDestination` rationale (m23-aj §18): a verb that
+    ///     creates a collision the project did not have refuses rather than
+    ///     picking which of the user's own clips dies.
+    ///  2. **The caller cannot know this import's footprint.** A move's
+    ///     footprint is a clip already on screen; an import's length is the
+    ///     FILE's duration converted at the current tempo, so `atBeat` alone
+    ///     never told the caller what it was about to cover. A trim nobody could
+    ///     have predicted is not a trim anybody consented to.
+    ///
+    /// `overwrite: true` restores the trim/remove — the same m11-d/m13-b policy,
+    /// through the same `resolvingOverlaps` choke point — and RETURNS what it
+    /// did in `trimmedClipIDs`/`removedClipIDs` (the `clip.moveMany` receipt).
+    /// It is the `vc.importVoiceModel` / `vc.installEmbeddedVoice` `overwrite`
+    /// precedent: refuse a destructive replace by default, honour it on request.
+    ///
+    /// TAKE STACKS ARE UNAFFECTED, BY CONSTRUCTION. The refusal's oracle is
+    /// `resolvingOverlaps` itself, not a geometric intersection test, so
+    /// take/comp members (`takeGroupID != nil`, which STACK legally and are
+    /// exempt from trimming) never appear in the trimmed/removed lists and so
+    /// never trigger a refusal. An import landing over a take stack succeeds
+    /// exactly as it did before m33-j.
+    @discardableResult
+    public func importAudio(url: URL, toTrack id: UUID, atBeat: Double?,
+                            overwrite: Bool) throws -> ClipImportResult {
         guard let media else { throw ProjectError.mediaServiceUnavailable }
         guard let index = tracks.firstIndex(where: { $0.id == id }) else {
             throw ProjectError.trackNotFound(id)
@@ -3474,18 +4287,36 @@ public final class ProjectStore {
             lengthBeats: lengthBeats,
             audioFileURL: url
         )
+        // Landing over an occupied region resolves through the ONE
+        // no-silent-overlap choke point (m13-b) — the same trim rule the ⌘I
+        // import batch and clip.move use. Run OUTSIDE the edit body (the
+        // `importAudioBatch` / `setTrackArm` "validate before you journal"
+        // precedent) so the refusal below can throw without leaving an undo
+        // entry, and so the resolved array is computed exactly once.
+        let resolved = Self.resolvingOverlaps(
+            in: tracks[index].clips + [clip], activeIDs: [clip.id],
+            start: startBeat, end: startBeat + lengthBeats,
+            tempoMap: transport.tempoMap)
+
+        if !overwrite {
+            // The offender is chosen by TRACK-ARRAY ORDER, not by which list it
+            // landed in: `removeClips` picks its one named offender
+            // deterministically too, and "the first resident in the way" is a
+            // stable answer that does not change when a trim becomes a removal.
+            let touched = Set(resolved.trimmedIDs + resolved.removedIDs)
+            if let victim = tracks[index].clips.first(where: { touched.contains($0.id) }) {
+                throw ProjectError.clipImportWouldOverlap(
+                    existingID: victim.id, existingName: victim.name,
+                    appendBeat: appendPosition)
+            }
+        }
+
         performEdit("Import '\(clip.name)'") {
-            tracks[index].clips.append(clip)
-            // Landing over an occupied region resolves through the ONE
-            // no-silent-overlap choke point (m13-b) — the same trim rule the
-            // ⌘I import batch and clip.move use — folded into this one edit.
-            tracks[index].clips = Self.resolvingOverlaps(
-                in: tracks[index].clips, activeIDs: [clip.id],
-                start: startBeat, end: startBeat + lengthBeats,
-                tempoMap: transport.tempoMap).clips
+            tracks[index].clips = resolved.clips
             engine?.tracksDidChange(tracks)
         }
-        return clip
+        return ClipImportResult(clip: clip, trimmedClipIDs: resolved.trimmedIDs,
+                                removedClipIDs: resolved.removedIDs)
     }
 
     // MARK: - MIDI clips
@@ -3683,10 +4514,15 @@ public final class ProjectStore {
         }
         let ordered = MIDINote.canonicallyOrdered(reclamped)
 
-        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure, and
-        // the meter is sampled at the clip's start exactly as the piano roll
-        // samples it for its own bar lines (`ContentView`: `beatsPerBar(atBeat:
-        // clip.startBeat)`), so the new end lands on a line the user can see.
+        // Decide the grow BEFORE the edit opens — `ClipAutoExtend` is pure. It
+        // is handed the clip's place in the SONG (its start beat and the song's
+        // meter map) because the piano roll draws the SONG's bar lines
+        // (`PianoRollSongGrid`, m23-ap I5-F2): the new end lands on the next of
+        // those lines, where the user can see it. Bars counted from the clip's
+        // first beat put it BETWEEN two drawn lines for a clip that starts off a
+        // bar line (m23-ap AX). A clip that starts on a bar line gets exactly
+        // the length it always got; in a song whose meter changes, bars are
+        // still counted from the clip's start (`ClipAutoExtend.songBarPhase`).
         let clip = tracks[t].clips[c]
         // ⚠️ m25-a-2 — `.map { … } ?? .notNeeded`, NOT `.flatMap`, AND THE
         // DIFFERENCE IS THE FEATURE. `coverage` returns nil when `extendToCover`
@@ -3701,7 +4537,8 @@ public final class ProjectStore {
                     currentLengthBeats: clip.lengthBeats,
                     coveringOnsetBeat: span.onsetBeat,
                     coveringEndBeat: span.endBeat,
-                    beatsPerBar: transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                    clipStartBeat: clip.startBeat,
+                    meterMap: transport.meterMap,
                     maxLengthBeats: trailingHeadroom(trackIndex: t, clipIndex: c))
             } ?? .notNeeded
         lastAutoExtendOutcome = outcome
@@ -4167,8 +5004,9 @@ public final class ProjectStore {
     /// inserted right after it as the right half. One undo step, NO coalescing.
     ///
     /// - Audio: the right half's `startOffsetSeconds` advances by the left half's
-    ///   duration — the tempo-map integral over [clip.startBeat, atBeat]
-    ///   (m12-b; with the Phase-A trivial map this is exactly the old
+    ///   duration IN SOURCE SECONDS — the tempo-map integral over
+    ///   [clip.startBeat, atBeat] divided by the stretch ratio (m12-b; C2-0.
+    ///   With the Phase-A trivial map and ratio 1 this is exactly the old
     ///   `splitBeats · 60 / tempoBPM`).
     /// - MIDI: notes partition by start beat — a note starting before the split
     ///   stays left (truncated to the split boundary if it overhangs); a note at
@@ -4189,6 +5027,11 @@ public final class ProjectStore {
         let firstLength = relBeat
         let secondLength = clip.lengthBeats - relBeat
         let splitSeconds = transport.tempoMap.seconds(from: clip.startBeat, to: atBeat)
+        // `splitSeconds` is TIMELINE seconds; `startOffsetSeconds` is SOURCE
+        // seconds (the engine reads the stretched render at offset × ratio), so
+        // the right half advances by `splitSeconds / ratio` (C2-0 / F13 — the
+        // `CompFlattener` rule, Takes.swift). Zero-guarded like that site.
+        let ratio = clip.stretchRatio > 0 ? clip.stretchRatio : 1
 
         // Partition MIDI notes (nil for audio clips stays nil on both sides).
         var firstNotes: [MIDINote]?
@@ -4236,8 +5079,14 @@ public final class ProjectStore {
         // Stretch params (M5 ii-c) copy verbatim to BOTH halves: the engine's
         // render (ii-d) covers the WHOLE source file, so both halves read the
         // same stretched material — the split junction is seamless by
-        // construction (spec §3). The offset math above is unchanged; ii-d maps
-        // `startOffsetSeconds` through the ratio at schedule time.
+        // construction (spec §3) — PROVIDED the right half's offset advances
+        // in SOURCE seconds (`splitSeconds / ratio`, C2-0), because ii-d maps
+        // `startOffsetSeconds` back through × ratio at schedule time. Until
+        // C2-0 this comment said the offset math needed no change; it did.
+        // Lyrics (p2-sing-d1b): the words go with the notes they start on
+        // (`ClipLyrics.WordPlacement`), the rule the notes above follow.
+        let lyricsHalves = ClipLyrics.WordPlacement(clip: clip, tempoMap: transport.tempoMap)?
+            .split(atClipBeat: relBeat)
         let first = Clip(
             id: clip.id, name: clip.name,
             startBeat: clip.startBeat, lengthBeats: firstLength,
@@ -4248,18 +5097,43 @@ public final class ProjectStore {
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: .linear,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: firstEnv,
-            controllerLanes: firstLanes)
+            controllerLanes: firstLanes,
+            // Pitch edits (m23-q): copied VERBATIM to BOTH halves — deliberately
+            // NOT windowed like the two lines above it.
+            //
+            // ⚠️⚠️ THE NEIGHBOURING CODE IS THE TRAP. `firstEnv`/`firstLanes`
+            // exist because gain points and controller points are CLIP-RELATIVE
+            // BEATS and must be re-anchored at a split. `NoteSegment` times are
+            // SOURCE-FILE-ABSOLUTE SECONDS (`ClipPitchFrame.timeSeconds`:
+            // "geometry-free: trims/splits don't move these numbers"), and
+            // `startOffsetSeconds` below already carries the whole geometry
+            // change. Re-anchoring these would shift every segment on the right
+            // half by `splitSeconds` and silently de-tune the take — while
+            // leaving a healthy-looking non-nil set behind.
+            //
+            // Both halves keep the WHOLE set, including a note that straddles
+            // the cut and notes that fall outside their own window: the curve is
+            // only ever evaluated over the source window a half actually plays,
+            // so an out-of-window segment costs nothing, and a split is
+            // reversible by re-joining while discarded tuning is not.
+            pitchEdits: clip.pitchEdits,
+            lyrics: lyricsHalves?.left)
         let second = Clip(
             id: UUID(), name: clip.name,
             startBeat: clip.startBeat + firstLength, lengthBeats: secondLength,
             audioFileURL: clip.audioFileURL, notes: secondNotes,
             isAIGenerated: clip.isAIGenerated,
-            startOffsetSeconds: clip.startOffsetSeconds + splitSeconds, gainDb: clip.gainDb,
+            startOffsetSeconds: clip.startOffsetSeconds + splitSeconds / ratio, gainDb: clip.gainDb,
             fadeInBeats: secondIn, fadeOutBeats: secondOut,
             fadeInCurve: .linear, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: secondEnv,
-            controllerLanes: secondLanes)
+            controllerLanes: secondLanes,
+            // Same verbatim carry as the first half — see the note above. This
+            // is the half where a re-anchoring mistake would actually change the
+            // sound, because its `startOffsetSeconds` moved.
+            pitchEdits: clip.pitchEdits,
+            lyrics: lyricsHalves?.right)
 
         performEdit("Split Clip '\(clip.name)'") {
             tracks[t].clips[c] = first
@@ -4274,8 +5148,9 @@ public final class ProjectStore {
     /// The clip CONTENT stays fixed on the timeline, so only the visible window
     /// moves:
     /// - Leading-edge move: `startOffsetSeconds` advances by the start delta
-    ///   converted beats -> seconds at the current tempo (clamped >= 0), so an
-    ///   audio clip keeps playing the right region of its source.
+    ///   converted beats -> seconds at the current tempo, ÷ the stretch ratio
+    ///   (source seconds, C2-0; clamped >= 0), so an audio clip keeps playing
+    ///   the right region of its source.
     /// - MIDI notes shift by the start delta and are DROPPED when they fall
     ///   wholly outside the new window, or TRUNCATED where they cross either
     ///   edge (a note thinner than `MIDINote.minLengthBeats` after truncation is
@@ -4311,9 +5186,12 @@ public final class ProjectStore {
         let newStart = max(0, newStartBeat)
         let newLength = max(Self.minClipLengthBeats, newLengthBeats)
         let delta = newStart - oldStart  // > 0 trims the leading edge inward
-        // Signed integral over the trimmed span (m12-b, design row 13).
+        // Signed integral over the trimmed span (m12-b, design row 13). That
+        // is TIMELINE seconds; ÷ the ratio makes it the SOURCE seconds
+        // `startOffsetSeconds` is kept in (C2-0 / F13, the splitClip rule).
+        let ratio = clip.stretchRatio > 0 ? clip.stretchRatio : 1
         let newOffset = max(0, clip.startOffsetSeconds
-            + transport.tempoMap.seconds(from: oldStart, to: newStart))
+            + transport.tempoMap.seconds(from: oldStart, to: newStart) / ratio)
 
         var newNotes: [MIDINote]?
         if let notes = clip.notes {
@@ -4354,7 +5232,16 @@ public final class ProjectStore {
             // formant carry through unchanged — only the visible window moves.
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: newEnv,
-            controllerLanes: newLanes)
+            controllerLanes: newLanes,
+            // Pitch edits (m23-q): VERBATIM, and deliberately NOT re-windowed
+            // like `newEnv`/`newLanes` above — those are clip-relative beats,
+            // these are source-file-absolute seconds, which `newOffset` already
+            // accounts for. Segments outside the new window are KEPT: a trim is
+            // a non-destructive window change the user can drag back open, so
+            // dropping them would turn a reversible gesture into lost tuning.
+            pitchEdits: clip.pitchEdits,
+            // Lyrics (p2-sing-d1b): a trim keeps the text exactly.
+            lyrics: clip.lyrics)
 
         performEdit(label, key: key) {
             tracks[t].clips[c] = rebuilt
@@ -5283,7 +6170,23 @@ public final class ProjectStore {
             // so a duplicated / split-off piece carries the same lanes with
             // nothing to re-mint (design-m16b §11 duplicate row).
             controllerLanes: clip.controllerLanes,
-            takeGroupID: nil)
+            takeGroupID: nil,
+            // Pitch edits (m23-q): copied. A FRESH IDENTITY IS NOT A FRESH
+            // PERFORMANCE — the copy reads the same source file at the same
+            // source offset, so the same notes are there and the same tuning
+            // applies. Contrast `takeGroupID` above, which is dropped precisely
+            // because it names a relationship the copy does not have; this field
+            // names the CONTENT, like `gainEnvelope` and `controllerLanes`.
+            //
+            // This site is load-bearing beyond duplicate/paste: `insertBars` and
+            // `deleteBars` re-mint their SPLIT-OFF TAILS through here, and those
+            // REPLACE the original clip — so an omission is real data loss, not
+            // just an untuned copy.
+            pitchEdits: clip.pitchEdits,
+            // Lyrics (p2-sing-d1b): a copy keeps the text exactly. The bar
+            // insert/delete tails re-minted here are re-shared by
+            // `ClipLyrics.distribute` in `clipAfterInsert` / `clipAfterDelete`.
+            lyrics: clip.lyrics)
     }
 
     /// Duplicates a clip (m15-d) — a VALUE-COPY of everything (`reidentified`)
@@ -5371,9 +6274,14 @@ public final class ProjectStore {
         guard newLength >= minClipLengthBeats else { return nil }
         let start = max(0, newStart)
         let delta = start - clip.startBeat  // > 0 trims the leading edge inward
-        // Signed integral over the covered span (m12-b, design row 15).
+        // Signed integral over the covered span (m12-b, design row 15). That
+        // is TIMELINE seconds; ÷ the ratio makes it the SOURCE seconds
+        // `startOffsetSeconds` is kept in (C2-0 / F13 — must agree with
+        // `applyTrimWindow`, or a journalled and an un-journalled trim of a
+        // stretched clip would play different audio).
+        let ratio = clip.stretchRatio > 0 ? clip.stretchRatio : 1
         let newOffset = max(0, clip.startOffsetSeconds
-            + tempoMap.seconds(from: clip.startBeat, to: start))
+            + tempoMap.seconds(from: clip.startBeat, to: start) / ratio)
         var newNotes: [MIDINote]?
         if let notes = clip.notes {
             newNotes = notes.compactMap { note -> MIDINote? in
@@ -5408,7 +6316,17 @@ public final class ProjectStore {
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
             stretchRatio: clip.stretchRatio, pitchShiftSemitones: clip.pitchShiftSemitones,
             formantPreserve: clip.formantPreserve, gainEnvelope: newEnv,
-            controllerLanes: newLanes)
+            controllerLanes: newLanes,
+            // Pitch edits (m23-q): VERBATIM — source-file-absolute seconds, so
+            // `newOffset` is the only thing a window change may touch (the same
+            // reasoning as `trimClip`'s own rebuild; these two must agree or a
+            // journalled and an un-journalled trim would disagree about the
+            // user's tuning). Reached by the overlap-resolution choke point, so
+            // an omission here loses tuning on a STATIONARY clip the user never
+            // touched — the worst shape this bug can take.
+            pitchEdits: clip.pitchEdits,
+            // Lyrics (p2-sing-d1b): a trim keeps the text exactly.
+            lyrics: clip.lyrics)
     }
 
     /// Resolves how one STATIONARY same-track clip must change so it no longer
@@ -5757,7 +6675,8 @@ public final class ProjectStore {
         if let tail = clipTrimmedToWindow(clip, newStart: pivot, newLength: end - pivot, tempoMap: tempoMap) {
             pieces.append(reidentified(tail, id: UUID(), startBeat: pivot + delta))
         }
-        return pieces
+        // Lyrics (p2-sing-d1b): a straddling clip is a split in disguise.
+        return ClipLyrics.distribute(pieces, cutFrom: clip, atClipBeat: pivot - start, tempoMap: tempoMap)
     }
 
     /// The 0, 1, or 2 clips that replace `clip` under a delete of
@@ -5786,7 +6705,9 @@ public final class ProjectStore {
             let tailID = pieces.isEmpty ? clip.id : UUID()
             pieces.append(reidentified(tail, id: tailID, startBeat: deleteEnd - delta))
         }
-        return pieces
+        // Lyrics (p2-sing-d1b): head AND tail is a split at the delete's start;
+        // the words inside the deleted range go with the tail, a trim.
+        return ClipLyrics.distribute(pieces, cutFrom: clip, atClipBeat: deleteStart - start, tempoMap: tempoMap)
     }
 
     /// Automation-point shift for an insert: a point at/after `pivot` moves right
@@ -6422,6 +7343,10 @@ public final class ProjectStore {
             masterVolume: masterVolume,
             masterEffects: masterEffects,  // MASTERED class (m13-d, design §2)
             masterAutomation: masterAutomation,  // rides the class (m15-c)
+            // …and so does the master strip's modulation (m39-e-2): an LFO or
+            // macro on the master fader is part of the song the user exports.
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
             fromBeat: startBeat,
             durationSeconds: duration,
             to: url,
@@ -6516,7 +7441,9 @@ public final class ProjectStore {
                          grooveTemplates: grooveTemplates, markers: markers,
                          masterEffects: masterEffects,
                          masterAutomation: masterAutomation,
-                         reference: reference)
+                         reference: reference,
+                         masterModulationSources: masterModulationSources,
+                         masterModulationRoutes: masterModulationRoutes)
     }
 
     /// The single funnel every undoable mutation passes through. Captures the
@@ -6587,6 +7514,12 @@ public final class ProjectStore {
         masterVolume = target.masterVolume
         masterEffects = target.masterEffects
         masterAutomation = target.masterAutomation
+        // Master modulation (F2, W7-MODP): rides the snapshot now; pushed to the engine below with the other
+        // master intents. Compared BEFORE the overwrite so the push fires only when it moved.
+        let masterModulationMoved = masterModulationSources != target.masterModulationSources
+            || masterModulationRoutes != target.masterModulationRoutes
+        masterModulationSources = target.masterModulationSources
+        masterModulationRoutes = target.masterModulationRoutes
         // Groove palette rides the same snapshot (no engine involvement — grooves
         // are pure data applied at quantize time).
         grooveTemplates = target.grooveTemplates
@@ -6615,6 +7548,9 @@ public final class ProjectStore {
         if masterChanged { engine?.masterVolumeChanged(masterVolume) }
         if masterFXChanged { engine?.masterEffectsChanged(masterEffects) }
         if masterAutoChanged { engine?.masterAutomationChanged(masterAutomation) }
+        if masterModulationMoved {
+            engine?.masterModulationChanged(sources: masterModulationSources, routes: masterModulationRoutes)
+        }
         // Reference slot (m22-g P2): keep the transient monitor honest across
         // the restore — a restore that removes/replaces the slot mid-audition
         // turns the monitor OFF (un-gating the mix); an offset/trim restore
@@ -6693,6 +7629,30 @@ public final class ProjectStore {
         }
         let plan = ProjectBundle.planMedia(
             tracks: persistedTracks, reference: reference, bundleURL: bundleURL)
+        // Embedded voice models (m24-n — the user's "Embed a copy of the
+        // voice"). Driven ENTIRELY by the voiceProvenance the conversion wrote
+        // on each generated track: no project with no converted tracks pays
+        // anything, and nothing here consults, validates against, or re-runs a
+        // conversion. `openBundleURL` is the bundle this session is open FROM,
+        // so a Save As of a project whose voice is not on THIS machine copies
+        // that project's own embedded copy forward instead of losing it.
+        let voiceNamed = persistedTracks.contains { $0.voiceProvenance != nil }
+        let voicePlan = ProjectBundle.planVoices(
+            tracks: persistedTracks, bundleURL: bundleURL,
+            voiceStoreURL: voiceStoreDirectory,
+            openBundleURL: projectPath.map { URL(fileURLWithPath: $0).standardizedFileURL })
+        // Loud EXACTLY WHEN THE DISK COST IS PAID, and silent afterwards: an
+        // idempotent re-save copies zero bytes and says nothing, so this is one
+        // line per voice per project rather than a nag on every save. A silent
+        // 240 MB is the support question this exists to prevent.
+        if voicePlan.copiedBytes > 0 {
+            stateWarnings.append(
+                "embedded \(voicePlan.voices.filter { $0.copiedByteCount > 0 }.count) voice "
+                + "model(s) into this project (\(Self.megabytes(voicePlan.copiedBytes)) MB) so it "
+                + "stays re-convertible on another machine — project.embeddedVoices lists what "
+                + "it carries")
+        }
+        stateWarnings.append(contentsOf: voicePlan.warnings)
         let effectiveName = adoptName
             ? bundleURL.deletingPathExtension().lastPathComponent
             : projectName
@@ -6721,10 +7681,14 @@ public final class ProjectStore {
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
             copilotChats: persistedChats,
-            reference: reference
+            reference: reference,
+            // m39-e (W7-MODP): the master strip's modulation was never handed to the save format.
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes
         )
         do {
-            try ProjectBundle.write(document: document, plan: plan, to: bundleURL)
+            try ProjectBundle.write(
+                document: document, plan: plan, voices: voicePlan, to: bundleURL)
         } catch {
             throw ProjectError.saveFailed(Self.reason(error))
         }
@@ -6792,8 +7756,20 @@ public final class ProjectStore {
         return ProjectSaveResult(
             path: bundleURL.path,
             mediaFilesCopied: plan.copies.count,
-            warnings: plan.warnings + stateWarnings
+            warnings: plan.warnings + stateWarnings,
+            // Absent (keys omitted) when the project names no voice at all, so
+            // every save response for a project with no converted tracks stays
+            // byte-identical to its pre-m24-n shape.
+            voicesEmbedded: voiceNamed ? voicePlan.voices.count : nil,
+            voiceBytes: voiceNamed ? voicePlan.totalBytes : nil,
+            voiceBytesCopied: voiceNamed ? voicePlan.copiedBytes : nil
         )
+    }
+
+    /// Bytes → a one-decimal MB string for the save warning. Local to the save
+    /// path (the numbers it formats are only ever spoken there).
+    static func megabytes(_ bytes: Int) -> String {
+        String(format: "%.1f", Double(bytes) / (1024 * 1024))
     }
 
     /// Soft cap on inlined Audio Unit state (8 MiB): larger states still save,
@@ -6908,6 +7884,10 @@ public final class ProjectStore {
         masterVolume = 1
         masterEffects = []  // m13-d: a fresh session carries no master chain
         masterAutomation = []  // m15-c: … and no master automation
+        // m39-e (F1, W7-MODP): … and no master modulation. It used to survive New — in the store AND in the
+        // live graph — so the last project's master LFO kept playing in the new one.
+        masterModulationSources = []
+        masterModulationRoutes = []
         grooveTemplates = []
         markers = []
         reference = nil  // m22-g: … and no reference slot
@@ -6940,6 +7920,22 @@ public final class ProjectStore {
         // m23-d: a project boundary destroys every renderer, so held audition
         // voices are released HERE, while the objects that own them are still
         // reachable and the controller's timers can still be cancelled.
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        // I1 (RT review H2): the clip-note audition too. `audition.stopAll`
+        // below silences its VOICE (through the engine) but never cleared the
+        // controller, so a release still waiting for its render played up to
+        // 8 s later. This drops that wait, a drag step waiting behind a span
+        // render, and cancels a span render in flight. It touches neither the
+        // live-play nor the audition ledger, so the m23-ct order holds.
+        clipNoteAudition.stop(engine: engine)
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         // m13-a (A1): a project boundary retires the engine's whole graph —
         // a once-rendered engine rebuilds from the new (empty) model inside
@@ -6949,6 +7945,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.masterModulationChanged(sources: masterModulationSources, routes: masterModulationRoutes)
         engine?.referenceChanged(reference)  // m22-g P2: clear the lane cache
         engine?.loopChanged(transport)
 
@@ -6973,6 +7970,11 @@ public final class ProjectStore {
         masterVolume = runtime.masterVolume
         masterEffects = runtime.masterEffects
         masterAutomation = runtime.masterAutomation
+        // Master modulation (m39-e; F1, W7-MODP): the document's — EMPTY when the file has none, which is what
+        // stops the previous session's master modulation surviving the open.
+        let masterModulation = document.runtimeMasterModulation
+        masterModulationSources = masterModulation.sources
+        masterModulationRoutes = masterModulation.routes
         // Resume the persisted map revision (m12-d) so a reopened non-trivial
         // map keeps a stable, monotonic identity; trivial projects load 0.
         mapRevision = document.tempoMapRevision ?? 0
@@ -7019,6 +8021,22 @@ public final class ProjectStore {
         // m23-d: a project boundary destroys every renderer, so held audition
         // voices are released HERE, while the objects that own them are still
         // reachable and the controller's timers can still be cancelled.
+        // m23-ct: `LivePlayController` is a SECOND heartbeating ledger, and
+        // §6's law is already paid for — an engine-side flush with a surviving
+        // DAWCore ledger RESURRECTS the note within one heartbeat (measured red
+        // at -17.65 LUFS two heartbeats after a panic, m23-af). It runs BEFORE
+        // `audition.stopAll` because that call's `engine.stopAllAudition()`
+        // wipes `auditionVoices` wholesale: run it first and the live-play
+        // release below diffs against an empty ledger, ingests zero note-offs,
+        // and every open note clamps to the end of the take.
+        // I1 (RT review H2): the clip-note audition too. `audition.stopAll`
+        // below silences its VOICE (through the engine) but never cleared the
+        // controller, so a release still waiting for its render played up to
+        // 8 s later. This drops that wait, a drag step waiting behind a span
+        // render, and cancels a span render in flight. It touches neither the
+        // live-play nor the audition ledger, so the m23-ct order holds.
+        clipNoteAudition.stop(engine: engine)
+        livePlay.stopAll(engine: engine)
         audition.stopAll(engine: engine)
         // m13-a (A1): a project boundary retires the engine's whole graph —
         // a once-rendered engine rebuilds from the opened model inside the
@@ -7028,6 +8046,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.masterModulationChanged(sources: masterModulationSources, routes: masterModulationRoutes)
         engine?.referenceChanged(reference)  // m22-g P2: fresh lane cache
         engine?.loopChanged(transport)
 
@@ -7253,7 +8272,10 @@ public final class ProjectStore {
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
             copilotChats: includeChats ? copilotChatsForPersistence() : [],
-            reference: reference
+            reference: reference,
+            // m39-e (W7-MODP): crash-recovery and untitled-recovery bundles carry it too (F4).
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes
         )
     }
 
@@ -7397,6 +8419,10 @@ public final class ProjectStore {
         masterVolume = runtime.masterVolume
         masterEffects = runtime.masterEffects
         masterAutomation = runtime.masterAutomation
+        // Master modulation (m39-e; F1 + F4, W7-MODP): the recovered snapshot's, the open-path rule.
+        let masterModulation = document.runtimeMasterModulation
+        masterModulationSources = masterModulation.sources
+        masterModulationRoutes = masterModulation.routes
         // Resume the persisted map revision (m12-d), like the open path.
         mapRevision = document.tempoMapRevision ?? 0
         grooveTemplates = document.grooveTemplates ?? []
@@ -7436,6 +8462,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.masterModulationChanged(sources: masterModulationSources, routes: masterModulationRoutes)
         engine?.referenceChanged(reference)  // m22-g P2: fresh lane cache
         engine?.loopChanged(transport)
 
@@ -7702,6 +8729,22 @@ public final class ProjectStore {
     /// `testGenerationImportsRoot`.
     private static let testReferenceImportsRoot: URL? = testMediaImportsRoot(.references)
 
+    /// Per-PROCESS redirected home for `voiceStoreDefault()` (m24-n). Shares
+    /// `testMediaImportsBase` for the same reason the other two do: under
+    /// production these categories are SIBLINGS under one `DAWPro/`, and two
+    /// independent bases would silently break that relationship under test.
+    private static let testVoiceStoreRoot: URL? = testMediaImportsRoot(.voiceModels)
+
+    /// The default value for `voiceStoreDirectory` (m24-n) — the
+    /// `generationImportsDefault()` shape. Production: exactly
+    /// `VoiceStore.directory`. Under a detected Swift test process: a
+    /// redirected temp root, so no test can read or overwrite the user's real
+    /// voice models — which, unlike a scratch autosave, are large user assets
+    /// that took a training run to produce.
+    static func voiceStoreDefault() -> URL {
+        testVoiceStoreRoot ?? VoiceStore.directory
+    }
+
     /// The default value for `generationImportsDirectory` (the m23-aa
     /// `autosaveRecoveryDefault()` / m23-aq `outputDirDefault()` shape). Production:
     /// exactly `defaultGenerationImportsDirectory()` — unchanged, still the real
@@ -7811,6 +8854,11 @@ public final class ProjectStore {
                 // row 19) — advances correctly across future map boundaries.
                 self.transport.positionBeats = self.transport.tempoMap.beat(
                     from: self.transport.positionBeats, elapsedSeconds: seconds)
+                // m34-h-1: the headless twin of the engine playhead handler's
+                // deck refresh. BOTH transports drive the deck, so a headless
+                // test and a live session see the same behaviour rather than
+                // two implementations that agree by luck.
+                self.refreshLoopDeck()
                 // End of content (m25-d): park the playhead EXACTLY on the
                 // content end rather than wherever this tick overshot to, then
                 // stop on the ordinary path. `stop()` cancels this very task

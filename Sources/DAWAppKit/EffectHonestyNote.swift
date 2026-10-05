@@ -83,11 +83,139 @@ public struct EffectHonestyNote: Sendable, Equatable {
         case .bassEnhancer:
             return bassEnhancer
         case .gain, .eq, .compressor, .limiter, .reverb, .delay, .saturator,
-             .gate, .chorus, .audioUnit:
+             .gate, .chorus, .bitCrusher, .djFilter, .ringMod, .flanger,
+             .hallReverb, .tapeDelay, .stereoWidth, .phaser, .transientShaper,
+             .freqShifter, .clipper, .dynamicEQ, .audioUnit:
+            // `dynamicEQ` (m39-af) was put to the same test and lands here
+            // DELIBERATELY, alongside `.eq` — the design asked for exactly this
+            // placement. An honesty note exists for a kind whose NAME
+            // OVER-PROMISES; "dynamic EQ" promises EQ that moves with the
+            // signal, and that is precisely what it does. The two things a user
+            // could be surprised by are real and both live where a user reads
+            // them rather than in a card-level confession: that this kind's `Q`
+            // does not mean what `.eq`'s `Q` means (a measured difference,
+            // stated with its numbers in `bandNQ`'s own `note:`), and that
+            // `mode: below` sits at FULL range on digital silence (stated in
+            // `bandNMode`'s). Both belong to ONE control each, both carry a
+            // number, and `fx.describe` surfaces both verbatim.
+            // ⚠️ The honest case FOR a note here is the ABSENT GAIN-REDUCTION
+            // METER — a dynamic effect with no visible feedback is hard to
+            // trust. But that is a missing FEATURE, filed as a follow-up
+            // needing a protocol widening, not a gap between the name and the
+            // behaviour, and an honesty note would be the wrong instrument for
+            // it: it would tell the user the kind is not what it says, when the
+            // truth is that the kind is exactly what it says and we have not
+            // yet drawn it.
+            // `clipper` (m39-ac) was put to the same test and lands here
+            // DELIBERATELY, and it is the CLOSEST CALL since `stereoWidth`.
+            // The case FOR a note is real: a clipper makes things louder, and
+            // louder is the one change a listener reliably mistakes for
+            // better — so a user can credit the effect for a difference that
+            // is only level. But that is a property of how you AUDITION any
+            // loudness tool, not a gap between what this kind promises and
+            // what it does. It promises a hard ceiling and it delivers one,
+            // exactly, at a finite input, in both modes. The two things that
+            // could surprise — that the sample ceiling is not a TRUE-PEAK
+            // ceiling, and that `oversampling: 1` deliberately lets the
+            // folded-back fizz through — each belong to ONE control, have a
+            // number attached, and are stated in that control's own `note:`,
+            // which `fx.describe` surfaces verbatim. An honesty note is for a
+            // kind whose NAME over-promises; "clipper" promises clipping.
+            // `freqShifter` (m39-z) was put to the same test and lands here
+            // DELIBERATELY. An honesty note exists for a kind whose NAME
+            // over-promises — and this one's under-promises if anything. It
+            // says it shifts frequency and it shifts frequency, by exactly the
+            // number of Hz asked for, measured. The thing a user could be
+            // surprised by is that it is NOT a pitch shifter: moving every
+            // partial by the same Hz (rather than the same ratio) breaks the
+            // harmonic series and makes the source clangorous. But that is the
+            // EFFECT, not a shortfall in it — the inharmonicity is the reason
+            // the kind exists, it is the first thing `shiftHz`'s own `note:`
+            // says, and `fx.describe` surfaces that note verbatim. Nothing is
+            // hidden and nothing under-delivers, so there is nothing to
+            // confess.
+            // `transientShaper` (m39-y) was put to the same test and lands
+            // here DELIBERATELY, not by grouping convenience. It does not
+            // promise revelation: it promises punch and it delivers punch. The
+            // thing a user could be surprised by — that `attackDb: +6` is a
+            // MAXIMUM reached only at a full 12 dB differential, and that
+            // nothing at all happens below −70 dBFS — is real, but it is stated
+            // in the param's own `note:` and surfaced verbatim by
+            // `fx.describe`, which is where a number's caveat belongs. An
+            // honesty note is for a kind whose NAME over-promises; this one's
+            // does not.
+            // `stereoWidth` (m23-dj) was put to the same test and lands with
+            // the rest, but it is the CLOSEST CALL in the list and the
+            // reasoning is worth keeping. It does not promise revelation: it
+            // promises width, and it delivers width. The thing a user could be
+            // surprised by is real — `spread` puts a gentle ripple into each
+            // channel on its own, because a flat mono sum and flat individual
+            // channels are not simultaneously achievable out of a mono source
+            // — but that is a property of ONE control, with a number attached
+            // (`channelPeakDb`/`channelNotchDb`), and a consequence that
+            // belongs to one control belongs in that control's own `note`,
+            // which is where it is. The effect's PROMISE and its MECHANISM do
+            // not diverge, so there is nothing for a disclosure to close.
+            // `tapeDelay` (m39-n) was put to the same test and lands with
+            // `delay`: it promises a wobbling, saturated echo and it delivers
+            // exactly that. Nothing about it claims to REVEAL anything the
+            // source contained — it plainly ADDS repeats, and every repeat is
+            // audibly a repeat. The two things a user could be surprised by
+            // are level-related (`feedback` and `saturationDrive` both change
+            // loudness) and each says so in its own `note`, which is where a
+            // consequence belongs when it is a property of one control rather
+            // than of the effect's promise.
+            // `hallReverb` (m39-l) was put to the same test and lands with
+            // `reverb`: it unmistakably CREATES content the source did not
+            // contain — a tail that was never played — but it never promises
+            // to REVEAL anything. Its name, its `sizeMeters`/`decaySeconds`
+            // controls and its copy all say "this puts your sound in a room
+            // that is not there". No gap between promise and mechanism, so
+            // there is nothing for a disclosure to close. (Two of its params
+            // DO carry level consequences — `mix` and `earlyLateBalance` — and
+            // each says so in its own `note` rather than in a panel the user
+            // has to open.)
+            // `flanger` (m39-j) was put to the same test and lands with
+            // `chorus`: it promises a sweeping, whooshing colouration and it
+            // delivers exactly that by sweeping a comb. Its resonance ADDS
+            // level at the peaks and its positive feedback makes the whole
+            // unit louder — but that is reinforcement of material the user
+            // already had, not content invented from nowhere, and the
+            // `feedback` param's own `note` states the gain arithmetic in
+            // decibels rather than leaving it to be discovered. No gap between
+            // promise and mechanism, so there is nothing for a disclosure to
+            // close.
+            // `ringMod` (m39-m) was put to the same test and lands with
+            // `saturator`/`reverb`/`chorus`, NOT with `bassEnhancer`: it
+            // unmistakably CREATES content the source did not contain (the
+            // sidebands are new tones at new frequencies), but it never
+            // promises to REVEAL anything. Its name, its one knob and its copy
+            // all say "this makes a new sound out of yours". There is no gap
+            // between the promise and the mechanism, so there is nothing for a
+            // disclosure to close.
+            // `djFilter` (m39-i) was put to the same test: it promises to
+            // REMOVE a band and it removes that band. Its one knob, its name
+            // and its copy all say "this takes sound away", so there is no gap
+            // between the promise and the mechanism. Its resonance ADDS level
+            // at the corner — but that is a peak in material the user already
+            // had, not content invented from nowhere, and the param's own
+            // `note` says so in those words.
             // No gap between promise and mechanism — see the criterion above.
             // `saturator`/`reverb`/`chorus` DO create content the source did
             // not contain; they are excluded because nothing in this app tells
             // the user they are revealing it.
+            //
+            // `bitCrusher` (m32-e) was put to the same test rather than waved
+            // through: it promises DEGRADATION and performs degradation. Its
+            // name, its knobs (BITS, RATE) and its copy all say "this makes
+            // your audio worse on purpose", so there is no gap between the
+            // promise and the mechanism. The near-miss worth naming: its
+            // `antiAlias: false` default DOES add frequency content that was
+            // not in the source (images folding down below Nyquist) — but the
+            // param's own `note` says exactly that, in those words, and the
+            // user reaching for a bit-crusher is asking for it. A disclosure
+            // here would be a tax on harmonic generation, which is precisely
+            // the line this type refuses to draw.
             return nil
         }
     }

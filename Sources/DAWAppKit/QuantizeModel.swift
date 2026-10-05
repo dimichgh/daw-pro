@@ -271,7 +271,27 @@ public final class QuantizeModel {
     /// m25-a-2). The words are the store's `errorDescription` VERBATIM, the same
     /// sentence the `clip.quantize` wire returns and the same one
     /// `ArrangeRefusalBubble` prints.
-    public var refusalMessage: String? { targetRefusal.flatMap(\.errorDescription) }
+    ///
+    /// m23-ap I5-F4 round 4: with nothing from the store, a saved groove whose
+    /// own grid quantize cannot use speaks instead (`grooveGridRefusal`).
+    public var refusalMessage: String? {
+        targetRefusal.flatMap(\.errorDescription) ?? grooveGridRefusal
+    }
+
+    /// Why the SELECTED groove cannot drive Apply, or nil (m23-ap I5-F4 round 4).
+    /// A groove quantizes on its OWN grid (`buildSettings`, Pro only), and a
+    /// saved groove's grid comes from the project file, where a hand edit can
+    /// put any number: one finer than 1/1024 beat is no grid anyone means, one
+    /// longer than the timeline puts every note on beat 0. The same test the
+    /// wire applies to a `gridBeats` it is sent (`QuantizeLimits.isUsableGrid`).
+    /// Simple never uses the groove, so it never refuses there.
+    public var grooveGridRefusal: String? {
+        guard density == .pro, let groove = selectedGroove,
+              !QuantizeLimits.isUsableGrid(groove.gridBeats) else { return nil }
+        return "This groove was saved with a grid of \(Self.gridLabel(forBeats: groove.gridBeats)), "
+            + "which quantize can't use: a grid has to be between 1/1024 of a beat and "
+            + "\(Int(TimelineLimits.maximumBeats)) beats. Pick another groove, or Straight grid."
+    }
 
     /// Whether Apply can fire: a MIDI target with nothing refusing it (m25-c-2 —
     /// this model had no `canApply` at all, so the panel offered APPLY QUANTIZE to
@@ -279,7 +299,7 @@ public final class QuantizeModel {
     /// nothing). There is deliberately no strength/no-op conjunct here: unlike
     /// Humanize's two amounts, a 0-strength quantize is not this item's business.
     public var canApply: Bool {
-        targetClipID != nil && targetIsMIDI && targetRefusal == nil
+        targetClipID != nil && targetIsMIDI && targetRefusal == nil && grooveGridRefusal == nil
     }
 
     /// Applies the built settings to the target clip through the injected apply

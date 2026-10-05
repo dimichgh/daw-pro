@@ -88,6 +88,9 @@ struct SignalsmithStretch {
 
 		blockProcess = {};
 		formantMetric.resize(bands + 2);
+		formantLogEnvelope.resize(bands + 2);
+		formantStack.resize(bands + 2);
+		formantMark.resize(bands + 2);
 
 		tmpProcessBuffer.resize(blockSamples + intervalSamples);
 		tmpPreRollBuffer.resize(outputLatency()*channels);
@@ -299,8 +302,10 @@ struct SignalsmithStretch {
 				blockProcess.newSpectrum = didSeek || (inputInterval > 0);
 				blockProcess.mappedFrequencies = customFreqMap || freqMultiplier != 1;
 				if (blockProcess.newSpectrum) {
-					// make sure the previous input is the correct distance in the past (give or take 1 sample)
-					blockProcess.reanalysePrev = didSeek || std::abs(inputInterval - int(stft.defaultInterval())) > 1;
+					// make sure the previous input is EXACTLY one synthesis hop in the past: the `rot` pass (and the peak
+					// position) turn by defaultInterval(), so upstream's "give or take 1 sample" left up to ~1.3 c.
+					// DAW PRO LOCAL PATCH 0003 (exact hop) -- see VENDORED.md. Upstream tolerated |interval - H| <= 1.
+					blockProcess.reanalysePrev = didSeek || inputInterval != int(stft.defaultInterval());
 					if (blockProcess.reanalysePrev) blockProcess.steps += stft.analyseSteps() + 1;
 
 					// analyse a new input
@@ -698,6 +703,10 @@ private:
 			int c = int(step);
 			Band *bins = bandsForChannel(c);
 			auto *predictions = predictionsForChannel(c);
+			// DAW PRO LOCAL PATCH (fractional prevInput read) -- see VENDORED.md.
+			// The per-bin turn the `rot` pass applied between adjacent bins (same expression as its `rotStep`).
+			const Sample binTurn = (bandToFreq(1) - bandToFreq(0))*stft.defaultInterval()*Sample(2*M_PI);
+			const Complex binTurnBack = std::polar(Sample(1), -binTurn);
 			for (int b = 0; b < bands; ++b) {
 				auto mapPoint = outputMap[b];
 				int lowIndex = static_cast<int>(std::floor(mapPoint.inputBin));
@@ -710,7 +719,17 @@ private:
 				prediction.input = getFractional<&Band::input>(c, lowIndex, fracIndex);
 
 				auto &outputBin = bins[b];
-				Complex prevInput = getFractional<&Band::prevInput>(c, lowIndex, fracIndex);
+				Complex prevInput;
+				if (fracIndex == 0) {
+					prevInput = getFractional<&Band::prevInput>(c, lowIndex, fracIndex); // upstream expression, unchanged
+				} else {
+					// Each stored prevInput carries its OWN bin's centre advance (the `rot` pass). Bring the upper
+					// neighbour into the lower one's frame, interpolate exactly like `prediction.input`, then turn the
+					// result to the fractional position: == rot(inputBin) * lerp(unrotated prevInput).
+					Complex low = getBand<&Band::prevInput>(c, lowIndex);
+					Complex high = _impl::mul(getBand<&Band::prevInput>(c, lowIndex + 1), binTurnBack);
+					prevInput = _impl::mul(low + (high - low)*fracIndex, std::polar(Sample(1), binTurn*fracIndex));
+				}
 				Complex freqTwist = _impl::mul<true>(prediction.input, prevInput);
 				Complex phase = _impl::mul(outputBin.output, freqTwist);
 				outputBin.output = phase/(std::max(prevEnergy, prediction.energy) + noiseFloor);
@@ -858,6 +877,14 @@ private:
 	// Identifies spectral peaks using energy across all channels
 	void findPeaks() {
 		peaks.resize(0);
+		// DAW PRO LOCAL PATCH 0002 (peak position) -- see VENDORED.md.
+		// After the `rot` pass, input*conj(prevInput) at bin k has phase theta*(peak - k) for a steady partial
+		// (theta = the rot pass's per-bin turn): the partial's exact position. The energy centroid below is
+		// biased toward bin centres by up to 0.076 bins. Only on a NEW spectrum: on a repeated block `prevInput`
+		// is the previous `.input`, unrotated, and its phase difference carries no position.
+		const bool phasePeaks = blockProcess.newSpectrum;
+		const Sample peakTheta = (bandToFreq(1) - bandToFreq(0))*Sample(stft.defaultInterval())*Sample(2*M_PI);
+		const Complex peakTurnUp = std::polar(Sample(1), peakTheta), peakTurnDown = std::conj(peakTurnUp);
 		
 		int start = 0;
 		while (start < bands) {
@@ -870,6 +897,30 @@ private:
 					++end;
 				}
 				Sample avgBand = bandSum/energySum;
+				if (phasePeaks) {
+					int maxB = start;
+					for (int b = start + 1; b < end; ++b) {
+						if (energy[size_t(b)] > energy[size_t(maxB)]) maxB = b;
+					}
+					// Channel-summed: each term's phase is a hop ADVANCE, independent of the channel's own phase.
+					Complex z = 0;
+					Sample zSum = 0;
+					for (int c = 0; c < channels; ++c) {
+						Band *channelBins = bandsForChannel(c);
+						for (int k = std::max(0, maxB - 1); k <= std::min(bands - 1, maxB + 1); ++k) {
+							Complex zk = _impl::mul<true>(channelBins[k].input, channelBins[k].prevInput);
+							zSum += std::abs(zk);
+							if (k < maxB) zk = _impl::mul(zk, peakTurnDown);
+							if (k > maxB) zk = _impl::mul(zk, peakTurnUp);
+							z += zk;
+						}
+					}
+					if (std::abs(z) > Sample(0.5)*zSum && zSum > noiseFloor) { // coherent: a steady partial, not a transient
+						Sample phaseBand = Sample(maxB) + std::arg(z)/peakTheta;
+						// stay inside this region's bins (+-0.5), so neighbouring peaks keep a gap of more than one bin
+						if (phaseBand > Sample(start) - Sample(0.5) && phaseBand < Sample(end) - Sample(0.5)) avgBand = phaseBand;
+					}
+				}
 				Sample avgFreq = bandToFreq(avgBand);
 				peaks.emplace_back(Peak{avgBand, freqToBand(mapFreq(avgFreq))});
 
@@ -891,16 +942,28 @@ private:
 			outputMap[b] = {b + bottomOffset, 1};
 		}
 		// Interpolate between points
+		// DAW PRO LOCAL PATCH 0002 (flat peak neighbourhood) -- see VENDORED.md.
+		// Every output bin of a peak's main lobe must share that peak's offset, or the lobe's bins advance at
+		// different rates and pull the partial off pitch (the smoothstep's curvature near a peak, set by the
+		// NEXT peak, was the dominant large-shift error). Hold each peak's offset flat for the analysis window's
+		// main-lobe half-width either side of it, and smoothstep only in between.
+		// The width is upstream's smoothingBins/2 = 0.5*N/H: 97% of the window's first null at presetDefault
+		// (the lobe is already -40 dB there). At presetCheaper it is 86% (-21 dB): re-derive before changing preset.
+		// Capped at a quarter of the gap on BOTH sides of the map, so the flat zones never take more than half of
+		// the input bins between two peaks and the transition's energy gradient stays >= 0 up to +12 st.
+		const Sample peakFlatBins = Sample(0.5)*Sample(stft.fftSamples())/Sample(stft.defaultInterval());
 		for (size_t p = 1; p < peaks.size(); ++p) {
 			const Peak &prev = peaks[p - 1], &next = peaks[p];
-			Sample rangeScale = 1/(next.output - prev.output);
+			Sample flat = std::min(peakFlatBins, std::min(next.output - prev.output, next.input - prev.input)*Sample(0.25));
+			Sample rangeStart = prev.output + flat;
+			Sample rangeScale = 1/(next.output - prev.output - 2*flat);
 			Sample outOffset = prev.input - prev.output;
 			Sample outScale = next.input - next.output - prev.input + prev.output;
 			Sample gradScale = outScale*rangeScale;
 			int startBin = std::max(0, static_cast<int>(std::ceil(prev.output)));
 			int endBin = std::min(bands, static_cast<int>(std::ceil(next.output)));
 			for (int b = startBin; b < endBin; ++b) {
-				Sample r = (b - prev.output)*rangeScale;
+				Sample r = std::min(std::max((Sample(b) - rangeStart)*rangeScale, Sample(0)), Sample(1));
 				Sample h = r*r*(3 - 2*r);
 				Sample outB = b + outOffset + h*outScale;
 				
@@ -967,8 +1030,55 @@ private:
 	
 	Sample freqEstimate;
 	
-	std::vector<Sample> formantMetric;
+	std::vector<Sample> formantMetric, formantLogEnvelope;
+	std::vector<int> formantStack, formantMark;
 	Sample formantBaseFreq = 0;
+	// Spectral envelope through the harmonic peaks, from `formantMetric` (energy per band) in place.
+	// DAW PRO LOCAL PATCH 0004 (formant envelope through the harmonic peaks, explicit base only) -- see VENDORED.md.
+	// A bin is a peak when no strictly larger bin lies within half a harmonic spacing on either side, and it is
+	// strictly larger than its left neighbour. (`freqEstimate` comes from freqToBand(), which subtracts half a bin, so
+	// the spacing is `freqEstimate + 0.5` bins.) Consecutive peaks are joined by straight lines in log-energy, and the
+	// first/last peak's value is held outwards. A weak harmonic next to a strong one keeps its own level, and the
+	// envelope does not sag between two strong harmonics, so the compensation reads the envelope rather than a
+	// neighbour's decay. The nearest strictly larger bin on each side comes from a monotonic stack: O(bands) for any
+	// base. It needs a trustworthy f0 (an estimate an octave high joins only every other harmonic), so it is used only
+	// when the caller provides one.
+	void formantEnvelopeThroughPeaks() {
+		int halfSpacing = int(std::min(Sample(bands), Sample(0.5)*(freqEstimate + Sample(0.5))));
+		int *stack = formantStack.data(), *mark = formantMark.data();
+		int depth = 0;
+		for (int b = 0; b < bands; ++b) { // mark[b] = nearest strictly larger bin on the left (none: far away)
+			while (depth > 0 && formantMetric[stack[depth - 1]] <= formantMetric[b]) --depth;
+			mark[b] = (depth > 0) ? stack[depth - 1] : -bands - 1;
+			stack[depth++] = b;
+		}
+		depth = 0;
+		for (int b = bands - 1; b >= 0; --b) { // ... on the right; then mark[b] = 1 for a peak, else 0
+			while (depth > 0 && formantMetric[stack[depth - 1]] <= formantMetric[b]) --depth;
+			int rightLarger = (depth > 0) ? stack[depth - 1] : 2*bands + 1;
+			stack[depth++] = b;
+			bool peak = formantMetric[b] > 0 && b - mark[b] > halfSpacing && rightLarger - b > halfSpacing
+				&& (b == 0 || formantMetric[b] > formantMetric[b - 1]);
+			mark[b] = peak ? 1 : 0;
+		}
+		int prevPeak = -1;
+		Sample prevLog = 0;
+		for (int b = 0; b < bands; ++b) {
+			if (!mark[b]) continue;
+			Sample logE = std::log(formantMetric[b]);
+			if (prevPeak < 0) {
+				for (int i = 0; i < b; ++i) formantLogEnvelope[i] = logE;
+			} else {
+				Sample invSpan = Sample(1)/Sample(b - prevPeak);
+				for (int i = prevPeak; i < b; ++i) formantLogEnvelope[i] = prevLog + (logE - prevLog)*Sample(i - prevPeak)*invSpan;
+			}
+			prevPeak = b;
+			prevLog = logE;
+		}
+		if (prevPeak < 0) return; // no peak at all: leave the energy as it is
+		for (int i = prevPeak; i < bands; ++i) formantLogEnvelope[i] = prevLog;
+		for (int i = 0; i < bands; ++i) formantMetric[i] = std::exp(formantLogEnvelope[i]);
+	}
 	void updateFormants(size_t step) {
 		if (step-- == 0) {
 			for (auto &e : formantMetric) e = 0;
@@ -982,6 +1092,11 @@ private:
 			freqEstimate = freqToBand(formantBaseFreq);
 			if (formantBaseFreq <= 0) freqEstimate = estimateFrequency();
 		} else if (step-- == 0) {
+			if (formantBaseFreq > 0 && freqEstimate > Sample(1.5)) {
+				// the caller gave f0: the envelope through the harmonic peaks (see formantEnvelopeThroughPeaks())
+				formantEnvelopeThroughPeaks();
+				return;
+			}
 			Sample decay = 1 - 1/(freqEstimate*Sample(0.5) + 1);
 			Sample e = 0;
 			for (size_t repeat = 0; repeat < 2; ++repeat) {

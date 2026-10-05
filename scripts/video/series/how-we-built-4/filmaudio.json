@@ -1,0 +1,22 @@
+{
+ "abLevelDb": 3.157,
+ "abCorr": 0.695114,
+ "controlStage": "18-eyes",
+ "controlCorr": 0.000972,
+ "rms": {
+  "01-project": -24.33,
+  "03-empty": -17.14,
+  "06-flam": -42.06,
+  "07-apart": -38.91,
+  "08-plant": -17.14,
+  "18-eyes": -24.49
+ },
+ "peak": {
+  "01-project": -3.52,
+  "03-empty": -2.82,
+  "06-flam": -11.5,
+  "07-apart": -11.5,
+  "08-plant": -2.82,
+  "18-eyes": -3.4
+ }
+}

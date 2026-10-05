@@ -34,27 +34,28 @@ import Foundation
 /// - The scrub maps that x to a clip-local beat, snaps and clamps it, and only
 ///   THEN adds `clipStartBeat` (`PianoRollPlayhead.projectBeat`) to hand the
 ///   store a project beat. The project offset touches the returned value, never
-///   the axis — and the SNAP is likewise applied in clip-local space, before the
-///   offset, or the playhead would land on the ARRANGE's grid instead of the
-///   lines this ruler draws.
-/// - `PianoRollGrid.drawGridLines` emphasises a bar line at `beat % beatsPerBar
-///   == 0` counting from **clip-local beat 0**, and the header's readout
-///   (`PianoRollBarOps.targetBarNumber`) is `floor(localBeat / bpb) + 1` —
-///   **clip-local and 1-based**.
+///   the axis.
 ///
-/// So the labels here are **clip-local bars and beats, 1-based**. Numbering the
-/// project timeline instead would put a "bar 19" label on a line the grid draws
-/// as a bar START only when `clip.startBeat` happens to be a multiple of the
-/// meter — for every other clip the numbers would sit off the lines they name,
-/// AND would contradict the "BAR n" readout in this view's own header. A ruler
-/// that disagrees with the notes under it is worse than no ruler.
+/// ## ⭐ THE NUMBERS ARE THE SONG'S (m23-ap I5-F2)
 ///
-/// The knowingly accepted cost, recorded rather than hidden: for a clip that does
-/// not start at project bar 1, this ruler says "3" where the transport bar says
-/// project bar 19. That divergence is not introduced here — `PianoRollBarOps`
-/// already reads clip-local — and agreement WITHIN the editor is the property
-/// worth protecting, because the ruler's whole job is to name the pixels beneath
-/// it.
+/// Until I5-F2 the labels here were clip-local bars and beats, 1-based, and
+/// that was right at the time: `PianoRollGrid.drawGridLines` emphasised a bar
+/// line at `beat % beatsPerBar == 0` counting from clip-local beat 0, the
+/// header's "BAR n" was `floor(localBeat / bpb) + 1`, and the snap ran in
+/// clip-local beats. A project-numbered ruler would have sat off the lines it
+/// named. The recorded cost was that a clip not starting at song bar 1 read "3"
+/// where the transport read 19.
+///
+/// I5-F2 moved all four to the SONG's bars in one step, so they still agree with
+/// each other AND with the transport and the arrange ruler: the ruler draws
+/// `PitchEditorSongRuler.ticks` (the band's `songMeter`), the grid draws
+/// `PianoRollSongGrid.forEachLine`, "BAR n" and its +/− range are
+/// `PianoRollBarOps.targetBar`, and the snap is `PianoRollSongGrid
+/// .placementLocalBeat` (the song's grid, then the clamp to the clip). The AXIS
+/// above is unchanged. `ticks(lengthBeats:pixelsPerBeat:beatsPerBar:)` below is
+/// the clip-local numbering, now drawn only when the band gets no song meter
+/// (the previews); its density rules (`barLabelStride`, `labelsEveryBeat`,
+/// `showsBeatTicks`) and `Tick` serve both numberings.
 ///
 /// Everything is nonisolated value math, callable from `@Sendable` Canvas
 /// renderers.
@@ -168,8 +169,10 @@ public enum PianoRollScrubRuler {
         public let localBeat: Double
         /// Content-space x.
         public let x: CGFloat
-        /// True on a bar boundary (`localBeat % beatsPerBar == 0`) — the lines the
-        /// grid draws with `gridEmphasis`.
+        /// True on a bar boundary — the lines the grid draws with `gridEmphasis`:
+        /// the SONG's bar lines for `PitchEditorSongRuler.ticks` (both editors,
+        /// m23-ap I5-F1/F2), `localBeat % beatsPerBar == 0` for the clip-local
+        /// `ticks` below.
         public let isBar: Bool
         /// The number to draw, or nil for an unlabelled tick.
         public let label: String?

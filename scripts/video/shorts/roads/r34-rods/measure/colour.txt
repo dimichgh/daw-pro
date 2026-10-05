@@ -1,0 +1,8 @@
+V1-bass-thin-tall-lit-not-emitting   rod n= 2832 hue=66.9deg S=7.5% (unclipped S=7.5%, clipped 0%)   road0 29.5deg S12.4% dHue=37.4deg  |  road1 39.3deg S12.1% dHue=27.7deg
+V2-bass-thick-short-emitting         rod n=44763 hue=67.5deg S=7.0% (unclipped S=7.0%, clipped 0%)   road0 29.5deg S12.4% dHue=38.0deg  |  road1 39.3deg S12.1% dHue=28.3deg
+V3-bass-and-tenor-thin-tall          rod n= 2776 hue=37.1deg S=13.4% (unclipped S=13.4%, clipped 0%)   road0 29.5deg S12.4% dHue=7.6deg
+V4-bass-height-from-duration         rod n= 4787 hue=66.6deg S=8.1% (unclipped S=8.1%, clipped 0%)   road0 29.5deg S12.4% dHue=37.1deg  |  road1 39.3deg S12.1% dHue=27.4deg
+V5-bass-strong-colour-separation     rod n=13392 hue=59.5deg S=21.9% (unclipped S=21.9%, clipped 0%)   road0 29.5deg S12.4% dHue=30.0deg  |  road1 39.3deg S12.1% dHue=20.2deg
+V6-bass-rod-replaces-disk            rod n= 7724 hue=68.1deg S=10.9% (unclipped S=10.9%, clipped 0%)   road0 29.5deg S12.4% dHue=38.6deg  |  road1 39.3deg S12.1% dHue=28.8deg
+V7-bass-rods-standing-ahead          rod n= 2869 hue=66.6deg S=8.6% (unclipped S=8.6%, clipped 0%)   road0 29.5deg S12.4% dHue=37.0deg  |  road1 39.3deg S12.1% dHue=27.3deg
+V8-standing-ahead-at-V5-colour       rod n= 2779 hue=59.1deg S=15.4% (unclipped S=15.4%, clipped 0%)   road0 29.5deg S12.4% dHue=29.5deg  |  road1 39.3deg S12.1% dHue=19.8deg

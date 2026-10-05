@@ -1,5 +1,6 @@
 import AVFAudio
-import DAWCore
+import CryptoKit
+@testable import DAWCore  // C2-0 physics test builds its track directly (`tracks` is internal(set))
 import Foundation
 import Testing
 @testable import DAWEngine
@@ -334,6 +335,31 @@ struct StretchEngineTests {
 
     // MARK: - Latest-wins cancellation (spec §5 debounce contract)
 
+    /// TEST HELPER (LW, 2026-09-25): a thread-safe record of
+    /// `StretchRenderCache.jobPhaseForTesting` callbacks, stamped against
+    /// `ContinuousClock` — so a test can tell WHEN a job crossed a phase
+    /// boundary instead of guessing from a fixed sleep that a load spike can
+    /// make wrong either way (too short to have happened yet, or too long
+    /// to still be true). `@unchecked Sendable`: the callback itself is
+    /// `@Sendable` (called from inside the job's own `@MainActor` task,
+    /// which may not be the test's task), and the lock is the actual guard,
+    /// not the annotation.
+    private final class JobPhaseLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stamps: [String: ContinuousClock.Instant] = [:]
+
+        func time(_ phase: String) -> ContinuousClock.Instant? {
+            lock.lock(); defer { lock.unlock() }
+            return stamps[phase]
+        }
+
+        var recorder: @Sendable (String, TaskPriority) -> Void {
+            { [self] phase, _ in
+                lock.lock(); stamps[phase] = .now; lock.unlock()
+            }
+        }
+    }
+
     @Test("two rapid requests: the first is cancelled, only the second's CAF exists")
     func latestWinsCancelsInFlight() async throws {
         let sourceDir = try makeTempDir("cancel-src")
@@ -345,13 +371,21 @@ struct StretchEngineTests {
         let paramsA = StretchRenderCache.Params(ratio: 1.5, semitones: 0, formantPreserve: false)
         let paramsB = StretchRenderCache.Params(ratio: 2.0, semitones: 0, formantPreserve: false)
 
+        // A LONG debounce, so A is PROVABLY still asleep whenever B actually
+        // lands, however long scheduling takes under load — cancellation
+        // interrupts `Task.sleep`, so A's teardown is still immediate.
+        // Dropped back to the real default before B starts, so B's own
+        // render (which must actually complete) is not slowed by it.
+        cache.debounceMillisecondsForInstance = 60_000
         let first = Task { @MainActor in
             try await cache.renderIfNeeded(clipID: clipID, source: source, params: paramsA)
         }
-        // Let the first request register its job — still inside its 250 ms
-        // debounce window when the second lands.
-        try await Task.sleep(for: .milliseconds(50))
-        #expect(cache.status(forClip: clipID) == .rendering)
+        // Bounded poll, not a fixed sleep: wait for A's job to actually
+        // register, however long that takes under load. The 30 s guard
+        // makes a lost registration FAIL, not hang.
+        try #require(try await waitUntil(30) { cache.status(forClip: clipID) == .rendering },
+                     "A's job never reached .rendering within 30 s")
+        cache.debounceMillisecondsForInstance = StretchRenderCache.debounceMilliseconds
         let urlB = try await cache.renderIfNeeded(clipID: clipID, source: source, params: paramsB)
 
         await #expect(throws: (any Error).self) { _ = try await first.value }
@@ -367,6 +401,59 @@ struct StretchEngineTests {
         #expect(entries == [urlB.lastPathComponent])
     }
 
+    /// LW, 2026-09-25 (item 3): the mid-render leg of "aborts promptly" at
+    /// the JOB QUEUE, not the render primitive. `ClipSpanRenderTests
+    /// .spanRenderStopsMidRender` proves a span render's `isCancelled`
+    /// closure is polled inside the block loop, with a SYNTHETIC flag — it
+    /// never exercises `renderIfNeeded`'s own wiring: a second request's
+    /// `Job.cancel()` (the `cancelled` lock + `task.cancel()`, ~:280)
+    /// reaching a REAL `Task.detached` render that THIS job already
+    /// started. Debounce 0 so A reaches the render almost at once; a long
+    /// source so its render is not over before B can land. Every phase is
+    /// timed so a flake says WHICH side lost, rather than leaving a guess.
+    @Test("a render already past its debounce is cancelled MID-RENDER by a newer request: it aborts promptly, commits nothing at the superseded key, and leaves no partial file")
+    func lateSupersessionCancelsAnActiveRender() async throws {
+        let sourceDir = try makeTempDir("mid-render-src")
+        let source = sourceDir.appendingPathComponent("tone.wav")
+        // Long enough that the stretch loop takes real, measurable time —
+        // the window B's cancellation needs to land WHILE A is still inside
+        // `performRender`, never merely inside its debounce.
+        try writeSine(to: source, frequency: 440, seconds: 60.0)
+        let cacheDir = try makeTempDir("mid-render-cache")
+        let cache = StretchRenderCache(directory: cacheDir)
+        cache.debounceMillisecondsForInstance = 0
+        let clipID = UUID()
+        let paramsA = StretchRenderCache.Params(ratio: 3.0, semitones: 0, formantPreserve: false)
+        let paramsB = StretchRenderCache.Params(ratio: 1.5, semitones: 0, formantPreserve: false)
+
+        let log = JobPhaseLog()
+        let first = StretchRenderCache.$jobPhaseForTesting.withValue(log.recorder) {
+            Task { @MainActor in
+                try await cache.renderIfNeeded(clipID: clipID, source: source, params: paramsA)
+            }
+        }
+        try #require(try await waitUntil(30) { log.time("debounce-end") != nil },
+                     "A never left its debounce within 30 s")
+        let issuedB = ContinuousClock.now
+        let urlB = try await cache.renderIfNeeded(clipID: clipID, source: source, params: paramsB)
+        if let debounceEnd = log.time("debounce-end") {
+            let toIssue = Self.ms(issuedB - debounceEnd)
+            let toReturn = log.time("render-returned").map { Self.ms($0 - issuedB) }
+            print("[measured] mid-render cancel: debounce-end→B issued \(toIssue) ms, "
+                  + "B issued→A's render-returned \(toReturn.map { "\($0) ms" } ?? "n/a")")
+        }
+
+        await #expect(throws: (any Error).self) { _ = try await first.value }
+        #expect(FileManager.default.fileExists(atPath: urlB.path))
+        let keyA = try StretchRenderCache.cacheKey(source: source, params: paramsA)
+        #expect(!FileManager.default.fileExists(
+            atPath: cacheDir.appendingPathComponent(keyA + ".caf").path),
+            "the cancelled render must not commit")
+        let entries = try FileManager.default.contentsOfDirectory(atPath: cacheDir.path)
+        #expect(!entries.contains { $0.contains(".partial-") },
+                "a cancelled render left a partial file: \(entries)")
+    }
+
     // MARK: - Pending clips schedule as silence (never wrong-speed audio)
 
     @Test("a non-identity clip with no render bounces silent, not wrong-speed")
@@ -379,5 +466,2082 @@ struct StretchEngineTests {
             tracks: [audioTrack(clip)], tempoMap: TempoMap(constantBPM: 120), fromBeat: 0,
             durationSeconds: 1.0, masterVolume: 1)
         #expect(TestSignals.peak(rendered.channelData[0], in: 0..<48_000) == 0)
+    }
+
+    // MARK: - m23-q: pitch edits in the cache's identity
+
+    /// ⭐⭐ **THE INVARIANCE CONTROL, AND IT IS THE FIRST THING HERE ON
+    /// PURPOSE.** Adding a field to the key is how every stretched render on
+    /// every machine gets orphaned by a feature that changed none of their
+    /// audio. The gate is a GOLDEN REIMPLEMENTATION of the pre-m23-q formula,
+    /// written out below: an edit-free clip must still key to exactly that, and
+    /// an edited one must not.
+    @Test("an edit-free clip keys exactly as it did before pitch edits existed")
+    func editFreeClipKeyIsUnchanged() throws {
+        let dir = try makeTempDir("key-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 440, seconds: 0.25)
+
+        /// The field list as it stood before m23-q, verbatim — plus p2-acc's
+        /// `pv:` field on a transposing or near-unity render (a separate,
+        /// deliberate re-key: the transposer's audio changed;
+        /// `TransposeFractionalReadTests` G9).
+        func legacyKey(ratio: Double, semitones: Double, formant: Bool) throws -> String {
+            let path = source.standardizedFileURL.path
+            let attributes = try FileManager.default.attributesOfItem(atPath: path)
+            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            let mtime = (attributes[.modificationDate] as? Date)?
+                .timeIntervalSinceReferenceDate ?? 0
+            var hasher = SHA256()
+            for field in [
+                path, String(size), String(mtime.bitPattern),
+                String(ratio.bitPattern), String(semitones.bitPattern),
+                formant ? "1" : "0",
+                String(StretchRenderCache.stretchEngineVersion),
+            ] + (semitones != 0 || StretchRenderCache.phaseVocoderNearUnity(ratio)
+                 ? ["pv:\(StretchRenderCache.transposeEngineVersion)"] : []) {
+                hasher.update(data: Data(field.utf8))
+                hasher.update(data: Data([0]))
+            }
+            return String(hasher.finalize().map { String(format: "%02x", $0) }
+                .joined().prefix(16))
+        }
+
+        let plain = Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                         pitchShiftSemitones: 2, formantPreserve: true)
+        let detectedOnly = Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                                pitchShiftSemitones: 2, formantPreserve: true,
+                                pitchEdits: Self.detectedOnlyEdits())
+        let edited = Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                          pitchShiftSemitones: 2, formantPreserve: true,
+                          pitchEdits: Self.editedEdits(cents: 25))
+
+        let legacy = try legacyKey(ratio: 1.5, semitones: 2, formant: true)
+        let plainKey = try StretchRenderCache.cacheKey(
+            source: source, params: .init(clip: plain))
+        let detectedKey = try StretchRenderCache.cacheKey(
+            source: source, params: .init(clip: detectedOnly))
+        let editedKey = try StretchRenderCache.cacheKey(
+            source: source, params: .init(clip: edited))
+
+        #expect(plainKey == legacy,
+                "the key moved for a clip with no pitch edits — every cached render is orphaned")
+        #expect(detectedKey == legacy,
+                "a DETECTED-but-unedited note table re-keyed the cache; it renders as nothing")
+        // ⭐ The control: the gate above must be able to fail.
+        #expect(editedKey != legacy, "an edited clip must NOT share the edit-free key")
+        // And two different edit sets must not collide.
+        let other = Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                         pitchShiftSemitones: 2, formantPreserve: true,
+                         pitchEdits: Self.editedEdits(cents: 26))
+        #expect(try StretchRenderCache.cacheKey(source: source, params: .init(clip: other))
+            != editedKey, "a one-cent edit did not re-key the render")
+    }
+
+    /// §6.4's "never bypass the identity path": an unstretched clip carrying a
+    /// detected-but-unedited note table still plays its SOURCE FILE, and one
+    /// carrying a real edit does not.
+    @Test("identity bypass survives a note table and ends at a real edit")
+    func identityBypassAndItsControl() async throws {
+        let dir = try makeTempDir("bypass-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 220, seconds: 0.5)
+        let cache = StretchRenderCache(directory: try makeTempDir("bypass-cache"))
+        let clipID = UUID()
+
+        let bypassed = try await cache.renderIfNeeded(
+            clipID: clipID, source: source,
+            params: .init(clip: Clip(name: "c", audioFileURL: source,
+                                     pitchEdits: Self.detectedOnlyEdits())))
+        #expect(bypassed == source, "a note table that bends nothing must not force a render")
+        #expect(cache.renderCount == 0)
+
+        let rendered = try await cache.renderIfNeeded(
+            clipID: clipID, source: source,
+            params: .init(clip: Clip(name: "c", audioFileURL: source,
+                                     pitchEdits: Self.editedEdits(cents: 50))))
+        #expect(rendered != source, "a real pitch edit on an unstretched clip must render")
+        #expect(rendered.pathExtension == "caf")
+        #expect(cache.renderCount == 1)
+    }
+
+    /// The byte gate under the branch: taking the curve path for edited clips
+    /// must leave the EDIT-FREE render exactly where it was. Not "similar" —
+    /// sample-for-sample, against the facade call the cache used to make
+    /// unconditionally.
+    @Test("an edit-free render is byte-identical to the constant facade call")
+    func editFreeRenderIsByteIdenticalToTheConstantCall() async throws {
+        let dir = try makeTempDir("bytes-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 330, seconds: 0.75)
+        let cache = StretchRenderCache(directory: try makeTempDir("bytes-cache"))
+        let url = try await cache.renderIfNeeded(
+            clipID: UUID(), source: source,
+            params: .init(ratio: 1.5, semitones: 2, formantPreserve: false))
+        let throughCache = try TestSignals.readFile(url)
+        let direct = try OfflineStretcher.stretch(
+            input: try TestSignals.readFile(source), sampleRate: 48_000,
+            ratio: 1.5, semitones: 2, formantPreserve: false)
+        #expect(throughCache.count == direct.count)
+        var differing = 0
+        for channel in 0..<min(throughCache.count, direct.count) {
+            #expect(throughCache[channel].count == direct[channel].count)
+            for (a, b) in zip(throughCache[channel], direct[channel]) where a != b {
+                differing += 1
+            }
+        }
+        #expect(differing == 0,
+                "\(differing) samples moved in an edit-free render — the curve branch leaked")
+    }
+
+    /// A render that exists is not a render that is HEARD: the playback graph
+    /// re-opens a clip's file only when its `ClipKey` changes. An edit that
+    /// re-keyed the cache but not the schedule would render correctly and play
+    /// the old file.
+    @Test("a pitch edit changes the clip's schedule identity, not just its cache key")
+    func pitchEditChangesScheduleIdentity() throws {
+        let fixtures = try TestSignals.fixtures()
+        func key(_ edits: PitchEditSet?) -> PlaybackGraph.ClipKey {
+            let clip = Clip(name: "c", startBeat: 0, lengthBeats: 4,
+                            audioFileURL: fixtures.cos1k48, pitchEdits: edits)
+            return PlaybackGraph.ClipKey(
+                id: clip.id, startBeat: clip.startBeat, lengthBeats: clip.lengthBeats,
+                url: clip.audioFileURL, startOffsetSeconds: clip.startOffsetSeconds,
+                fadeInBeats: clip.fadeInBeats, fadeOutBeats: clip.fadeOutBeats,
+                fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
+                stretchRatio: clip.stretchRatio,
+                pitchShiftSemitones: clip.pitchShiftSemitones,
+                formantPreserve: clip.formantPreserve, gainEnvelope: clip.gainEnvelope,
+                pitchEditSetHash: PitchEditSetDigest.hex(clip.pitchEdits))
+        }
+        #expect(key(nil).pitchEditSetHash == key(Self.detectedOnlyEdits()).pitchEditSetHash,
+                "a note table that renders as nothing must not force a re-schedule")
+        #expect(key(nil).pitchEditSetHash != key(Self.editedEdits(cents: 25)).pitchEditSetHash)
+        #expect(key(Self.editedEdits(cents: 25)).pitchEditSetHash
+            != key(Self.editedEdits(cents: 26)).pitchEditSetHash)
+    }
+
+    /// m23-ap Phase 2, design §6.4 — **THE INVARIANCE HALF OF THE PRESET
+    /// DOOR'S GATE, END TO END THROUGH THE REAL CACHE.**
+    ///
+    /// The menu's *Remove Tuning* calls `ProjectStore.clearClipPitchEdits`,
+    /// which writes `nil` and never `PitchEditSet.empty`
+    /// (`PitchCorrectionWriterTests.clearClipPitchEditsWritesNilAndIsIdempotent`
+    /// pins that half). This is the other half: a clip that HAS been tuned and
+    /// then cleared must render **sample-for-sample** as if it had never been
+    /// tuned — same cache key, same bytes — so undoing a tuning is genuinely
+    /// undoing it and not "close enough".
+    ///
+    /// ⭐ The positive control is the point: every assertion here is an
+    /// equality, and equalities pass beautifully against a render path that
+    /// ignores `pitchEdits` entirely. The tuned render must DIFFER, or the
+    /// identity claims below are claims about nothing.
+    @Test("a tuned-then-cleared clip renders byte-identically to one that was never tuned")
+    func clearedSetRendersAsNeverTuned() async throws {
+        let dir = try makeTempDir("cleared-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 330, seconds: 0.75)
+
+        // Stretched on purpose: an unstretched, edit-free clip takes the
+        // IDENTITY BYPASS and never renders at all, so a byte comparison there
+        // would be comparing the source file to itself and could not fail.
+        func clip(_ edits: PitchEditSet?) -> Clip {
+            Clip(name: "c", audioFileURL: source, stretchRatio: 1.5,
+                 pitchShiftSemitones: 2, formantPreserve: false, pitchEdits: edits)
+        }
+        let neverTuned = clip(nil)
+        let tuned = clip(Self.editedEdits(cents: 50))
+        // Cleared the way the store clears it: the tuned clip with the field put
+        // back to nil, not a separately-typed clip that happens to look like one.
+        var cleared = tuned
+        cleared.pitchEdits = nil
+
+        func render(_ c: Clip, _ label: String) async throws -> [[Float]] {
+            let cache = StretchRenderCache(directory: try makeTempDir("cleared-\(label)"))
+            let url = try await cache.renderIfNeeded(
+                clipID: UUID(), source: source, params: .init(clip: c))
+            #expect(cache.renderCount == 1,
+                    "\(label) did not actually render — a byte comparison against a bypass proves nothing")
+            return try TestSignals.readFile(url)
+        }
+
+        let never = try await render(neverTuned, "never")
+        let after = try await render(cleared, "cleared")
+        let withEdits = try await render(tuned, "tuned")
+
+        // ⭐ THE POSITIVE CONTROL, FIRST, so a render path that ignores pitch
+        // edits fails here rather than passing the two identities below.
+        var tunedDiffering = 0
+        for channel in 0..<min(never.count, withEdits.count) {
+            for (a, b) in zip(never[channel], withEdits[channel]) where a != b { tunedDiffering += 1 }
+        }
+        #expect(tunedDiffering > 0,
+                "POSITIVE CONTROL FAILED: a 50-cent tuning changed not one sample, so the byte identity asserted below is an identity between two renders that ignore pitch edits")
+
+        #expect(never.count == after.count)
+        var differing = 0
+        for channel in 0..<min(never.count, after.count) {
+            #expect(never[channel].count == after[channel].count)
+            for (a, b) in zip(never[channel], after[channel]) where a != b { differing += 1 }
+        }
+        #expect(differing == 0,
+                "\(differing) samples moved after a tuning was cleared — Remove Tuning does not return the audio to where it started")
+
+        // And the key, because bytes that match under a key that moved still
+        // cost a pointless re-render and a pointless re-schedule.
+        #expect(try StretchRenderCache.cacheKey(source: source, params: .init(clip: cleared))
+            == (try StretchRenderCache.cacheKey(source: source, params: .init(clip: neverTuned))),
+                "a cleared clip does not share the never-tuned cache key")
+        #expect(try StretchRenderCache.cacheKey(source: source, params: .init(clip: tuned))
+            != (try StretchRenderCache.cacheKey(source: source, params: .init(clip: neverTuned))),
+                "POSITIVE CONTROL FAILED: a tuned clip shares the never-tuned key, so the key equality above proves nothing")
+    }
+
+    /// I7a/U-C (interaction-batch design §10, ruled in §17), END TO END
+    /// THROUGH THE REAL CACHE. An UNSTRETCHED clip whose only edit is a
+    /// cleared note is exactly the case the identity bypass could swallow:
+    /// if a clear digested to nothing, `renderIfNeeded` would hand back the
+    /// SOURCE and the note would play. The render must happen, the note must
+    /// be exact zeros between its ramps, and everything else must keep the
+    /// source's bytes (the level-only path runs no stretcher).
+    /// `NoteLevelRenderTests` pins the physics in depth; this pins the door.
+    /// It lives in this existing suite so the `@MainActor` suite count does
+    /// not move.
+    @Test("I7a: a clip whose only edit is a cleared note renders through the cache, not the bypass, and plays exact zeros there")
+    func clearedNoteRendersThroughTheCache() async throws {
+        let dir = try makeTempDir("i7a-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 220.625, seconds: 1.0)
+        let cache = StretchRenderCache(directory: try makeTempDir("i7a-cache"))
+        var note = NoteSegment(startSeconds: 0.40, endSeconds: 0.60, detectedHz: 220.625,
+                               detectedConfidence: 0.9)
+
+        // CONTROL: the same note, not cleared, takes the bypass. So a render
+        // below is caused by the flag, not by the table.
+        let untouched = Clip(name: "c", audioFileURL: source,
+                             pitchEdits: PitchEditSet(segments: [note]))
+        let bypassed = try await cache.renderIfNeeded(clipID: UUID(), source: source,
+                                                      params: .init(clip: untouched))
+        #expect(bypassed == source)
+        #expect(cache.renderCount == 0)
+
+        note.isCleared = true
+        let cleared = Clip(name: "c", audioFileURL: source,
+                           pitchEdits: PitchEditSet(segments: [note]))
+        #expect(cleared.stretchRatio == 1 && cleared.pitchShiftSemitones == 0,
+                "unstretched on purpose: the bypass is what is under test")
+        #expect(cleared.hasPitchEdits && StretchRenderCache.needsRender(cleared))
+        let url = try await cache.renderIfNeeded(clipID: UUID(), source: source,
+                                                 params: .init(clip: cleared))
+        #expect(url != source, "a cleared note took the identity bypass and plays the source")
+        #expect(cache.renderCount == 1)
+
+        let rendered = try TestSignals.readFile(url)
+        let original = try TestSignals.readFile(source)
+        #expect(rendered.map(\.count) == original.map(\.count))
+        let plateau = 19_681..<28_319  // source 0.41..0.59 s at 48 kHz, one frame trimmed each end
+        var nonZero = 0
+        for channel in rendered.indices {
+            for frame in plateau where rendered[channel][frame] != 0 { nonZero += 1 }
+        }
+        #expect(nonZero == 0, "\(nonZero) non-zero samples between the cleared note's ramps")
+        var moved = 0
+        for channel in rendered.indices {
+            for frame in Array(0..<19_199) + Array(28_801..<original[channel].count)
+            where rendered[channel][frame].bitPattern != original[channel][frame].bitPattern {
+                moved += 1
+            }
+        }
+        #expect(moved == 0, "\(moved) samples outside the cleared note left the source's bytes")
+    }
+
+    // MARK: - p2-ren Stage A, G4: an unedited project's offline render (env-gated)
+
+    /// G4 of `docs/design/2026-09-25-incremental-note-render.md` §12: an
+    /// unedited project's offline render is byte-identical before and after
+    /// the bridge. ENV-GATED: it writes ONE mixdown WAV to
+    /// `REN_A_G4_OUT/unedited-<REN_A_G4_LABEL>.wav`; two labels are compared
+    /// with `cmp` outside the test. The project holds every clip kind the
+    /// bridge touches (identity with fades and an offset, stretched and
+    /// transposed, tuned, a cleared note), is OPENED in a live engine first
+    /// and waits until every render has reached its node, so the resolver and
+    /// the file-opened memo both run before the bounce. Nothing plays.
+    @Test("p2-ren Stage A G4: an unedited project's offline render, written for a before/after byte compare (env-gated)",
+          .enabled(if: ProcessInfo.processInfo.environment["REN_A_G4_OUT"] != nil))
+    func uneditedProjectRenderForByteCompare() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let out = URL(fileURLWithPath: try #require(env["REN_A_G4_OUT"]))
+        let label = env["REN_A_G4_LABEL"] ?? "run"
+        let work = out.appendingPathComponent("work-\(label)")
+        try? FileManager.default.removeItem(at: work)
+        try FileManager.default.createDirectory(at: work, withIntermediateDirectories: true)
+        let plainSource = work.appendingPathComponent("plain.wav")
+        try writeRampedSine(to: plainSource, frequency: 330, seconds: 2.0)
+        let stretchSource = work.appendingPathComponent("stretch.wav")
+        try writeSine(to: stretchSource, frequency: 440, seconds: 1.5)
+        let tunedSource = work.appendingPathComponent("tuned.wav")
+        try writeSine(to: tunedSource, frequency: 220, seconds: 2.0)
+        var cleared = NoteSegment(startSeconds: 1.2, endSeconds: 1.5, detectedHz: 220,
+                                  detectedConfidence: 0.9)
+        cleared.isCleared = true
+        let clips = [
+            Clip(name: "plain", startBeat: 0, lengthBeats: 3.5, audioFileURL: plainSource,
+                 startOffsetSeconds: 0.25, fadeInBeats: 0.5, fadeOutBeats: 0.5),
+            Clip(name: "stretched", startBeat: 0, lengthBeats: 4.5, audioFileURL: stretchSource,
+                 stretchRatio: 1.5, pitchShiftSemitones: 2),
+            Clip(name: "tuned", startBeat: 0, lengthBeats: 4, audioFileURL: tunedSource,
+                 pitchEdits: PitchEditSet(segments: [
+                     NoteSegment(startSeconds: 0.2, endSeconds: 0.8, detectedHz: 220,
+                                 detectedConfidence: 0.9, pitchOffsetCents: 100),
+                     cleared,
+                 ])),
+        ]
+        let tracks = clips.map { Track(name: $0.name, kind: .audio, clips: [$0]) }
+        let engine = AudioEngine()
+        engine.stretchCache = StretchRenderCache(directory: work.appendingPathComponent("cache"))
+        engine.tracksDidChange(tracks)
+        // Every render reaches its node in the live graph before the bounce.
+        let deadline = Date().addingTimeInterval(60)
+        func landed() -> Bool {
+            clips.allSatisfy { clip in
+                guard StretchRenderCache.needsRender(clip) else { return true }
+                guard let played = engine.graph.clipFileURLForTesting(clipID: clip.id),
+                      let source = clip.audioFileURL,
+                      let committed = engine.stretchCache.cachedURL(
+                          source: source, params: StretchRenderCache.Params(clip: clip))
+                else { return false }
+                return played.standardizedFileURL == committed.standardizedFileURL
+            }
+        }
+        while !landed(), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(landed(), "the project's renders never reached their nodes")
+        let wav = out.appendingPathComponent("unedited-\(label).wav")
+        try? FileManager.default.removeItem(at: wav)
+        _ = try await engine.renderMixdown(
+            tracks: tracks, tempoMap: TempoMap(constantBPM: 120), masterVolume: 1,
+            fromBeat: 0, durationSeconds: 3.0, to: wav)
+        let written = try TestSignals.readFile(wav)
+        let rms = TestSignals.rms(written[0], in: 0..<(3 * 48_000))
+        print("[measured] p2-ren G4 unedited render '\(label)': \(wav.path), "
+              + "\(written[0].count) frames, RMS \(rms)")
+        #expect(rms > 0.1, "the unedited render is not audible: RMS \(rms)")
+        #expect(!engine.isRunning, "the G4 harness started the audio hardware")
+    }
+
+    // MARK: - p2-ren Stage A: THE BRIDGE (design 2026-09-25-incremental-note-render §11)
+    //
+    // While an edit's render is pending, a clip whose new render has the SAME
+    // time base as the file it last played keeps playing that file instead of
+    // going silent. Every test here runs the REAL engine with no hardware
+    // (nothing calls `prepare`) and asserts what the clip PLAYS, as rendered
+    // audio, not merely which URL a node holds.
+
+    private static let bridgeNoteID = UUID()
+
+    /// One note, 0.1–0.9 s of a 1 s tone, at `cents` (and a timing delta).
+    private static func bridgeNote(cents: Double, timing: Double = 0) -> PitchEditSet {
+        PitchEditSet(segments: [
+            NoteSegment(id: bridgeNoteID, startSeconds: 0.1, endSeconds: 0.9, detectedHz: 440,
+                        detectedConfidence: 0.9, pitchOffsetCents: cents,
+                        timeStartDeltaSeconds: timing)
+        ])
+    }
+
+    /// A 1 s amplitude-RAMPED 440 Hz tone (48 000 frames): position in the
+    /// file is observable from level, so a bridge played at the wrong place
+    /// or speed cannot match by coincidence.
+    private func bridgeSource(_ label: String) throws -> URL {
+        let url = try makeTempDir("bridge-\(label)-src").appendingPathComponent("tone.wav")
+        try writeRampedSine(to: url, frequency: 440, seconds: 1.0)
+        return url
+    }
+
+    /// Stage A's and A′'s engine. p2-ren Stage B's provisional is switched
+    /// OFF here (`provisionalsEnabled`, its one switch): these tests pin what
+    /// the bridge does on its own, and Stage B's own tests pin what the
+    /// provisional adds on top (`provisionalEngine`).
+    private func bridgeEngine(_ label: String) throws -> AudioEngine {
+        let engine = AudioEngine()
+        engine.stretchCache = StretchRenderCache(directory: try makeTempDir("bridge-\(label)-cache"))
+        engine.provisionalsEnabled = false
+        return engine
+    }
+
+    /// True once the clip's node plays what it should play for `clip` as it
+    /// now stands: the committed render, or the source for an identity clip.
+    private func committedPlays(_ engine: AudioEngine, _ clip: Clip) -> Bool {
+        guard let played = engine.graph.clipFileURLForTesting(clipID: clip.id),
+              let source = clip.audioFileURL else { return false }
+        let expected = StretchRenderCache.needsRender(clip)
+            ? engine.stretchCache.cachedURL(source: source, params: StretchRenderCache.Params(clip: clip))
+            : source
+        guard let expected else { return false }
+        return played.standardizedFileURL == expected.standardizedFileURL
+    }
+
+    /// A HANG GUARD (`HangGuard`), never a latency claim: the Stage A
+    /// events (a render landing, a failure on record, a bridge ending) each
+    /// need main-actor turns, which the full suite hands out slowly.
+    private func waitUntil(_ seconds: Double = HangGuard.seconds, _ condition: () -> Bool) async throws -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !condition(), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return condition()
+    }
+
+    /// WHAT THE CLIP PLAYS RIGHT NOW, as audio: an offline render handed the
+    /// file the clip's LIVE node opened (a render, a bridge or a source), and
+    /// nothing when the clip has no node. No resolver call: looking must not
+    /// change what plays.
+    private func livePlays(_ engine: AudioEngine, _ clip: Clip, seconds: Double = 1.2) throws -> [[Float]] {
+        let file = engine.graph.clipFileURLForTesting(clipID: clip.id)
+        let renderer = OfflineRenderer()
+        renderer.stretchedFileProvider = { asked in asked.id == clip.id ? file : nil }
+        return try renderer.render(tracks: [audioTrack(clip)], tempoMap: TempoMap(constantBPM: 120),
+                                   fromBeat: clip.startBeat, durationSeconds: seconds,
+                                   masterVolume: 1).channelData
+    }
+
+    private static func differingSamples(_ a: [[Float]], _ b: [[Float]]) -> Int {
+        guard a.count == b.count else { return Int.max }
+        var count = 0
+        for (x, y) in zip(a, b) {
+            guard x.count == y.count else { return Int.max }
+            for index in x.indices where x[index].bitPattern != y[index].bitPattern { count += 1 }
+        }
+        return count
+    }
+
+    /// Pitch inside the note (0.35–0.65 s, clear of the retune ramps).
+    private static func notePitch(_ audio: [[Float]]) -> Double {
+        TestSignals.dominantFrequency(byZeroCrossings: audio[0], sampleRate: 48_000,
+                                      in: 16_800..<31_200)
+    }
+
+    private static func isPitch(_ hz: Double, cents: Double) -> Bool {
+        let target = 440 * pow(2, cents / 1200)
+        return abs(hz - target) <= target * 0.015
+    }
+
+    /// Opens `clip` alone on `engine` and waits until it plays as set.
+    private func openLanded(_ engine: AudioEngine, _ clip: Clip) async throws -> Track {
+        let track = audioTrack(clip)
+        engine.tracksDidChange([track])
+        try #require(try await waitUntil { committedPlays(engine, clip) },
+                     "the clip's first render never reached its node")
+        return track
+    }
+
+    @Test("p2-ren Stage A: while a pitch-only edit's render is pending the clip plays its PREVIOUS render, byte for byte what played before the edit (the old pitch, same place, same speed); the note audition refuses it; then the new render plays")
+    func pitchEditBridgesOnThePreviousRender() async throws {
+        let source = try bridgeSource("pitch")
+        let engine = try bridgeEngine("pitch")
+        let before = Clip(name: "v", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                          pitchEdits: Self.bridgeNote(cents: 100))
+        var track = try await openLanded(engine, before)
+        let previous = try #require(engine.graph.clipFileURLForTesting(clipID: before.id))
+        let heardBefore = try livePlays(engine, before)
+        #expect(Self.isPitch(Self.notePitch(heardBefore), cents: 100), "premise: +100 c before the edit")
+
+        var after = before
+        after.pitchEdits = Self.bridgeNote(cents: 300)
+        track.clips = [after]
+        engine.tracksDidChange([track])
+        #expect(engine.graph.isPlayingBridge(clipID: after.id), "the pitch edit did not bridge")
+        #expect(engine.graph.clipFileURLForTesting(clipID: after.id)?.standardizedFileURL
+                == previous.standardizedFileURL)
+        #expect(engine.bridgeResolutionCountForTesting == 1)
+        // The note audition plays the note AS EDITED or nothing: never the bridge.
+        #expect(engine.planClipSpanAudition(trackID: track.id, clipID: after.id,
+                                            startSourceSeconds: 0.3, endSourceSeconds: 0.6)
+                == .refused(.inaudibleNotReady))
+
+        let heardBridge = try livePlays(engine, after)
+        let differing = Self.differingSamples(heardBridge, heardBefore)
+        let bridgeHz = Self.notePitch(heardBridge)
+        let tail = TestSignals.rms(heardBridge[0], in: Int(1.02 * 48_000)..<Int(1.15 * 48_000))
+        let late = TestSignals.rms(heardBridge[0], in: Int(0.85 * 48_000)..<Int(0.95 * 48_000))
+        let early = TestSignals.rms(heardBridge[0], in: Int(0.05 * 48_000)..<Int(0.15 * 48_000))
+        print("[measured] p2-ren bridge (pitch edit): \(differing) samples differ from the pre-edit "
+              + "playback; note pitch \(bridgeHz) Hz; RMS early \(early), late \(late), past the clip \(tail)")
+        #expect(differing == 0, "the bridge is not what played before the edit")
+        #expect(Self.isPitch(bridgeHz, cents: 100), "the bridge plays \(bridgeHz) Hz, not the previous +100 c")
+        #expect(late > 3 * early, "the source's level ramp is not where it should be")
+        #expect(tail < 1e-4, "audio past the clip's 1 s: the bridge plays at the wrong speed")
+
+        try #require(try await waitUntil { committedPlays(engine, after) }, "the +300 c render never landed")
+        #expect(!engine.graph.isPlayingBridge(clipID: after.id))
+        let heardAfter = try livePlays(engine, after)
+        #expect(Self.isPitch(Self.notePitch(heardAfter), cents: 300),
+                "after the landing: \(Self.notePitch(heardAfter)) Hz")
+        #expect(engine.planClipSpanAudition(trackID: track.id, clipID: after.id,
+                                            startSourceSeconds: 0.3, endSourceSeconds: 0.6)
+                != .refused(.inaudibleNotReady))
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage A: an untouched clip's first pitch edit bridges on its SOURCE, byte for byte what played before; the new pitch arrives with the render")
+    func identityClipFirstEditBridgesOnItsSource() async throws {
+        let source = try bridgeSource("identity")
+        let engine = try bridgeEngine("identity")
+        let before = Clip(name: "v", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                          pitchEdits: Self.bridgeNote(cents: 0))
+        #expect(!StretchRenderCache.needsRender(before), "premise: a note table alone is identity")
+        var track = try await openLanded(engine, before)
+        #expect(engine.lastPlayedForTesting(clipID: before.id)?.fileURL.standardizedFileURL
+                == source.standardizedFileURL, "the memo must follow identity clips too")
+        let heardBefore = try livePlays(engine, before)
+
+        var after = before
+        after.pitchEdits = Self.bridgeNote(cents: 200)
+        track.clips = [after]
+        engine.tracksDidChange([track])
+        #expect(engine.graph.isPlayingBridge(clipID: after.id))
+        #expect(engine.graph.clipFileURLForTesting(clipID: after.id)?.standardizedFileURL
+                == source.standardizedFileURL)
+        let heardBridge = try livePlays(engine, after)
+        let differing = Self.differingSamples(heardBridge, heardBefore)
+        print("[measured] p2-ren bridge (identity → first edit): \(differing) samples differ; "
+              + "note pitch \(Self.notePitch(heardBridge)) Hz")
+        #expect(differing == 0)
+        #expect(Self.isPitch(Self.notePitch(heardBridge), cents: 0))
+
+        try #require(try await waitUntil { committedPlays(engine, after) }, "the +200 c render never landed")
+        #expect(Self.isPitch(Self.notePitch(try livePlays(engine, after)), cents: 200))
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage A: a ratio edit never bridges, not even one whose render has the previous file's exact length (ratio 1 → 1.00001 on 48000 frames): the time base refuses before the frame count could agree")
+    func ratioEditNeverBridges() async throws {
+        // (a) An ordinary ratio edit on a rendered clip.
+        let tunedSource = try bridgeSource("ratio-a")
+        let engine = try bridgeEngine("ratio")
+        let tuned = Clip(name: "t", startBeat: 0, lengthBeats: 2, audioFileURL: tunedSource,
+                         pitchEdits: Self.bridgeNote(cents: 100))
+        var tunedTrack = try await openLanded(engine, tuned)
+        var slowed = tuned
+        slowed.stretchRatio = 1.25
+        tunedTrack.clips = [slowed]
+        engine.tracksDidChange([tunedTrack])
+        #expect(engine.graph.clipFileURLForTesting(clipID: slowed.id) == nil,
+                "a ratio edit bridged: the previous file plays at the wrong speed")
+        #expect(engine.bridgeResolutionCountForTesting == 0)
+        try #require(try await waitUntil { committedPlays(engine, slowed) })
+
+        // (b) The length-preserving ratio edit on an untouched clip.
+        let plainSource = try makeTempDir("bridge-ratio-b-src").appendingPathComponent("tone.wav")
+        try writeSine(to: plainSource, frequency: 440, seconds: 1.0)
+        let plain = Clip(name: "p", startBeat: 0, lengthBeats: 2, audioFileURL: plainSource)
+        var plainTrack = try await openLanded(engine, plain)
+        let memo = try #require(engine.lastPlayedForTesting(clipID: plain.id))
+        var nudged = plain
+        nudged.stretchRatio = 1.00001
+        let nudgedBase = try RenderTimeBase.of(source: plainSource, clip: nudged)
+        #expect(memo.frameCount == 48_000)
+        #expect(nudgedBase.expectedFrames(sourceFrames: 48_000) == memo.frameCount,
+                "premise: the frame count alone cannot tell these apart")
+        #expect(nudgedBase != memo.timeBase, "premise: the time base can")
+        plainTrack.clips = [nudged]
+        engine.tracksDidChange([plainTrack])
+        #expect(engine.graph.clipFileURLForTesting(clipID: nudged.id) == nil,
+                "a length-preserving ratio edit bridged")
+        #expect(engine.bridgeResolutionCountForTesting == 0)
+        try #require(try await waitUntil { committedPlays(engine, nudged) })
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage A: the render time base is the source's identity, the ratio's bits and (only once the render reads it) the time warp; never pitch, transpose, formant or level")
+    func renderTimeBaseIsTimeOnly() throws {
+        let dir = try makeTempDir("timebase-src")
+        let source = dir.appendingPathComponent("tone.wav")
+        try writeSine(to: source, frequency: 440, seconds: 0.25)
+        let base = Clip(name: "c", startBeat: 0, lengthBeats: 1, audioFileURL: source,
+                        pitchEdits: Self.bridgeNote(cents: 100))
+        let timeBase = try RenderTimeBase.of(source: source, clip: base)
+        func of(_ change: (inout Clip) -> Void, readsTimeWarp: Bool = StretchCurvePlan.readsTimeWarp)
+            throws -> RenderTimeBase {
+            var clip = base
+            change(&clip)
+            return try RenderTimeBase.of(source: source, clip: clip, readsTimeWarp: readsTimeWarp)
+        }
+        // What a file SOUNDS like never changes its time base.
+        #expect(try of { $0.pitchEdits = Self.bridgeNote(cents: 700) } == timeBase)
+        #expect(try of { $0.pitchShiftSemitones = 3 } == timeBase)
+        #expect(try of { $0.formantPreserve = true } == timeBase)
+        #expect(try of { $0.gainDb = -6 } == timeBase)
+        #expect(try of { clip in
+            var edits = Self.bridgeNote(cents: 100)
+            edits.segments[0].amplitudeDb = -6
+            edits.segments[0].formantOffsetSemitones = 2
+            clip.pitchEdits = edits
+        } == timeBase)
+        // Which source frame plays when: the ratio, to the last bit…
+        #expect(try of { $0.stretchRatio = 1.25 } != timeBase)
+        #expect(try of { $0.stretchRatio = (1.0).nextUp } != timeBase)
+        // …and the source's identity (a rewrite moves the mtime; a copy moves the path).
+        let copy = try makeTempDir("timebase-copy").appendingPathComponent("tone.wav")
+        try FileManager.default.copyItem(at: source, to: copy)
+        var copied = base
+        copied.audioFileURL = copy
+        #expect(try RenderTimeBase.of(source: copy, clip: copied) != timeBase)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date().addingTimeInterval(9)], ofItemAtPath: source.path)
+        #expect(try RenderTimeBase.of(source: source, clip: base) != timeBase)
+        // A timing-only edit: invisible while the render ignores W, a different
+        // time base the moment it reads it (C2-3's flip, same diff).
+        #expect(StretchCurvePlan.readsTimeWarp == false,
+                "C2-3 flips readsTimeWarp in the SAME diff that makes the render read W")
+        let now = try RenderTimeBase.of(source: source, clip: base)
+        #expect(try of { $0.pitchEdits = Self.bridgeNote(cents: 100, timing: 0.05) } == now)
+        let warped = try of({ $0.pitchEdits = Self.bridgeNote(cents: 100, timing: 0.05) },
+                            readsTimeWarp: true)
+        let unwarped = try of({ _ in }, readsTimeWarp: true)
+        #expect(warped != unwarped, "once the render reads W a timing edit must not bridge")
+        #expect(try of({ $0.pitchEdits = Self.bridgeNote(cents: 500) }, readsTimeWarp: true) == unwarped,
+                "a pitch edit keeps its time base when W is read")
+        // The length every file of a time base has: OfflineStretcher's contract.
+        #expect(timeBase.expectedFrames(sourceFrames: 48_000) == 48_000)
+        #expect(try of { $0.stretchRatio = 1.25 }.expectedFrames(sourceFrames: 48_000) == 60_000)
+    }
+
+    @Test("p2-ren Stage A: a render that FAILS ends the bridge: the clip goes silent with the failure on record, and the previous version never outlives it; the next edit renders again")
+    func failedRenderEndsTheBridge() async throws {
+        let source = try bridgeSource("fail")
+        let engine = try bridgeEngine("fail")
+        let before = Clip(name: "v", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                          pitchEdits: Self.bridgeNote(cents: 100))
+        var track = try await openLanded(engine, before)
+        var after = before
+        after.pitchEdits = Self.bridgeNote(cents: 300)
+        track.clips = [after]
+        engine.tracksDidChange([track])
+        // The render will fail: its folder turns read-only before it writes.
+        let cacheDir = engine.stretchCache.directory
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: cacheDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cacheDir.path)
+        }
+        #expect(engine.graph.isPlayingBridge(clipID: after.id), "premise: the edit bridged")
+        let failed = try await waitUntil {
+            if case .failed = engine.stretchCache.status(forClip: after.id) { return true }
+            return false
+        }
+        try #require(failed, "the injected render failure never happened")
+        let ended = try await waitUntil { !engine.graph.isPlayingBridge(clipID: after.id) }
+        try #require(ended, "the render failed and the previous version kept playing")
+        #expect(engine.graph.clipFileURLForTesting(clipID: after.id) == nil)
+        let heard = try livePlays(engine, after)
+        #expect(TestSignals.peak(heard[0], in: 0..<heard[0].count) == 0, "a failed render must play silence")
+        // A later pass keeps it silent: the failure is sticky for this key.
+        engine.tracksDidChange([track])
+        #expect(engine.graph.clipFileURLForTesting(clipID: after.id) == nil)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cacheDir.path)
+        var next = after
+        next.pitchEdits = Self.bridgeNote(cents: 500)
+        track.clips = [next]
+        engine.tracksDidChange([track])
+        // Its first resolve still reads the failed job's status (the kick is
+        // async), so it errs toward silence rather than bridging.
+        #expect(engine.graph.clipFileURLForTesting(clipID: next.id) == nil)
+        try #require(try await waitUntil { committedPlays(engine, next) }, "the next edit never rendered")
+        #expect(Self.isPitch(Self.notePitch(try livePlays(engine, next)), cents: 500))
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage A: a render CANCELLED by a newer edit does not end the bridge: the same player keeps the previous version and the cancellation changes no schedule")
+    func cancelledRenderKeepsTheBridge() async throws {
+        let source = try bridgeSource("cancel")
+        let engine = try bridgeEngine("cancel")
+        let before = Clip(name: "v", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                          pitchEdits: Self.bridgeNote(cents: 100))
+        var track = try await openLanded(engine, before)
+        let previous = try #require(engine.graph.clipFileURLForTesting(clipID: before.id))
+        let rendersBefore = engine.stretchCache.renderCount
+
+        // LW, 2026-09-25 (same shape as `latestWinsCancelsInFlight`, found
+        // by that fix's census): a LONG debounce for the +200 c job, so it
+        // is PROVABLY still asleep when the +300 c edit lands, however long
+        // scheduling takes under load — a fixed 60 ms sleep here is exactly
+        // the race that made `renderCount` read 2 instead of 1 three times
+        // today.
+        engine.stretchCache.debounceMillisecondsForInstance = 60_000
+        var first = before
+        first.pitchEdits = Self.bridgeNote(cents: 200)
+        track.clips = [first]
+        engine.tracksDidChange([track])
+        #expect(engine.graph.isPlayingBridge(clipID: first.id))
+        try #require(try await waitUntil(30) { engine.stretchCache.status(forClip: first.id) == .rendering },
+                     "the +200 c job never reached .rendering within 30 s")
+
+        // Dropped back to the real default before the +300 c edit, so ITS
+        // render (which must actually land below) is not slowed by the long
+        // debounce above.
+        engine.stretchCache.debounceMillisecondsForInstance = StretchRenderCache.debounceMilliseconds
+        var second = first
+        second.pitchEdits = Self.bridgeNote(cents: 300)
+        let log = JobPhaseLog()
+        StretchRenderCache.$jobPhaseForTesting.withValue(log.recorder) {
+            track.clips = [second]
+            engine.tracksDidChange([track])
+        }
+        let bridgePlayer = try #require(engine.graph.clipPlayerForTesting(clipID: second.id))
+        #expect(engine.graph.isPlayingBridge(clipID: second.id))
+        #expect(engine.graph.clipFileURLForTesting(clipID: second.id)?.standardizedFileURL
+                == previous.standardizedFileURL, "the second bridge is not the file the clip played")
+        let passes = engine.scheduleChangingPassCountForTesting
+        // "job-start" for the +300 c job fires only after `renderIfNeeded`'s
+        // supersession (`jobs.removeValue(forKey:)?.cancel()`) has already
+        // run, so seeing it is PROOF the +200 c job was cancelled — not a
+        // guess from a fixed sleep. (`status == .rendering` alone would be
+        // vacuous here: it has been true since the +200 c job registered.)
+        try #require(try await waitUntil(30) { log.time("job-start") != nil },
+                     "the +300 c job never started within 30 s")
+        #expect(engine.graph.clipPlayerForTesting(clipID: second.id) === bridgePlayer,
+                "the cancellation rebuilt the clip's node")
+        #expect(engine.graph.isPlayingBridge(clipID: second.id), "the cancellation ended the bridge")
+        #expect(engine.scheduleChangingPassCountForTesting == passes,
+                "the cancellation changed the schedule")
+
+        try #require(try await waitUntil { committedPlays(engine, second) }, "the +300 c render never landed")
+        #expect(engine.stretchCache.renderCount == rendersBefore + 1,
+                "the cancelled job rendered anyway")
+        #expect(Self.isPitch(Self.notePitch(try livePlays(engine, second)), cents: 300))
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage A: when the file the clip played is gone (a purged cache), an edit cannot bridge on it and is silent until its render lands")
+    func deletedPreviousFileCannotBridge() async throws {
+        let source = try bridgeSource("deleted")
+        let engine = try bridgeEngine("deleted")
+        let before = Clip(name: "v", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                          pitchEdits: Self.bridgeNote(cents: 100))
+        var track = try await openLanded(engine, before)
+        let previous = try #require(engine.graph.clipFileURLForTesting(clipID: before.id))
+        try FileManager.default.removeItem(at: previous)
+        #expect(engine.lastPlayedForTesting(clipID: before.id)?.fileURL.standardizedFileURL
+                == previous.standardizedFileURL, "premise: the memo still names the deleted file")
+        var after = before
+        after.pitchEdits = Self.bridgeNote(cents: 300)
+        track.clips = [after]
+        engine.tracksDidChange([track])
+        #expect(engine.graph.clipFileURLForTesting(clipID: after.id) == nil)
+        #expect(engine.bridgeResolutionCountForTesting == 0)
+        try #require(try await waitUntil { committedPlays(engine, after) })
+        #expect(Self.isPitch(Self.notePitch(try livePlays(engine, after)), cents: 300))
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage A: a previous file whose length is not the new render's never bridges (a damaged render planted at the old key), while a sound one beside it does")
+    func wrongLengthPreviousFileCannotBridge() async throws {
+        let engine = try bridgeEngine("length")
+        let soundSource = try bridgeSource("length-sound")
+        let damagedSource = try bridgeSource("length-damaged")
+        let sound = Clip(name: "sound", startBeat: 0, lengthBeats: 2, audioFileURL: soundSource,
+                         pitchEdits: Self.bridgeNote(cents: 100))
+        let damaged = Clip(name: "damaged", startBeat: 0, lengthBeats: 2, audioFileURL: damagedSource,
+                           pitchEdits: Self.bridgeNote(cents: 100))
+        // The damage: half the frames, committed at the damaged clip's key
+        // before the engine ever resolves it.
+        let key = try StretchRenderCache.cacheKey(
+            source: damagedSource, params: StretchRenderCache.Params(clip: damaged))
+        let planted = engine.stretchCache.directory.appendingPathComponent(key + ".caf")
+        try writeSine(to: planted, frequency: 440, seconds: 0.5)
+        var tracks = [audioTrack(sound), audioTrack(damaged)]
+        engine.tracksDidChange(tracks)
+        try #require(try await waitUntil { committedPlays(engine, sound) && committedPlays(engine, damaged) })
+        #expect(engine.graph.clipFileURLForTesting(clipID: damaged.id)?.standardizedFileURL
+                == planted.standardizedFileURL, "premise: the damaged render is what the clip opened")
+        #expect(engine.lastPlayedForTesting(clipID: damaged.id)?.frameCount == 24_000)
+        #expect(engine.lastPlayedForTesting(clipID: sound.id)?.frameCount == 48_000)
+
+        var soundEdited = sound
+        soundEdited.pitchEdits = Self.bridgeNote(cents: 300)
+        var damagedEdited = damaged
+        damagedEdited.pitchEdits = Self.bridgeNote(cents: 300)
+        tracks[0].clips = [soundEdited]
+        tracks[1].clips = [damagedEdited]
+        engine.tracksDidChange(tracks)
+        #expect(engine.graph.isPlayingBridge(clipID: soundEdited.id), "positive control: a sound file bridges")
+        #expect(engine.graph.clipFileURLForTesting(clipID: damagedEdited.id) == nil,
+                "a file of the wrong length bridged")
+        #expect(engine.bridgeResolutionCountForTesting == 1)
+        try #require(try await waitUntil { committedPlays(engine, soundEdited) && committedPlays(engine, damagedEdited) })
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage A: a bounce taken while a bridge plays WAITS for the render and bounces the final version, byte for byte the bounce taken after it landed, never the previous version")
+    func bounceNeverTakesTheBridge() async throws {
+        let source = try bridgeSource("bounce")
+        let engine = try bridgeEngine("bounce")
+        let before = Clip(name: "v", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                          pitchEdits: Self.bridgeNote(cents: 100))
+        var track = try await openLanded(engine, before)
+        let tempo = TempoMap(constantBPM: 120)
+        func bounce(_ clip: Clip) async throws -> [[Float]] {
+            try await engine.renderOffline(tracks: [audioTrack(clip)], tempoMap: tempo, masterVolume: 1,
+                                           fromBeat: 0, durationSeconds: 1.2,
+                                           forcedCompensationTargets: nil).channelData
+        }
+        let previousVersion = try await bounce(before)
+
+        var after = before
+        after.pitchEdits = Self.bridgeNote(cents: 300)
+        track.clips = [after]
+        engine.tracksDidChange([track])
+        try #require(engine.graph.isPlayingBridge(clipID: after.id), "premise: a bridge plays")
+        let whilePending = try await bounce(after)
+        try #require(try await waitUntil { committedPlays(engine, after) })
+        let afterLanding = try await bounce(after)
+
+        let vsFinal = Self.differingSamples(whilePending, afterLanding)
+        let vsPrevious = Self.differingSamples(whilePending, previousVersion)
+        print("[measured] p2-ren bounce while bridged: \(vsFinal) samples differ from the final version's "
+              + "bounce, \(vsPrevious) from the previous version's; note pitch "
+              + "\(Self.notePitch(whilePending)) Hz")
+        #expect(vsFinal == 0, "the bounce did not wait for the final version")
+        #expect(vsPrevious > 10_000, "positive control: the previous version must be tellable from the final")
+        #expect(Self.isPitch(Self.notePitch(whilePending), cents: 300))
+        #expect(engine.bridgeResolutionCountForTesting == 1, "only the edit's own resolve bridged")
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage A G4: an unedited session (open, play, seek, stop, a save that repoints its media) resolves NO bridge; one edit then resolves exactly one")
+    func uneditedSessionResolvesNoBridge() async throws {
+        let dir = try makeTempDir("g4spy-src")
+        let plainSource = dir.appendingPathComponent("plain.wav")
+        try writeRampedSine(to: plainSource, frequency: 330, seconds: 2.0)
+        let stretchSource = dir.appendingPathComponent("stretch.wav")
+        try writeSine(to: stretchSource, frequency: 440, seconds: 1.5)
+        let tunedSource = dir.appendingPathComponent("tuned.wav")
+        try writeSine(to: tunedSource, frequency: 220, seconds: 2.0)
+        var clips = [
+            Clip(name: "plain", startBeat: 0, lengthBeats: 3.5, audioFileURL: plainSource,
+                 startOffsetSeconds: 0.25, fadeInBeats: 0.5, fadeOutBeats: 0.5),
+            Clip(name: "stretched", startBeat: 0, lengthBeats: 4.5, audioFileURL: stretchSource,
+                 stretchRatio: 1.5, pitchShiftSemitones: 2),
+            Clip(name: "tuned", startBeat: 0, lengthBeats: 4, audioFileURL: tunedSource,
+                 pitchEdits: Self.editedEdits(cents: 100)),
+        ]
+        var tracks = clips.map { audioTrack($0) }
+        let engine = try bridgeEngine("g4spy")
+        let tempo = TempoMap(constantBPM: 120)
+        func allPlay() -> Bool { clips.allSatisfy { committedPlays(engine, $0) } }
+        engine.tracksDidChange(tracks)                                   // open
+        try #require(try await waitUntil { allPlay() }, "the session's renders never landed")
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 0, tempoMap: tempo)           // play
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 2.5, tempoMap: tempo)         // seek
+        engine.graph.stopAllPlayers()                                    // stop
+        tracks[0].volume = 0.5
+        engine.tracksDidChange(tracks)                                   // a mixer move
+        // The first save copies every file into the project and repoints it.
+        let media = try makeTempDir("g4spy-media")
+        for index in clips.indices {
+            let old = try #require(clips[index].audioFileURL)
+            let copy = media.appendingPathComponent(old.lastPathComponent)
+            try FileManager.default.copyItem(at: old, to: copy)
+            clips[index].audioFileURL = copy
+            tracks[index].clips = [clips[index]]
+        }
+        engine.tracksDidChange(tracks)
+        try #require(try await waitUntil { allPlay() }, "the repointed session never played again")
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        #expect(engine.bridgeResolutionCountForTesting == 0, "an unedited session resolved a bridge")
+
+        // POSITIVE CONTROL: the spy counts a real bridge.
+        clips[2].pitchEdits = Self.editedEdits(cents: 300)
+        tracks[2].clips = [clips[2]]
+        engine.tracksDidChange(tracks)
+        #expect(engine.bridgeResolutionCountForTesting == 1)
+        #expect(engine.graph.isPlayingBridge(clipID: clips[2].id))
+        try #require(try await waitUntil { allPlay() })
+        #expect(!engine.isRunning)
+    }
+
+    /// p2-ren Stage A′ (design §5 "Tier 1b", §11 step 8, G6): with the bridge
+    /// on, a pitch or timing-only edit keeps its node (the clip goes on
+    /// playing the same file under the new key), so the edit itself is NOT a
+    /// schedule change; only the landing is. Before A′ (Stage A's G6 test,
+    /// retired with this one's arrival) the edit was one too: 2 per edit, 3
+    /// for two quick edits, 2 for a failure. Vetoed, nothing may change.
+    @Test("p2-ren Stage A′ G6: with the bridge on, a pitch or timing-only edit keeps its node and is NOT a schedule-changing pass (only its landing restarts a rolling transport: 1 per edit, two quick edits 1, a failure 1); a ratio edit still 2; vetoed, every count is Stage A's")
+    func noRestartAtTheEdit() async throws {
+        var counts: [String: [String: Int]] = [:]
+        var kept: [String: [String: Bool]] = [:]
+        for bridge in [true, false] {
+            let mode = bridge ? "bridge" : "vetoed"
+            let source = try bridgeSource("g6-\(mode)")
+            let engine = try bridgeEngine("g6-\(mode)")
+            engine.bridgeEnabled = bridge
+            var clip = Clip(name: "v", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                            pitchEdits: Self.bridgeNote(cents: 100))
+            var track = try await openLanded(engine, clip)
+            var perEdit: [String: Int] = [:]
+            var keptNode: [String: Bool] = [:]
+            var editsSeen = 0
+            /// An edit; records whether the clip's node (its PLAYER) survived
+            /// it, which is what "no restart at the edit" means for the audio.
+            func edit(_ change: (inout Clip) -> Void) {
+                let before = engine.graph.clipPlayerForTesting(clipID: clip.id)
+                change(&clip)
+                track.clips = [clip]
+                engine.tracksDidChange([track])
+                editsSeen += 1
+                let after = engine.graph.clipPlayerForTesting(clipID: clip.id)
+                keptNode["edit \(editsSeen)"] = before != nil && after === before
+            }
+            func measure(_ label: String, _ body: () async throws -> Void) async throws {
+                let base = engine.scheduleChangingPassCountForTesting
+                try await body()
+                try await Task.sleep(for: .milliseconds(150))   // nothing else trickles in
+                perEdit[label] = engine.scheduleChangingPassCountForTesting - base
+            }
+            try await measure("pitch") {
+                edit { $0.pitchEdits = Self.bridgeNote(cents: 200) }
+                try #require(try await waitUntil { committedPlays(engine, clip) })
+            }
+            try await measure("timing-only") {
+                edit { $0.pitchEdits = Self.bridgeNote(cents: 200, timing: 0.05) }
+                try #require(try await waitUntil { committedPlays(engine, clip) })
+            }
+            try await measure("ratio") {
+                edit { $0.stretchRatio = 1.25 }
+                try #require(try await waitUntil { committedPlays(engine, clip) })
+            }
+            try await measure("two quick edits") {
+                edit { $0.pitchEdits = Self.bridgeNote(cents: 300) }
+                try await Task.sleep(for: .milliseconds(60))
+                edit { $0.pitchEdits = Self.bridgeNote(cents: 400) }
+                try #require(try await waitUntil { committedPlays(engine, clip) })
+            }
+            let cacheDir = engine.stretchCache.directory
+            try await measure("failure") {
+                edit { $0.pitchEdits = Self.bridgeNote(cents: 500) }
+                try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: cacheDir.path)
+                defer {
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                           ofItemAtPath: cacheDir.path)
+                }
+                try #require(try await waitUntil {
+                    if case .failed = engine.stretchCache.status(forClip: clip.id) { return true }
+                    return false
+                }, "the injected failure never happened")
+                _ = try await waitUntil { !engine.graph.isPlayingBridge(clipID: clip.id) }
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            counts[mode] = perEdit
+            kept[mode] = keptNode
+            #expect(!engine.isRunning)
+        }
+        print("[measured] p2-ren A′ G6 schedule-changing passes per edit: \(counts); "
+              + "node kept through each edit: \(kept)")
+        // With the bridge on: the edit keeps its node; only the landing counts.
+        #expect(counts["bridge"]?["pitch"] == 1, "bridge: \(counts["bridge"] ?? [:])")
+        #expect(counts["bridge"]?["timing-only"] == 1, "bridge: \(counts["bridge"] ?? [:])")
+        #expect(counts["bridge"]?["ratio"] == 2, "bridge: \(counts["bridge"] ?? [:])")
+        #expect(counts["bridge"]?["two quick edits"] == 1, "bridge: \(counts["bridge"] ?? [:])")
+        // Ending a bridge IS a schedule change, the ONE pass a failure costs.
+        #expect(counts["bridge"]?["failure"] == 1, "bridge: \(counts["bridge"] ?? [:])")
+        // Edits 1, 2, 4, 5, 6 are pitch/timing edits with a bridge; edit 3 is the ratio edit.
+        #expect(kept["bridge"] == ["edit 1": true, "edit 2": true, "edit 3": false,
+                                   "edit 4": true, "edit 5": true, "edit 6": true],
+                "bridge: \(kept["bridge"] ?? [:])")
+        // Vetoed: Stage A's counts, unchanged, and no edit keeps a node.
+        #expect(counts["vetoed"] == ["pitch": 2, "timing-only": 2, "ratio": 2,
+                                     "two quick edits": 3, "failure": 1],
+                "vetoed: \(counts["vetoed"] ?? [:])")
+        #expect(kept["vetoed"]?.values.contains(true) == false, "vetoed: \(kept["vetoed"] ?? [:])")
+    }
+
+    /// p2-ren Stage A′: with no restart at a rolling edit there is no schedule
+    /// pass, which is where render notices post. The notice a restart would
+    /// have posted posts from the edit's own pass instead, ONCE, and only
+    /// while the transport rolls; a stopped transport posts nothing (its next
+    /// play does, p2-notice).
+    @Test("p2-ren Stage A′: an edit that keeps its bridged node while the transport ROLLS says clip-render-previous once, from the edit's own pass; stopped, the edit says nothing and the next play says it")
+    func adoptedBridgeNoticeWhileRolling() async throws {
+        for rolling in [true, false] {
+            let source = try bridgeSource("a1-notice-\(rolling)")
+            let engine = try bridgeEngine("a1-notice-\(rolling)")
+            var events: [EngineNoticeEvent] = []
+            engine.engineNoticeHandler = { events.append($0) }
+            let before = Clip(name: "Lead", startBeat: 0, lengthBeats: 2, audioFileURL: source,
+                              pitchEdits: Self.bridgeNote(cents: 100))
+            var track = try await openLanded(engine, before)
+            let player = try #require(engine.graph.clipPlayerForTesting(clipID: before.id))
+            events.removeAll()
+            engine.interimTransportRollingForTesting = rolling
+
+            var after = before
+            after.pitchEdits = Self.bridgeNote(cents: 300)
+            track.clips = [after]
+            engine.tracksDidChange([track])
+            #expect(engine.graph.clipPlayerForTesting(clipID: after.id) === player,
+                    "rolling \(rolling): the edit rebuilt the node")
+            #expect(engine.graph.isPlayingBridge(clipID: after.id))
+            let codes = events.map(\.code)
+            if rolling {
+                #expect(codes == ["clip-render-previous"], "rolling: \(codes)")
+                // A second unrelated pass while rolling is the same episode.
+                engine.tracksDidChange([track])
+                #expect(events.map(\.code) == ["clip-render-previous"], "rolling: \(events.map(\.code))")
+            } else {
+                #expect(codes.isEmpty, "stopped: an edit's reconcile is not playback: \(codes)")
+                engine.graph.stopAllPlayers()
+                engine.graph.scheduleAll(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
+                #expect(events.map(\.code) == ["clip-render-previous"], "stopped, then play: \(events.map(\.code))")
+            }
+            try #require(try await waitUntil { committedPlays(engine, after) }, "the +300 c render never landed")
+            #expect(Self.isPitch(Self.notePitch(try livePlays(engine, after)), cents: 300),
+                    "the edit never reached the node")
+            #expect(events.map(\.code) == ["clip-render-previous"], "the landing posted: \(events.map(\.code))")
+            #expect(!engine.isRunning)
+        }
+    }
+
+    // MARK: - p2-ren Stage A G1: edit → the clip sounding again (env-gated harness)
+
+    private static func ms(_ d: Duration) -> Double {
+        Double(d.components.seconds) * 1_000 + Double(d.components.attoseconds) / 1e15
+    }
+
+    private static func loadAverage() -> [Double] {
+        var loads = [Double](repeating: 0, count: 3)
+        getloadavg(&loads, 3)
+        return loads
+    }
+
+    /// A JSON number, or null for nil / NaN / ±inf (JSONSerialization raises
+    /// an Objective-C exception on a non-finite Double).
+    private static func jsonNumber(_ x: Double?) -> Any {
+        if let x, x.isFinite { return x }
+        return NSNull()
+    }
+
+    /// Nearest-rank percentile.
+    private static func percentile(_ values: [Double], _ p: Double) -> Double {
+        guard !values.isEmpty else { return .nan }
+        let sorted = values.sorted()
+        let rank = Int((p / 100 * Double(sorted.count)).rounded(.up))
+        return sorted[max(0, min(sorted.count - 1, rank - 1))]
+    }
+
+    /// G1 of design §12, ENV-GATED (nothing runs in a normal `./scripts/test.sh`):
+    ///
+    ///     REN_A_G1_TAKE=<wav> REN_A_G1_OUT=<dir> [REN_A_G1_MANIFEST=<i1lt manifest.json>] \
+    ///       [REN_A_G1_EDITS=50] [REN_A_G1_BASELINE=6] [REN_A_G1_LABEL=run] \
+    ///       ./scripts/test.sh --filter bridgeLatencyHarness
+    ///
+    /// The take is read in place, never copied. Its note table is the
+    /// manifest's known spans (a synthetic take) or the product's detector (the
+    /// user's take). Per edit, a single note gets a new offset through the
+    /// STORE, the path I1 timed. Edits come ~1 s apart, so the renders are
+    /// always in flight; every tenth waits for its render to land, so later
+    /// edits bridge on a render as well as on the source.
+    ///
+    /// No audio hardware runs here, so "sounding again while rolling" is a
+    /// COMPOSITE, each term named in the JSON:
+    ///  * `commitMs`: the store edit, whose `tracksDidChange` runs the reconcile
+    ///    that resolves the bridge and opens its node (MEASURED);
+    ///  * `scheduleMs`: the rolling restart's schedule pass, `stopAllPlayers` +
+    ///    `scheduleAll` from near the edited note (MEASURED, headless; the
+    ///    restart's `prepareAllPlayers` pre-read is not in it);
+    ///  * `leadMs`: `StartAnchorBudget.lead(1)`, the anchor lead the restart
+    ///    adds (INFERRED: it is a constant, and no hardware is here to show it).
+    /// The vetoed engine (today) is silent from the commit until the render
+    /// lands, so its composite adds that wait instead.
+    @Test("p2-ren Stage A G1: edit → the clip sounds again while rolling, ≥50 single-note edits ~1 s apart with renders in flight, bridge on, and today's (vetoed) baseline (env-gated)",
+          .enabled(if: ProcessInfo.processInfo.environment["REN_A_G1_OUT"] != nil))
+    func bridgeLatencyHarness() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let take = URL(fileURLWithPath: try #require(env["REN_A_G1_TAKE"]))
+        let out = URL(fileURLWithPath: try #require(env["REN_A_G1_OUT"]))
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let edits = max(50, Int(env["REN_A_G1_EDITS"] ?? "") ?? 50)
+        let baselineEdits = max(3, Int(env["REN_A_G1_BASELINE"] ?? "") ?? 6)
+        let label = env["REN_A_G1_LABEL"] ?? "run"
+
+        struct Manifest: Decodable {
+            struct Note: Decodable { let start: Double; let end: Double; let hz: Double }
+            struct Take: Decodable { let path: String; let notes: [Note] }
+            let takes: [Take]
+        }
+        let table: PitchEditSet
+        let tableSource: String
+        if let manifestPath = env["REN_A_G1_MANIFEST"] {
+            let manifest = try JSONDecoder().decode(
+                Manifest.self, from: Data(contentsOf: URL(fileURLWithPath: manifestPath)))
+            let entry = try #require(manifest.takes.first {
+                URL(fileURLWithPath: $0.path).standardizedFileURL == take.standardizedFileURL
+            }, "the take is not in the manifest")
+            table = PitchEditSet(segments: entry.notes.map {
+                NoteSegment(startSeconds: $0.start, endSeconds: $0.end, detectedHz: $0.hz,
+                            detectedConfidence: 0.95)
+            })
+            tableSource = "manifest"
+        } else {
+            table = PitchNoteTable.detected(from: try PitchContourCache.detectWholeFile(take, .product))
+            tableSource = "detected (product detector)"
+        }
+        let file = try AVAudioFile(forReading: take)
+        let duration = Double(file.length) / file.processingFormat.sampleRate
+        let candidates = table.segments.filter { $0.durationSeconds >= 0.30 && $0.detectedHz > 0 }
+        try #require(candidates.count >= 5, "only \(candidates.count) notes ≥ 0.30 s")
+        print("[measured] p2-ren G1 '\(label)': \(take.lastPathComponent), \(duration) s, "
+              + "\(file.processingFormat.channelCount) ch, \(table.segments.count) notes (\(tableSource)), "
+              + "\(candidates.count) candidates")
+
+        var report: [String: Any] = [
+            "label": label, "take": take.path, "seconds": duration,
+            "channels": Int(file.processingFormat.channelCount), "sourceFrames": Int(file.length),
+            "notes": table.segments.count, "noteTable": tableSource,
+            "leadMs": StartAnchorBudget.lead(forStartablePlayerCount: 1).seconds * 1_000,
+            "debounceMs": StretchRenderCache.debounceMilliseconds,
+        ]
+        for (mode, count) in [("bridge", edits), ("vetoed", baselineEdits)] {
+            report[mode] = try await g1Run(bridge: mode == "bridge", edits: count, take: take,
+                                           table: table, candidates: candidates, duration: duration,
+                                           out: out, label: "\(label)-\(mode)")
+        }
+        let json = out.appendingPathComponent("g1-\(label).json")
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: json)
+        print("[measured] p2-ren G1 wrote \(json.path)")
+    }
+
+    private func g1Run(bridge: Bool, edits: Int, take: URL, table: PitchEditSet,
+                       candidates: [NoteSegment], duration: Double, out: URL,
+                       label: String) async throws -> [String: Any] {
+        let clip = Clip(name: "take", startBeat: 0, lengthBeats: (duration * 2).rounded(.up),
+                        audioFileURL: take, pitchEdits: table)
+        let track = Track(name: "Vox", kind: .audio, clips: [clip])
+        let store = ProjectStore(tracks: [track])
+        let engine = AudioEngine()
+        engine.bridgeEnabled = bridge
+        let cacheDir = out.appendingPathComponent("cache-\(label)", isDirectory: true)
+        try? FileManager.default.removeItem(at: cacheDir)
+        engine.stretchCache = StretchRenderCache(directory: cacheDir)
+        store.engine = engine
+        engine.tracksDidChange(store.tracks)
+        try #require(committedPlays(engine, clip), "the untouched take does not play its source")
+        let tempo = TempoMap(constantBPM: 120)
+        let leadMs = StartAnchorBudget.lead(forStartablePlayerCount: 1).seconds * 1_000
+        let loadAtStart = Self.loadAverage()
+        let started = ContinuousClock.now
+
+        var rows: [[String: Any]] = []
+        var fromBefore: [Double] = []
+        var fromReturn: [Double] = []
+        var bridged = 0
+        for index in 0..<edits {
+            let note = candidates[(index * 7) % candidates.count]
+            let cents = 100 + Double(index)
+            let memoKind = engine.lastPlayedForTesting(clipID: clip.id).map {
+                $0.fileURL.standardizedFileURL == take.standardizedFileURL ? "source" : "render"
+            } ?? "none"
+            let inFlight = engine.stretchCache.status(forClip: clip.id) == .rendering
+            let load = Self.loadAverage()[0]
+            let t0 = ContinuousClock.now
+            _ = try store.setClipNotePitchOffset(clipId: clip.id, segmentId: note.id, offsetCents: cents)
+            let t1 = ContinuousClock.now
+            let isBridge = engine.graph.isPlayingBridge(clipID: clip.id)
+            let hasNode = engine.graph.clipFileURLForTesting(clipID: clip.id) != nil
+            if isBridge { bridged += 1 }
+            let edited = store.tracks[0].clips[0]
+            let waitsForLanding = !bridge || index % 10 == 9
+            var landedMs: Double?
+            if waitsForLanding {
+                let landed = try await waitUntil(240) { committedPlays(engine, edited) }
+                landedMs = landed ? Self.ms(ContinuousClock.now - t0) : nil
+            }
+            // The rolling restart's schedule pass, from 1 s before the note.
+            let playheadBeat = max(0, note.startSeconds - 1) * 2
+            let r0 = ContinuousClock.now
+            engine.graph.stopAllPlayers()
+            engine.graph.scheduleAll(fromBeat: playheadBeat, tempoMap: tempo)
+            let scheduleMs = Self.ms(ContinuousClock.now - r0)
+            let commitMs = Self.ms(t1 - t0)
+            // When the clip sounds again: at the commit's own restart with a
+            // bridge; at the landing's restart without one.
+            let soundsAgainFromBefore: Double?
+            let soundsAgainFromReturn: Double?
+            if hasNode {
+                soundsAgainFromBefore = commitMs + scheduleMs + leadMs
+                soundsAgainFromReturn = scheduleMs + leadMs
+            } else if let landedMs {
+                soundsAgainFromBefore = landedMs + scheduleMs + leadMs
+                soundsAgainFromReturn = landedMs - commitMs + scheduleMs + leadMs
+            } else {
+                soundsAgainFromBefore = nil
+                soundsAgainFromReturn = nil
+            }
+            if let soundsAgainFromBefore, let soundsAgainFromReturn {
+                fromBefore.append(soundsAgainFromBefore)
+                fromReturn.append(soundsAgainFromReturn)
+            }
+            rows.append([
+                "edit": index, "noteStart": note.startSeconds, "noteEnd": note.endSeconds,
+                "cents": cents, "memo": memoKind, "renderInFlightAtCommit": inFlight,
+                "bridged": isBridge, "nodeAfterCommit": hasNode, "commitMs": commitMs,
+                "scheduleMs": scheduleMs, "landedMs": Self.jsonNumber(landedMs),
+                "soundsAgainFromBeforeMs": Self.jsonNumber(soundsAgainFromBefore),
+                "soundsAgainFromReturnMs": Self.jsonNumber(soundsAgainFromReturn),
+                "loadAtCommit": load,
+            ])
+            if !waitsForLanding {
+                try await Task.sleep(for: .seconds(1))
+            }
+        }
+        let loadAtEnd = Self.loadAverage()
+        // Let the last job settle before the cache folder goes.
+        _ = try await waitUntil(240) { engine.stretchCache.status(forClip: clip.id) != .rendering }
+        try? FileManager.default.removeItem(at: cacheDir)
+        #expect(!engine.isRunning, "the G1 harness started the audio hardware")
+        let summary: [String: Any] = [
+            "edits": edits, "bridged": bridged, "soundedCount": fromBefore.count,
+            "p50FromBeforeMs": Self.jsonNumber(Self.percentile(fromBefore, 50)),
+            "p95FromBeforeMs": Self.jsonNumber(Self.percentile(fromBefore, 95)),
+            "maxFromBeforeMs": Self.jsonNumber(fromBefore.max()),
+            "p50FromReturnMs": Self.jsonNumber(Self.percentile(fromReturn, 50)),
+            "p95FromReturnMs": Self.jsonNumber(Self.percentile(fromReturn, 95)),
+            "maxFromReturnMs": Self.jsonNumber(fromReturn.max()),
+        ]
+        print("[measured] p2-ren G1 \(label): \(summary); load start \(loadAtStart) end \(loadAtEnd)")
+        return [
+            "bridgeEnabled": bridge, "loadAverageAtStart": loadAtStart, "loadAverageAtEnd": loadAtEnd,
+            "elapsedMs": Self.ms(ContinuousClock.now - started), "summary": summary, "rows": rows,
+        ]
+    }
+
+    // MARK: - p2-ren Stage B: the provisional, through the engine
+    //
+    // Every test here uses a 6 s voice-like take, long enough that one note's
+    // change fits the cap (40 % = 2.4 s) and a provisional is really BUILT;
+    // the 1 s bridge fixtures above decline it (and run with it off). Each
+    // asserts the build's kind as its positive control. The final render is
+    // held back through the engine's test seam where the order matters: which
+    // of two real renders lands first is a race, never a premise.
+
+    private func provisionalSource(_ label: String, seconds: Double = 6) throws -> (url: URL, notes: [NoteSegment]) {
+        let dir = try makeTempDir("prov-\(label)-src")
+        let voice = SpanRenderSignals.voice(seconds: seconds, sampleRate: 48_000)
+        let url = dir.appendingPathComponent("voice.wav")
+        try I1Signals.write([voice.samples], sampleRate: 48_000, to: url)
+        return (url, voice.notes)
+    }
+
+    private func provisionalEngine(_ label: String) throws -> AudioEngine {
+        let engine = AudioEngine()
+        engine.stretchCache = StretchRenderCache(directory: try makeTempDir("prov-\(label)-cache"))
+        return engine
+    }
+
+    /// Holds every final render back (before it reaches the cache) until `open`.
+    private final class FinalGate { var open = false }
+
+    private func holdFinals(_ engine: AudioEngine) -> FinalGate {
+        let gate = FinalGate()
+        engine.finalRenderHoldForTesting = {
+            while !gate.open { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+        return gate
+    }
+
+    /// The take's notes with note 0 at +100 c (so every render is a curve
+    /// render) and `edit` applied.
+    private static func provisionalEdits(_ notes: [NoteSegment],
+                                         _ edit: (inout [NoteSegment]) -> Void = { _ in }) -> PitchEditSet {
+        var segments = notes
+        segments[0].pitchOffsetCents = 100
+        edit(&segments)
+        return PitchEditSet(segments: segments)
+    }
+
+    /// The provisional files on disk, every session folder included.
+    private func provisionalFiles(_ engine: AudioEngine) -> [String] {
+        let root = AudioEngine.provisionalRoot(of: engine.stretchCache)
+        let sessions = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
+        return sessions.flatMap { session in
+            ((try? FileManager.default.contentsOfDirectory(
+                atPath: root.appendingPathComponent(session).path)) ?? []).filter { $0.hasSuffix(".caf") }
+        }
+    }
+
+    private func builtKind(_ engine: AudioEngine, _ clipID: UUID) -> ProvisionalRender.Kind? {
+        if case .built(let built)? = engine.provisionals.lastOutcomeForTesting[clipID] { return built.kind }
+        return nil
+    }
+
+    /// The signed pitch of `test` against `reference` over `note` (YIN, off the
+    /// main actor).
+    private static func pitchShift(_ reference: URL, _ test: URL, over note: NoteSegment,
+                                   expected: Double) async throws -> Double {
+        try await Task.detached {
+            let a = try I1Signals.read(reference).planar[0]
+            let b = try I1Signals.read(test).planar[0]
+            let range = Int(note.startSeconds * 48_000 + 4_800)..<Int(note.endSeconds * 48_000 - 4_800)
+            return SpanRenderMetrics.signedShift(a[range], b[range], sampleRate: 48_000, minHz: 70,
+                                                 maxHz: 400, around: expected).median
+        }.value
+    }
+
+    @Test("p2-ren Stage B: a pitch edit plays its PROVISIONAL (committed → provisional → bridge → pending): the bridge at the edit, then the spliced stand-in, named <newKey>~<baseKey> in this session's folder and never visible as the key's render, carrying the edit; it says clip-render-preview once per episode; the final replaces it and its file is deleted")
+    func provisionalPlaysUntilTheFinal() async throws {
+        let src = try provisionalSource("order")
+        let engine = try provisionalEngine("order")
+        var events: [EngineNoticeEvent] = []
+        engine.engineNoticeHandler = { events.append($0) }
+        let before = Clip(name: "Take", startBeat: 0, lengthBeats: 12, audioFileURL: src.url,
+                          pitchEdits: Self.provisionalEdits(src.notes))
+        var track = try await openLanded(engine, before)
+        let baseURL = try #require(engine.graph.clipFileURLForTesting(clipID: before.id))
+        #expect(engine.lastCommittedForTesting(clipID: before.id)?.base.url.standardizedFileURL
+                == baseURL.standardizedFileURL, "the committed render is not the clip's base")
+        let gate = holdFinals(engine)
+        var after = before
+        after.pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = 200 }
+        track.clips = [after]
+        engine.tracksDidChange([track])
+        #expect(engine.graph.clipPlays(clipID: after.id) == .previous, "the edit did not bridge first")
+        try #require(try await waitUntil { engine.graph.clipPlays(clipID: after.id) == .preview },
+                     "the provisional never played (outcome: \(String(describing: engine.provisionals.lastOutcomeForTesting[after.id])))")
+        #expect(builtKind(engine, after.id) == .spliced)
+        let playing = try #require(engine.graph.clipFileURLForTesting(clipID: after.id))
+        let newKey = try StretchRenderCache.cacheKey(source: src.url, params: .init(clip: after))
+        let baseKey = baseURL.deletingPathExtension().lastPathComponent
+        #expect(playing.lastPathComponent == "\(newKey)~\(baseKey).caf")
+        #expect(playing.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL
+                == AudioEngine.provisionalRoot(of: engine.stretchCache).standardizedFileURL)
+        #expect(engine.stretchCache.cachedURL(source: src.url, params: .init(clip: after)) == nil,
+                "a provisional is visible as the key's committed render")
+        // It carries the edit: note 3 is +200 c against the base.
+        let shift = try await Self.pitchShift(baseURL, playing, over: src.notes[3], expected: 200)
+        print(String(format: "[measured] p2-ren B: the provisional's note 3 is %+.1f c from the base", shift))
+        #expect(abs(shift - 200) <= 15)
+        // A re-resolve serves the same file and builds nothing.
+        let builds = engine.provisionals.buildCountForTesting
+        engine.tracksDidChange([track])
+        #expect(engine.graph.clipPlays(clipID: after.id) == .preview)
+        #expect(engine.provisionals.buildCountForTesting == builds)
+        #expect(provisionalFiles(engine).count == 1)
+        // The play pass says what plays, once per episode.
+        let tempo = TempoMap(constantBPM: 120)
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        let previews = events.filter { $0.code == "clip-render-preview" }
+        #expect(previews.count == 1, "clip-render-preview posted \(previews.count) times")
+        #expect(previews.first?.message == PlaybackGraph.renderPreviewMessage(for: after))
+        #expect(!events.contains { $0.code == "clip-stretch-pending" })
+        // The final replaces it; the provisional's file goes.
+        gate.open = true
+        try #require(try await waitUntil { committedPlays(engine, after) }, "the final never replaced the provisional")
+        #expect(engine.graph.clipPlays(clipID: after.id) == .exact)
+        #expect(provisionalFiles(engine).isEmpty, "a superseded provisional was kept: \(provisionalFiles(engine))")
+        #expect(engine.lastCommittedForTesting(clipID: after.id)?.base.name == newKey)
+        #expect(engine.bridgeResolutionCountForTesting == 1)
+        #expect(engine.provisionalResolutionCountForTesting >= 1)
+        #expect(engine.provisionalFilesOpenedForTesting.map(\.lastPathComponent) == [playing.lastPathComponent])
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage B: while the transport ROLLS, a final landing under a playing provisional restarts nothing: it is marked, the provisional plays on, and the next reschedule swaps the final in under the SAME player; a newer edit drops a stale mark")
+    func deferredFinalSwapRidesTheNextReschedule() async throws {
+        let src = try provisionalSource("defer")
+        let engine = try provisionalEngine("defer")
+        let first = Clip(name: "Take", startBeat: 0, lengthBeats: 12, audioFileURL: src.url,
+                         pitchEdits: Self.provisionalEdits(src.notes))
+        var clip = first
+        var track = try await openLanded(engine, clip)
+        engine.interimTransportRollingForTesting = true
+        let gate = holdFinals(engine)
+        func edit(_ cents: Double) async throws {
+            gate.open = false
+            clip.pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = cents }
+            track.clips = [clip]
+            engine.tracksDidChange([track])
+            try #require(try await waitUntil { engine.graph.clipPlays(clipID: clip.id) == .preview },
+                         "\(cents) c: the provisional never played")
+            #expect(builtKind(engine, clip.id) == .spliced)
+        }
+        try await edit(200)
+        let provisional = try #require(engine.graph.clipFileURLForTesting(clipID: clip.id))
+        let player = try #require(engine.graph.clipPlayerForTesting(clipID: clip.id))
+        let passes = engine.scheduleChangingPassCountForTesting
+        gate.open = true
+        try #require(try await waitUntil { engine.deferredFinalSwapsForTesting[clip.id] != nil },
+                     "the final was not deferred")
+        try await Task.sleep(for: .milliseconds(150))
+        let final = try #require(engine.stretchCache.cachedURL(source: src.url, params: .init(clip: clip)))
+        #expect(engine.scheduleChangingPassCountForTesting == passes, "the final restarted a rolling transport")
+        #expect(engine.graph.clipPlays(clipID: clip.id) == .preview)
+        #expect(engine.graph.clipFileURLForTesting(clipID: clip.id) == provisional)
+        #expect(engine.lastPlayedForTesting(clipID: clip.id)?.fileURL == provisional)
+        #expect(engine.lastCommittedForTesting(clipID: clip.id)?.base.url == final,
+                "the landed final is not the next edit's base")
+        #expect(provisionalFiles(engine).count == 1, "the playing provisional was deleted")
+        // The reschedule (what `restart` and `stopPlayback` call; headless here).
+        #expect(engine.applyDeferredFinalSwaps().isEmpty)
+        #expect(engine.graph.clipPlays(clipID: clip.id) == .exact)
+        #expect(engine.graph.clipFileURLForTesting(clipID: clip.id)?.standardizedFileURL == final.standardizedFileURL)
+        #expect(engine.graph.clipPlayerForTesting(clipID: clip.id) === player, "the swap replaced the player")
+        #expect(engine.lastPlayedForTesting(clipID: clip.id)?.fileURL.standardizedFileURL == final.standardizedFileURL)
+        #expect(provisionalFiles(engine).isEmpty, "the swapped-out provisional was kept")
+        #expect(engine.deferredFinalSwapsForTesting.isEmpty)
+        #expect(engine.deferredFinalSwapCountForTesting == 1)
+
+        // A newer edit before the reschedule: the old mark is dropped, never applied.
+        try await edit(300)
+        gate.open = true
+        try #require(try await waitUntil { engine.deferredFinalSwapsForTesting[clip.id] != nil })
+        try await edit(400)          // adopts its bridge: the provisional it plays
+        #expect(engine.graph.clipPlays(clipID: clip.id) == .preview)
+        let standIn = try #require(engine.graph.clipFileURLForTesting(clipID: clip.id))
+        #expect(provisionalFiles(engine).count <= 2, "files: \(provisionalFiles(engine))")
+        #expect(engine.applyDeferredFinalSwaps().isEmpty)
+        #expect(engine.graph.clipFileURLForTesting(clipID: clip.id) == standIn,
+                "a stale final replaced the stand-in of a newer edit")
+        gate.open = true
+        try #require(try await waitUntil {
+            engine.deferredFinalSwapsForTesting[clip.id] != nil || committedPlays(engine, clip)
+        })
+        engine.applyDeferredFinalSwaps()
+        #expect(committedPlays(engine, clip), "the newest edit's final never played")
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage B: two quick edits — the first edit's provisional is never opened (cancelled, or stale when it lands); the second's plays")
+    func staleProvisionalIsNeverOpened() async throws {
+        let src = try provisionalSource("stale")
+        let engine = try provisionalEngine("stale")
+        var clip = Clip(name: "Take", startBeat: 0, lengthBeats: 12, audioFileURL: src.url,
+                        pitchEdits: Self.provisionalEdits(src.notes))
+        var track = try await openLanded(engine, clip)
+        let gate = holdFinals(engine)
+        clip.pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = 200 }
+        let firstKey = try StretchRenderCache.cacheKey(source: src.url, params: .init(clip: clip))
+        track.clips = [clip]
+        engine.tracksDidChange([track])
+        clip.pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = 300 }
+        let secondKey = try StretchRenderCache.cacheKey(source: src.url, params: .init(clip: clip))
+        track.clips = [clip]
+        engine.tracksDidChange([track])
+        try #require(try await waitUntil { engine.graph.clipPlays(clipID: clip.id) == .preview })
+        try await Task.sleep(for: .milliseconds(300))   // anything late has landed
+        let opened = engine.provisionalFilesOpenedForTesting.map(\.lastPathComponent)
+        print("[measured] p2-ren B two quick edits: builds \(engine.provisionals.buildCountForTesting), opened \(opened)")
+        #expect(!opened.contains { $0.hasPrefix(firstKey) }, "the first edit's provisional was opened")
+        #expect(opened.contains { $0.hasPrefix(secondKey) }, "positive control: the ledger saw no open at all")
+        #expect(engine.graph.clipFileURLForTesting(clipID: clip.id)?.lastPathComponent.hasPrefix(secondKey) == true)
+        gate.open = true
+        try #require(try await waitUntil { committedPlays(engine, clip) })
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage B: a final render that FAILS under a playing provisional ends it: no node, the failure on record, and no later resolve serves the provisional again")
+    func failureNeverLeavesAProvisional() async throws {
+        let src = try provisionalSource("fail")
+        let engine = try provisionalEngine("fail")
+        var clip = Clip(name: "Take", startBeat: 0, lengthBeats: 12, audioFileURL: src.url,
+                        pitchEdits: Self.provisionalEdits(src.notes))
+        var track = try await openLanded(engine, clip)
+        let gate = holdFinals(engine)
+        clip.pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = 200 }
+        track.clips = [clip]
+        engine.tracksDidChange([track])
+        try #require(try await waitUntil { engine.graph.clipPlays(clipID: clip.id) == .preview })
+        let cacheDir = engine.stretchCache.directory
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: cacheDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cacheDir.path)
+        }
+        gate.open = true
+        try #require(try await waitUntil {
+            if case .failed = engine.stretchCache.status(forClip: clip.id) { return true }
+            return false
+        }, "the injected failure never happened")
+        try #require(try await waitUntil { engine.graph.clipPlays(clipID: clip.id) == nil },
+                     "the provisional outlived its failed final")
+        let served = engine.provisionalResolutionCountForTesting
+        engine.tracksDidChange([track])
+        #expect(engine.graph.clipPlays(clipID: clip.id) == nil)
+        #expect(engine.provisionalResolutionCountForTesting == served, "a failed clip was served its provisional")
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage B, design §10 failure mode 14: an engine REBUILD while a provisional is being built — the new graph bridges, the build lands and plays THERE (not on the discarded graph), builds once, and the final still replaces it")
+    func provisionalLandsAcrossARebuild() async throws {
+        let src = try provisionalSource("rebuild")
+        let engine = try provisionalEngine("rebuild")
+        var clip = Clip(name: "Take", startBeat: 0, lengthBeats: 12, audioFileURL: src.url,
+                        pitchEdits: Self.provisionalEdits(src.notes))
+        var track = try await openLanded(engine, clip)
+        let gate = holdFinals(engine)
+        clip.pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = 200 }
+        track.clips = [clip]
+        engine.tracksDidChange([track])
+        let builds = engine.provisionals.buildCountForTesting
+        #expect(engine.graph.clipPlays(clipID: clip.id) == .previous)
+        // No await since the edit, so the build's landing (a main-actor hop)
+        // cannot have run: the rebuild below is mid-provisional by construction.
+        let graphBefore = ObjectIdentifier(engine.graph)
+        engine.graph.engineHasRun = true  // a once-rendered engine, as prepare() leaves it
+        engine.projectWillReplace()
+        engine.tracksDidChange([track])
+        try #require(ObjectIdentifier(engine.graph) != graphBefore, "positive control: no rebuild happened")
+        #expect(engine.graph.clipPlays(clipID: clip.id) == .previous,
+                "the rebuilt graph did not bridge while the provisional was still building")
+        try #require(try await waitUntil { engine.graph.clipPlays(clipID: clip.id) == .preview },
+                     "the provisional never played on the rebuilt graph (outcome: \(String(describing: engine.provisionals.lastOutcomeForTesting[clip.id])))")
+        #expect(builtKind(engine, clip.id) == .spliced)
+        #expect(engine.provisionals.buildCountForTesting == builds, "the rebuild started a second build")
+        gate.open = true
+        try #require(try await waitUntil { committedPlays(engine, clip) }, "the final never replaced the provisional")
+        #expect(engine.graph.clipPlays(clipID: clip.id) == .exact)
+        #expect(provisionalFiles(engine).isEmpty, "a superseded provisional was kept: \(provisionalFiles(engine))")
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage B: a bounce taken while a provisional plays WAITS for the final and bounces it, byte for byte the bounce after it landed; the provisional itself is tellable from the final")
+    func bounceNeverTakesAProvisional() async throws {
+        let src = try provisionalSource("bounce")
+        let engine = try provisionalEngine("bounce")
+        var clip = Clip(name: "Take", startBeat: 0, lengthBeats: 12, audioFileURL: src.url,
+                        pitchEdits: Self.provisionalEdits(src.notes))
+        var track = try await openLanded(engine, clip)
+        let tempo = TempoMap(constantBPM: 120)
+        func bounce() async throws -> [[Float]] {
+            try await engine.renderOffline(tracks: [audioTrack(clip)], tempoMap: tempo, masterVolume: 1,
+                                           fromBeat: 0, durationSeconds: 6,
+                                           forcedCompensationTargets: nil).channelData
+        }
+        let gate = holdFinals(engine)
+        clip.pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = 200 }
+        track.clips = [clip]
+        engine.tracksDidChange([track])
+        try #require(try await waitUntil { engine.graph.clipPlays(clipID: clip.id) == .preview })
+        #expect(builtKind(engine, clip.id) == .spliced)
+        let heard = try livePlays(engine, clip, seconds: 6)
+        let whilePreview = try await bounce()
+        gate.open = true
+        try #require(try await waitUntil { committedPlays(engine, clip) })
+        let afterLanding = try await bounce()
+        let vsFinal = Self.differingSamples(whilePreview, afterLanding)
+        let heardVsFinal = Self.differingSamples(heard, afterLanding)
+        print("[measured] p2-ren B bounce while a provisional played: \(vsFinal) samples differ from the final's bounce; the provisional itself differs in \(heardVsFinal)")
+        #expect(vsFinal == 0, "the bounce did not wait for the final")
+        #expect(heardVsFinal > 1_000, "positive control: the provisional must be tellable from the final")
+        #expect(!engine.isRunning)
+    }
+
+    @Test("p2-ren Stage B G4: an unedited session (open, play, seek, stop, a mixer move, a save that repoints its media) builds NO provisional, serves none and creates no Provisional folder; one edit then builds exactly one")
+    func uneditedSessionBuildsNoProvisional() async throws {
+        let src = try provisionalSource("g4")
+        let dir = try makeTempDir("prov-g4-more")
+        let plainSource = dir.appendingPathComponent("plain.wav")
+        try writeRampedSine(to: plainSource, frequency: 330, seconds: 2.0)
+        let stretchSource = dir.appendingPathComponent("stretch.wav")
+        try writeSine(to: stretchSource, frequency: 440, seconds: 1.5)
+        var clips = [
+            Clip(name: "plain", startBeat: 0, lengthBeats: 3.5, audioFileURL: plainSource,
+                 startOffsetSeconds: 0.25, fadeInBeats: 0.5, fadeOutBeats: 0.5),
+            Clip(name: "stretched", startBeat: 0, lengthBeats: 4.5, audioFileURL: stretchSource,
+                 stretchRatio: 1.5, pitchShiftSemitones: 2),
+            Clip(name: "tuned", startBeat: 0, lengthBeats: 12, audioFileURL: src.url,
+                 pitchEdits: Self.provisionalEdits(src.notes)),
+        ]
+        var tracks = clips.map { audioTrack($0) }
+        let engine = try provisionalEngine("g4")
+        let tempo = TempoMap(constantBPM: 120)
+        func allPlay() -> Bool { clips.allSatisfy { committedPlays(engine, $0) } }
+        engine.tracksDidChange(tracks)
+        try #require(try await waitUntil { allPlay() }, "the session's renders never landed")
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 2.5, tempoMap: tempo)
+        engine.graph.stopAllPlayers()
+        tracks[0].volume = 0.5
+        engine.tracksDidChange(tracks)
+        let media = try makeTempDir("prov-g4-media")
+        for index in clips.indices {
+            let old = try #require(clips[index].audioFileURL)
+            let copy = media.appendingPathComponent("\(index)-\(old.lastPathComponent)")
+            try FileManager.default.copyItem(at: old, to: copy)
+            clips[index].audioFileURL = copy
+            tracks[index].clips = [clips[index]]
+        }
+        engine.tracksDidChange(tracks)
+        try #require(try await waitUntil { allPlay() }, "the repointed session never played again")
+        engine.graph.stopAllPlayers()
+        engine.graph.scheduleAll(fromBeat: 0, tempoMap: tempo)
+        let root = AudioEngine.provisionalRoot(of: engine.stretchCache)
+        #expect(engine.provisionals.buildCountForTesting == 0, "an unedited session built a provisional")
+        #expect(engine.provisionalResolutionCountForTesting == 0)
+        #expect(!FileManager.default.fileExists(atPath: root.path), "an unedited session created \(root.path)")
+        // POSITIVE CONTROL: the spy counts a real build.
+        clips[2].pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = 200 }
+        tracks[2].clips = [clips[2]]
+        engine.tracksDidChange(tracks)
+        #expect(engine.provisionals.buildCountForTesting == 1)
+        try #require(try await waitUntil { allPlay() })
+        #expect(!engine.isRunning)
+    }
+
+    /// §12 G6 with Stage B (a fake rolling transport, headless): schedule-
+    /// changing passes per edit. Stage A′ alone: pitch 1, timing-only 1,
+    /// ratio 2 (`noRestartAtTheEdit`). With the provisional and the deferred
+    /// final: the edit 0 (A′), the provisional's landing 1, the final 0
+    /// (deferred); a timing-only edit's provisional is the file the bridge
+    /// already plays (relabelled in place) so 0; a ratio edit never
+    /// provisions, 2. With the deferral off, each final adds its 1.
+    @Test("p2-ren Stage B G6: schedule-changing passes per edit while rolling — pitch 1, timing-only 0, ratio 2 with the deferred final; pitch 2, timing-only 1, ratio 2 without; a ratio edit builds nothing; never more than Stage A′")
+    func provisionalRestartsPerEdit() async throws {
+        var counts: [String: [String: Int]] = [:]
+        for deferring in [true, false] {
+            let mode = deferring ? "deferred" : "at-once"
+            let src = try provisionalSource("g6-\(mode)")
+            let engine = try provisionalEngine("g6-\(mode)")
+            engine.defersFinalSwapWhileRolling = deferring
+            var clip = Clip(name: "Take", startBeat: 0, lengthBeats: 12, audioFileURL: src.url,
+                            pitchEdits: Self.provisionalEdits(src.notes))
+            var track = try await openLanded(engine, clip)
+            engine.interimTransportRollingForTesting = true
+            let gate = holdFinals(engine)
+            var perEdit: [String: Int] = [:]
+            func measure(_ label: String, _ change: (inout Clip) -> Void, provisional: Bool) async throws {
+                let base = engine.scheduleChangingPassCountForTesting
+                gate.open = !provisional
+                change(&clip)
+                track.clips = [clip]
+                engine.tracksDidChange([track])
+                if provisional {
+                    try #require(try await waitUntil { engine.graph.clipPlays(clipID: clip.id) == .preview },
+                                 "\(mode) \(label): the provisional never played")
+                    gate.open = true
+                }
+                try #require(try await waitUntil {
+                    engine.deferredFinalSwapsForTesting[clip.id] != nil || committedPlays(engine, clip)
+                }, "\(mode) \(label): the final never landed")
+                try await Task.sleep(for: .milliseconds(150))
+                perEdit[label] = engine.scheduleChangingPassCountForTesting - base
+                engine.applyDeferredFinalSwaps()   // the next reschedule
+                #expect(committedPlays(engine, clip), "\(mode) \(label): the final does not play after the reschedule")
+            }
+            try await measure("pitch", { $0.pitchEdits = Self.provisionalEdits(src.notes) { $0[3].pitchOffsetCents = 200 } },
+                              provisional: true)
+            #expect(builtKind(engine, clip.id) == .spliced)
+            try await measure("timing-only", {
+                $0.pitchEdits = Self.provisionalEdits(src.notes) {
+                    $0[3].pitchOffsetCents = 200; $0[2].timeStartDeltaSeconds = 0.04
+                }
+            }, provisional: true)
+            #expect(builtKind(engine, clip.id) == .baseAsIs)
+            let builds = engine.provisionals.buildCountForTesting
+            try await measure("ratio", { $0.stretchRatio = 1.25 }, provisional: false)
+            #expect(engine.provisionals.buildCountForTesting == builds, "a ratio edit built a provisional")
+            counts[mode] = perEdit
+            #expect(!engine.isRunning)
+        }
+        print("[measured] p2-ren B G6 schedule-changing passes per edit (fake rolling): \(counts)")
+        #expect(counts["deferred"] == ["pitch": 1, "timing-only": 0, "ratio": 2], "\(counts)")
+        #expect(counts["at-once"] == ["pitch": 2, "timing-only": 1, "ratio": 2], "\(counts)")
+    }
+
+    /// Allocated bytes of every file under `root` (synchronous: the
+    /// enumerator is unavailable from async code).
+    private static func allocatedBytes(under root: URL) -> Int {
+        guard let walker = FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: [.totalFileAllocatedSizeKey]) else { return 0 }
+        var bytes = 0
+        for case let url as URL in walker {
+            bytes += (try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]).totalFileAllocatedSize) ?? 0
+        }
+        return bytes
+    }
+
+    /// §12 G1 for Stage B, ENV-GATED (nothing runs in a normal `./scripts/test.sh`):
+    ///
+    ///     REN_B_G1_TAKE=<wav> REN_B_G1_OUT=<dir> [REN_B_G1_MANIFEST=<i1lt manifest.json>] \
+    ///       [REN_B_G1_EDITS=50] [REN_B_G1_LABEL=run] [REN_B_G1_SEAM_W=0.5] \
+    ///       ./scripts/test.sh --filter provisionalLatencyHarness
+    ///
+    /// ≥ 50 single-note edits ~1 s apart through the REAL store, the final
+    /// renders running concurrently (every 10th edit waits for its final, so
+    /// the base moves on as it does when a user listens). Per edit:
+    ///  * START: the store commit RETURNING (`mach_absolute_time`, test side);
+    ///  * END, THE PRODUCT'S OWN STAMP: the host time the clip's node OPENED
+    ///    the provisional (`provisionalOpenedHostTimeForTesting`);
+    ///  * plus, to reach "audible while rolling": the rolling restart's
+    ///    schedule pass (MEASURED headless: `stopAllPlayers` + `scheduleAll`)
+    ///    and the anchor lead `StartAnchorBudget.lead(1)` (INFERRED: a
+    ///    constant; no hardware here to show it).
+    /// Each edit's outcome is recorded: a provisional (its kind, base, span,
+    /// seams and step timings), a decline (its reason), or the final first.
+    @Test("p2-ren Stage B G1: edit → the provisional is playing, ≥50 single-note edits ~1 s apart with the finals rendering concurrently, product stamps (env-gated)",
+          .enabled(if: ProcessInfo.processInfo.environment["REN_B_G1_OUT"] != nil))
+    func provisionalLatencyHarness() async throws {
+        let env = ProcessInfo.processInfo.environment
+        let take = URL(fileURLWithPath: try #require(env["REN_B_G1_TAKE"]))
+        let out = URL(fileURLWithPath: try #require(env["REN_B_G1_OUT"]))
+        try FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let edits = max(50, Int(env["REN_B_G1_EDITS"] ?? "") ?? 50)
+        let label = env["REN_B_G1_LABEL"] ?? "run"
+        struct Manifest: Decodable {
+            struct Note: Decodable { let start: Double; let end: Double; let hz: Double }
+            struct Take: Decodable { let path: String; let notes: [Note] }
+            let takes: [Take]
+        }
+        let table: PitchEditSet
+        if let manifestPath = env["REN_B_G1_MANIFEST"] {
+            let manifest = try JSONDecoder().decode(
+                Manifest.self, from: Data(contentsOf: URL(fileURLWithPath: manifestPath)))
+            let entry = try #require(manifest.takes.first {
+                URL(fileURLWithPath: $0.path).standardizedFileURL == take.standardizedFileURL
+            }, "the take is not in the manifest")
+            table = PitchEditSet(segments: entry.notes.map {
+                NoteSegment(startSeconds: $0.start, endSeconds: $0.end, detectedHz: $0.hz,
+                            detectedConfidence: 0.95)
+            })
+        } else {
+            table = try await Task.detached {
+                PitchNoteTable.detected(from: try PitchContourCache.detectWholeFile(take, .product))
+            }.value
+        }
+        let file = try AVAudioFile(forReading: take)
+        let duration = Double(file.length) / file.processingFormat.sampleRate
+        let candidates = table.segments.filter { $0.durationSeconds >= 0.30 && $0.detectedHz > 0 }
+        try #require(candidates.count >= 5)
+        let clip = Clip(name: "take", startBeat: 0, lengthBeats: (duration * 2).rounded(.up),
+                        audioFileURL: take, pitchEdits: table)
+        let store = ProjectStore(tracks: [Track(name: "Vox", kind: .audio, clips: [clip])])
+        let engine = AudioEngine()
+        let cacheDir = out.appendingPathComponent("cache-\(label)", isDirectory: true)
+        try? FileManager.default.removeItem(at: cacheDir)
+        engine.stretchCache = StretchRenderCache(directory: cacheDir)
+        if let w = env["REN_B_G1_SEAM_W"].flatMap(Double.init) {
+            engine.provisionals.tuning.seamSearchSeconds = w
+        }
+        store.engine = engine
+        engine.tracksDidChange(store.tracks)
+        try #require(committedPlays(engine, clip), "the untouched take does not play its source")
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        func hostMs(_ ticks: UInt64) -> Double {
+            Double(ticks) * Double(timebase.numer) / Double(timebase.denom) / 1e6
+        }
+        let tempo = TempoMap(constantBPM: 120)
+        let leadMs = StartAnchorBudget.lead(forStartablePlayerCount: 1).seconds * 1_000
+        let loadAtStart = Self.loadAverage()
+        var rows: [[String: Any]] = []
+        var sounded: [Double] = []
+        var soundedFromRender: [Double] = []
+        var outcomes: [String: Int] = [:]
+        var maxFiles = 0
+        for index in 0..<edits {
+            let note = candidates[(index * 7) % candidates.count]
+            let cents = 100 + Double(index)
+            let baseKind = engine.lastCommittedForTesting(clipID: clip.id).map { $0.base.isSource ? "source" : "render" } ?? "none"
+            let inFlight = engine.stretchCache.status(forClip: clip.id) == .rendering
+            let load = Self.loadAverage()[0]
+            let before = mach_absolute_time()
+            _ = try store.setClipNotePitchOffset(clipId: clip.id, segmentId: note.id, offsetCents: cents)
+            let returned = mach_absolute_time()
+            let edited = store.tracks[0].clips[0]
+            let newKey = try StretchRenderCache.cacheKey(source: take, params: .init(clip: edited))
+            let baseName = engine.lastCommittedForTesting(clipID: clip.id)?.base.name ?? ""
+            let pair = ProvisionalRenderStore.Pair(newKey: newKey, baseName: baseName)
+            var outcome = "timeout"
+            let deadline = Date().addingTimeInterval(60)
+            while Date() < deadline {
+                if let stamp = engine.provisionalOpenedHostTimeForTesting[clip.id], stamp > returned,
+                   engine.graph.clipFileURLForTesting(clipID: clip.id)?.lastPathComponent.hasPrefix(newKey) == true
+                    || engine.graph.clipPlays(clipID: clip.id) == .preview {
+                    outcome = "provisional"; break
+                }
+                if engine.provisionals.isDeclined(pair) { outcome = "declined"; break }
+                if committedPlays(engine, edited) { outcome = "final-first"; break }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+            outcomes[outcome, default: 0] += 1
+            var row: [String: Any] = [
+                "edit": index, "noteStart": note.startSeconds, "noteEnd": note.endSeconds, "cents": cents,
+                "base": baseKind, "renderInFlightAtCommit": inFlight, "loadAtCommit": load,
+                "commitMs": hostMs(returned - before), "outcome": outcome,
+            ]
+            if outcome == "provisional", let stamp = engine.provisionalOpenedHostTimeForTesting[clip.id] {
+                let r0 = ContinuousClock.now
+                engine.graph.stopAllPlayers()
+                engine.graph.scheduleAll(fromBeat: max(0, note.startSeconds - 1) * 2, tempoMap: tempo)
+                let scheduleMs = Self.ms(ContinuousClock.now - r0)
+                let openMs = hostMs(stamp - returned)
+                let total = openMs + scheduleMs + leadMs
+                sounded.append(total)
+                if baseKind == "render" { soundedFromRender.append(total) }
+                row["openFromReturnMs"] = openMs
+                row["scheduleMs"] = scheduleMs
+                row["soundsNewFromReturnMs"] = total
+            }
+            if case .built(let built)? = engine.provisionals.lastOutcomeForTesting[clip.id] {
+                row["kind"] = built.kind.rawValue
+                row["assembly"] = built.assembly.rawValue
+                row["spanFrames"] = built.spanFrames
+                row["renderedSpanFrames"] = built.renderedSpanFrames
+                row["reusedSpanFrames"] = built.reusedSpanFrames
+                row["spans"] = built.spanRanges.count
+                row["stepMs"] = built.millis
+                row["seams"] = built.seams.map {
+                    ["side": $0.side.rawValue, "atSeconds": Double($0.centreFrame) / file.processingFormat.sampleRate,
+                     "crossfadeFrames": $0.crossfadeFrames, "law": $0.law.rawValue, "rmsDb": $0.seamRmsDb,
+                     "activeDb": $0.activeRmsDb, "quiet": $0.isQuiet, "correlation": $0.correlation] as [String: Any]
+                }
+            }
+            if outcome == "declined" { row["declined"] = String(describing: engine.provisionals.lastOutcomeForTesting[clip.id]) }
+            maxFiles = max(maxFiles, provisionalFiles(engine).count)
+            rows.append(row)
+            if index % 10 == 9 {
+                _ = try await waitUntil(240) { committedPlays(engine, edited) }
+            } else {
+                try await Task.sleep(for: .seconds(1))
+            }
+        }
+        let loadAtEnd = Self.loadAverage()
+        _ = try await waitUntil(240) { engine.stretchCache.status(forClip: clip.id) != .rendering }
+        let files = provisionalFiles(engine)
+        let root = AudioEngine.provisionalRoot(of: engine.stretchCache)
+        let bytes = Self.allocatedBytes(under: root)
+        let summary: [String: Any] = [
+            "edits": edits, "outcomes": outcomes,
+            "p50SoundsNewMs": Self.jsonNumber(Self.percentile(sounded, 50)),
+            "p95SoundsNewMs": Self.jsonNumber(Self.percentile(sounded, 95)),
+            "maxSoundsNewMs": Self.jsonNumber(sounded.max()),
+            "p50FromRenderBaseMs": Self.jsonNumber(Self.percentile(soundedFromRender, 50)),
+            "p95FromRenderBaseMs": Self.jsonNumber(Self.percentile(soundedFromRender, 95)),
+            "maxFilesDuringRun": maxFiles, "filesAtEnd": files.count, "allocatedBytesAtEnd": bytes,
+            "leadMs": leadMs, "seamSearchSeconds": engine.provisionals.tuning.seamSearchSeconds,
+        ]
+        print("[measured] p2-ren B G1 \(label): \(summary); load start \(loadAtStart) end \(loadAtEnd)")
+        let report: [String: Any] = [
+            "label": label, "take": take.path, "seconds": duration, "notes": table.segments.count,
+            "loadAverageAtStart": loadAtStart, "loadAverageAtEnd": loadAtEnd, "summary": summary, "rows": rows,
+        ]
+        let json = out.appendingPathComponent("g1-b-\(label).json")
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: json)
+        print("[measured] p2-ren B G1 wrote \(json.path)")
+        try? FileManager.default.removeItem(at: cacheDir)
+        #expect(maxFiles <= 2, "more than 2 provisional files for one clip during the run")
+        #expect(!engine.isRunning)
+    }
+
+    static func detectedOnlyEdits() -> PitchEditSet {
+        PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.4, detectedHz: 220,
+                        detectedConfidence: 0.9)
+        ])
+    }
+
+    static func editedEdits(cents: Double) -> PitchEditSet {
+        PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.4, detectedHz: 220,
+                        detectedConfidence: 0.9, pitchOffsetCents: cents)
+        ])
+    }
+
+    // MARK: - C2-0 (F13) physics: A SPLIT MUST NOT CHANGE THE SOUND
+    //
+    // `ProjectStoreClipStretchTests` (DAWCoreTests) pins the split/trim offsets
+    // against an oracle written in the same terms as the source, so on its own
+    // it could restate a wrong assumption. This test asks the question in a
+    // different form: it renders a stretched clip WHOLE through the real engine,
+    // splits it through the real store, renders again, and compares the audio.
+    //  - BEFORE the split point the renders must be identical: the left half is
+    //    untouched. That is the invariance control.
+    //  - AFTER it they must match too. Both halves read the SAME stretched
+    //    render (`StretchRenderCache`'s key has no clip id), so a correct split
+    //    is sample-exact by construction.
+    //
+    // It MEASURES any displacement rather than assuming one: a bounded search
+    // finds the lag at which the split render's first post-split 100 ms appear
+    // in the whole render. The undivided offset math predicts
+    // `splitSeconds × (ratio − 1)`: +1 s at ratio 2 (stretched audio SKIPPED),
+    // −0.25 s at ratio 0.5 (REPEATED).
+    //
+    // The source is a linear CHIRP, not a sine. A periodic tone matches itself
+    // at every multiple of its period, so a displaced read could pass a sample
+    // diff by coincidence. A chirp's content is different at every position.
+    //
+    // It lives in THIS suite (beside `startOffsetMapsThroughRatio`, the read
+    // side of the same offset) rather than a new one, which keeps the
+    // `@MainActor` suite count (`MainActorOccupancySiteTests` Leg C) unmoved.
+
+    struct SplitCase: Sendable, CustomTestStringConvertible {
+        let ratio: Double
+        /// SOURCE seconds.
+        let startOffsetSeconds: Double
+        /// Sized so the clip plays exactly to the end of the stretched render.
+        let lengthBeats: Double
+        let splitBeat: Double
+        var testDescription: String { "ratio \(ratio)" }
+    }
+
+    static let splitSampleRate = 48_000.0
+    static let splitSourceSeconds = 3.0
+    static let splitBPM = 120.0  // 1 beat = 0.5 s
+
+    /// `nonisolated`: the `@Test(arguments:)` macro reads it off the main actor.
+    nonisolated static let splitCases: [SplitCase] = [
+        // 3 s × 2 = a 6 s render. Offset 0.25 s of source = render 0.5 s, so the
+        // clip plays render [0.5, 6.0) = 5.5 s = 11 beats. Split 1 s in: the
+        // right half must read render 1.5 s; the undivided math reads 2.5 s, which
+        // also stays inside the file, so the error is a displacement, not silence.
+        SplitCase(ratio: 2, startOffsetSeconds: 0.25, lengthBeats: 11, splitBeat: 2),
+        // 3 s × 0.5 = a 1.5 s render. Offset 0.25 s of source = render 0.125 s,
+        // so the clip plays render [0.125, 1.5) = 1.375 s = 2.75 beats. Split
+        // 0.5 s in: the right half must read render 0.625 s; the undivided math
+        // reads 0.375 s.
+        SplitCase(ratio: 0.5, startOffsetSeconds: 0.25, lengthBeats: 2.75, splitBeat: 1),
+    ]
+
+    @Test("splitting a stretched clip renders identically to the unsplit clip",
+          arguments: splitCases)
+    func splitIsInaudible(_ c: SplitCase) async throws {
+        let dir = try makeTempDir("c2-0-split")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let source = dir.appendingPathComponent("chirp.wav")
+        try Self.writeChirp(to: source)
+
+        // A private cache directory: never the user's real stretch cache.
+        let engine = AudioEngine()
+        engine.stretchCache = StretchRenderCache(directory: dir.appendingPathComponent("cache"))
+
+        let store = ProjectStore()
+        try store.setTempo(Self.splitBPM)
+        let clip = Clip(name: "Chirp", startBeat: 0, lengthBeats: c.lengthBeats,
+                        audioFileURL: source, startOffsetSeconds: c.startOffsetSeconds,
+                        stretchRatio: c.ratio)
+        // Built directly (`tracks` is internal(set), hence `@testable import
+        // DAWCore`): an offset set through the store would need a trim, which
+        // is another C2-0 site, and this test must exercise the split ALONE.
+        store.tracks.append(Track(name: "Vox", kind: .audio, clips: [clip]))
+        let map = store.transport.tempoMap
+        let clipSeconds = map.seconds(from: 0, to: c.lengthBeats)
+        let duration = clipSeconds + 0.25
+
+        let whole = try await engine.renderOffline(
+            tracks: store.tracks, tempoMap: map, masterVolume: 1,
+            fromBeat: 0, durationSeconds: duration, forcedCompensationTargets: nil)
+        let (_, right) = try store.splitClip(trackId: store.tracks[0].id, clipId: clip.id,
+                                             atBeat: c.splitBeat)
+        #expect(store.tracks[0].clips.count == 2)
+        let split = try await engine.renderOffline(
+            tracks: store.tracks, tempoMap: map, masterVolume: 1,
+            fromBeat: 0, durationSeconds: duration, forcedCompensationTargets: nil)
+
+        let w = whole.channelData[0]
+        let s = split.channelData[0]
+        let splitSeconds = map.seconds(from: 0, to: c.splitBeat)
+        let splitFrame = Int((splitSeconds * Self.splitSampleRate).rounded())
+        let endFrame = Int((clipSeconds * Self.splitSampleRate).rounded())
+        try #require(w.count >= endFrame && s.count >= endFrame)
+
+        // Audibility control: a diff over silence proves nothing.
+        let postRMS = TestSignals.rms(w, in: splitFrame..<endFrame)
+        #expect(postRMS > 0.1, "the whole render must be audible after the split: RMS \(postRMS)")
+
+        let preDiff = Self.maxAbsDiff(s, w, in: 0..<splitFrame)
+        let postDiff = Self.maxAbsDiff(s, w, in: splitFrame..<endFrame)
+        let (lag, residual) = Self.bestLag(of: s, in: w, probeStart: splitFrame,
+                                           probeLength: 4_800, validEnd: endFrame)
+        let predictedUndividedLag = Int((splitSeconds * (c.ratio - 1) * Self.splitSampleRate).rounded())
+        let lastHalfSecond = max(splitFrame, endFrame - 24_000)..<endFrame
+        let splitTailRMS = TestSignals.rms(s, in: lastHalfSecond)
+        let wholeTailRMS = TestSignals.rms(w, in: lastHalfSecond)
+        print("[measured] C2-0 physics ratio \(c.ratio): right-half offset \(right.startOffsetSeconds) s; "
+              + "max|split − whole| before the split \(preDiff), after it \(postDiff); "
+              + "measured lag \(lag) frames = \(Double(lag) / Self.splitSampleRate) s "
+              + "(probe residual \(residual)); undivided-math prediction \(predictedUndividedLag) frames; "
+              + "last-0.5 s RMS split \(splitTailRMS) vs whole \(wholeTailRMS)")
+
+        #expect(preDiff == 0, "the left half must render bit-identically: max diff \(preDiff)")
+        #expect(postDiff <= 1e-6,
+                "after the split point the audio must not change: max diff \(postDiff)")
+        #expect(lag == 0,
+                "the right half is displaced by \(lag) frames (\(Double(lag) / Self.splitSampleRate) s)")
+        #expect(residual <= 1e-6, "the post-split probe must match the whole render exactly somewhere")
+    }
+
+    /// Stereo Float32 WAV at 48 kHz, identical channels: a linear chirp
+    /// 200 → 2 000 Hz at amplitude 0.5 across `splitSourceSeconds`.
+    private static func writeChirp(to url: URL) throws {
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: splitSampleRate,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        let frames = Int(splitSourceSeconds * splitSampleRate)
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: splitSampleRate, channels: 2,
+                                         interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                            frameCapacity: AVAudioFrameCount(frames)),
+              let channels = buffer.floatChannelData else {
+            throw EngineError.renderFailed("fixture buffer allocation failed")
+        }
+        let f0 = 200.0
+        let f1 = 2_000.0
+        for frame in 0..<frames {
+            let t = Double(frame) / splitSampleRate
+            let phase = 2 * Double.pi * (f0 * t + (f1 - f0) * t * t / (2 * splitSourceSeconds))
+            let value = Float(0.5 * sin(phase))
+            channels[0][frame] = value
+            channels[1][frame] = value
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        try file.write(from: buffer)
+    }
+
+    private static func maxAbsDiff(_ a: [Float], _ b: [Float], in range: Range<Int>) -> Float {
+        var worst: Float = 0
+        for frame in range {
+            worst = max(worst, abs(a[frame] - b[frame]))
+        }
+        return worst
+    }
+
+    /// The lag `k` minimising `max |a[p + i] − b[p + i + k]|` over the probe
+    /// `i ∈ [0, probeLength)`, searched over EVERY `k` that keeps `b`'s index
+    /// inside `[0, validEnd)`. Nothing about the expected answer is assumed.
+    /// Early exit keeps it cheap: a candidate stops as soon as its running max
+    /// exceeds the best so far.
+    private static func bestLag(of a: [Float], in b: [Float], probeStart p: Int,
+                                probeLength n: Int, validEnd: Int) -> (lag: Int, residual: Float) {
+        var bestLag = 0
+        var best = Float.infinity
+        for k in (-p)...(validEnd - n - p) {
+            var worst: Float = 0
+            var i = 0
+            while i < n {
+                worst = max(worst, abs(a[p + i] - b[p + i + k]))
+                if worst >= best { break }
+                i += 1
+            }
+            if worst < best {
+                best = worst
+                bestLag = k
+            }
+        }
+        return (bestLag, best)
     }
 }

@@ -1,0 +1,111 @@
+{
+  "set": "polysynth-unison",
+  "description": "m39-g richness pass, ONE axis: unison detune. Identical arpeggio, identical filter (cutoffHz 2500, the 'singing' setting from polysynth-cutoff) so this bench is directly A/B-able against that baseline. Only unisonDetuneCents moves: 0 (control, a single voice — today's synth) then 8 / 18 / 35 cents across 8 stacked voices. Research called unison the single highest-payoff richness feature in the whole survey; this is the bench that tests that claim by ear.",
+  "variants": [
+    {
+      "name": "single-voice",
+      "role": "control",
+      "axis": "unisonVoices = 1 — today's synth, one oscillator, no detune. The A/B anchor.",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8,
+          "unisonVoices": 1, "unisonDetuneCents": 0, "unisonStereoSpread": 0
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "subtle",
+      "axis": "8 voices, unisonDetuneCents = 8 — a gentle thickening; should read as 'warmer' rather than 'wider'",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8,
+          "unisonVoices": 8, "unisonDetuneCents": 8, "unisonStereoSpread": 0.8
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "wide",
+      "axis": "8 voices, unisonDetuneCents = 18 — the classic supersaw region; should read as clearly wide and lush",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8,
+          "unisonVoices": 8, "unisonDetuneCents": 18, "unisonStereoSpread": 0.8
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "extreme",
+      "axis": "8 voices, unisonDetuneCents = 35 — deliberately past tasteful, to hear where it stops being 'wide' and starts being 'out of tune'",
+      "commands": [
+        { "command": "track.add", "params": { "name": "Lead", "kind": "instrument" }, "as": "lead" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$lead", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.005, "decay": 0.15, "sustain": 0.8, "release": 0.2,
+          "cutoffHz": 2500, "resonance": 0.15, "gain": 0.8,
+          "unisonVoices": 8, "unisonDetuneCents": 35, "unisonStereoSpread": 0.8
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$lead", "atBeat": 0,
+          "notes": [
+            { "pitch": 60, "startBeat": 0, "lengthBeats": 0.9 },
+            { "pitch": 64, "startBeat": 1, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 2, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 3, "lengthBeats": 0.9 },
+            { "pitch": 76, "startBeat": 4, "lengthBeats": 0.9 },
+            { "pitch": 72, "startBeat": 5, "lengthBeats": 0.9 },
+            { "pitch": 67, "startBeat": 6, "lengthBeats": 0.9 },
+            { "pitch": 60, "startBeat": 7, "lengthBeats": 1.8 }
+          ]
+        } }
+      ]
+    }
+  ]
+}

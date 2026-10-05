@@ -1,6 +1,10 @@
 import SwiftUI
 import DAWCore
 import DAWAppKit
+// m34-c: `SoundBankOffering` / `SoundBankDownloadState` — the download
+// catalogue types the picker renders. The view holds no coordinator; every
+// action goes through `InstrumentPickerModel`.
+import AIServices
 
 /// The instrument picker (m10-n-3): the ONE shared surface opened from both the
 /// track-header instrument chip and the mixer instrument-strip chip. It presents
@@ -64,6 +68,12 @@ struct InstrumentPickerOverlay: View {
         .onChange(of: densityStore.density(forPanel: Self.panelID)) { _, new in
             model.density = new
         }
+        // m34-c: watch the SHARED download slot only while this panel is on
+        // screen. `prepare` starts the watcher too; this pair makes the panel's
+        // own lifetime the bound, so a closed picker is not polling an actor
+        // nobody is looking at.
+        .onAppear { model.beginWatchingDownloads() }
+        .onDisappear { model.endWatchingDownloads() }
     }
 
     private var isPro: Bool { densityStore.density(forPanel: Self.panelID) == .pro }
@@ -220,7 +230,10 @@ struct InstrumentPickerOverlay: View {
                 EffectEditorButton(action: onTuneSampler)
                     .help("Tune the Sampler — its zone map, envelopes, tuning, level and looping")
                     .explainable(.samplerEditor))
-        case .testTone, .soundBank, .audioUnit:
+        // `.drumSynth` has no editor card yet (m39-dm ships engine + model +
+        // wire; the card is UI work). Showing a tune button that opens nothing
+        // is worse than showing none.
+        case .testTone, .soundBank, .audioUnit, .drumSynth:
             // Test Tone has nothing to tune; sound banks pick a program in this
             // same picker; a hosted AU opens its own plugin window.
             return nil
@@ -278,6 +291,13 @@ struct InstrumentPickerOverlay: View {
     private var soundBankSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("SOUND BANKS", trailing: AnyView(importButton))
+            // m34-c: ABOVE the bank list, not below it. ⭐ Placed below first,
+            // and a `debug.captureUI` screenshot settled it: in Simple density
+            // the section is SEVENTEEN curated Instrument Set rows, so the
+            // download offer landed off-screen behind a scroll — invisible to
+            // exactly the beginner who most needs a bigger palette. No
+            // assertion in this repo can see that; a picture can.
+            downloadSection
             if isPro {
                 // Pro: the bank list → drill into a program browser.
                 ForEach(model.filteredBanks, id: \.path) { bank in
@@ -299,6 +319,153 @@ struct InstrumentPickerOverlay: View {
         .explainable(.instrumentPickerSoundBanks)
     }
 
+    // MARK: - Get more sounds (m34-c)
+
+    /// The download affordance: an offer while idle, live progress with a
+    /// working Cancel while running, and an honest sentence when it stops.
+    ///
+    /// ⭐ COPY LAW: plain language and a real number. "Downloading 88 MB of
+    /// 206 MB" says what is happening; a bare spinner or a lone "43%" does
+    /// not. Every numeric readout here is SF Mono (`design: .monospaced`) per
+    /// docs/DESIGN-LANGUAGE.md.
+    @ViewBuilder
+    private var downloadSection: some View {
+        if model.canDownloadBanks {
+            VStack(alignment: .leading, spacing: 6) {
+                if let line = model.downloadStatusLine, model.downloadStatus?.state != .idle {
+                    downloadProgressRow(line)
+                }
+                if let error = model.downloadRequestError {
+                    inlineDownloadError(error)
+                }
+                ForEach(model.downloadableBanks) { offering in
+                    downloadOfferRow(offering)
+                }
+            }
+        }
+    }
+
+    /// One offerable bank: what it is, what it costs, what it is licensed
+    /// under, and a button. The licence is on screen BEFORE the download —
+    /// this is somebody else's work being placed on the user's machine.
+    private func downloadOfferRow(_ offering: SoundBankOffering) -> some View {
+        let isBusy = model.downloadStatus?.state == .downloading
+        return HStack(spacing: 9) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 12))
+                .foregroundStyle(DAWTheme.textDim)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(offering.bank.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(DAWTheme.textPrimary)
+                Text(offering.bank.summary)
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    // SF Mono for the number (design rule), plain text for the
+                    // words around it.
+                    Text(offering.bank.sizeDescription)
+                        .font(.system(size: 10, design: .monospaced))
+                    Text("· free · \(offering.bank.licence) licence")
+                        .font(.system(size: 10))
+                }
+                .foregroundStyle(DAWTheme.textDim)
+            }
+            Spacer(minLength: 8)
+            Button { model.startDownload(id: offering.id) } label: {
+                Text("Download")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(isBusy ? DAWTheme.textFaint : DAWTheme.textPrimary)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(DAWTheme.panelRaised)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+                    .overlay(RoundedRectangle(cornerRadius: 5)
+                        .stroke(DAWTheme.hairline, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .disabled(isBusy)
+            .help("Download \(offering.bank.name) (\(offering.bank.sizeDescription)) "
+                  + "into your sound-bank library. \(offering.bank.attribution)")
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(DAWTheme.panelRaised.opacity(0.4))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(DAWTheme.hairline, lineWidth: 1))
+    }
+
+    /// The live row: the plain sentence, a bar for the TRANSFER only, and
+    /// Cancel while it can still be cancelled.
+    private func downloadProgressRow(_ line: String) -> some View {
+        let state = model.downloadStatus?.state
+        let failed = state == .failed
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: failed ? "exclamationmark.triangle.fill"
+                                     : state == .succeeded ? "checkmark.circle.fill"
+                                                           : "arrow.down.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(failed ? DAWTheme.record
+                                        : state == .succeeded ? DAWTheme.signal
+                                                              : DAWTheme.playback)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(line)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(failed ? DAWTheme.record : DAWTheme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let fraction = model.downloadFraction {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(DAWTheme.panelRaised)
+                            Capsule().fill(DAWTheme.playback)
+                                .frame(width: max(2, geo.size.width * fraction))
+                        }
+                    }
+                    .frame(height: 4)
+                }
+            }
+            Spacer(minLength: 0)
+            if state == .downloading {
+                Button { model.cancelDownload() } label: {
+                    Text(model.downloadStatus?.cancelRequested == true ? "Stopping…" : "Cancel")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(DAWTheme.textDim)
+                }
+                .buttonStyle(.plain)
+                .disabled(model.downloadStatus?.cancelRequested == true)
+                .help("Stop the download. Nothing partly downloaded is kept.")
+            }
+        }
+        .padding(8)
+        .background((failed ? DAWTheme.record : DAWTheme.playback).opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    /// A REFUSED request (unknown bank, one already running, nothing to
+    /// cancel) — distinct from a download that started and then failed, which
+    /// speaks through `downloadProgressRow`.
+    private func inlineDownloadError(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(DAWTheme.record)
+            Text(text)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(DAWTheme.record)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button { model.clearDownloadRequestError() } label: {
+                Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(DAWTheme.textDim)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(8)
+        .background(DAWTheme.record.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
     private var importButton: some View {
         Button(action: onImport) {
             HStack(spacing: 4) {
@@ -314,31 +481,52 @@ struct InstrumentPickerOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Import a SoundFont (.sf2) or DLS bank file into your library")
+        // m31-h: this tooltip said .sf3 "aren't supported yet" — true when it
+        // was written, a lie the moment import learned to convert them.
+        .help("Import a SoundFont (.sf2 or .sf3) or DLS bank file into your library — "
+              + "a compressed .sf3 is converted as it's added, which takes a few seconds")
     }
 
+    /// One bank row. ⚠️ m31-g: a DISCOVERED-BUT-UNSUPPORTED bank (a `.sf3`)
+    /// is shown here rather than hidden — being invisible was the defect — but
+    /// it must read as unavailable at a glance: amber icon, "UNSUPPORTED"
+    /// badge, its reason in place of the size line, no drill-in chevron. The
+    /// row stays tappable ONLY so the model can restate the reason in the
+    /// inline alert; it can never produce a selection.
     private func bankRow(_ bank: SoundBankInfo) -> some View {
-        Button { model.drillInto(bank) } label: {
+        let reason = bank.unsupportedReason
+        return Button { model.drillInto(bank) } label: {
             HStack(spacing: 9) {
-                Image(systemName: "pianokeys")
+                Image(systemName: reason == nil ? "pianokeys" : "exclamationmark.triangle")
                     .font(.system(size: 12))
-                    .foregroundStyle(DAWTheme.textDim)
+                    .foregroundStyle(reason == nil ? DAWTheme.textDim : DAWTheme.record)
                     .frame(width: 18)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 6) {
                         Text(bank.name)
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(DAWTheme.textPrimary)
+                            .foregroundStyle(reason == nil ? DAWTheme.textPrimary : DAWTheme.textDim)
                         if bank.builtin { tag("BUILT-IN") }
+                        if reason != nil { tag("UNSUPPORTED") }
                     }
-                    Text("\(bank.format.uppercased()) · \(byteLabel(bank.sizeBytes))")
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundStyle(DAWTheme.textDim)
+                    if let reason {
+                        Text(reason)
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(DAWTheme.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    } else {
+                        Text("\(bank.format.uppercased()) · \(byteLabel(bank.sizeBytes))")
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundStyle(DAWTheme.textDim)
+                    }
                 }
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(DAWTheme.textFaint)
+                if reason == nil {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(DAWTheme.textFaint)
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
             .background(DAWTheme.panelRaised.opacity(0.5))
@@ -346,7 +534,7 @@ struct InstrumentPickerOverlay: View {
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(DAWTheme.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Browse the programs in \(bank.name)")
+        .help(reason ?? "Browse the programs in \(bank.name)")
     }
 
     // MARK: - Program browser (Pro, drilled into a bank)

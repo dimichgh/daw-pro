@@ -332,4 +332,47 @@ import DAWCore
         #expect(abs(model.strength - 0.4) < 1e-12)
         #expect(model.swingPercent == 64)
     }
+
+    // MARK: - A saved groove's own grid (m23-ap I5-F4 round 4)
+
+    @Test("I5-F4 round 4 — a saved groove whose own grid quantize cannot use (finer than 1/1024 beat, longer than the 2^20-beat timeline, or not finite) darkens Apply in Pro with a sentence naming both limits, and Apply does nothing; Simple, which never uses the groove, and a usable groove are untouched")
+    func grooveWithAnUnusableGridRefusesApply() throws {
+        func decoded(_ grid: String) throws -> GrooveTemplate {
+            // The project-file path: a hand-edited groove, decoded without the init.
+            let json = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","name":"hand-edited","#
+                + #""gridBeats":\#(grid),"cycleBeats":4,"offsets":[0,0.01]}"#
+            return try JSONDecoder().decode(GrooveTemplate.self, from: Data(json.utf8))
+        }
+        let unusable = [try decoded("1e-20"), try decoded("0.0009"), try decoded("1e300"),
+                        GrooveTemplate(name: "endless", gridBeats: .infinity, cycleBeats: 4, offsets: [])]
+        let harness = Harness()
+        let model = harness.makeModel()
+        model.prepare(clipID: UUID(), clipName: "Beat", isMIDI: true)
+        for groove in unusable {
+            model.density = .pro
+            model.selectGroove(groove)
+            #expect(!model.canApply, "\(groove.gridBeats)")
+            let message = try #require(model.refusalMessage, "\(groove.gridBeats)")
+            #expect(message.contains("1/1024 of a beat") && message.contains("1048576 beats"), "\(message)")
+            #expect(message.contains("Straight grid"))
+            #expect(!model.apply())
+            // Simple quantizes on the picked grid and never reads the groove.
+            model.density = .simple
+            #expect(model.canApply)
+            #expect(model.refusalMessage == nil)
+        }
+        #expect(harness.applied.count == 0)
+        #expect(model.apply())                        // Simple, with the groove still selected
+        #expect(harness.applied.count == 1)
+        // CONTROL: usable grooves, including the finest grid there is, apply in Pro.
+        model.density = .pro
+        for groove in [try decoded("0.0009765625"), try decoded("0.25"),
+                       try #require(GrooveTemplate.builtin(named: "swing16:58"))] {
+            model.selectGroove(groove)
+            #expect(model.canApply, "\(groove.gridBeats)")
+            #expect(model.refusalMessage == nil)
+        }
+        #expect(model.apply())
+        #expect(harness.applied.count == 2)
+    }
 }

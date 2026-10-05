@@ -1,0 +1,85 @@
+{
+  "set": "chorus-migration",
+  "description": "NOT a listening demo — this is the BYTE-IDENTITY BASELINE for m39-j-0, the extraction of InterpolatedDelayLine out of ChorusEffect. Render it BEFORE touching any Swift, keep the WAVs, render it again after the migration, and compare bytes. The design (creative-effects §4.1) freezes the tap arithmetic expression-by-expression precisely so this comparison is meaningful: `s0 + (s1 - s0) * fraction` and NOT the algebraically identical `s0 * (1 - f) + s1 * f`, because Float addition is not associative. The material is deliberately sustained and harmonically dense so the fractional tap sweeps continuously across the whole render — a short percussive source would leave most of the delay line untouched and a broken interpolator could still land byte-identical.",
+  "variants": [
+    {
+      "name": "dry-control",
+      "role": "control",
+      "axis": "no chorus at all — the reference the other two are heard and measured against. If this one ever differs across the migration, the change reached something other than the chorus and the whole comparison is void.",
+      "render": { "durationSeconds": 14 },
+      "commands": [
+        { "command": "track.add", "params": { "name": "Pad", "kind": "instrument" }, "as": "pad" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$pad", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.02, "decay": 0.4, "sustain": 0.9, "release": 0.8,
+          "cutoffHz": 14000, "resonance": 0.1, "gain": 0.55
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$pad", "atBeat": 0,
+          "notes": [
+            { "pitch": 45, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 57, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 64, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 69, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 76, "startBeat": 0, "lengthBeats": 28 }
+          ]
+        } }
+      ]
+    },
+    {
+      "name": "baseline",
+      "axis": "THE ARTEFACT UNDER TEST. Chorus at non-default settings on every axis (rateHz 1.7 vs default 0.8, depthMs 7.5 vs 3, mix 0.85 vs 0.5) so that no parameter is accidentally sitting on a value the migration could special-case. depthMs 7.5 sweeps the tap across ~330 samples at 44.1 kHz, so the fractional part visits every phase.",
+      "render": { "durationSeconds": 14 },
+      "commands": [
+        { "command": "track.add", "params": { "name": "Pad", "kind": "instrument" }, "as": "pad" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$pad", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.02, "decay": 0.4, "sustain": 0.9, "release": 0.8,
+          "cutoffHz": 14000, "resonance": 0.1, "gain": 0.55
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$pad", "atBeat": 0,
+          "notes": [
+            { "pitch": 45, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 57, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 64, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 69, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 76, "startBeat": 0, "lengthBeats": 28 }
+          ]
+        } },
+        { "command": "fx.add", "params": {
+          "trackId": "$pad", "kind": "chorus",
+          "params": { "rateHz": 1.7, "depthMs": 7.5, "mix": 0.85 }
+        }, "as": "chorus" }
+      ]
+    },
+    {
+      "name": "control-perturbed",
+      "role": "control",
+      "axis": "THE POSITIVE CONTROL, AND IT LIVES IN THE SPEC SO IT CANNOT BE FORGOTTEN. Identical to `baseline` except depthMs 7.5 -> 7.501. That is a ~44-nanosecond change in delay time, far below anything audible, and it MUST make the bytes differ from `baseline` — both before the migration and after. If `control-perturbed` ever renders byte-identical to `baseline`, the comparison instrument is broken and a green byte-identity result across the migration proves NOTHING. A byte-comparison that has never failed is indistinguishable from one that cannot.",
+      "render": { "durationSeconds": 14 },
+      "commands": [
+        { "command": "track.add", "params": { "name": "Pad", "kind": "instrument" }, "as": "pad" },
+        { "command": "track.setInstrument", "params": {
+          "trackId": "$pad", "kind": "polySynth", "waveform": "saw",
+          "attack": 0.02, "decay": 0.4, "sustain": 0.9, "release": 0.8,
+          "cutoffHz": 14000, "resonance": 0.1, "gain": 0.55
+        } },
+        { "command": "clip.addMIDI", "params": {
+          "trackId": "$pad", "atBeat": 0,
+          "notes": [
+            { "pitch": 45, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 57, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 64, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 69, "startBeat": 0, "lengthBeats": 28 },
+            { "pitch": 76, "startBeat": 0, "lengthBeats": 28 }
+          ]
+        } },
+        { "command": "fx.add", "params": {
+          "trackId": "$pad", "kind": "chorus",
+          "params": { "rateHz": 1.7, "depthMs": 7.501, "mix": 0.85 }
+        }, "as": "chorus" }
+      ]
+    }
+  ]
+}

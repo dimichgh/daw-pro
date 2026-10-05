@@ -16,6 +16,9 @@ public struct ModelID: RawRepresentable, Codable, Sendable, Hashable {
     public static let aceStep = ModelID(rawValue: "ace-step")
     /// The RVC voice-conversion sidecar (loopback 8002).
     public static let rvc = ModelID(rawValue: "rvc")
+    /// The local singing-engine sidecar (loopback 8004, design
+    /// `docs/design/2026-09-27-p2-sing-integration.md` §2.2) — item p2-sing-c.
+    public static let soulxSinger = ModelID(rawValue: "soulx-singer")
     // m23-dg adds `.musicFlamingo` HERE and nowhere else. If adding a model
     // requires an edit anywhere but this file and one `register(...)` call,
     // something has grown a pairwise special case — see `ModelAdmission`.
@@ -154,11 +157,21 @@ public struct ModelDescriptor: Codable, Sendable, Equatable {
     /// are live in the product and neither is only exercised by a test fixture.
     public var idleUnloadSeconds: Double?
 
+    /// **ADDITIVE, item p2-sing-c — defaults `false` for every existing model.** A resident with
+    /// this flag set is evicted by `ModelAdmission.resolve` even while `activeJobs > 0` — the one
+    /// exception to F8's absolute busy-job veto (design §2.7, R3). It exists so SoulX-Singer
+    /// always gives way to ACE/RVC rather than the two ever being resident together, and it
+    /// changes nothing for a model that never sets it: `false` reproduces exactly today's
+    /// behaviour (a busy resident is skipped and reported `protectedByJobs`). See
+    /// `ModelAdmissionTests.invarianceControlExistingRegistryUnaffectedByYieldsWhenBusy` for the
+    /// pin over the registry as it stood before this field existed.
+    public var yieldsWhenBusy: Bool
+
     public init(
         id: ModelID, displayName: String, baseURL: URL, seededHoldBytes: UInt64? = nil,
         seededHoldProvenance: String? = nil, estimatedHoldBytes: UInt64,
         estimatedHoldProvenance: String, isEvictable: Bool = true,
-        idleUnloadSeconds: Double? = nil
+        idleUnloadSeconds: Double? = nil, yieldsWhenBusy: Bool = false
     ) {
         self.id = id
         self.displayName = displayName
@@ -169,6 +182,7 @@ public struct ModelDescriptor: Codable, Sendable, Equatable {
         self.estimatedHoldProvenance = estimatedHoldProvenance
         self.isEvictable = isEvictable
         self.idleUnloadSeconds = idleUnloadSeconds
+        self.yieldsWhenBusy = yieldsWhenBusy
     }
 }
 
@@ -298,6 +312,36 @@ public enum ModelRegistry {
             // of its own. This is also the shipped `nil` polarity the idle tests
             // pin, so "off" is proven inert on a real descriptor.
             idleUnloadSeconds: nil)
+    }
+
+    /// SoulX-Singer's hold, seeded from the spike (design §2.6): the tree's `phys_footprint`
+    /// held FLAT at 6.05 GiB across both a 10 s and a 30 s render unit (SING-6), so this is not
+    /// an extrapolation from one sample. Recorded in GiB, not a rounded GB figure, because that
+    /// is the unit the design document and the spike's own logs use for this number.
+    public static let soulxSingerSeededHoldBytes: UInt64 = UInt64((6.05 * 1_073_741_824).rounded())
+
+    public static let soulxSingerHoldProvenance =
+        "measured on the spike Mac (SING-6): the sidecar tree's phys_footprint held flat at "
+        + "6.05 GiB across both a 10 s and a 30 s render unit"
+
+    public static func soulxSinger(baseURL: URL) -> ModelDescriptor {
+        ModelDescriptor(
+            id: .soulxSinger,
+            displayName: "Singing voice",
+            baseURL: baseURL,
+            seededHoldBytes: soulxSingerSeededHoldBytes,
+            seededHoldProvenance: soulxSingerHoldProvenance,
+            estimatedHoldBytes: soulxSingerSeededHoldBytes,
+            estimatedHoldProvenance: soulxSingerHoldProvenance,
+            isEvictable: true,
+            // Ten idle minutes, same reasoning and the SAME figure as ACE's (design §2.6): a
+            // cold start costs 7-20 s, so ten warm minutes across a session of edits and
+            // re-takes is worth 6 GB back on an otherwise-idle machine.
+            idleUnloadSeconds: aceStepIdleUnloadSeconds,
+            // THE point of this descriptor (design §2.7, R3): SoulX always gives way, even
+            // mid-phrase, so it and ACE are never resident together through DAW Pro's own
+            // actions. Every OTHER registered model defaults `false` and is unaffected.
+            yieldsWhenBusy: true)
     }
 
     /// PURE. The ONE home for *"what does this model need, and how do we know?"*

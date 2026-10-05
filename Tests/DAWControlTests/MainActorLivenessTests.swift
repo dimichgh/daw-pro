@@ -132,6 +132,50 @@ struct MainActorLivenessStateMachineTests {
             == "1970-01-01T00:00:00Z RECOVERED main actor responsive again after 10.3 s wedged")
     }
 
+    @Test("breadcrumb origin — pid, port and process appended AFTER the old words (append-only)")
+    func breadcrumbOriginAppendOnly() {
+        let epoch = Date(timeIntervalSince1970: 0)
+        let tag = MainActorLiveness.originTag(pid: 4242, port: 17695, processName: "DAWProStaging")
+        #expect(tag == "pid=4242 port=17695 process=DAWProStaging")
+        #expect(MainActorLiveness.originTag(pid: 7, port: nil, processName: "DAWApp")
+            == "pid=7 port=? process=DAWApp")
+        let wedged = MainActorLiveness.wedgeLine(
+            unresponsiveForSeconds: 2.6, thresholdSeconds: 2.5, timestamp: epoch, origin: tag)
+        #expect(wedged == "1970-01-01T00:00:00Z WEDGED main actor unresponsive for 2.6 s "
+            + "(threshold 2.5 s) pid=4242 port=17695 process=DAWProStaging")
+        let recovered = MainActorLiveness.recoveryLine(
+            totalWedgeSeconds: 10.3, timestamp: epoch, origin: tag)
+        #expect(recovered == "1970-01-01T00:00:00Z RECOVERED main actor responsive again after "
+            + "10.3 s wedged pid=4242 port=17695 process=DAWProStaging")
+        // Old readers still match: the untagged line is a strict PREFIX.
+        #expect(wedged.hasPrefix(MainActorLiveness.wedgeLine(
+            unresponsiveForSeconds: 2.6, thresholdSeconds: 2.5, timestamp: epoch)))
+        #expect(recovered.hasPrefix(MainActorLiveness.recoveryLine(
+            totalWedgeSeconds: 10.3, timestamp: epoch)))
+        // nil and empty origin = the pre-WF line, byte for byte.
+        #expect(MainActorLiveness.wedgeLine(
+            unresponsiveForSeconds: 2.6, thresholdSeconds: 2.5, timestamp: epoch, origin: "")
+            == "1970-01-01T00:00:00Z WEDGED main actor unresponsive for 2.6 s (threshold 2.5 s)")
+    }
+
+    @Test("the monitor's ONE line builder tags BOTH edges with its origin")
+    func monitorTagsBothEdges() {
+        let epoch = Date(timeIntervalSince1970: 0)
+        let monitor = MainActorLivenessMonitor(
+            wedgeThresholdSeconds: 2.5, clock: { 0 }, breadcrumb: { _ in },
+            origin: "pid=1 port=17600 process=DAWApp")
+        #expect(monitor.breadcrumbLine(for: .becameWedged(unresponsiveForSeconds: 3.1), timestamp: epoch)
+            == "1970-01-01T00:00:00Z WEDGED main actor unresponsive for 3.1 s (threshold 2.5 s) "
+            + "pid=1 port=17600 process=DAWApp")
+        #expect(monitor.breadcrumbLine(for: .recovered(totalWedgeSeconds: 4.0), timestamp: epoch)
+            == "1970-01-01T00:00:00Z RECOVERED main actor responsive again after 4.0 s wedged "
+            + "pid=1 port=17600 process=DAWApp")
+        // An untagged monitor writes the pre-WF line.
+        let bare = MainActorLivenessMonitor(clock: { 0 }, breadcrumb: { _ in })
+        #expect(bare.breadcrumbLine(for: .recovered(totalWedgeSeconds: 4.0), timestamp: epoch)
+            == "1970-01-01T00:00:00Z RECOVERED main actor responsive again after 4.0 s wedged")
+    }
+
     @Test("a fresh monitor snapshot (injected clock, timer never started) is responsive")
     func monitorFreshSnapshot() {
         let monitor = MainActorLivenessMonitor(

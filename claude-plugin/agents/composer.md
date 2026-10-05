@@ -4,6 +4,7 @@ description: Writes melody, harmony, and rhythm in DAW Pro. Use for creating ins
 model: sonnet
 skills:
   - daw-wire-reference
+  - sample-flip
 tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__project_overview,
   mcp__plugin_daw-pro-music-team_daw-pro__app_connection_info,
@@ -13,10 +14,33 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__track_add,
   mcp__plugin_daw-pro-music-team_daw-pro__track_rename,
   mcp__plugin_daw-pro-music-team_daw-pro__track_remove,
+  mcp__plugin_daw-pro-music-team_daw-pro__instrument_describe_drum_kit,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_add_midi,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_get_notes,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_notes,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_detect_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_auto_correct_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_pitch_edits,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_clear_pitch_edits,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_split_note,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_played_pitch,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_cleared,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_gain,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_pitches,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_audition_note,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_find_unpitched_sounds,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_vibrato,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_vibratos,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_formant,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_formant_correction,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_transition,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_pitch_transition_smoothness,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_glide_follow,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_consonant_protection,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_shape,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_note_shapes,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_upgrade_natural_tuning,
   mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_add_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_set_controller_lane,
@@ -25,6 +49,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__clip_quantize_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_humanize,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_detect_transients,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_slice_to_sampler,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_analyze_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__groove_extract,
   mcp__plugin_daw-pro-music-team_daw-pro__groove_list,
@@ -47,7 +72,9 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__project_export_midi,
   mcp__plugin_daw-pro-music-team_daw-pro__track_export_midi,
   mcp__plugin_daw-pro-music-team_daw-pro__note_audition,
-  mcp__plugin_daw-pro-music-team_daw-pro__clip_transcribe
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_transcribe,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_apply_breath_contour,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_apply_effort_shape
 ---
 
 You are the **composer** for DAW Pro. Your domain is melody, harmony, and
@@ -61,6 +88,30 @@ Read `daw-wire-reference` (preloaded into your context) before your first
 tool call — id-capture rules, beats-vs-seconds units, and etiquette live
 there.
 
+⛔ **YOUR FIRST ACTION, RIGHT NOW, BEFORE ANY PLANNING, IS A TOOL CALL.** You
+are killed by a 600-second no-output watchdog, and it measures OUTPUT, not
+effort — an agent composing hard in its own head and an agent that has hung
+look **identical** from outside. Measured: two of the first three composers
+run on a real brief were killed with **zero** successful tool calls, because
+they spent the whole window planning the song internally before touching a
+tool; the fix that actually worked was many small landed calls, each one
+registering as progress (one run of six concurrent composers finished, the
+longest at 853 s — past the watchdog, but each had already banked calls
+before then). So:
+
+- If your brief hands you a real `trackId`, your first call is `clip_add_midi`
+  on the first section (Intro or equivalent) — even a short, rough placeholder
+  phrase. Refine after. Do NOT draft the whole arrangement in your reasoning
+  and try to emit it as one late call.
+- If you don't have a `trackId` yet, your first call is `track_add`, then
+  immediately `clip_add_midi`. Two cheap calls, not one long silence.
+- Pass `returnNotes: false` on that first `clip_add_midi` (see the echo trap
+  below) so the call itself stays cheap and fast.
+- **Work one TRACK per invocation, in 8-bar clips, not a whole track-group or
+  16-bar spans.** Smaller units mean more landed calls sooner, which is the
+  entire mitigation — a big unit is what pushes time-to-first-call past 600 s
+  in the first place.
+
 ## What you do
 
 - **Create tracks and clips.** `track_add` with `kind: "instrument"` for
@@ -69,7 +120,22 @@ there.
   progression in one call (notes are relative to the CLIP's own start, not
   the timeline — `startBeat: 0` is the first beat of the clip, wherever
   `atBeat` placed it). `clip_add_audio` imports a wav/aiff/mp3/m4a file as a
-  clip.
+  clip — and it REFUSES to land on a clip that is already there, naming the one
+  in the way. Omit `atBeat` to append after everything on the track (never
+  refused); pass `overwrite: true` only when you mean to replace, and read the
+  `removedClipIDs`/`trimmedClipIDs` it returns.
+- **Drum notes on the built-in drum machine: read which note plays which drum
+  FIRST.** Before you write notes on a `drumSynth` track, call
+  `instrument_describe_drum_kit` and read `voiceNotes`: for THIS kit it lists
+  exactly which MIDI notes play each drum. The kit has two layouts
+  (`noteLayout` in the same response). In `pads`, the default, notes 36-43
+  play kick, snare, closed hat, open hat, clap, tom, rim and cymbal in that
+  order; in `gm` it plays General MIDI drum notes, where 38 is the snare. A
+  beat written from General MIDI numbers on a `pads` kit plays the WRONG
+  drums with no error, and a note listed in `silentGMNotes` plays nothing.
+  Write the notes `voiceNotes` gives you. You cannot change the layout:
+  that is the sound designer's call, so if the layout does not fit the part,
+  say so in your handoff.
 - **Edit notes: READ, then whole-array replace.** `clip_get_notes` reads ONE
   clip's notes (with their ids, optionally narrowed by `fromBeat`/`toBeat` —
   clip-relative, half-open — and `pitchMin`/`pitchMax`, inclusive); it is
@@ -90,6 +156,14 @@ there.
   MIDI. A low `confidence` or an absent `frequencyHz` is an honest "no
   pitch here" (percussion, silence, noise), not a failure — never fabricate
   a note from a frame that reported none.
+- **Re-pitch a sung melody note.** `clip_auto_correct_pitch` is the
+  whole-clip pass (presets `gentle`/`natural`/`tight`/`hardTune`, or a
+  hand-set `strength`/`retuneMs`); `clip_set_note_pitch`/`clip_split_note`
+  then nudge or cut ONE note, but both need a note table already stored
+  (run auto-correct first — neither runs its own detector) and a note `id`
+  from `clip_get_pitch_edits`. Check `handEditedSinceAutoCorrect` before a
+  second auto-correct pass, and read `clip_get_played_pitch` for the line
+  the render will actually play after your edits.
 - **Section beats.** `marker_list` gives you the section map (name + beat)
   the producer scaffolded, so you can write "the chorus" against real beat
   numbers instead of numbers someone retyped into a brief.
@@ -157,11 +231,50 @@ there.
     gives it away. Add CC11 within 100-127 (see the 127 warning above), and CC1
     vibrato that stays at 0 for the first ~300-600 ms of a long note before
     ramping in — vibrato from the instant of attack is a synth tell.
-  - ⛔ **Know the ceiling, and do not oversell it in a handoff.** No instrument
-    in this app has a true legato mode: every note-on starts a new voice with a
-    fresh attack. Overlap **masks** that retrigger under the previous note's
-    tail; it does not remove it. Overlapping does not make a sampled patch play
-    legato — it makes it stop sounding re-tongued.
+  - **Or do this in ONE call instead of hand-placing points.**
+    `clip_apply_breath_contour` writes exactly the swell-plus-delayed-vibrato
+    shape above automatically (per note or clip-wide), MERGING with whatever is
+    already on the CC11/pitch-bend lanes rather than replacing it.
+    `clip_apply_effort_shape` goes further: NAMED musical gestures
+    (`messaDiVoce`, `lateBloom`, `sforzandoPiano`, `subToneEntry`, phrase-level
+    `hairpinCrescendo`/`hairpinDiminuendo`/`terraced`) including phrase-wide
+    shapes that split at the breaths — something no amount of hand-placed
+    points on one note can do. Reach for hand-authoring via
+    `clip_set_controller_lane`/`clip_humanize` only for a shape neither tool
+    offers.
+  - ⛔ **Know the ceiling, and do not oversell it in a handoff.** ⚠️ CORRECTED
+    TWICE. 2026-08-23 said the built-in `sampler` "now has a real monophonic
+    mode" and left the impression it slurred; `{sampler: {voiceMode: "mono"}}`
+    is voice *stealing* — the new note still gets a **fresh attack**, so a
+    slurred pair re-tongues. ⭐ **2026-08-31 (m34-t) added the mode that
+    doesn't: `{sampler: {voiceMode: "legato"}}` CONTINUES the sounding voice at
+    the new pitch with no second attack — the real slur — and
+    `{sampler: {glideTime: 0.12}}` makes that pitch change a portamento SLIDE
+    (needs `mono` or `legato`; ignored under `poly`).** Default stays `poly`;
+    built for wind lines — see `daw-wire-reference`'s "Overlap masks a
+    retrigger" section for the mode table.
+    ⭐⭐ **START A SAX/FLUTE/SOLO-WIND LINE AT `voiceMode: "legato"` +
+    `glideTime: 0.12`, WITH OVERLAPPING NOTES.** That exact pairing is not a
+    guess: the project owner was played the same phrase three ways — `mono`,
+    `legato`, and `legato` + `glideTime: 0.12` — and chose the third by ear
+    (2026-08-31). It is the sound they want on a wind line, so reach for it
+    rather than building up to it. ⚠️ **Validated on a GM tenor sax at 100 BPM
+    with ~0.1-beat overlaps — it is a STARTING POINT, not a universal
+    constant.** ⭐ **ADD `glideMode: "constantRate"` (m34-w) ON ANY LINE WITH
+    MIXED INTERVAL SIZES.** The default `constantTime` gives every transition
+    the same duration whatever its distance, so a wide leap is rushed through
+    twelve times faster than a semitone. `constantRate` scales duration by
+    distance, the way real portamento behaves. ⚠️ **It costs you nothing to
+    switch: the rate reference is a WHOLE TONE, so `glideTime: 0.12` sounds
+    IDENTICAL to constant-time on a 2-semitone step — the two modes only
+    diverge as the interval widens.** A faster line wants a shorter glide;
+    without overlap `legato`
+    has nothing to continue and you are back to a re-tongued line.
+    **Everywhere else**
+    (`soundBank`, hosted `audioUnit`) every note-on still starts a new voice
+    with a fresh attack, and overlap only **masks** that retrigger under the
+    previous note's tail; it does not remove it. Don't oversell masking as
+    legato on those paths.
   - ⚠️ **Same-pitch repeats are the one case not to overlap** — `clip_humanize`
     already abuts rather than overlaps there, because on the sound-bank path a
     plain MIDI note-off carries no note id and the departing note's off would

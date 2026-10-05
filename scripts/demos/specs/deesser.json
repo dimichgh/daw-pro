@@ -1,0 +1,287 @@
+{
+  "set": "deesser",
+  "description": "m39-ae, THE DE-ESSER'S PHYSICS FIXTURE. This set is a MEASUREMENT FIRST and a demo second, and the material is chosen for that: two pure sine tones, one low and one high, and nothing else in the spectrum.\n\nWHAT A DE-ESSER IS, in plain words. A singer's 's' and 'sh' sounds carry far more energy than the rest of the voice, and a microphone makes that worse. A de-esser turns the voice down for the fraction of a second that an 's' lasts, and leaves it alone the rest of the time. It is not an EQ: an EQ would dull the whole vocal permanently to fix a sound that happens for 80 milliseconds at a time.\n\n⛔ THERE IS NO 'deEsser' EFFECT KIND, AND THERE IS NOT GOING TO BE ONE. A de-esser IS a compressor - the same threshold, ratio, attack and release - with ONE difference: the part of it that DECIDES when to turn down listens to a filtered copy of the signal instead of the whole thing. So it ships as a MODE on `compressor`: set `detectorMode` to 1 and `detectorFreqHz` to where the 'sss' lives. If you went looking for a separate de-esser and did not find one, this is why.\n\n⛔ IT IS WIDEBAND, NOT SPLIT-BAND, AND THE DIFFERENCE IS AUDIBLE. When the detector fires, the WHOLE signal ducks - lows included - for as long as the 'sss' lasts. It does not carve the sibilant band out and leave the rest playing; that is a split-band de-esser, a different machine, and it is deliberately not what this is. Wideband is what the classic hardware did, it needs no crossover, and it adds ZERO latency, which is why turning it on cannot shift an existing project in time. On a solo voice the ducking is inaudible because an 's' is short. On a full mix it is audible, and you should not put one there.\n\nWHY TWO SINES AND NOT MUSIC. The low tone is MIDI 64 = 329.63 Hz and stands for the body of a voice; the high tone is MIDI 117 = 7040 Hz and stands for the 'sss'. The high tone joins at beat 8 - exactly 4.0 seconds in at 120 BPM - and the two are within 0.4 dB of each other, measured. That gives the gate two clean questions it can ask of rendered audio: does the de-esser IGNORE the first half (where there is no sibilance), and does it ACT on the second half (where there is)? On real music both bins would already contain material, the measurement would read the material instead of the effect, and a build whose detector filter had quietly stopped working would pass while sounding roughly right.\n\n⭐ THE ASSERTION THAT ACTUALLY CATCHES THE BUG is none of the above. It is this: in the second half, the RATIO between the 7040 Hz tone and the 329.63 Hz tone must be the same in every variant as it is in the control, to within a quarter of a decibel. A wideband de-esser applies ONE gain to everything, so it cannot change the balance between two tones - and if the band-pass filter ever leaked into the AUDIO path instead of staying on the detector, that ratio is the first thing that would move, while every loudness, peak and 'did it duck?' number still looked perfectly healthy. scripts/gates/m39ae-deesser-physics.mjs measures it.\n\nBE PRECISE ABOUT WHAT IS LOUDNESS-MATCHED. The three compressor variants share every knob except `detectorMode`, so an A/B AMONG THEM is a fair test of the detector alone. They are NOT matched to the control - all three are quieter than it, which is what a compressor is for - so do not judge 'de-esser vs no de-esser' by ear on this set.",
+  "variants": [
+    {
+      "name": "no-compressor",
+      "axis": "THE CONTROL: the bare two-tone source with no effect at all. It is what every 'how much did this duck?' number below is measured against, and it is also the probe's positive control — the 330 Hz tone is present in both halves and the 7040 Hz tone is present in the SECOND half only, so a probe that finds the high tone in section A is reading its own leakage.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "deess-off",
+      "axis": "detectorMode 0 - the de-esser OFF. An ordinary broadband compressor: the detector hears everything, so the LOW tone alone is already over threshold and the unit ducks through the whole render, including the half with no sibilance in it at all. This is the 'before'.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 8,
+              "attackMs": 1,
+              "releaseMs": 50,
+              "kneeDb": 0,
+              "makeupDb": 0,
+              "mix": 1,
+              "detectorFreqHz": 7000,
+              "detectorQ": 2,
+              "detectorMode": 0
+            }
+          },
+          "as": "comp"
+        }
+      ]
+    },
+    {
+      "name": "deess-band",
+      "axis": "detectorMode 1 - BAND-PASS detector at 7000 Hz, Q 2. Identical knobs to deess-off in every other respect. The detector now hears the sibilant band and essentially nothing else, so the first half - low tone only - passes UNTOUCHED, and the unit ducks only once the 7040 Hz tone arrives.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 8,
+              "attackMs": 1,
+              "releaseMs": 50,
+              "kneeDb": 0,
+              "makeupDb": 0,
+              "mix": 1,
+              "detectorFreqHz": 7000,
+              "detectorQ": 2,
+              "detectorMode": 1
+            }
+          },
+          "as": "comp"
+        }
+      ]
+    },
+    {
+      "name": "deess-high",
+      "axis": "detectorMode 2 - HIGH-PASS detector at 7000 Hz, Q 2. Again identical knobs. It also ignores the first half, and it ducks the second half HARDER than the band-pass does, because a 2-pole high-pass has gain Q at its own corner - the default Q of 2 is a deliberate +6 dB of emphasis exactly where sibilance starts.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0,
+            "sustain": 1,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0,
+            "gain": 0.5,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 15.5,
+                "velocity": 100
+              },
+              {
+                "pitch": 117,
+                "startBeat": 8,
+                "lengthBeats": 7.5,
+                "velocity": 100
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 8,
+              "attackMs": 1,
+              "releaseMs": 50,
+              "kneeDb": 0,
+              "makeupDb": 0,
+              "mix": 1,
+              "detectorFreqHz": 7000,
+              "detectorQ": 2,
+              "detectorMode": 2
+            }
+          },
+          "as": "comp"
+        }
+      ]
+    }
+  ]
+}

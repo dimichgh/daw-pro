@@ -1,0 +1,752 @@
+{
+  "copilotChats" : [
+    {
+      "createdAt" : "2026-09-21T14:13:20Z",
+      "droppedEntries" : 2,
+      "id" : "00000000-0000-0000-0000-000000000093",
+      "model" : "claude",
+      "providerMessages" : [
+
+      ],
+      "title" : "Mix help",
+      "transcript" : [
+
+      ],
+      "updatedAt" : "2026-09-21T14:14:20Z"
+    }
+  ],
+  "grooveTemplates" : [
+    {
+      "cycleBeats" : 1,
+      "gridBeats" : 0.5,
+      "id" : "00000000-0000-0000-0000-000000000080",
+      "name" : "Swing 58",
+      "offsets" : [
+        0,
+        0.08
+      ]
+    }
+  ],
+  "markers" : [
+    {
+      "beat" : 8,
+      "id" : "00000000-0000-0000-0000-000000000081",
+      "name" : "Verse"
+    },
+    {
+      "beat" : 24,
+      "id" : "00000000-0000-0000-0000-000000000082",
+      "name" : "Chorus"
+    }
+  ],
+  "masterAutomation" : [
+    {
+      "id" : "00000000-0000-0000-0000-000000000092",
+      "isEnabled" : true,
+      "points" : [
+        {
+          "beat" : 0,
+          "curve" : "linear",
+          "value" : 0.8
+        },
+        {
+          "beat" : 16,
+          "curve" : "linear",
+          "value" : 1.1
+        }
+      ],
+      "target" : {
+        "type" : "volume"
+      }
+    }
+  ],
+  "masterEffects" : [
+    {
+      "id" : "00000000-0000-0000-0000-000000000090",
+      "kind" : "limiter",
+      "limiter" : {
+        "ceilingDb" : -1.7,
+        "releaseMs" : 88,
+        "truePeak" : true
+      }
+    },
+    {
+      "bypassed" : true,
+      "eq" : {
+        "highPassFreq" : 62,
+        "highShelfFreq" : 7800,
+        "highShelfGainDb" : 3.5,
+        "lowShelfEnabled" : false,
+        "lowShelfFreq" : 137,
+        "lowShelfGainDb" : -4.5,
+        "peak1Freq" : 1234,
+        "peak1GainDb" : 6.25,
+        "peak1Q" : 2.4,
+        "peak2Freq" : 4100,
+        "peak2GainDb" : -3.75,
+        "peak2Q" : 0.55
+      },
+      "id" : "00000000-0000-0000-0000-000000000091",
+      "kind" : "eq"
+    }
+  ],
+  "masterVolume" : 1.4,
+  "meterChanges" : [
+    {
+      "beatUnit" : 8,
+      "beatsPerBar" : 7,
+      "startBeat" : 0
+    },
+    {
+      "beatUnit" : 4,
+      "beatsPerBar" : 4,
+      "startBeat" : 14
+    }
+  ],
+  "name" : "MODP kitchen sink",
+  "reference" : {
+    "analysis" : {
+      "analyzerVersion" : 1,
+      "balance" : 0.05,
+      "bandsDb" : [
+        -30,
+        -29,
+        -28,
+        -27,
+        -26,
+        -25,
+        -24,
+        -23,
+        -22,
+        -21,
+        -20,
+        -19,
+        -18,
+        -17,
+        -16,
+        -15,
+        -14,
+        -13,
+        -12,
+        -11,
+        -10,
+        -9,
+        -8,
+        -7
+      ],
+      "correlation" : 0.7,
+      "durationSeconds" : 180,
+      "integratedLufs" : -9,
+      "loudnessRangeLu" : 5,
+      "maxMomentaryLufs" : -6,
+      "maxShortTermLufs" : -7,
+      "sampleRateHz" : 48000,
+      "truePeakDbtp" : -0.8,
+      "width" : 0.4
+    },
+    "id" : "00000000-0000-0000-0000-000000000094",
+    "media" : "media\/ref.wav",
+    "name" : "Ref",
+    "offsetSeconds" : 0.5,
+    "trimDb" : -2
+  },
+  "savedAt" : "2026-09-21T14:13:20Z",
+  "schemaVersion" : 1,
+  "tempoMap" : [
+    {
+      "bpm" : 97,
+      "startBeat" : 0
+    },
+    {
+      "bpm" : 120,
+      "startBeat" : 16
+    }
+  ],
+  "tempoMapRevision" : 5,
+  "tracks" : [
+    {
+      "automation" : [
+        {
+          "id" : "00000000-0000-0000-0000-000000000060",
+          "isEnabled" : false,
+          "points" : [
+            {
+              "beat" : 0,
+              "curve" : "linear",
+              "value" : 0.5
+            },
+            {
+              "beat" : 8,
+              "curve" : "hold",
+              "value" : 0.9
+            }
+          ],
+          "target" : {
+            "type" : "volume"
+          }
+        }
+      ],
+      "clips" : [
+
+      ],
+      "effects" : [
+        {
+          "bypassed" : true,
+          "id" : "00000000-0000-0000-0000-000000000050",
+          "kind" : "reverb",
+          "reverb" : {
+            "damping" : 0.41,
+            "mix" : 0.37,
+            "preDelayMs" : 23,
+            "roomSize" : 0.73,
+            "width" : 0.85
+          }
+        }
+      ],
+      "id" : "00000000-0000-0000-0000-000000000001",
+      "isAIGenerated" : true,
+      "isArmed" : true,
+      "isMuted" : true,
+      "isSoloed" : true,
+      "kind" : "bus",
+      "name" : "Echo Bus",
+      "pan" : -0.3,
+      "volume" : 0.7
+    },
+    {
+      "automation" : [
+        {
+          "id" : "00000000-0000-0000-0000-000000000061",
+          "isEnabled" : true,
+          "points" : [
+            {
+              "beat" : 0,
+              "curve" : "linear",
+              "value" : -0.5
+            },
+            {
+              "beat" : 4,
+              "curve" : "linear",
+              "value" : 0.5
+            }
+          ],
+          "target" : {
+            "type" : "pan"
+          }
+        },
+        {
+          "id" : "00000000-0000-0000-0000-000000000062",
+          "isEnabled" : true,
+          "points" : [
+            {
+              "beat" : 1,
+              "curve" : "linear",
+              "value" : -30
+            }
+          ],
+          "target" : {
+            "effectId" : "00000000-0000-0000-0000-000000000051",
+            "param" : "thresholdDb",
+            "type" : "effectParam"
+          }
+        },
+        {
+          "id" : "00000000-0000-0000-0000-000000000063",
+          "isEnabled" : true,
+          "points" : [
+            {
+              "beat" : 2,
+              "curve" : "hold",
+              "value" : 0.4
+            }
+          ],
+          "target" : {
+            "sendId" : "00000000-0000-0000-0000-000000000201",
+            "type" : "sendLevel"
+          }
+        }
+      ],
+      "clips" : [
+        {
+          "fadeInBeats" : 0.5,
+          "fadeInCurve" : "equalPower",
+          "fadeOutBeats" : 0.75,
+          "fadeOutCurve" : "equalPower",
+          "formantPreserve" : true,
+          "gainDb" : -3.5,
+          "gainEnvelope" : [
+            {
+              "beat" : 1,
+              "gainDb" : -6
+            },
+            {
+              "beat" : 3,
+              "gainDb" : 2
+            }
+          ],
+          "id" : "00000000-0000-0000-0000-000000000021",
+          "isAIGenerated" : true,
+          "lengthBeats" : 8,
+          "media" : "media\/vox.wav",
+          "name" : "Vox",
+          "pitchEdits" : {
+            "analysisVersion" : 1,
+            "keepsConsonantsUntuned" : true,
+            "retuneMs" : 80,
+            "segments" : [
+              {
+                "detectedConfidence" : 0.9,
+                "detectedHz" : 220,
+                "endSeconds" : 1,
+                "id" : "00000000-0000-0000-0000-000000000022",
+                "pitchOffsetCents" : 35,
+                "startSeconds" : 0.5
+              }
+            ]
+          },
+          "pitchShiftSemitones" : -2,
+          "startBeat" : 2,
+          "startOffsetSeconds" : 0.25,
+          "stretchRatio" : 1.25
+        },
+        {
+          "id" : "00000000-0000-0000-0000-000000000023",
+          "isAIGenerated" : false,
+          "lengthBeats" : 4,
+          "media" : "media\/take1.wav",
+          "name" : "Vox comp",
+          "startBeat" : 12,
+          "takeGroupId" : "00000000-0000-0000-0000-000000000030"
+        }
+      ],
+      "effects" : [
+        {
+          "compressor" : {
+            "attackMs" : 7.25,
+            "detectorFreqHz" : 7250,
+            "detectorMode" : 1,
+            "detectorQ" : 3.25,
+            "kneeDb" : 4.5,
+            "makeupDb" : 3.25,
+            "mix" : 0.65,
+            "ratio" : 5.5,
+            "releaseMs" : 155,
+            "thresholdDb" : -21.5
+          },
+          "id" : "00000000-0000-0000-0000-000000000051",
+          "kind" : "compressor",
+          "sidechainSourceTrackID" : "00000000-0000-0000-0000-000000000003"
+        },
+        {
+          "bypassed" : true,
+          "eq" : {
+            "highPassFreq" : 62,
+            "highShelfFreq" : 7800,
+            "highShelfGainDb" : 3.5,
+            "lowShelfEnabled" : false,
+            "lowShelfFreq" : 137,
+            "lowShelfGainDb" : -4.5,
+            "peak1Freq" : 1234,
+            "peak1GainDb" : 6.25,
+            "peak1Q" : 2.4,
+            "peak2Freq" : 4100,
+            "peak2GainDb" : -3.75,
+            "peak2Q" : 0.55
+          },
+          "id" : "00000000-0000-0000-0000-000000000052",
+          "kind" : "eq"
+        }
+      ],
+      "id" : "00000000-0000-0000-0000-000000000002",
+      "isAIGenerated" : true,
+      "isArmed" : true,
+      "isMuted" : true,
+      "isSoloed" : true,
+      "kind" : "audio",
+      "name" : "Vox",
+      "outputBusId" : "00000000-0000-0000-0000-000000000001",
+      "pan" : 0.25,
+      "sends" : [
+        {
+          "busId" : "00000000-0000-0000-0000-000000000001",
+          "id" : "00000000-0000-0000-0000-000000000201",
+          "level" : 0.6
+        }
+      ],
+      "takeGroups" : [
+        {
+          "comp" : [
+            {
+              "endBeat" : 14,
+              "laneId" : "00000000-0000-0000-0000-000000000031",
+              "startBeat" : 12
+            },
+            {
+              "endBeat" : 16,
+              "laneId" : "00000000-0000-0000-0000-000000000033",
+              "startBeat" : 14
+            }
+          ],
+          "crossfadeSeconds" : 0.02,
+          "id" : "00000000-0000-0000-0000-000000000030",
+          "lanes" : [
+            {
+              "clip" : {
+                "gainDb" : 1.5,
+                "id" : "00000000-0000-0000-0000-000000000032",
+                "isAIGenerated" : false,
+                "lengthBeats" : 4,
+                "media" : "media\/take1.wav",
+                "name" : "Take 1",
+                "startBeat" : 12
+              },
+              "id" : "00000000-0000-0000-0000-000000000031",
+              "name" : "Take 1"
+            },
+            {
+              "clip" : {
+                "gainEnvelope" : [
+                  {
+                    "beat" : 2,
+                    "gainDb" : -9
+                  }
+                ],
+                "id" : "00000000-0000-0000-0000-000000000034",
+                "isAIGenerated" : false,
+                "lengthBeats" : 4,
+                "media" : "media\/take2.wav",
+                "name" : "Take 2",
+                "startBeat" : 12
+              },
+              "id" : "00000000-0000-0000-0000-000000000033",
+              "name" : "Take 2"
+            }
+          ],
+          "name" : "Vox takes"
+        }
+      ],
+      "voiceProvenance" : {
+        "convertedAt" : "2026-09-21T14:13:20Z",
+        "pitchSemitones" : 3,
+        "voiceId" : "modp-voice",
+        "voiceName" : "Test Voice"
+      },
+      "volume" : 1.3
+    },
+    {
+      "automation" : [
+        {
+          "id" : "00000000-0000-0000-0000-000000000064",
+          "isEnabled" : true,
+          "points" : [
+            {
+              "beat" : 0,
+              "curve" : "linear",
+              "value" : 2000
+            }
+          ],
+          "target" : {
+            "param" : "cutoffHz",
+            "type" : "instrumentParam"
+          }
+        }
+      ],
+      "clips" : [
+        {
+          "controllerLanes" : [
+            {
+              "points" : [
+                {
+                  "beat" : 0,
+                  "value" : 10
+                },
+                {
+                  "beat" : 2,
+                  "value" : 100
+                }
+              ],
+              "type" : {
+                "controller" : 1,
+                "type" : "cc"
+              }
+            },
+            {
+              "points" : [
+                {
+                  "beat" : 1,
+                  "value" : 9000
+                }
+              ],
+              "type" : {
+                "type" : "pitchBend"
+              }
+            }
+          ],
+          "fadeInBeats" : 0.25,
+          "gainDb" : 1.5,
+          "gainEnvelope" : [
+            {
+              "beat" : 0.5,
+              "gainDb" : -2
+            }
+          ],
+          "id" : "00000000-0000-0000-0000-000000000041",
+          "isAIGenerated" : true,
+          "lengthBeats" : 4,
+          "lyrics" : {
+            "text" : "hel-lo world"
+          },
+          "media" : null,
+          "name" : "Melody",
+          "notes" : [
+            {
+              "id" : "00000000-0000-0000-0000-000000000401",
+              "lengthBeats" : 1,
+              "pitch" : 60,
+              "startBeat" : 0,
+              "velocity" : 90
+            },
+            {
+              "id" : "00000000-0000-0000-0000-000000000402",
+              "lengthBeats" : 0.5,
+              "pitch" : 64,
+              "startBeat" : 1,
+              "velocity" : 70
+            }
+          ],
+          "startBeat" : 4
+        }
+      ],
+      "id" : "00000000-0000-0000-0000-000000000003",
+      "instrument" : {
+        "audioUnit" : {
+          "component" : {
+            "manufacturer" : "appl",
+            "subType" : "dls ",
+            "type" : "aumu"
+          },
+          "manufacturerName" : "Apple",
+          "name" : "DLSMusicDevice",
+          "stateData" : "AQIDBA=="
+        },
+        "drumKit" : {
+          "accentDepth" : 0.5,
+          "accentThreshold" : 90,
+          "clap" : {
+            "decay" : 0.28,
+            "drive" : 0.05,
+            "level" : 0.75,
+            "pan" : -0.15,
+            "snap" : 0.5,
+            "spread" : 0.011,
+            "tone" : 0.55,
+            "tune" : 1000,
+            "velocity" : 0.6
+          },
+          "closedHat" : {
+            "chokeGroup" : 0,
+            "decay" : 0.05,
+            "drive" : 0,
+            "level" : 0.7,
+            "pan" : 0.1,
+            "snap" : 0.5,
+            "tone" : 0.5,
+            "tune" : 1,
+            "velocity" : 0.75
+          },
+          "cymbal" : {
+            "band" : 3440,
+            "decay" : 1.1,
+            "drive" : 0,
+            "level" : 0.55,
+            "pan" : -0.2,
+            "snap" : 0.5,
+            "tone" : 0.45,
+            "tune" : 1,
+            "velocity" : 0.8
+          },
+          "gain" : 0.8,
+          "kick" : {
+            "decay" : 0.62,
+            "drive" : 0.12,
+            "level" : 0.9,
+            "pan" : 0,
+            "pitchAmount" : 3.2,
+            "pitchDecay" : 0.045,
+            "snap" : 0.18,
+            "tone" : 0.5,
+            "tune" : 52,
+            "velocity" : 0.55
+          },
+          "openHat" : {
+            "chokeGroup" : 0,
+            "decay" : 0.32,
+            "drive" : 0,
+            "level" : 0.7,
+            "pan" : 0.1,
+            "snap" : 0.5,
+            "tone" : 0.5,
+            "tune" : 1,
+            "velocity" : 0.7
+          },
+          "rim" : {
+            "decay" : 0.028,
+            "drive" : 0,
+            "level" : 0.6,
+            "pan" : 0.3,
+            "snap" : 0.4,
+            "tone" : 0.3,
+            "tune" : 1700,
+            "velocity" : 0.7
+          },
+          "snare" : {
+            "decay" : 0.19,
+            "drive" : 0.1,
+            "level" : 0.8,
+            "noiseTone" : 2200,
+            "pan" : 0,
+            "partial2Ratio" : 1.83,
+            "snap" : 0.55,
+            "tone" : 0.5,
+            "tune" : 180,
+            "velocity" : 0.85
+          },
+          "tom" : {
+            "decay" : 0.38,
+            "drive" : 0.05,
+            "level" : 0.8,
+            "pan" : -0.25,
+            "pitchAmount" : 0.45,
+            "snap" : 0.25,
+            "tone" : 0.5,
+            "tune" : 120,
+            "velocity" : 0.8
+          },
+          "velocityToTone" : 0.7
+        },
+        "kind" : "sampler",
+        "polySynth" : {
+          "attack" : 0.02,
+          "cutoffHz" : 3000,
+          "decay" : 0.2,
+          "drift" : 0.2,
+          "drive" : 0.25,
+          "gain" : 0.6,
+          "noiseLevel" : 0.1,
+          "pedalHoldLimit" : 4,
+          "release" : 0.4,
+          "resonance" : 0.3,
+          "subLevel" : 0.3,
+          "subWaveform" : "square",
+          "sustain" : 0.5,
+          "unisonDetuneCents" : 12,
+          "unisonVoices" : 3,
+          "waveform" : "square"
+        },
+        "sampler" : {
+          "attack" : 0.031,
+          "bendRangeSemitones" : 6,
+          "decay" : 1.7,
+          "displayName" : "Test Patch",
+          "expressionFilterCC" : 2,
+          "expressionFilterDepth" : 0.37,
+          "expressionModDepth" : 0.42,
+          "gain" : 0.53,
+          "glideMode" : "constantRate",
+          "glideTime" : 0.35,
+          "oneShot" : true,
+          "pedalHoldLimit" : 5,
+          "release" : 0.61,
+          "sourcePath" : "\/tmp\/none.sfz",
+          "sustain" : 0.23,
+          "voiceMode" : "legato",
+          "zones" : [
+            {
+              "ampVelTrack" : 0.6,
+              "attack" : 0.01,
+              "chokeGroup" : 5,
+              "crossfade" : {
+                "ccInHi" : 64,
+                "ccInLo" : 0,
+                "controller" : 1
+              },
+              "decay" : 0.5,
+              "endFrame" : 50000,
+              "gain" : 1.2,
+              "group" : 2,
+              "id" : "00000000-0000-0000-0000-000000000071",
+              "loopEnd" : 40000,
+              "loopMode" : "continuous",
+              "loopStart" : 1000,
+              "maxPitch" : 80,
+              "maxVelocity" : 100,
+              "media" : "media\/zone.wav",
+              "minPitch" : 40,
+              "minVelocity" : 10,
+              "oneShot" : true,
+              "pan" : -0.4,
+              "randMax" : 0.8,
+              "randMin" : 0.1,
+              "release" : 0.3,
+              "reverse" : true,
+              "rootPitch" : 62,
+              "seqLength" : 3,
+              "seqPosition" : 2,
+              "startFrame" : 100,
+              "sustain" : 0.6,
+              "tuneCents" : 15
+            }
+          ]
+        },
+        "soundBank" : {
+          "bankLSB" : 3,
+          "bankMSB" : 120,
+          "displayName" : "Bank",
+          "program" : 5,
+          "source" : "\/tmp\/modp.sf2"
+        }
+      },
+      "isAIGenerated" : true,
+      "isArmed" : true,
+      "isMuted" : true,
+      "isSoloed" : true,
+      "kind" : "instrument",
+      "name" : "Keys",
+      "pan" : -0.6,
+      "sungVocalProvenance" : {
+        "cfg" : 3.5,
+        "engineCommit" : "abc123",
+        "engineId" : "ace-step",
+        "facadeVersion" : 2,
+        "lyricsText" : "hel-lo",
+        "nSteps" : 30,
+        "octaveShift" : -1,
+        "renderedAt" : "2026-09-21T14:13:20Z",
+        "seed" : 42,
+        "songTransposeSemitones" : 2,
+        "sourceClipId" : "00000000-0000-0000-0000-000000000041",
+        "voiceId" : "v",
+        "voiceKind" : "preset",
+        "voiceName" : "Singer",
+        "weightsRevision" : "r1"
+      },
+      "volume" : 0.9
+    }
+  ],
+  "transport" : {
+    "countInBars" : 2,
+    "isLoopEnabled" : true,
+    "isMetronomeEnabled" : true,
+    "isPunchEnabled" : true,
+    "loopEndBeat" : 12,
+    "loopStartBeat" : 4,
+    "positionBeats" : 7.5,
+    "punchInBeat" : 2,
+    "punchOutBeat" : 6,
+    "tempoBPM" : 97,
+    "timeSignature" : {
+      "beatUnit" : 8,
+      "beatsPerBar" : 7
+    }
+  }
+}

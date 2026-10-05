@@ -477,4 +477,90 @@ struct PanelLayoutStoreTests {
         store.reset()
         #expect(store.pianoRollRowHeight == 14)
     }
+
+    // MARK: - Pitch-editor VERTICAL zoom (m23-ap C4)
+
+    @Test("the pitch editor's row height is its OWN slot — three surfaces, three keys, one word")
+    func pitchEditorRowHeightIsItsOwnSlot() {
+        let store = PanelLayoutStore(backing: SpyBacking())
+        // An existing session is unchanged: the pane opens where Increment A did.
+        #expect(store.pitchEditorRowHeight == 14)
+        #expect(PanelLayoutStore.defaultPitchEditorRowHeight == PianoRollZoom.defaultRowHeight)
+        #expect(PitchEditorGeometry.defaultRowHeight == PianoRollZoom.defaultRowHeight)
+
+        // ⚠️⚠️ THE NAME TRAP, PINNED FOR A THIRD TIME. `rowHeight` is the
+        // ARRANGE track lane, `pianoRollRowHeight` is the roll's pitch rows,
+        // this is the pitch editor's semitone rows. Same word, three surfaces.
+        #expect(PanelLayoutStore.pitchEditorRowHeightKey != PanelLayoutStore.rowHeightKey)
+        #expect(PanelLayoutStore.pitchEditorRowHeightKey
+                != PanelLayoutStore.pianoRollRowHeightKey)
+
+        // ⛔ THE INVARIANCE CONTROL: zooming ONE pane must not move the other.
+        // The two bottom editors are never on screen together, so a shared slot
+        // would rescale the roll every time a vocal was inspected — invisibly.
+        store.setPitchEditorRowHeight(40)
+        #expect(store.pitchEditorRowHeight == 40)
+        #expect(store.pianoRollRowHeight == PanelLayoutStore.defaultPianoRollRowHeight)
+        #expect(store.rowHeight == PanelLayoutStore.defaultRowHeight)
+        store.setPianoRollRowHeight(56)
+        #expect(store.pitchEditorRowHeight == 40)
+    }
+
+    @Test("the pitch editor's row height clamps, writes through, and survives a relaunch")
+    func pitchEditorRowHeightClampsAndPersists() {
+        let spy = SpyBacking()
+        let store = PanelLayoutStore(backing: spy)
+        store.setPitchEditorRowHeight(1)
+        #expect(store.pitchEditorRowHeight == PianoRollZoom.rowHeightRange.lowerBound)
+        #expect(spy.storage[PanelLayoutStore.pitchEditorRowHeightKey]
+                == Double(PianoRollZoom.rowHeightRange.lowerBound))
+        store.setPitchEditorRowHeight(1000)
+        #expect(store.pitchEditorRowHeight == PianoRollZoom.rowHeightRange.upperBound)
+
+        let reopened = PanelLayoutStore(backing: spy)
+        #expect(reopened.pitchEditorRowHeight == PianoRollZoom.rowHeightRange.upperBound)
+
+        reopened.reset()
+        #expect(reopened.pitchEditorRowHeight == PanelLayoutStore.defaultPitchEditorRowHeight)
+    }
+
+    // MARK: - Piano-roll pitch FOCUS (the one non-persisted slot)
+
+    @Test("a focus request clamps, bumps its nonce, and persists NOTHING")
+    func pianoRollFocusIsAnEventNotADimension() {
+        let spy = SpyBacking()
+        let store = PanelLayoutStore(backing: spy)
+        #expect(store.pianoRollFocusPitch == nil)
+        #expect(store.pianoRollFocusNonce == 0)
+
+        store.requestPianoRollFocus(pitch: 24)
+        #expect(store.pianoRollFocusPitch == 24)
+        #expect(store.pianoRollFocusNonce == 1)
+
+        // ⭐ THE NONCE IS THE WHOLE POINT: asking for the SAME pitch twice must
+        // still scroll, because between the two asks the user may have scrolled
+        // away. A plain value slot would silently no-op the second request.
+        store.requestPianoRollFocus(pitch: 24)
+        #expect(store.pianoRollFocusNonce == 2)
+
+        store.requestPianoRollFocus(pitch: -5)
+        #expect(store.pianoRollFocusPitch == 0)
+        store.requestPianoRollFocus(pitch: 900)
+        #expect(store.pianoRollFocusPitch == 127)
+
+        // ⚠️ NOT PERSISTED — every other slot on this type write-throughs, so the
+        // negative has to be pinned or the next relaunch would scroll the roll
+        // somewhere the user never asked for. The spy saw four requests; it must
+        // hold nothing from any of them.
+        #expect(spy.storage.isEmpty)
+        let reopened = PanelLayoutStore(backing: spy)
+        #expect(reopened.pianoRollFocusPitch == nil)
+        #expect(reopened.pianoRollFocusNonce == 0)
+
+        // Positive control on that emptiness: the SAME spy does record a slot
+        // that is meant to be remembered, so `storage.isEmpty` above is a real
+        // measurement and not a spy that never wrote anything.
+        store.setPianoRollRowHeight(40)
+        #expect(spy.storage[PanelLayoutStore.pianoRollRowHeightKey] == 40)
+    }
 }

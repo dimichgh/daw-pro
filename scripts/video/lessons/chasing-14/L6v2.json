@@ -1,0 +1,920 @@
+{
+ "id": "L6v2",
+ "theme": "mastering",
+ "size": "1920x1080",
+ "filename": "DAW Pro Lesson 6 - Chasing -14 (rebuild)",
+ "title": "Chasing −14 LUFS: what it costs, measured on one mix four ways",
+ "playlist": "Mixing, measured",
+ "categoryId": "27",
+ "cut": 5.0,
+ "playMax": 9.0,
+ "introSeconds": 4,
+ "outroSeconds": 3,
+ "meter": "br",
+ "bursts": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/bursts",
+ "cards": [
+  {
+   "type": "statement",
+   "size": 70,
+   "y": 250,
+   "lines": [
+    "SIX AND A HALF DECIBELS",
+    "OF GAIN GETS YOU TO −14.",
+    "HERE IS THE BILL."
+   ],
+   "sub": [
+    "Nothing here is an opinion.",
+    "Every number was predicted first, then measured off the render."
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THREE METERS, IN PLAIN ENGLISH",
+   "step": 96,
+   "items": [
+    [
+     "peak",
+     "the single highest number in the file"
+    ],
+    [
+     "LUFS",
+     "how loud it SOUNDS, averaged, the way an ear hears it",
+     "hot"
+    ],
+    [
+     "loudness range",
+     "how much that loudness MOVES across the track"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "WHERE MINUS FOURTEEN COMES FROM",
+   "step": 88,
+   "items": [
+    [
+     "streaming platforms",
+     "play everything at one loudness"
+    ],
+    [
+     "so they turn you down",
+     "if you are louder than their target"
+    ],
+    [
+     "and turn you up",
+     "if you are quieter",
+     "hot"
+    ],
+    [
+     "minus fourteen",
+     "is one such target — not a law of physics"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THE MIX BEING MASTERED",
+   "step": 88,
+   "items": [
+    [
+     "written by hand",
+     "318 notes, 16 bars, four parts"
+    ],
+    [
+     "nothing on the master",
+     "no gain, no compressor, no limiter"
+    ],
+    [
+     "measured",
+     "-20.50 LUFS, peak -2.23 dBFS, 3.70 LU of range",
+     "hot"
+    ],
+    [
+     "the number that matters",
+     "peak minus loudness = 18.3 dB of headroom to spend"
+    ]
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "THE OBVIOUS MOVE, AND WHAT IT COSTS",
+   "value": "+6.48",
+   "unit": "DB OF GAIN",
+   "size": 170,
+   "notes": [
+    "lands on -14.00 LUFS exactly — a gain moves loudness one for one",
+    "and moves the PEAK one for one too: 4.25 dBFS",
+    "which is above the highest number an integer file can store"
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "WHAT A 24-BIT FILE DID WITH IT",
+   "value": "944",
+   "unit": "SAMPLES CLIPPED",
+   "size": 170,
+   "notes": [
+    "in 506 separate runs, the longest 23 samples (0.48 ms)",
+    "0.025% of the file — and nothing warned about it",
+    "the float render stored the same peaks quite happily"
+   ]
+  },
+  {
+   "type": "list",
+   "title": "HOW THE DISTORTION WAS ISOLATED",
+   "step": 84,
+   "items": [
+    [
+     "one render in float",
+     "which stores samples above full scale"
+    ],
+    [
+     "one render in 24-bit",
+     "which cannot, and clamps them"
+    ],
+    [
+     "subtract",
+     "what is left is the clipping, and nothing else",
+     "hot"
+    ],
+    [
+     "control one",
+     "the same subtraction on the unclipped mix: -149.2 dB, the 24-bit floor"
+    ],
+    [
+     "control two",
+     "a file minus itself: 0 non-zero samples — digital silence"
+    ]
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "AND HERE IS THE HONEST PART",
+   "value": "-38.5",
+   "unit": "DB UNDER THE MUSIC",
+   "size": 170,
+   "notes": [
+    "the distortion measures -54.62 dBFS on its own",
+    "at its very closest it is still 25 dB below the music it is hiding in",
+    "you will not hear that on a laptop speaker, and this film will not pretend otherwise"
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THE SAME MIX, FOUR LOUDNESS TARGETS",
+   "step": 84,
+   "items": [
+    [
+     "−14 LUFS",
+     "944 samples clipped · -54.6 dBFS of distortion"
+    ],
+    [
+     "−11 LUFS",
+     "25,916 · -36.1 dBFS"
+    ],
+    [
+     "−8 LUFS",
+     "90,256 · -24.4 dBFS"
+    ],
+    [
+     "−5 LUFS",
+     "158,241 · -16.9 dBFS",
+     "hot"
+    ]
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 60,
+   "y": 320,
+   "lines": [
+    "THE QUIET VERSION IS NOT",
+    "WORSE. IT IS QUIETER."
+   ],
+   "sub": [
+    "Louder wins a blind comparison almost every time,",
+    "whatever else changed. That is a fact about ears,",
+    "not a fact about the master.",
+    "So this pair is played twice: as it is, then level-matched."
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 96,
+   "y": 430,
+   "rule": false,
+   "lines": [
+    "THE MIX, UNTOUCHED"
+   ],
+   "sub": [
+    "-20.50 LUFS"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 96,
+   "y": 430,
+   "rule": false,
+   "lines": [
+    "THE −14 MASTER"
+   ],
+   "sub": [
+    "-14.10 LUFS  ·  6.2 LU louder"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 82,
+   "y": 420,
+   "rule": false,
+   "lines": [
+    "THE −14 MASTER,",
+    "TURNED BACK DOWN"
+   ],
+   "sub": [
+    "the master pulled down by 6.2 dB, so both sit at -19.0 LUFS"
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "THE BILL FOR MINUS FOURTEEN",
+   "value": "0.5",
+   "unit": "LU OF RANGE",
+   "size": 180,
+   "notes": [
+    "3.7 LU became 3.2 LU, for 6.4 dB of loudness",
+    "that is 14% of the range — real, but small",
+    "the expensive part is not −14. It is everything past it."
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "THE BILL FOR CHASING MINUS EIGHT",
+   "value": "2.1",
+   "unit": "LU OF RANGE",
+   "size": 180,
+   "notes": [
+    "3.7 LU became 1.6 LU — 57% of it gone",
+    "and it took +40.9 dB of drive to get there",
+    "above the threshold a two-to-one compressor returns half a decibel for every decibel you feed it"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 58,
+   "y": 330,
+   "lines": [
+    "MOST OF THIS IS A PICTURE,",
+    "NOT A SOUND."
+   ],
+   "sub": [
+    "The clipping at −14 measures -38.5 dB under the music.",
+    "No speaker is going to hand you that, and the film says so",
+    "instead of asking you to listen harder.",
+    "The charts are measured off the renders for exactly that reason."
+   ]
+  },
+  {
+   "type": "list",
+   "title": "WHAT TO ACTUALLY DO",
+   "step": 92,
+   "items": [
+    [
+     "mix with headroom",
+     "peak minus loudness is what you get to spend",
+     "hot"
+    ],
+    [
+     "limiter last, true peak on",
+     "a ceiling of minus one dBTP"
+    ],
+    [
+     "compressor before it",
+     "gently — it is what buys the loudness back"
+    ],
+    [
+     "then measure",
+     "and read the loudness RANGE, not just the LUFS",
+     "hot"
+    ],
+    [
+     "and ask",
+     "who is actually asking you for minus fourteen"
+    ]
+   ]
+  },
+  {
+   "type": "closing",
+   "size": 58,
+   "y": 560,
+   "lines": [
+    "Built and measured in DAW Pro.",
+    "The build script, the measurements and the charts",
+    "are all reproducible."
+   ],
+   "kicker": "Spend the headroom on purpose, not by accident."
+  },
+  {
+   "type": "statement",
+   "size": 96,
+   "y": 430,
+   "rule": false,
+   "lines": [
+    "CHASING −14"
+   ],
+   "sub": [
+    "the clipping, on its own, at one shared gain"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 96,
+   "y": 430,
+   "rule": false,
+   "lines": [
+    "CHASING −5"
+   ],
+   "sub": [
+    "the same isolation, the same gain"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 96,
+   "y": 430,
+   "rule": false,
+   "lines": [
+    "CLEAN"
+   ],
+   "sub": [
+    "the −5 master, before the file clamped it"
+   ]
+  },
+  {
+   "type": "statement",
+   "size": 96,
+   "y": 430,
+   "rule": false,
+   "lines": [
+    "CLIPPED"
+   ],
+   "sub": [
+    "158,241 samples pinned flat"
+   ]
+  }
+ ],
+ "stages": [
+  {
+   "id": "00-open",
+   "shots": [
+    0,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/arrange.png"
+   ],
+   "cut": 4.6,
+   "brandCheck": "DAW Pro",
+   "factCheck": [
+    [
+     "minus fourteen",
+     "minus 14",
+     "-14",
+     "−14"
+    ]
+   ],
+   "narration": "Somewhere along the way, minus fourteen LUFS turned into a number people chase. This lesson is about what it actually costs to get there, measured rather than asserted. One mix, mastered four different ways, with every meter shown after every move. It is built and measured inside DAW Pro, and nothing in it is an opinion: every number was worked out from first principles before anything was rendered, then measured off the render, and both go on the screen together. Every chart you are about to see was drawn from a DAW Pro render as well. And one warning up front, because it is the honest thing to say. The damage this lesson is about is mostly something you can see rather than something you can hear, and I will show you exactly how far below the music it sits rather than telling you to listen harder."
+  },
+  {
+   "id": "01-meters",
+   "shots": [
+    1
+   ],
+   "cut": 5.6,
+   "factCheck": [
+    [
+     "loudness range"
+    ],
+    [
+     "peak"
+    ]
+   ],
+   "narration": "Start from the beginning, in case this is new. There are three different meters in this story and they measure three different things. The first is peak. That is simply the single highest number anywhere in the file, and it tells you almost nothing about how loud something sounds. A sharp drum hit has a huge peak and very little loudness. The second is LUFS, which stands for loudness units relative to full scale. That is an average, weighted roughly the way an ear is weighted, over the whole track, and it is the number that actually corresponds to how loud a piece of music seems. The third is loudness range, in LU. That is not how loud it is, it is how much the loudness MOVES: the difference between the quiet parts and the loud parts. Hold on to that third one, because it is the one nobody watches, and it is the one that gets spent."
+  },
+  {
+   "id": "02-why",
+   "shots": [
+    2
+   ],
+   "cut": 5.6,
+   "factCheck": [
+    [
+     "minus fourteen",
+     "minus 14",
+     "-14",
+     "−14"
+    ],
+    [
+     "turn it up",
+     "turned up"
+    ]
+   ],
+   "narration": "So where does minus fourteen come from. Streaming services normalise. They measure every track that arrives and play them all back at roughly one loudness, so that a quiet record and a loud record do not make the listener reach for the volume between songs. If your master arrives louder than their target, they turn it down. If it arrives quieter, most of them turn it up. Minus fourteen LUFS is one of those targets. It is a convention, not a law of physics, and it changes between services and over time. Which is worth remembering, because in a moment we are going to pay quite a lot to hit it exactly."
+  },
+  {
+   "id": "03-mix",
+   "shots": [
+    3,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/arrange.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/roll.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/mixer-dry.png"
+   ],
+   "cut": 4.6,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/ab-dry.wav",
+   "burst": "arrangeplay",
+   "playMax": 8.4,
+   "normalize": false,
+   "factCheck": [
+    [
+     "three hundred and eighteen",
+     "318"
+    ],
+    [
+     "sixteen bars",
+     "16 bars"
+    ],
+    [
+     "minus twenty point five",
+     "minus 20.5",
+     "-20.5",
+     "−20.5"
+    ]
+   ],
+   "narration": "Here is the mix we are going to master. Three hundred and eighteen notes, sixteen bars, four parts, written by hand — a pad, a bass, a drum kit and a lead. Nothing is generated, and there is nothing at all on the master bus: no gain, no compressor, no limiter. Rendered exactly as it is, it measures minus twenty point five LUFS, its highest single sample is minus two point two three decibels below full scale, and its loudness range is three point seven LU. Subtract the loudness from the peak and you get about eighteen decibels. That gap is the headroom, and everything that happens next is a decision about how to spend it."
+  },
+  {
+   "id": "04-arithmetic",
+   "shots": [
+    4,
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/fx-gain-naive.png",
+     "zoom": [
+      0.385,
+      0.4,
+      0.235,
+      0.23
+     ]
+    },
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-waveform.png"
+   ],
+   "cut": 5.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "six point four eight",
+     "6.48"
+    ],
+    [
+     "four point two five",
+     "4.25"
+    ]
+   ],
+   "narration": "The obvious move is a gain. Turning something up is arithmetic: a static gain of a certain number of decibels moves the measured loudness by exactly that many decibels. So from minus twenty point five to minus fourteen is six point four eight decibels, and that is not an estimate, it is a subtraction. Here it is, one gain insert on the master bus — the knob rounds it to six point five, but the value underneath is six point four eight. And the render agrees: minus fourteen point zero LUFS, dead on. But the same gain moves the peak by exactly the same amount, and the peak had only two point two decibels of room. Six point four eight minus two point two three puts the highest sample at plus four point two five decibels — above full scale. Above the highest number the file format has."
+  },
+  {
+   "id": "05-mechanism",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/mechanism-final.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-waveform.png"
+   ],
+   "cut": 8.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/mech.wav",
+   "burst": "mechanism",
+   "playMax": 22.2,
+   "normalize": false,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "clipping"
+    ],
+    [
+     "flat"
+    ]
+   ],
+   "narration": "So what happens to a number that will not fit. In a moment you will see a waveform, drawn at this mix's own measured peak, and two dashed lines marking full scale. Watch what happens as the gain comes up. The parts of the wave that go past the line do not get quieter and they do not wrap around. They get cut off flat, because the file stores the largest number it has instead. That is clipping, and it is worth being precise about what it does. It is not a level change. It is a curve being replaced by a straight line, and a straight line where a curve should be is new content — frequencies that were never in the music. At the end you will see that difference drawn on its own. Underneath, you are hearing the same passage twice: the clean version first, then the version the file actually stored."
+  },
+  {
+   "id": "06-count",
+   "shots": [
+    5,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-flattop.png"
+   ],
+   "cut": 5.6,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "nine hundred and forty four",
+     "944"
+    ],
+    [
+     "twenty three",
+     "23"
+    ],
+    [
+     "half a millisecond"
+    ]
+   ],
+   "narration": "Now the measurement. The same master rendered to twenty four bit — which is what you would actually deliver — comes back with nine hundred and forty four samples pinned flat against the ceiling, in five hundred and six separate runs. The longest of them is twenty three samples long, which is about half a millisecond. Here is that one, magnified. The violet line is what the mix asked for and the red line is what the file could store, and in the middle the red line simply goes straight for half a millisecond. Nothing anywhere warned about this. The floating point render stored the same peaks quite happily, the loudness meter said minus fourteen and looked pleased with itself, and the only reason we know is that we went and counted."
+  },
+  {
+   "id": "07-controls",
+   "shots": [
+    6,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-flattop.png"
+   ],
+   "cut": 6.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "subtract",
+     "subtracting",
+     "subtraction"
+    ],
+    [
+     "digital silence"
+    ]
+   ],
+   "narration": "Before believing any of that, the method needs checking, because a measurement without a control is just a claim. The way the distortion gets isolated is a subtraction: render the same master twice, once in floating point, which can hold samples above full scale, and once in twenty four bit, which cannot. Subtract one from the other. Everything that fitted cancels to nothing, and what is left is exactly the clipping. Two controls tell us that subtraction is doing what it claims. Run it on the untouched mix, which never goes above full scale, and it returns minus one hundred and forty nine decibels — that is the twenty four bit noise floor and nothing else. Run it on a file against itself and it returns digital silence: zero non-zero samples, not a small number, actually zero."
+  },
+  {
+   "id": "08-honest",
+   "shots": [
+    7,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-ladder.png"
+   ],
+   "cut": 9.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "minus fifty four",
+     "minus 54",
+     "-54",
+     "−54"
+    ],
+    [
+     "thirty eight",
+     "38"
+    ],
+    [
+     "laptop"
+    ]
+   ],
+   "narration": "And now the part that most videos about clipping quietly skip. How loud is that distortion? On its own it measures minus fifty four point six decibels below full scale. Compare that to the music it is hiding inside, and it sits thirty eight and a half decibels underneath. At its very closest moment, in the loudest, busiest part of the track, it still never gets within twenty five decibels of the music. That is real, it is correctly measured, and on a laptop speaker you are not going to hear it. I am not going to ask you to listen harder, because there is nothing wrong with your ears or your speakers. So instead, here is the same experiment run four times."
+  },
+  {
+   "id": "09-ladder",
+   "shots": [
+    8,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-ladder.png"
+   ],
+   "cut": 9.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "a hundred and fifty eight thousand",
+     "158,000",
+     "158000"
+    ],
+    [
+     "thirty eight decibels",
+     "38 decibels",
+     "38 dB"
+    ]
+   ],
+   "narration": "Four loudness targets, from minus fourteen up to minus five, the same mix and the same plain gain each time. At minus fourteen, nine hundred and forty four samples clip. At minus eleven, twenty six thousand. At minus eight, ninety thousand. At minus five, a hundred and fifty eight thousand samples — four percent of the entire file. And the distortion itself climbs with it: from minus fifty four point six decibels at the minus fourteen target, to minus sixteen point nine at minus five. That is a span of nearly thirty eight decibels, from one mix and one gain knob. The left hand chart is the important one, because it shows the distortion relative to the music rather than on its own. At minus fourteen it is far too far down to matter. Somewhere between minus eleven and minus eight it climbs out of the floor, and by minus five it is right up against the music."
+  },
+  {
+   "id": "10-isolate",
+   "shots": [
+    18,
+    6
+   ],
+   "cut": 4.4,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/resid5.wav",
+   "normalize": false,
+   "bedEligible": false,
+   "playMax": 8.4,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/resid14.wav",
+    "beforeShots": [
+     18
+    ],
+    "afterShots": [
+     19
+    ],
+    "cycles": 2,
+    "seconds": 8.0
+   },
+   "factCheck": [
+    [
+     "thirty four",
+     "34"
+    ],
+    [
+     "same amount"
+    ]
+   ],
+   "narration": "Here is that, isolated and played to you. This is the clipping on its own, with the music subtracted away, from the minus fourteen master and then from the minus five master. Both are turned up by exactly the same amount, so what you hear is the real relationship between them and not two things normalised to sound equally loud. The first one is almost nothing — a few faint ticks. The second one is thirty four decibels louder and it is an obvious, ugly buzz. Same mix, same gain knob, two different positions on it."
+  },
+  {
+   "id": "11-marker",
+   "shots": [
+    8,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/clipchart-final.png"
+   ],
+   "cut": 9.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/chartaudio.wav",
+   "burst": "clipchart",
+   "playMax": 24.2,
+   "normalize": false,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "shaded"
+    ],
+    [
+     "half a decibel"
+    ]
+   ],
+   "narration": "This next chart says when to listen and where, so you are not hunting. It shows the clipping relative to the music, moment by moment, across eight seconds of the same passage, and a playhead sweeps it at real speed while you hear that passage. The dashed line is roughly forty decibels under the music, which is about where a small speaker stops handing you anything — a rule of thumb, not a measurement, and it is drawn as one. First the minus fourteen master: the line spends most of its time on the floor of the chart, meaning there is no clipping there at all, and never climbs above minus twenty five. Then the minus five master, where the same line comes within half a decibel of the music itself. The shaded bars are not chosen by eye — they are every stretch where that second version crosses the dashed line, worked out from the measurements. When the playhead is inside one, that is the moment to listen."
+  },
+  {
+   "id": "12-limiter",
+   "shots": [
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/mixer-mastered.png",
+     "zoom": [
+      0.878,
+      0.195,
+      0.108,
+      0.14
+     ]
+    },
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/fx-lim.png",
+     "zoom": [
+      0.385,
+      0.305,
+      0.235,
+      0.435
+     ]
+    }
+   ],
+   "cut": 8.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "minus one",
+     "minus 1",
+     "-1",
+     "−1"
+    ],
+    [
+     "true peak"
+    ],
+    [
+     "minus fifteen point two",
+     "minus 15.2",
+     "-15.2",
+     "−15.2"
+    ]
+   ],
+   "narration": "So let us do it properly instead. The tool for the peak problem is a limiter. A limiter is a hard ceiling: you tell it a level and no output sample is allowed past it, ever. Here is the one on this master, set to a ceiling of minus one decibel with true peak detection switched on. True peak matters and it is worth thirty seconds. A digital file is a set of dots, and the speaker plays the smooth curve that runs through those dots. That curve can rise higher between two dots than either dot did, so a file whose samples all sit under the ceiling can still overshoot it when something reconstructs it — a converter, or an MP3 encoder. True peak mode measures the curve rather than the dots. With that limiter in the chain and exactly the same six point four eight decibels of gain in front of it, nothing clips: the true peak is minus one point zero, dead on. But the loudness has fallen to minus fifteen point two, because the limiter took the peaks away and the peaks were part of the loudness."
+  },
+  {
+   "id": "13-compressor",
+   "shots": [
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/fx-gain.png",
+     "zoom": [
+      0.385,
+      0.4,
+      0.235,
+      0.23
+     ]
+    },
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/fx-comp.png",
+     "zoom": [
+      0.385,
+      0.245,
+      0.235,
+      0.55
+     ]
+    }
+   ],
+   "cut": 7.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "two to one",
+     "2:1",
+     "2 to 1"
+    ],
+    [
+     "twenty millisecond",
+     "20 millisecond",
+     "20 ms"
+    ],
+    [
+     "minus eighteen",
+     "minus 18",
+     "-18",
+     "−18"
+    ]
+   ],
+   "narration": "Which is where the compressor comes in, and it is worth saying plainly what it is for here. A compressor turns down the loud parts automatically, so the peaks come down before the limiter ever sees them, and that lets the whole thing be driven harder without the limiter having to grab as much. Here is the one on this master. The ratio is two to one, above a threshold of minus eighteen decibels — so above that level, every two decibels that go in come out as one. The attack is twenty milliseconds, which is slow enough to let the front of a drum hit through before the gain starts moving, and the release is a hundred and eighty milliseconds. And there is six decibels of makeup gain at the end, putting back some of what the compression took away."
+  },
+  {
+   "id": "13b-result",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-gr.png",
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/mixer-mastered.png",
+     "zoom": [
+      0.878,
+      0.195,
+      0.108,
+      0.14
+     ]
+    }
+   ],
+   "cut": 9.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "seven point two",
+     "7.2"
+    ],
+    [
+     "three point four",
+     "3.4"
+    ],
+    [
+     "minus fourteen point one",
+     "minus 14.1",
+     "-14.1",
+     "−14.1"
+    ]
+   ],
+   "narration": "With that compressor in front of the limiter, the drive that reaches the target is seven point two decibels, and the finished master measures minus fourteen point one LUFS at minus one point zero true peak. Nothing clipped. And this chart is not a drawing. It is one render with the compressor bypassed, divided by one with it engaged, at the same drive, sample for sample — which makes it the compressor's own gain, measured rather than illustrated. The median is three point four decibels of reduction, the deepest moment is eight point seven, and it is working past three decibels for well over half of the track. So that is the whole chain: a gain, a gentle compressor, and a true peak limiter, in that order."
+  },
+  {
+   "id": "14-louder",
+   "shots": [
+    9,
+    10,
+    11
+   ],
+   "cut": 9.0,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/ab-mastered.wav",
+   "normalize": false,
+   "playMax": 8.4,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/ab-dry.wav",
+    "beforeShots": [
+     10
+    ],
+    "afterShots": [
+     11
+    ],
+    "cycles": 2,
+    "seconds": 8.0
+   },
+   "factCheck": [
+    [
+     "six point two",
+     "6.2"
+    ],
+    [
+     "louder"
+    ]
+   ],
+   "narration": "Now the honest beat, and it is the one thing that makes almost every mastering comparison on the internet worthless. Louder wins. If you play two versions of the same music and one of them is louder, listeners prefer the louder one, almost regardless of what else changed. That is a fact about ears, not a fact about the master. So here is this pair played the dishonest way first: the mix, then the finished master, with no level matching at all — one single gain applied to both, so the six point two LU difference between them is the real one. The second one is going to sound better. It is not better. It is louder."
+  },
+  {
+   "id": "15-matched",
+   "shots": [
+    12,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-overtime.png"
+   ],
+   "cut": 5.6,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/ab-masteredM.wav",
+   "normalize": false,
+   "playMax": 8.4,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/audio/ab-dryM.wav",
+    "beforeShots": [
+     10
+    ],
+    "afterShots": [
+     12
+    ],
+    "cycles": 2,
+    "seconds": 8.0
+   },
+   "factCheck": [
+    [
+     "same measured loudness"
+    ],
+    [
+     "six point two",
+     "6.2"
+    ]
+   ],
+   "narration": "So here is the same pair again with the master pulled back down by six point two decibels, so that both sit at the same measured loudness. Now there is nothing to prefer on volume, and what is left is what the chain actually did. And what it did was mostly to stop the level moving. Listen for the drum hits sitting a little less proud, and the quiet bar at the start being a little less quiet. That is not damage — a mastering chain is supposed to do that. But it is the trade, and it is the thing that the loudness number on its own will never show you. The chart underneath is the same three masters as a level over time, and the story is in the shapes: the louder the master, the flatter the line."
+  },
+  {
+   "id": "16-bill",
+   "shots": [
+    13,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-masters.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-bill.png"
+   ],
+   "cut": 5.6,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "three point seven",
+     "3.7"
+    ],
+    [
+     "three point two",
+     "3.2"
+    ],
+    [
+     "nought point five",
+     "0.5",
+     "zero point five",
+     "naught point five"
+    ]
+   ],
+   "narration": "So what did minus fourteen cost, exactly. The mix had three point seven LU of loudness range. The finished master has three point two. Six point four decibels of loudness cost nought point five LU of range, which is about fourteen percent of it. That is real, and it is smaller than the internet would have you believe. Doing this properly to reach a normal streaming target is not an act of vandalism. Look at the whole set together, though, because the numbers only mean something side by side. The untouched mix, the plain gain that hits the target and clips, the limiter alone that stays clean but lands short, and the compressor and limiter together that reach the target cleanly. Every one of those bars was measured off a render, twice, by two different meters that agreed to within a twentieth of a decibel."
+  },
+  {
+   "id": "17-past",
+   "shots": [
+    14,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/chasing-14/shots/chart-bill.png"
+   ],
+   "cut": 5.6,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "minus eight point seven",
+     "minus 8.7",
+     "-8.7",
+     "−8.7"
+    ],
+    [
+     "one point six",
+     "1.6"
+    ],
+    [
+     "fifty seven",
+     "57"
+    ]
+   ],
+   "narration": "And then there is what happens past it, which is where the price actually is. The same chain, the same compressor, driven as hard as it will go, reaches minus eight point seven LUFS. And the loudness range collapses from three point seven to one point six — fifty seven percent of it gone. There is also a lovely piece of arithmetic hiding in that. Getting there took plus forty point nine decibels of gain, which sounds absurd until you remember what a two to one ratio means: above the threshold, every extra decibel you feed the compressor comes out as half a decibel. So the fader number runs away from you while the loudness crawls. That is what chasing loudness feels like from the inside."
+  },
+  {
+   "id": "18-close",
+   "shots": [
+    16,
+    15,
+    17
+   ],
+   "cut": 5.4,
+   "brandCheck": "DAW Pro",
+   "factCheck": [
+    [
+     "headroom"
+    ],
+    [
+     "loudness range"
+    ]
+   ],
+   "narration": "So, what to do with all that. First, mix with headroom, because peak minus loudness is exactly the budget you get to spend later, and you cannot spend what you did not leave. Second, put a limiter last with true peak switched on and a ceiling around minus one, and let a gentle compressor in front of it do the work of getting there. Third, measure afterwards, and read the loudness range as well as the LUFS, because the LUFS number is the one that tells you that you succeeded and the range is the one that tells you what it cost. And last: streaming platforms normalise. A quieter master gets turned up for you, at no charge, with none of this damage. So before you pay for minus fourteen, it is worth asking who is actually asking you for it. Everything in this video was built and rendered in DAW Pro, and measured off those DAW Pro renders. Thanks for watching."
+  }
+ ],
+ "tags": [
+  "mastering",
+  "LUFS",
+  "loudness",
+  "true peak",
+  "clipping",
+  "limiter",
+  "compression",
+  "music production"
+ ],
+ "description": "One mix, mastered four ways, with every meter shown after every move. Every number on screen was measured off the actual render — none of it is a rule of thumb.\n\nTHE MIX\n318 notes, 16 bars, four parts, written by hand. Nothing on the master bus. Rendered: -20.50 LUFS, peak -2.23 dBFS, 3.70 LU of range — 18.3 dB of headroom to spend.\n\nTHE OBVIOUS MOVE\n+6.48 dB lands on -14.00 LUFS exactly, and puts the peak at 4.25 dBFS. Rendered to 24-bit, 944 samples come back pinned flat, in 506 runs, the longest 23 samples (0.48 ms). Subtracting the clean render from the clipped one isolates the distortion at -54.62 dBFS.\n\nTHE CONTROLS\nThe same subtraction on the unclipped mix returns -149.2 dBFS — the 24-bit noise floor — and a file minus itself returns 0 non-zero samples, i.e. digital silence. Every loudness figure was measured twice, by the app and by ffmpeg's ebur128, agreeing to within 0.05 LU.\n\nHOW MUCH OF IT YOU CAN HEAR\nSaid plainly rather than assumed: at −14 the clipping sits 38.5 dB under the music, and at its very closest never gets within 25 dB of it. You will not hear that on a laptop. So the same experiment is run at four targets — −14, −11, −8 and −5 — where the distortion climbs 37.8 dB, and the film plays the isolated artefact from both ends at one shared gain.\n\nDONE PROPERLY\nA true-peak limiter alone holds -1.00 dBTP but only reaches -15.20 LUFS. Adding a 2:1 compressor (−18 dB threshold, 20 ms attack, +6 dB makeup) reaches -14.10 LUFS at -1.00 dBTP. Measured gain reduction: median 3.38 dB, deepest 8.70 dB.\n\nTHE BILL\n3.7 LU of range became 3.2 LU — 0.5 LU, or 14%, for 6.4 dB of loudness. Driving the same chain to -8.70 LUFS costs 2.1 LU (57%) and takes +40.9 dB of drive.\n\nThe closing point: streaming services normalise, so a quiet master gets turned up for you. Ask who is actually asking for −14 before you pay for it.\n\nDISCLOSURE\nThe narration is a synthetic voice, generated locally. No music-generation model was used.\n\n#mastering #loudness #LUFS #musicproduction #audioengineering #mixing"
+}

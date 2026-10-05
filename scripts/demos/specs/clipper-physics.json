@@ -1,0 +1,311 @@
+{
+  "set": "clipper-physics",
+  "description": "m39-ac, the .clipper insert and the Oversampler primitive under it. THIS SET IS A MEASUREMENT FIXTURE FIRST AND A DEMO SECOND, and the material is chosen for that: every variant plays ONE SUSTAINED SINE at MIDI 115 = 6271.927 Hz for the whole render, with the synth's filter wide open and no unison detune, so the source spectrum is a single known line and nothing else.\n\nWHY THE ONLY NUMBER THAT MATTERS IS THE ALIAS FLOOR. An oversampled clipper and a naive one are BOTH LOUD. They have the same loudness, the same peak, the same character on most material, and they render byte-distinct files - so audibility cannot tell them apart and neither can a byte-difference check (measured in this tree on 2026-09-20: a completely inert shaper produced four distinct renders and exited 0 with audible=true on every one). What oversampling actually does, and the ONLY thing it does, is suppress the energy that hard clipping folds back below Nyquist. So this set exists to make that energy measurable and scripts/gates/m39ac-clipper-physics.mjs measures it.\n\nWHY A BARE SINE AND NOT MUSIC. Hard clipping is odd-symmetric, so a single sine at f0 comes out as f0 plus ODD harmonics only. At 48 kHz just two of them fit below Nyquist - f0 itself and 3*f0 = 18815.8 Hz. Every higher odd harmonic is above Nyquist and FOLDS, landing at 1921 Hz (H15), 4097 Hz (H7), 8447 Hz (H9), 14465 Hz (H13) and 16640 Hz (H5). None of those is a multiple of f0, so every one of them is EMPTY before the effect runs and anything found there afterwards is aliasing and can be nothing else. On a chord or a drum loop those bins already contain music, the measurement would read the material instead of the effect, and a build whose oversampling had quietly stopped working would pass while sounding roughly as it should.\n\nWHAT A CLIPPER IS, against the two things it gets confused with. A LIMITER rides a gain to keep peaks under a ceiling and preserves the waveform's shape - you use it when it must not be heard. A SATURATOR (`saturator`) bends the waveform with tanh, which only ever APPROACHES its bound, so it can never promise a ceiling at all. A CLIPPER cuts the wave off flat at the ceiling, and the corners that leaves ARE new harmonics - which is where the loudness and the hardness come from, and also why it needs oversampling and the other two do not.\n\nWHAT TO LISTEN FOR, variant by variant. 'no-clipper' is the bare tone: a plain steady electronic pitch. 'clip-1x' is the same tone clipped with the oversampling switched OFF - listen for a thin metallic fizz sitting UNDERNEATH the tone, at pitches that have nothing to do with it. That fizz is the fold-back, and it is what the other variants remove. 'clip-2x' has clearly less of it; 'clip-4x' has essentially none - the same loudness, the same hardness, just the tone and its one real harmonic. 'soft-4x' is the other axis, included because it is the one setting a listener will actually reach for: the same clipping through a rounded knee instead of a flat cut, which is gentler and quieter in the harmonics while still holding exactly the same ceiling.\n\nWHY 'clip-1x' IS A SHIPPED SETTING AND NOT A BROKEN ONE. Plenty of records want that grit, and keeping 1x is the only way a user can hear what 2x and 4x are removing. It is also this set's reference point: without it there is no 'before' to measure the improvement against.\n\nWHY THIS FIXTURE IS UNPLEASANT TO LISTEN TO, said plainly rather than left as a surprise: a sustained 6272 Hz sine is a hard, bright tone and nine seconds of it is not music. That is the cost of a source whose spectrum is ONE line, which is what makes the empty bins believable. The clipper's musical demonstration belongs on drums, and this is deliberately not that set.\n\nWHY THE DRIVE IS +24 dB AND THE OUTPUT TRIM IS -12 dB, both measured rather than chosen. The synth tone arrives at the insert peaking at -18.832 dBFS (measured with ffmpeg astats on the 'no-clipper' render, which is the same signal with the insert absent). A clipper only does anything when the signal is ABOVE its ceiling, so the fixture has to put it there: +24 dB of drive lifts the peak to +5.168 dBFS against a -6 dBFS ceiling, which is 11.17 dB of clipping depth - deep enough that the odd harmonics are large and the fold-back is far above the render's noise floor. THIS IS NOT A DETAIL. The first version of this fixture used +12 dB of drive, which lands the peak at -6.832 dBFS - 0.832 dB BELOW the ceiling. Every variant rendered, every file was distinct, every one was audibly a clean loud tone, and the clipper had done nothing but apply gain. The five alias bins all measured between -175 and -210 dB, and the gate failed them, which is the only reason it was caught. A fixture that never reaches the ceiling tests the clipper's bypass path and calls it a clipper. The -12 dB output trim then brings the clipped variants back down beside the control, and the trim is a gain applied AFTER the shaping, so it moves every bin by the same amount and changes no ratio the gate measures. MEASURED sample peaks on the shipped render (ffmpeg astats, Peak level dB): no-clipper -18.832, clip-1x -18.000 (exactly the -6 dBFS ceiling plus the -12 dB trim), clip-2x -16.686, clip-4x -16.759, soft-4x -16.841 - the 2x and 4x variants sit about 1.3 dB above the 1x one because a flat cut taken at a higher rate and filtered back down RINGS, and that inter-sample overshoot is real and is deliberately not re-clipped. BE PRECISE ABOUT WHAT IS LOUDNESS-MATCHED AND WHAT IS NOT, because the two comparisons in this set are different comparisons. The three clipping variants are matched to each other - measured I = -12.3, -12.4, -12.4 LUFS - so an A/B AMONG THEM is a fair listening test of the aliasing alone. They are NOT matched to the control, which measures -15.6 LUFS: clipping flattens the wave, which raises its RMS at the same peak, so the clipped variants are about 3.2 LU louder no matter how the trim is set. Louder reads as better, so do not judge 'clipper vs no clipper' by ear on this set; judge 1x vs 4x.",
+  "variants": [
+    {
+      "name": "no-clipper",
+      "axis": "no clipper at all - the bare tone, so the five measured alias bins are known to be empty before the effect runs",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "clip-1x",
+      "axis": "oversampling 1 - the clipper with the machinery OFF, so the harmonics above Nyquist fold straight back into the audio band. This is the 'before'.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "clipper",
+            "params": {
+              "driveDb": 24,
+              "ceilingDb": -6,
+              "mode": 0,
+              "oversampling": 1,
+              "mix": 1,
+              "outputDb": -12
+            }
+          },
+          "as": "clip"
+        }
+      ]
+    },
+    {
+      "name": "clip-2x",
+      "axis": "oversampling 2 - the same clipping run at twice the rate, which moves most of the fold out of the band",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "clipper",
+            "params": {
+              "driveDb": 24,
+              "ceilingDb": -6,
+              "mode": 0,
+              "oversampling": 2,
+              "mix": 1,
+              "outputDb": -12
+            }
+          },
+          "as": "clip"
+        }
+      ]
+    },
+    {
+      "name": "clip-4x",
+      "axis": "oversampling 4 (the default) - the same clipping again, with the fold essentially gone. Identical loudness and identical harmonics to clip-1x; the ONLY difference is the fizz that is no longer there.",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "clipper",
+            "params": {
+              "driveDb": 24,
+              "ceilingDb": -6,
+              "mode": 0,
+              "oversampling": 4,
+              "mix": 1,
+              "outputDb": -12
+            }
+          },
+          "as": "clip"
+        }
+      ]
+    },
+    {
+      "name": "soft-4x",
+      "axis": "mode 1 (soft) at oversampling 4 - THE MUSICAL ONE: the same ceiling reached through a rounded knee instead of a flat cut, so quiet parts pass untouched and the harmonics are gentler",
+      "render": {
+        "durationSeconds": 9
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Tone",
+            "kind": "instrument"
+          },
+          "as": "tone"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$tone",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.02,
+            "decay": 0.0,
+            "sustain": 1.0,
+            "release": 0.2,
+            "cutoffHz": 18000,
+            "resonance": 0.0,
+            "gain": 0.6,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$tone",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 115,
+                "startBeat": 0.0,
+                "lengthBeats": 15.5
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$tone",
+            "kind": "clipper",
+            "params": {
+              "driveDb": 24,
+              "ceilingDb": -6,
+              "mode": 1,
+              "oversampling": 4,
+              "mix": 1,
+              "outputDb": -12
+            }
+          },
+          "as": "clip"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,159 @@
+{
+  "V0-no-rods-control": null,
+  "V1-bass-thin-tall-lit-not-emitting": {
+    "roads": [
+      2
+    ],
+    "r": 0.013,
+    "h": 0.95,
+    "light": 0,
+    "hole": 0,
+    "rise": 0.1,
+    "fall": 0.16,
+    "gain": 2.6,
+    "white": 0.3,
+    "pool": 3
+  },
+  "V2-bass-thick-short-emitting": {
+    "roads": [
+      2
+    ],
+    "r": 0.048,
+    "h": 0.4,
+    "light": 1.8,
+    "lightAt": 0.55,
+    "hole": 1,
+    "holeK": 1.6,
+    "rise": 0.1,
+    "fall": 0.16,
+    "gain": 2.2,
+    "white": 0.4,
+    "pool": 3
+  },
+  "V3-bass-and-tenor-thin-tall": {
+    "roads": [
+      1,
+      2
+    ],
+    "r": 0.013,
+    "h": 0.88,
+    "light": 0.5,
+    "hole": 1,
+    "holeK": 2.4,
+    "rise": 0.1,
+    "fall": 0.16,
+    "gain": 2.6,
+    "white": 0.3,
+    "pool": 3
+  },
+  "V4-bass-height-from-duration": {
+    "roads": [
+      2
+    ],
+    "r": 0.02,
+    "h": 1.15,
+    "hScale": "dur",
+    "light": 0.6,
+    "hole": 1,
+    "rise": 0.1,
+    "fall": 0.16,
+    "gain": 2.4,
+    "white": 0.35,
+    "pool": 3
+  },
+  "V5-bass-strong-colour-separation": {
+    "roads": [
+      2
+    ],
+    "r": 0.022,
+    "h": 0.7,
+    "light": 1.0,
+    "hole": 1,
+    "lum": 0.92,
+    "hueAdd": -0.035,
+    "white": 0.08,
+    "gain": 3.0,
+    "rise": 0.1,
+    "fall": 0.16,
+    "pool": 3
+  },
+  "V6-bass-rod-replaces-disk": {
+    "roads": [
+      2
+    ],
+    "r": 0.02,
+    "h": 0.72,
+    "light": 0.9,
+    "hole": 1,
+    "hideDisk": true,
+    "rise": 0.1,
+    "fall": 0.16,
+    "gain": 2.4,
+    "white": 0.35,
+    "pool": 3
+  },
+  "V7-bass-rods-standing-ahead": {
+    "roads": [
+      2
+    ],
+    "r": 0.016,
+    "h": 0.8,
+    "light": 0.45,
+    "hole": 1,
+    "pre": 7.0,
+    "preK": 0.45,
+    "preA": 0.3,
+    "rise": 0.12,
+    "gain": 2.4,
+    "white": 0.28,
+    "pool": 8
+  },
+  "V8-standing-ahead-at-V5-colour": {
+    "roads": [
+      2
+    ],
+    "r": 0.016,
+    "h": 0.8,
+    "light": 0.45,
+    "hole": 1,
+    "pre": 7.0,
+    "preK": 0.45,
+    "preA": 0.3,
+    "rise": 0.12,
+    "gain": 3.0,
+    "white": 0.08,
+    "pool": 8,
+    "lum": 0.92,
+    "hueAdd": -0.035
+  },
+  "V9-horizontal-duration-bar": {
+    "roads": [
+      2
+    ],
+    "style": "bar",
+    "barW": 0.032,
+    "barH": 0.11,
+    "light": 0.9,
+    "lightDist": 5,
+    "rise": 0.06,
+    "fall": 0.35,
+    "gain": 1.2,
+    "white": 0.05,
+    "pool": 3
+  },
+  "V1h-thin-tall-with-a-hole": {
+    "roads": [
+      2
+    ],
+    "r": 0.013,
+    "h": 0.95,
+    "light": 0,
+    "hole": 1,
+    "rise": 0.1,
+    "fall": 0.16,
+    "gain": 2.6,
+    "white": 0.3,
+    "pool": 3,
+    "holeK": 3.0
+  }
+}

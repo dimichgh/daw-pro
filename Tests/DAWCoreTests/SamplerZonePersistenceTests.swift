@@ -75,7 +75,7 @@ struct SamplerZonePersistenceTests {
         #expect(loaded.loopEnd == 1_500)
     }
 
-    @Test("a legacy zone document encodes NONE of the 17 optional keys and decodes them as nil")
+    @Test("a legacy zone document encodes NONE of its optional keys and decodes every one as nil")
     func legacyDocumentShapeStable() throws {
         // Encode side: a nil-field zone's document JSON carries only the
         // legacy keys — byte-shape-compatible with a pre-m19 save.
@@ -105,5 +105,16 @@ struct SamplerZonePersistenceTests {
         #expect(decoded.decay == nil)
         #expect(decoded.sustain == nil)
         #expect(decoded.release == nil)
+        // m20-g / m27 leg B / m32-d / m32-f. ⚠️ The title used to say "the 17
+        // optional keys" and had stopped being true four fields earlier — the
+        // load-bearing assertion is the KEY-SET one above, which fails the
+        // moment any new field encodes when nil, so the count was decoration
+        // that rotted. It is now named rather than counted.
+        #expect(decoded.loopMode == nil)
+        #expect(decoded.loopStart == nil)
+        #expect(decoded.loopEnd == nil)
+        #expect(decoded.crossfade == nil)
+        #expect(decoded.reverse == nil)
+        #expect(decoded.chokeGroup == nil)
     }
 }

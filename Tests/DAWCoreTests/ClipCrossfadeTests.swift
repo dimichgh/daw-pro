@@ -437,62 +437,135 @@ struct NoSilentOverlapCompletionTests {
     }
 
     // MARK: - clip.addAudio atBeat (bypass #3, audit overlap [1,120] full doubling)
+    //
+    // ⚠️ RE-PINNED AT m33-j (2026-08-29), AND WHY. These four tests were written
+    // for the m11-d audit, whose defect was SILENT OVERLAP — two ordinary clips
+    // sounding at once, doubling the level with nobody told. The cure was the
+    // trim/remove policy, and these four pinned it. What m33-j found is that the
+    // cure had its own silence: the same import that refuses to leave an overlap
+    // was DELETING the resident to avoid one and returning a normal success with
+    // a new id, so `addAudioFullDoublingCollapsesToSingle` below was pinning DATA
+    // LOSS as intended behaviour ("collapses to ONE clip" is exactly the field
+    // report's "the first id is dead"). Two imports at `atBeat: 0` left one clip.
+    //
+    // ⭐ THE INVARIANT THESE TESTS EXIST FOR IS UNCHANGED AND STILL PINNED: no
+    // silent overlap of ordinary same-track clips, and every `noOverlaps` check
+    // below still runs. What changed is WHO DECIDES. The default import now
+    // REFUSES the placement (`ProjectError.clipImportWouldOverlap`) instead of
+    // choosing which of the user's clips dies; `overwrite: true` is the caller
+    // saying "yes, I mean it", and it produces the EXACT geometry these four
+    // always pinned — which is why each test now asserts both halves rather than
+    // dropping the geometry it used to cover.
+    //
+    // Reason the split lands here rather than on `moveClip` (which still trims
+    // without asking): a move's footprint is a clip already on screen, but an
+    // import's length comes from the FILE's duration at the current tempo, so
+    // `atBeat` alone never told the caller what it was about to cover.
 
-    @Test("addAudio atBeat over a resident trims the resident's tail (no overlap)")
+    @Test("addAudio atBeat over a resident is REFUSED; overwrite:true trims the resident's tail")
     func addAudioAtBeatTrimsResidentTail() throws {
         let store = ProjectStore()
         store.media = FakeMedia()
         let track = store.addTrack(kind: .audio)
         let resident = try store.importAudio(url: url, toTrack: track.id)     // [0,4]
+
         // Land a second clip at beat 2 → active [2,6] covers resident's tail [2,4].
-        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 2)
-        #expect(abs(landed.startBeat - 2) < 1e-9)
+        // ⭐ NEGATIVE PIN (m33-j): by default that is refused and NOTHING moves.
+        var refusal: ProjectError?
+        do { _ = try store.importAudio(url: url, toTrack: track.id, atBeat: 2) }
+        catch let error as ProjectError { refusal = error }
+        if case .clipImportWouldOverlap(let existingID, _, _) = refusal {
+            #expect(existingID == resident.id)
+        } else {
+            Issue.record("expected clipImportWouldOverlap, got \(String(describing: refusal))")
+        }
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(abs(store.tracks[0].clips[0].lengthBeats - 4) < 1e-9)
+
+        // With the caller's explicit consent, the m11-d geometry is unchanged.
+        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 2, overwrite: true)
+        #expect(abs(landed.clip.startBeat - 2) < 1e-9)
+        #expect(landed.trimmedClipIDs == [resident.id])
         let residentAfter = store.tracks[0].clips.first { $0.id == resident.id }!
         #expect(abs(residentAfter.lengthBeats - 2) < 1e-9)   // tail trimmed to 2
         #expect(store.tracks[0].clips.count == 2)
         #expect(noOverlaps(store, track.id))
     }
 
-    @Test("addAudio atBeat that FULLY doubles a resident collapses to a single clip (worst shape)")
+    @Test("addAudio atBeat that FULLY doubles a resident is REFUSED; overwrite:true collapses to one (worst shape)")
     func addAudioFullDoublingCollapsesToSingle() throws {
         let store = ProjectStore()
         store.media = FakeMedia()
         let track = store.addTrack(kind: .audio)
         let resident = try store.importAudio(url: url, toTrack: track.id)     // [0,4]
-        // The audit's worst shape: land a second identical clip AT the resident's
-        // start → it fully covers the resident → the silent volume-doubling
-        // collapses to ONE clip (the loudness-honesty geometry).
-        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 0)
+
+        // The audit's worst shape: a second identical clip AT the resident's
+        // start fully covers it. ⛔ THE DEFECT PIN, AND IT IS A NEGATIVE ONE
+        // (the m24-o `VoiceConversionConvertCommandTests` precedent): until
+        // m33-j this line WAS the bug — the resident vanished and the call
+        // returned success. The silent volume-doubling is still prevented; it is
+        // now prevented by refusing, not by deleting.
+        #expect(throws: ProjectError.self) {
+            _ = try store.importAudio(url: url, toTrack: track.id, atBeat: 0)
+        }
         #expect(store.tracks[0].clips.count == 1)
-        #expect(store.tracks[0].clips[0].id == landed.id)
+        #expect(store.tracks[0].clips[0].id == resident.id,
+                "the resident must SURVIVE an import it did not consent to")
+
+        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 0, overwrite: true)
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(store.tracks[0].clips[0].id == landed.clip.id)
         #expect(store.tracks[0].clips.first { $0.id == resident.id } == nil)
+        // …and the removal is now REPORTED, which is the whole of m33-j.
+        #expect(landed.removedClipIDs == [resident.id])
         #expect(noOverlaps(store, track.id))
     }
 
-    @Test("addAudio atBeat that trims a resident is ONE undo step restoring it")
+    @Test("addAudio atBeat that trims a resident is ONE undo step restoring it (and a refusal journals nothing)")
     func addAudioAtBeatIsOneUndoStep() throws {
         let store = ProjectStore()
         store.media = FakeMedia()
         let track = store.addTrack(kind: .audio)
         let resident = try store.importAudio(url: url, toTrack: track.id)     // [0,4]
-        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 2)
+
+        // A refusal must leave the journal exactly as it found it — otherwise
+        // the undo below would restore the wrong edit.
+        let historyBefore = store.undoHistory().undo
+        #expect(throws: ProjectError.self) {
+            _ = try store.importAudio(url: url, toTrack: track.id, atBeat: 2)
+        }
+        #expect(store.undoHistory().undo == historyBefore)
+
+        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 2, overwrite: true)
         #expect(store.tracks[0].clips.first { $0.id == resident.id }!.lengthBeats < 4)
-        #expect(try store.undo() == "Import '\(landed.name)'")
+        #expect(try store.undo() == "Import '\(landed.clip.name)'")
         #expect(store.tracks[0].clips.count == 1)
         #expect(abs(store.tracks[0].clips[0].lengthBeats - 4) < 1e-9)   // resident restored
         #expect(store.tracks[0].clips[0].id == resident.id)
     }
 
-    @Test("addAudio atBeat leaving a sub-minClipLength remnant REMOVES the resident")
+    @Test("addAudio atBeat leaving a sub-minClipLength remnant is REFUSED; overwrite:true REMOVES the resident")
     func addAudioSubMinRemnantRemovesResident() throws {
         let store = ProjectStore()
         store.media = FakeMedia()
         let track = store.addTrack(kind: .audio)
         let resident = try store.importAudio(url: url, toTrack: track.id)     // [0,4]
+
         // Land at 0.01 → resident's head remnant [0,0.01] = 0.01 < 1/32 → removed.
-        _ = try store.importAudio(url: url, toTrack: track.id, atBeat: 0.01)
+        // ⭐ This is why the refusal's oracle is `resolvingOverlaps` itself and
+        // not a "does the remnant survive?" predicate: a sliver removal reads as
+        // a TRIM geometrically and as a DELETE in the result, and only the choke
+        // point classifies it correctly. Refused by default either way.
+        #expect(throws: ProjectError.self) {
+            _ = try store.importAudio(url: url, toTrack: track.id, atBeat: 0.01)
+        }
+        #expect(store.tracks[0].clips.count == 1)
+        #expect(store.tracks[0].clips[0].id == resident.id)
+
+        let landed = try store.importAudio(url: url, toTrack: track.id, atBeat: 0.01, overwrite: true)
         #expect(store.tracks[0].clips.count == 1)
         #expect(store.tracks[0].clips.first { $0.id == resident.id } == nil)
+        #expect(landed.removedClipIDs == [resident.id])
         #expect(noOverlaps(store, track.id))
     }
 

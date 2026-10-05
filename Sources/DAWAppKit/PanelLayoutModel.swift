@@ -50,6 +50,23 @@ public final class PanelLayoutStore {
     public static let arrangePPBKey = "arrangePPB"
     /// Piano-roll horizontal zoom (m21-c) — the `arrangePPB` sibling slot.
     public static let pianoRollPPBKey = "pianoRollPPB"
+    /// PITCH-EDITOR horizontal zoom (m23-ap p2-b) — the `pianoRollPPB` twin for
+    /// the second bottom editor pane. Design §5.8.
+    ///
+    /// ⚠️ **`debug.panelLayout` TIER, NEVER `view.panelLayout`.** That verb owns
+    /// only what determines *what a capture can SEE* and accepts exactly two
+    /// keys; a pitch-editor zoom *"changes what an eye prefers, not what exists
+    /// to be seen"*, so it joins `pianoRollPPB` in the debug tier and sending it
+    /// to `view.panelLayout` is a rejected unknown key ON PURPOSE.
+    ///
+    /// ⚠️ **NO ANCHOR RE-PIN RIDES ON THIS SLOT, UNLIKE `pianoRollPPB`.** The
+    /// roll's no-jump rule hangs off `PianoRollView.repinZoomAnchor`'s
+    /// `.onChange(of: layout.pianoRollPPB)`; the pitch editor's Increment A has
+    /// no scroll anchor to preserve (it lays its content out from the clip's
+    /// left edge and does not restore a scroll offset). ⭐ If a later increment
+    /// gives it one, the anchor rule belongs on THIS slot's `onChange`, not on
+    /// its callers — that asymmetry is argued on `setPianoRollPPB`.
+    public static let pitchEditorPPBKey = "pitchEditorPPB"
     /// Piano-roll VERTICAL zoom (m25-b-4) — the pitch-row height, in points.
     ///
     /// ⚠️⚠️ **NOT `rowHeightKey` ABOVE, AND THE NAME COLLISION IS THE WHOLE REASON
@@ -58,6 +75,15 @@ public final class PanelLayoutStore {
     /// Same word, different surface, different units, different range — a slot that
     /// borrowed the name would send every future reader to the wrong axis.
     public static let pianoRollRowHeightKey = "pianoRollRowHeight"
+    /// Pitch-editor VERTICAL zoom (m23-ap C4) — the SEMITONE-row height, points.
+    ///
+    /// ⚠️ **A THIRD SLOT ON THIS AXIS, AND ALL THREE ARE DIFFERENT SURFACES.**
+    /// `rowHeight` is the arrange's TRACK lane; `pianoRollRowHeight` is the
+    /// roll's pitch rows; this is the pitch editor's. The two bottom panes get
+    /// separate slots for the reason `pitchEditorPPB` does: they are never on
+    /// screen together (design §3.6), so a shared value would silently rescale
+    /// the roll every time a vocal was inspected.
+    public static let pitchEditorRowHeightKey = "pitchEditorRowHeight"
     /// Mixer INSERTS disclosure (m23-a) — collapsed vs expanded, for the whole
     /// console (the density precedent: the mixer is ONE panel, so its strips do
     /// not each carry their own chrome state). Stored in the shared `Double`
@@ -127,6 +153,11 @@ public final class PanelLayoutStore {
     public static let defaultArrangePPB: CGFloat = ArrangeZoom.defaultPixelsPerBeat
     /// Piano-roll pixels-per-beat (m21-c) — the historical fixed 32 pt/beat.
     public static let defaultPianoRollPPB: CGFloat = PianoRollZoom.defaultPixelsPerBeat
+    /// Pitch-editor pixels-per-beat (m23-ap p2-b) — opens at the roll's scale so
+    /// the two bottom-pane editors feel like siblings.
+    /// `PitchEditorGeometry.defaultPixelsPerBeat` is the SAME constant read from
+    /// the SAME home; neither is a second copy.
+    public static let defaultPitchEditorPPB: CGFloat = PianoRollZoom.defaultPixelsPerBeat
     /// Mixer inserts start EXPANDED (m23-a) — the pre-m23-a look. A persisted
     /// default of "collapsed" would make every existing user's insert chains
     /// vanish on the update; the disclosure is an escape hatch, not the norm.
@@ -149,6 +180,11 @@ public final class PanelLayoutStore {
     /// ONE home for the number: `PianoRollZoom.defaultRowHeight`, which
     /// `PianoRollModel.defaultRowHeight` also reads.
     public static let defaultPianoRollRowHeight = PianoRollZoom.defaultRowHeight
+    /// The pitch editor's semitone rows start at the same 14 pt the roll's do
+    /// (m23-ap C4) — `PitchEditorGeometry.defaultRowHeight` is the SAME constant
+    /// from the SAME home, so a session that never touches the zoom draws
+    /// byte-identically to the read-only Increment A.
+    public static let defaultPitchEditorRowHeight = PianoRollZoom.defaultRowHeight
     /// Waveform vertical zoom starts at 1× (m25-e) — no magnification on top of
     /// the fit, the ⌥⌘0 reset target.
     public static let defaultWaveformVerticalZoom = WaveformScale.defaultVerticalZoom
@@ -197,9 +233,19 @@ public final class PanelLayoutStore {
     public static let arrangePPBRange: ClosedRange<CGFloat> = ArrangeZoom.pixelsPerBeatRange
     /// Piano-roll zoom bounds (m21-c) — one source of truth in `PianoRollZoom`.
     public static let pianoRollPPBRange: ClosedRange<CGFloat> = PianoRollZoom.pixelsPerBeatRange
+    /// Pitch-editor zoom bounds (m23-ap p2-b) — the SAME range as the roll, from
+    /// the SAME home. A second ladder would let the two bottom panes disagree
+    /// about what "one step in" means, and `PitchEditorGeometry` already opens at
+    /// `PianoRollZoom.defaultPixelsPerBeat` for that reason.
+    public static let pitchEditorPPBRange: ClosedRange<CGFloat> = PianoRollZoom.pixelsPerBeatRange
     /// Pitch-row-height bounds (m25-b-4) — one source of truth in `PianoRollZoom`,
     /// where the measured legibility floor and the stated span ceiling are argued.
     public static let pianoRollRowHeightRange: ClosedRange<CGFloat> = PianoRollZoom.rowHeightRange
+    /// Pitch-editor row-height bounds (m23-ap C4) — the SAME range as the roll,
+    /// from the SAME home, for the reason `pitchEditorPPBRange` shares it: a
+    /// second ladder would let the two bottom panes disagree about what "one
+    /// step taller" means.
+    public static let pitchEditorRowHeightRange: ClosedRange<CGFloat> = PianoRollZoom.rowHeightRange
     /// Waveform vertical-zoom bounds (m25-e) — one source of truth in
     /// `WaveformScale`, the `ArrangeZoom`/`PianoRollZoom` discipline.
     public static let waveformVerticalZoomRange: ClosedRange<CGFloat> = WaveformScale.verticalZoomRange
@@ -216,17 +262,29 @@ public final class PanelLayoutStore {
     /// so all three bands (note grid, velocity lane, controller strip) rescale
     /// off the ONE value.
     public private(set) var pianoRollPPB: CGFloat
+    /// Pitch-editor pixels-per-beat (m23-ap p2-b) — the second bottom pane's own
+    /// horizontal scale, read by `PitchEditorGeometry`. A SEPARATE slot from the
+    /// roll's on purpose: the two panes are never on screen at once (design
+    /// §3.6), so sharing one value would silently rescale the roll every time a
+    /// vocal was inspected.
+    public private(set) var pitchEditorPPB: CGFloat
     /// Piano-roll pitch-row height (m25-b-4) — the `pianoRollPPB` sibling on the
     /// other axis. Read by the note grid, the keyboard gutter, the marquee and the
     /// minimap off the ONE value, so they rescale together by construction.
     public private(set) var pianoRollRowHeight: CGFloat
+    /// Pitch-editor semitone-row height (m23-ap C4) — read by
+    /// `PitchEditorGeometry`, which the surface, the ruler sidebar and the hit
+    /// testing all share, so they rescale together by construction.
+    public private(set) var pitchEditorRowHeight: CGFloat
     /// Whether the mixer console's INSERTS sections are collapsed (m23-a). ONE
     /// value for the whole console — channel strips, bus strips, and the master
     /// chain all read it, the way density is read per-console and never per-strip.
     public private(set) var mixerInsertsCollapsed: Bool
-    /// Whether the arrange lanes and the piano-roll bands keep the playhead in
-    /// frame during playback (m23-c2). ONE value for both surfaces — the follow
-    /// POLICY is shared, so its switch is too.
+    /// Whether the arrange lanes, the piano-roll bands and the pitch (note)
+    /// editor keep the playhead in frame during playback (m23-c2; the pitch
+    /// editor since m23-ap I5). ONE value for all three surfaces — the follow
+    /// POLICY is shared, so its switch is too. Each surface keeps its own
+    /// runtime (`FollowPlayheadModel`), so scrolling one never suspends another.
     public private(set) var followPlayhead: Bool
     /// Whether a piano-roll drag / keyboard-gutter click sounds the pitch on
     /// the track's instrument (m23-d). ONE value for both audition surfaces.
@@ -242,8 +300,9 @@ public final class PanelLayoutStore {
     public private(set) var waveformVerticalZoom: CGFloat
     /// Whether the bottom note editor is MAXIMIZED (m25-b-1) — suspending the
     /// `editorFraction` clamp for as long as the mode is on. Read by the pane's
-    /// height expression, by the arrange row's pinned height, and by the roll's
-    /// header toggle; written by that toggle and by Escape. `editorFraction` is
+    /// height expression, by the arrange row's pinned height, and by the header
+    /// toggles of BOTH bottom editors (the roll's, and the note editor pane's
+    /// since m23-ap I6a); written by those toggles and by Escape. `editorFraction` is
     /// untouched throughout, which is what makes the restore land on the user's
     /// own height (see `editorMaximizedKey`).
     public private(set) var editorMaximized: Bool
@@ -270,9 +329,15 @@ public final class PanelLayoutStore {
                                       default: Self.defaultArrangePPB, range: Self.arrangePPBRange)
         self.pianoRollPPB = Self.loaded(backing, Self.pianoRollPPBKey,
                                         default: Self.defaultPianoRollPPB, range: Self.pianoRollPPBRange)
+        self.pitchEditorPPB = Self.loaded(backing, Self.pitchEditorPPBKey,
+                                          default: Self.defaultPitchEditorPPB,
+                                          range: Self.pitchEditorPPBRange)
         self.pianoRollRowHeight = Self.loaded(backing, Self.pianoRollRowHeightKey,
                                               default: Self.defaultPianoRollRowHeight,
                                               range: Self.pianoRollRowHeightRange)
+        self.pitchEditorRowHeight = Self.loaded(backing, Self.pitchEditorRowHeightKey,
+                                                default: Self.defaultPitchEditorRowHeight,
+                                                range: Self.pitchEditorRowHeightRange)
         self.mixerInsertsCollapsed = backing.loadValue(forKey: Self.mixerInsertsCollapsedKey)
             .map { $0 != 0 } ?? Self.defaultMixerInsertsCollapsed
         self.followPlayhead = backing.loadValue(forKey: Self.followPlayheadKey)
@@ -342,6 +407,33 @@ public final class PanelLayoutStore {
         backing.storeValue(Double(pianoRollPPB), forKey: Self.pianoRollPPBKey)
     }
 
+    /// Sets the PITCH-EDITOR horizontal zoom (m23-ap p2-b). Clamped like every
+    /// dimension; write-through like every dimension.
+    ///
+    /// Drivers: `AppModel.zoomPitchEditorIn/Out/Reset` (⌘+ / ⌘− / ⌘0, routed by
+    /// `EditorSurfaceRouter.resolve` — never by a raw
+    /// `openPitchEditorClip != nil`), `AppModel.setPitchEditorTimeScale` (the
+    /// pane's pinch, m23-ap I2) and `debug.panelLayout {pitchEditorPPB}`.
+    public func setPitchEditorPPB(_ value: CGFloat) {
+        pitchEditorPPB = value.clamped(to: Self.pitchEditorPPBRange)
+        backing.storeValue(Double(pitchEditorPPB), forKey: Self.pitchEditorPPBKey)
+    }
+
+    /// Sets the PITCH-EDITOR vertical zoom (m23-ap C4) — the semitone-row
+    /// height. Clamped like every dimension; write-through like every dimension.
+    ///
+    /// Drivers: the pane's own zoom cluster and
+    /// `debug.panelLayout {pitchEditorRowHeight}`. ⚠️ **NOT the View menu's
+    /// Note Row Height items (⌃⌘=/−/0)** — those write
+    /// `pianoRollRowHeight` unconditionally, so they still target the ROLL
+    /// while this pane is engaged. That is a live routing gap, reported rather
+    /// than silently patched here: routing them on `activeEditorSurface` is a
+    /// change to `EditorSurfaceRouter`'s tested policy and belongs with it.
+    public func setPitchEditorRowHeight(_ value: CGFloat) {
+        pitchEditorRowHeight = value.clamped(to: Self.pitchEditorRowHeightRange)
+        backing.storeValue(Double(pitchEditorRowHeight), forKey: Self.pitchEditorRowHeightKey)
+    }
+
     /// Sets the piano-roll VERTICAL zoom (m25-b-4) — the pitch-row height.
     /// Clamped like every dimension.
     ///
@@ -362,6 +454,33 @@ public final class PanelLayoutStore {
     public func setPianoRollRowHeight(_ value: CGFloat) {
         pianoRollRowHeight = value.clamped(to: Self.pianoRollRowHeightRange)
         backing.storeValue(Double(pianoRollRowHeight), forKey: Self.pianoRollRowHeightKey)
+    }
+
+    /// A one-shot request to scroll the piano roll's PITCH axis so `pitch` sits in
+    /// the middle of the note grid.
+    ///
+    /// ⚠️ **DELIBERATELY NOT PERSISTED, and the only slot on this type that is
+    /// not.** Every other value here is a remembered dimension; this one is an
+    /// EVENT — "put that pitch in frame, now" — and a remembered scroll position
+    /// would fight the roll's own anchor rules on the next launch. The
+    /// `followTargetX`/`followNonce` idiom is the precedent: the nonce is what
+    /// makes a repeat of the SAME pitch still scroll, so a driver can ask twice.
+    ///
+    /// WHY IT EXISTS: the roll opens anchored near the middle of the 128-row
+    /// stack, so a clip written low (a 49 Hz heartbeat at C1, an 808 at F1) opens
+    /// on an EMPTY grid — the notes are real, visible in the minimap and in the
+    /// velocity lane, and simply below the viewport. Shrinking `pianoRollRowHeight`
+    /// does not fix it: measured at the 10 pt floor -- the CLAMP, which is where a
+    /// request for 5 lands -- the grid still bottomed out at F2. Auto-centring the roll on its clip's own pitch range when it OPENS is
+    /// the product fix (m35-h); this slot is the drivable one underneath it.
+    public private(set) var pianoRollFocusPitch: Int?
+    public private(set) var pianoRollFocusNonce: Int = 0
+
+    /// Asks the open piano roll to centre its pitch axis on `pitch` (0...127,
+    /// clamped). Bumps the nonce so an identical repeat still applies.
+    public func requestPianoRollFocus(pitch: Int) {
+        pianoRollFocusPitch = pitch.clamped(to: 0...127)
+        pianoRollFocusNonce += 1
     }
 
     /// Collapses or expands the mixer console's INSERTS sections (m23-a). No clamp
@@ -410,9 +529,10 @@ public final class PanelLayoutStore {
     ///
     /// ⚠️ **DELIBERATELY DOES NOT TOUCH `editorFraction`.** That is the whole
     /// restore mechanism: the user's dragged height stays where it is and comes
-    /// back untouched when the mode ends. Two callers converge here — the roll's
-    /// header toggle and the Escape route — and both SET rather than toggle, so a
-    /// double-delivered Escape cannot re-maximize.
+    /// back untouched when the mode ends. Three callers converge here — the
+    /// roll's header toggle, the note editor pane's (m23-ap I6a), and the Escape
+    /// route — and all SET rather than toggle, so a double-delivered Escape
+    /// cannot re-maximize.
     public func setEditorMaximized(_ maximized: Bool) {
         editorMaximized = maximized
         backing.storeValue(maximized ? 1 : 0, forKey: Self.editorMaximizedKey)
@@ -434,7 +554,9 @@ public final class PanelLayoutStore {
         setRowHeight(Self.defaultRowHeight)
         setArrangePPB(Self.defaultArrangePPB)
         setPianoRollPPB(Self.defaultPianoRollPPB)
+        setPitchEditorPPB(Self.defaultPitchEditorPPB)
         setPianoRollRowHeight(Self.defaultPianoRollRowHeight)
+        setPitchEditorRowHeight(Self.defaultPitchEditorRowHeight)
         setMixerInsertsCollapsed(Self.defaultMixerInsertsCollapsed)
         setFollowPlayhead(Self.defaultFollowPlayhead)
         setAuditionEnabled(Self.defaultAuditionEnabled)

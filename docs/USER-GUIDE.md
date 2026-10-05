@@ -183,7 +183,7 @@ Every strip (audio, instrument, or bus) has an insert chain. Click **+** in Inse
 | **Compressor** | Reduces volume when signal gets loud, evening out dynamics. Useful for vocals and bass. |
 | **Limiter** | Hard ceiling — nothing gets louder than your threshold. Protects against clipping. |
 | **Reverb** | Adds space (simulates room acoustics). |
-| **Delay** | Echo effect — copies of the signal at set intervals. |
+| **Delay** | Echo effect — copies of the signal at set intervals. Turn **feedback** all the way up (0.999) for an *echo freeze*: the repeats stop fading and hold. To use it, stop feeding the delay — put it on a bus, send to it, then pull the send down, and the loop keeps what it already has. |
 | **Saturator** | Adds harmonic warmth and crunch. |
 | **Gate** | Silences the signal below a threshold (reduces noise). |
 | **Chorus** | Doubles the signal slightly detuned for width and thickness. |

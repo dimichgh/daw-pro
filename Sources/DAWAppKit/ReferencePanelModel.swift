@@ -104,8 +104,8 @@ public final class ReferencePanelModel {
         statusProvider: @escaping () -> ReferenceStatus = { ReferenceStatus() },
         compareProvider: @escaping () -> ReferenceCompareResult? = { nil },
         fileExists: @escaping (String) -> Bool = { _ in true },
-        importAction: @escaping (String) async throws -> Void = { _ in },
-        analyzeAction: @escaping () async throws -> Void = {},
+        importAction: ((String) async throws -> Void)? = nil,
+        analyzeAction: (() async throws -> Void)? = nil,
         removeAction: @escaping () throws -> Void = {},
         monitorAction: @escaping (Bool) throws -> Void = { _ in },
         offsetAction: @escaping (Double) throws -> Void = { _ in },
@@ -115,8 +115,11 @@ public final class ReferencePanelModel {
         self.statusProvider = statusProvider
         self.compareProvider = compareProvider
         self.fileExists = fileExists
-        self.importAction = importAction
-        self.analyzeAction = analyzeAction
+        // `nil` = a no-op, supplied HERE and never as the default argument: Swift 6.3.3 re-emits
+        // an async default-argument closure in every module that omits the argument, and the
+        // link can pair two copies of different sizes. Gate: `scripts/gates/async-default-dup.py`.
+        self.importAction = importAction ?? { _ in }
+        self.analyzeAction = analyzeAction ?? {}
         self.removeAction = removeAction
         self.monitorAction = monitorAction
         self.offsetAction = offsetAction

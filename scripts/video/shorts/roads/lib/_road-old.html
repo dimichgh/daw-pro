@@ -1,0 +1,2304 @@
+<!-- ⛔⛔ FROZEN 2026-09-07. THIS IS NOT A LIVE FILE AND MUST NOT BE EDITED OR
+     KEPT IN SYNC. It is road.html with EXACTLY the five round-16 performance
+     edits REVERSED, so lib/_perfprobe.mjs can time the before and the after
+     under identical conditions. It will drift from road.html and that is
+     correct — it is a fixed reference point, not a fork.
+     If you need a NEW before/after, rebuild it from the recipe in NOTES.md
+     ("ROUND 16 — STEP 1") against the road.html of that day; do not update
+     this one, and do not measure anything else with it. -->
+<!doctype html><meta charset=utf-8>
+<style>html,body{margin:0;background:#070403;overflow:hidden}canvas{display:block}</style>
+<canvas id=c width=1080 height=1920></canvas>
+<div id=hdr style="position:absolute;left:0;top:0;width:100%;pointer-events:none;
+  font-family:-apple-system,'SF Pro Display',Helvetica;">
+  <div id=ttl style="margin:44px 0 0 52px;font-size:44px;color:#f7f0e4;letter-spacing:.5px"></div>
+  <div id=sub style="margin:14px 0 0 54px;font-size:25px;color:#caa87e;
+       font-family:'SF Mono',Menlo,monospace"></div>
+</div>
+<div id=prg style="position:absolute;left:0;top:0;height:5px;width:0;background:#ffb45a"></div>
+<script type="importmap">{"imports":{
+  "three":"../node_modules/three/build/three.module.js",
+  "three/addons/":"../node_modules/three/examples/jsm/"}}</script>
+<script type="module">
+// THE ROAD, in three.js. Driven frame-by-frame from puppeteer: window.__init(P)
+// builds the scene once, window.__frame(t) puts it at a time and renders. There
+// is NO requestAnimationFrame and no wall clock anywhere in this file --
+// a dropped frame would silently slide the light off the beat.
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// ⭐ ROUND 4: THE FRAME IS AN ARGUMENT, NOT A CONSTANT. Landscape 1920x1080
+// and the 1080x1920 Short are the SAME SCENE, same song data, same physics,
+// same look -- only `width`/`height` and the camera keyframes differ. Forking
+// the renderer per aspect would mean two things to tune and one of them
+// silently rotting; these are payload fields instead.
+let W = 1080, H = 1920;
+let R, scene, cam, comp, P, grade, voiceRigs = [], drumRigs = [], arcGroup, paperMat;
+let bloomPass, overheadLight, glowGroup, ambLight, paperSave = null;
+const WARM = new THREE.Color(1.0, 0.60, 0.26);
+// ⚠ WARM ONLY. The reference is cream/amber on near-black for its whole
+// 8.2 s -- the cool-blue-ahead grade was inferred from thumbnails and is not
+// in the footage. Voices still have to be TELLABLE APART (that was an explicit
+// requirement), so they are spread across warm HUES -- gold, amber, cream,
+// peach, apricot, pale straw -- rather than around the wheel into blue.
+const VOICE_COL = ['#ffd27a', '#ffb45a', '#fff0c0', '#ffc9a0', '#ffa96a', '#ffe9a8'];
+
+// ---- the paper: staff, bar lines, noteheads, stems, drawn ONCE to a canvas --
+// ⚠⚠ paperRepV IS A DENSITY WEARING A COUNT'S CLOTHES, and that is a second,
+// quieter length-dependence in the same place as the texture wall. `repeat.set(6,
+// 90)` puts NINETY fibre periods down the sheet however long the sheet is: 90 over
+// the tuning sample's 38.33-unit plane is 2.35 per unit, 90 over a 20-bar plane at
+// zPerGap 0.45 is about 0.74 — the paper's own grain getting 3x coarser purely
+// because the film got longer. A segmentation that fixed the map and left this
+// alone would still have the look drift with length.
+// ⭐ THE REFERENCE IS DECLARED, AND ABSENCE IS IDENTITY. With no
+// `paperRepRefPH` the ratio is PH/PH = 1 EXACTLY and the count is the old 90; with
+// the tuning sample's own measured PH it is also exactly 1. So this cannot move an
+// approved look, and it does not silently pick a density for a song that never
+// declared one.
+function paperRepV() {
+  const PH = P.zlen + 2 * (P.look.sheetPad ?? 7.0);
+  const ref = P.look.paperRepRefPH ?? PH;
+  return (P.look.paperRepV ?? 90) * (PH / ref);
+}
+
+function paperTexture() {
+  const cv = document.createElement('canvas');
+  // ⭐ THE TILE, NOT THE WHOLE ROAD. `paperTileH` is bounded (12288) and
+  // `paperRepeatV` wraps it down the length, so this canvas does not grow with
+  // the film. Older payloads carry neither field and fall back to the whole-road
+  // texture, unchanged. See the long note in lib/prep.mjs for why a repeating
+  // tile is EXACT here and not an approximation: the map is grain and tint, and
+  // every line, notehead and label is geometry.
+  cv.width = P.texW; cv.height = P.paperTileH ?? P.texH;
+  const g = cv.getContext('2d');
+  // ⚠ A near-white sheet + a lamp per voice clipped the whole road on a
+  // four-note chord. The paper is now acream, not a highlight.
+  // ⚠⚠ ROUND 7: THE PAPER IS RETIRED. The user: "We need to use gray rough
+  // surface that consumes light, make environment darker and light effect
+  // better" -- then, correcting a dark-grey first cut: "light gray, not dark."
+  // ⭐ SO: A LIGHT GREY ROAD IN A DARK WORLD. The value stays high (this is
+  // near the cream's luminance, and the black disks keep the same contrast
+  // regime they had on paper); what changes is HUE -- neutral, not warm -- and
+  // what gets dark is everything AROUND the road: background, fog, ambient.
+  // Roughness stays 0.99 and metalness 0, so it scatters and bounces no sheen.
+  g.fillStyle = P.look.paper ?? '#b6b8bd'; g.fillRect(0, 0, cv.width, cv.height);
+  // grain, so the lit pool has something to fall on
+  const id = g.getImageData(0, 0, cv.width, Math.min(cv.height, 2048));
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+  for (let y = 0; y < cv.height; y += 2048) {
+    const h = Math.min(2048, cv.height - y);
+    const im = g.getImageData(0, y, cv.width, h);
+    for (let i = 0; i < im.data.length; i += 4) {
+      const d = (rnd() * 14 - 7) | 0;
+      im.data[i] += d; im.data[i+1] += d; im.data[i+2] += d;
+    }
+    g.putImageData(im, 0, y);
+  }
+  // ⚠⚠ THE SEAM CONTROL. `look.paperSeamControl` (a luma offset, 0-255) darkens
+  // the last N rows of the TILE so every wrap boundary carries a deliberate mean
+  // step. A seam gate that has never been made to fire is a gate that cannot
+  // fail; this is what makes lib/seam.mjs's pass mean something. It is off by
+  // default and nothing reads it in a shipped render.
+  const SEAM = P.look.paperSeamControl ?? 0;
+  if (SEAM) {
+    // ⛔ THE FIRST CONTROL WAS 40 ROWS AND IT PASSED THE GATE WHILE THE FILM
+    // FAILED — the verdicts came out INVERTED. 40 of 12288 rows is 0.097 world
+    // units, thinner than the gate's own +-0.10 sampling separation, so both
+    // patches straddled the band and neither one landed IN it. A control has to
+    // be the failure it is imitating: a mis-registered tile is a STEP IN MEAN
+    // LEVEL that runs the length of the tile, not a hairline. So half the tile.
+    const n = Math.max(1, Math.round(P.look.paperSeamControlRows ?? cv.height / 2));
+    const y0 = Math.max(0, cv.height - n);
+    const im = g.getImageData(0, y0, cv.width, cv.height - y0);
+    for (let i = 0; i < im.data.length; i += 4) {
+      im.data[i] = Math.max(0, im.data[i] - SEAM);
+      im.data[i+1] = Math.max(0, im.data[i+1] - SEAM);
+      im.data[i+2] = Math.max(0, im.data[i+2] - SEAM);
+    }
+    g.putImageData(im, 0, y0);
+  }
+  // ⭐⭐ FIBRE, AS A NORMAL MAP AND A ROUGHNESS MAP, NOT JUST A TINT. The user:
+  // "textures of the surfaces and 3d objects should be realistic, not just
+  // transparent 3d objects." A flat tint + per-pixel grain gives a surface that
+  // is uniformly rough everywhere, so the overhead light falls on it perfectly
+  // evenly and it reads as coloured plastic. Paper does not: it has directional
+  // fibre and its gloss varies.
+  // ⚠ SEEDED AND SMALL AND TILED. Deterministic because the whole
+  // stills-equal-sequence property -- which the camera-track architecture rests
+  // on -- dies the moment a texture is generated from Math.random(). The same
+  // LCG as the grain above, its own seed, and a 512x512 tile repeated rather
+  // than a second copy of a 2176x10939 canvas.
+  paperNormal = (() => {
+    const n = 512, c2 = document.createElement('canvas'); c2.width = c2.height = n;
+    const g2 = c2.getContext('2d'); const im = g2.createImageData(n, n);
+    let s2 = 20250906;
+    const r2 = () => (s2 = (s2 * 1664525 + 1013904223) >>> 0) / 4294967296;
+    const hgt = new Float32Array(n * n);
+    for (let i = 0; i < n * n; i++) hgt[i] = r2();
+    // stretch the noise ALONG x: paper fibre is directional, and isotropic
+    // noise reads as sandpaper rather than as paper
+    const sm = new Float32Array(n * n);
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      let a = 0; for (let k = -3; k <= 3; k++) a += hgt[y * n + ((x + k + n) % n)];
+      sm[y * n + x] = a / 7;
+    }
+    const A = P.look.paperBump ?? 2.6;
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      const dx = (sm[y * n + ((x + 1) % n)] - sm[y * n + ((x - 1 + n) % n)]) * A;
+      const dy = (sm[((y + 1) % n) * n + x] - sm[((y - 1 + n) % n) * n + x]) * A;
+      const L = Math.hypot(dx, dy, 1), k = (y * n + x) * 4;
+      im.data[k]   = ((-dx / L) * 0.5 + 0.5) * 255;
+      im.data[k+1] = ((-dy / L) * 0.5 + 0.5) * 255;
+      im.data[k+2] = ((1 / L) * 0.5 + 0.5) * 255;
+      im.data[k+3] = 255;
+    }
+    g2.putImageData(im, 0, 0);
+    const tx = new THREE.CanvasTexture(c2);
+    tx.wrapS = tx.wrapT = THREE.RepeatWrapping;
+    tx.repeat.set(P.look.paperRepU ?? 6, paperRepV());
+    tx.flipY = false;
+    return tx;
+  })();
+  paperRough = (() => {
+    const n = 256, c3 = document.createElement('canvas'); c3.width = c3.height = n;
+    const g3 = c3.getContext('2d'); const im = g3.createImageData(n, n);
+    let s3 = 90620251;
+    const r3 = () => (s3 = (s3 * 1664525 + 1013904223) >>> 0) / 4294967296;
+    for (let i = 0; i < n * n; i++) {
+      // ⚠ CENTRED HIGH ON PURPOSE. roughness = material.roughness * map.g, so a
+      // map centred at 190/255 multiplied 0.94 down to 0.70 and turned the road
+      // semi-gloss: the first render with it was a sheet of blown white.
+      const v = 246 + (r3() * 18 - 14);
+      im.data[i*4] = im.data[i*4+1] = im.data[i*4+2] = v; im.data[i*4+3] = 255;
+    }
+    g3.putImageData(im, 0, 0);
+    const tx = new THREE.CanvasTexture(c3);
+    tx.wrapS = tx.wrapT = THREE.RepeatWrapping;
+    tx.repeat.set(P.look.paperRepU ?? 6, paperRepV());
+    tx.flipY = false;
+    return tx;
+  })();
+
+  const PXU = cv.width / (2 * P.UMAX);
+  const X = x => (x + P.UMAX) * PXU;
+  // world z of a time, and the canvas row for a world z (v=1 is the FAR edge)
+  const zt = t => -t * P.zps;
+  const Y = z => (1 - (z - P.zFar) / P.zlen) * cv.height;
+  const PZ = cv.height / P.zlen;
+
+  // ⭐⭐⭐ ROUND 5: THE PAPER IS NOW CONTENT-FREE. Grain and tint, nothing else.
+  //
+  // Everything that used to be PAINTED here -- staff lines, bar lines, road
+  // labels, noteheads, ledger lines, stems, percussion marks -- is now REAL
+  // GEOMETRY built by buildSheet(), positioned in the SAME world coordinates
+  // the balls already fly through, (x, y, -t*zps).
+  //
+  // ⛔ THIS IS A FIX FOR A CLASS, NOT FOR TWO BUGS. Painting content into a
+  // texture on a plane made the content's coordinate frame INDEPENDENT of the
+  // balls' frame, and every defect below is one consequence of that:
+  //   - the sheet rendered MIRRORED end to end (flipY vs the Y() mapping), so
+  //     31 of 36 melody landings and 24 of 24 drum strikes came down on blank
+  //     paper;
+  //   - fixing that with flipY=false then rendered every ROAD LABEL mirrored
+  //     ("Piano" as "bIɐuo") -- in both formats, from frame 0. I opened that
+  //     frame, said in NOTES.md that I had read the label, and had not;
+  //   - the struck-note glow was a camera-facing SPRITE hovering over a
+  //     painted dot, which the user described exactly: "the circle of the note
+  //     should glow, not just part of some cloud covering the note";
+  //   - and the notes and lines were flat, which the user asked to change.
+  //
+  // ⭐ GEOMETRY CANNOT MIRROR AGAINST THE BALLS BECAUSE IT SHARES THEIR FRAME.
+  // That is the whole point of the change, and it is why `mirrorPaper` is gone
+  // rather than kept as a control: it would now control nothing, and a probe
+  // that cannot move anything is a probe that never looked.
+
+  const tx = new THREE.CanvasTexture(cv);
+  // ⛔⛔⛔ THE MIRROR. This one line is the whole landing-miss defect the user
+  // reported as "the balls bounce off empty space", root-caused by the
+  // independent observer and confirmed here from the numbers below.
+  //
+  // Y(z) above puts zNear at CANVAS ROW 0 and zFar at the last row -- that is
+  // what the comment on Y() asserts. But CanvasTexture defaults to flipY=true,
+  // so row 0 becomes v=1; the plane is PlaneGeometry rotated -PI/2 about X, so
+  // v=1 lies at zFar. Net: drawn_z = zNear + zFar - z, i.e. the printed sheet
+  // is the piece REVERSED END TO END, with the balls flying correctly over it.
+  //
+  // MEASURED, this payload: zNear 1.3, zFar -23.0315, zps 1.8
+  //   => mirror constant C = -(zNear+zFar)/zps = 12.0731 s, so a note at t is
+  //      printed at 12.0731-t. The observer derived 12.0731 a priori from the
+  //      payload and then measured 23 back-projected noteheads against it,
+  //      residuals <= 0.005 s. 31 of 36 melody landings sat on blank paper;
+  //      0 of 24 drum strikes hit their own mark. The 5 that looked right were
+  //      MIRROR COINCIDENCES about t=6.0365 -- which is exactly why it read as
+  //      intermittent and survived every spot check I made.
+  //
+  // ⭐⭐ THE LESSON IS NOT "SET flipY". It is that the comment on Y() ASSERTED
+  // the mapping, flipY silently undid it, and NOTHING IN THE PIPELINE COMPARED
+  // THE TWO. Every gate I had checked the payload against the payload. The
+  // gate that can see this is lib/paperpix.mjs, which looks at the RENDERED
+  // PIXELS under the ball -- and it is proven by re-introducing this mirror.
+  tx.flipY = false;   // grain is isotropic so this is moot -- but do not re-open the class
+  // ⚠ THE WRAP IS SET ONLY WHEN IT IS USED. At repeatV == 1 (the tuning sample,
+  // whose 10939 rows fit under the cap) the texture is left exactly as it was,
+  // wrapping included, so the approved look cannot move through this branch --
+  // and, honestly, so the sample does not test the wrap. seam.mjs tests it on a
+  // payload that wraps.
+  // ⭐ THE MAP ITSELF IS THE THING (S1) ASKS ABOUT. "The wrap is invisible" is a
+  // claim about the TEXTURE — the two sides of a boundary are the tile's last
+  // rows and its first rows — and the texture can be measured with no camera, no
+  // lighting, no fog and no ink on top of it. This hands lib/seam.mjs the row
+  // statistics rather than making it re-photograph the road and try to subtract
+  // everything else out.
+  window.__paperRowStats = (rows) => {
+    const n = Math.max(1, Math.min(rows | 0, Math.floor(cv.height / 4)));
+    const mean = y0 => {
+      const im = g.getImageData(0, y0, cv.width, n).data;
+      let s = 0; for (let i = 0; i < im.length; i += 4) s += 0.299*im[i] + 0.587*im[i+1] + 0.114*im[i+2];
+      return s / (im.length / 4);
+    };
+    const first = mean(0), last = mean(cv.height - n);
+    // ⚠ THE SCALE COMES FROM THE TILE'S OWN INTERIOR, not from a luma constant:
+    // block means sampled across the middle, differenced pairwise. That is what
+    // "as continuous as any other pair of adjacent rows" means, measured.
+    const inner = [];
+    for (let k = 1; k <= 12; k++) inner.push(mean(Math.round(k * (cv.height - n) / 13)));
+    const d = [];
+    for (let i = 0; i + 1 < inner.length; i++) d.push(Math.abs(inner[i] - inner[i+1]));
+    d.sort((a, b) => a - b);
+    return { rows: n, tileH: cv.height, first, last, join: Math.abs(first - last),
+             innerMedian: d[Math.floor((d.length - 1) / 2)], innerMax: d[d.length - 1] };
+  };
+
+  const repV = P.paperRepeatV ?? 1;
+  if (repV > 1) {
+    tx.wrapS = THREE.ClampToEdgeWrapping;
+    tx.wrapT = THREE.RepeatWrapping;
+    tx.repeat.set(1, repV);
+  }
+  tx.colorSpace = THREE.SRGBColorSpace;
+  tx.anisotropy = 16;
+  tx.minFilter = THREE.LinearMipmapLinearFilter;
+  tx.generateMipmaps = true;
+  return tx;
+}
+
+function glowSprite(hex, size) {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+  const g = cv.getContext('2d');
+  const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, hex); gr.addColorStop(0.25, hex + '88');
+  gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: t, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true }));
+  s.scale.setScalar(size);
+  return s;
+}
+
+const GRADE = {
+  uniforms: { tDiffuse: { value: null }, uLightY: { value: 0.30 },
+              uWarm: { value: new THREE.Vector3(1.0, 0.66, 0.36) },
+              uCool: { value: new THREE.Vector3(0.92, 0.86, 0.70) },   // was blue; see VOICE_COL
+              uVig: { value: 1.0 } },
+  vertexShader: `varying vec2 vUv; void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform float uLightY, uVig;
+    uniform vec3 uWarm, uCool; varying vec2 vUv;
+    void main(){
+      vec4 c = texture2D(tDiffuse, vUv);
+      // warm BEHIND the light (below it in frame), cool AHEAD (above it)
+      float k = smoothstep(uLightY - 0.30, uLightY + 0.42, vUv.y);
+      vec3 tint = mix(uWarm, uCool, k);
+      c.rgb *= mix(vec3(1.0), tint, 0.20);
+      vec2 d = vUv - 0.5; d.x *= 0.72;
+      c.rgb *= mix(1.0, clamp(1.0 - dot(d,d) * 1.45, 0.0, 1.0), uVig);
+      gl_FragColor = c;
+    }`,
+};
+
+
+// ⭐⭐⭐ THE SHEET, AS REAL GEOMETRY. Round 5, bucket A.
+//
+// Everything the eye reads as "printed music" is built here, in WORLD
+// coordinates (x, y, -t*zps) -- the same frame the playheads fly through. The
+// paper underneath is now only grain and tint.
+//
+// ⚠ WHY INSTANCED, FROM DAY ONE: a long composition is the goal, and one
+// Mesh per notehead is the thing that stops being possible first. All the
+// pitched heads are one draw call; all the percussion marks are a second.
+//
+// ⚠ THE STRUCK-NOTE GLOW IS *NOT* HERE, AND IT CANNOT BE. In three.js r185
+// `InstancedMesh.instanceColor` reaches the shader as `vColor` and
+// `color_fragment.glsl.js` does exactly `diffuseColor *= vColor` -- emissive
+// is a plain uniform (`meshphysical.glsl.js`: `vec3 totalEmissiveRadiance =
+// emissive;`). So a per-instance emissive flare is not reachable without a
+// custom shader patch. Instead a small POOL of individually-materialed disks
+// (strikePool) is moved onto struck notes and carries the envelope. Same
+// pattern the old sprite pool used, with geometry instead of a billboard.
+let sheet, headMesh, percMesh, strikePool = [], labelMeshes = [], strikeGroup;
+let envRT = null;
+let paperNormal = null, paperRough = null;
+let takeCull = null;   // per-take near-cull, set by __camera
+const Z_EPS = 0.0016;      // lift off the paper plane; at 0 the disks z-fight
+
+function buildSheet() {
+  sheet = new THREE.Group(); scene.add(sheet);
+  // ⭐⭐ BLACK, AND BEVELLED, BECAUSE THE CONTRAST IS THE EFFECT. The user:
+  // "black to glow create a great effect" -- an unplayed note is a black
+  // bevelled disk and the flare when it is struck is the whole point.
+  // ⚠ A BLACK DIFFUSE SURFACE REFLECTS NO DIFFUSE LIGHT AT ALL, so a bevel on
+  // a pure-black matte disk is invisible and the "3d object rather than a dot"
+  // reading is lost. The bevel has to catch a SPECULAR highlight: low
+  // roughness and a little metalness, on a near-black rather than a true 0.
+  // ⭐ THEY COOL LIKE METAL, SO THEY ARE METAL. High metalness, moderate
+  // roughness, and an envMapIntensity so the chamfer has something to reflect
+  // -- that specular streak along the bevel is what sells the disk as an
+  // object, more than its silhouette does.
+  // ⚠ NONE OF THIS IS VISIBLE WITHOUT scene.environment (see __init).
+  const inkMat  = new THREE.MeshStandardMaterial({ color: P.look.inkColor ?? 0x060606,
+    roughness: P.look.inkRough ?? 0.28, metalness: P.look.inkMetal ?? 0.85,
+    envMap: envRT ? envRT.texture : null,
+    envMapIntensity: P.look.inkEnv ?? 1.15, side: THREE.DoubleSide });
+  const lineMat = new THREE.MeshStandardMaterial({ color: P.look.lineColor ?? 0x0b0a09,
+    roughness: P.look.lineRough ?? 0.42, metalness: P.look.lineMetal ?? 0.55,
+    envMap: envRT ? envRT.texture : null,
+    envMapIntensity: P.look.inkEnv ?? 0.9, side: THREE.DoubleSide });
+  // ⭐ A CHAMFERED DISK, extruded from a circle. ExtrudeGeometry's bevel is the
+  // chamfer; the geometry is built with unit radius and unit height so the
+  // existing instanced scale calls still mean what they meant.
+  const bevelDisk = (segs = 30) => {
+    const bs = P.look.noteBevel ?? 0.26;      // bevel size as a fraction of radius
+    const sh = new THREE.Shape();
+    sh.absarc(0, 0, 1 - bs, 0, Math.PI * 2, false);
+    const g = new THREE.ExtrudeGeometry(sh, { depth: 1 - 2 * bs, bevelEnabled: true,
+      bevelThickness: bs, bevelSize: bs, bevelSegments: P.look.noteBevelSegs ?? 3, curveSegments: segs });
+    g.translate(0, 0, -(0.5 - bs));           // centre it on the origin
+    g.rotateX(-Math.PI / 2);                  // extrude along +z -> lie flat on the paper
+    return g;
+  };
+  const bevelBox = () => {
+    const bs = P.look.lineBevel ?? 0.30;      // as a fraction of the HEIGHT
+    const sh = new THREE.Shape();
+    const hw = 0.5, hh = 0.5 - bs;
+    sh.moveTo(-hw, -hh); sh.lineTo(hw, -hh); sh.lineTo(hw, hh); sh.lineTo(-hw, hh); sh.closePath();
+    const g = new THREE.ExtrudeGeometry(sh, { depth: 1, bevelEnabled: true,
+      bevelThickness: bs, bevelSize: bs * 0.5, bevelSegments: 1, curveSegments: 1 });
+    g.translate(0, 0, -0.5);
+    return g;   // unit cube-ish, x = width, y = height, z = length
+  };
+  const lineGeo = bevelBox();
+  const LH = P.look.sheetLineH ?? 0.007;    // how far the engraving stands proud
+  const LW = P.look.sheetLineW ?? 0.009;    // staff line width, in world x
+  const DH = P.look.noteH ?? 0.026;         // ⭐ THE DISK'S THICKNESS = the "volume" the user asked for
+  // ⭐⭐ THE SHEET RUNS OFF INTO THE DARK AT BOTH ENDS, rather than stopping at
+  // a cut edge. The observer confirmed the far edge is visible with black
+  // beyond it in the final frame of both cuts; the reverse-angle take then put
+  // the sheet's START edge in shot too, from the first second. One fix covers
+  // both: pad the paper and the staff lines past the music at each end so the
+  // road always continues past what the fog can still show, and no frame ever
+  // contains the paper's own boundary. The MUSIC is unchanged -- notes, bars
+  // and marks still live only where they always did.
+  const PAD = P.look.sheetPad ?? 7.0;
+  const zLenPad = P.zlen + 2 * PAD;
+  const zmid = (P.zNear + P.zFar) / 2;
+  const ROADS = (P.roads && P.roads.length) ? P.roads
+              : [{ index: 0, x0: 0, lines: 5, name: '', color: '#c2b9a4' }];
+
+  // ---- staff / road lines: thin extruded boxes running the road's length ----
+  for (const rd of ROADS) {
+    const n = rd.lines ?? 5, ctr = (5 - n) / 2 * P.SP;
+    for (let i = 0; i < n; i++) {
+      const m = new THREE.Mesh(lineGeo, lineMat);
+      m.scale.set(LW, LH, zLenPad);
+      m.position.set(rd.x0 + P.BOT_X + ctr + i * P.SP, LH / 2, zmid);
+      sheet.add(m);
+    }
+    // ---- bar lines, across the staff ----
+    const xa = rd.x0 + P.BOT_X + ctr, xb = xa + (n - 1) * P.SP;
+    const span = Math.max(xb - xa, 0.02) + LW * 2;
+    for (const b of P.bars) {
+      const th = b.heavy ? 0.034 : 0.019;
+      const m = new THREE.Mesh(lineGeo, lineMat);
+      m.scale.set(span, LH * 0.92, th);
+      m.position.set((xa + xb) / 2, LH * 0.46, -b.t * P.zps);
+      sheet.add(m);
+    }
+  }
+
+  const diskGeo = bevelDisk(30);
+  const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), V = new THREE.Vector3();
+  const put = (mesh, i, x, y, z, sx, sy, sz) => {
+    M.compose(V.set(x, y, z), Q, new THREE.Vector3(sx, sy, sz));
+    mesh.setMatrixAt(i, M);
+  };
+
+  // ---- pitched noteheads ----
+  // ⚠ NARROWER ACROSS PITCH THAN ALONG THE ROAD (0.74), exactly as the painted
+  // ellipse was: far up the road perspective flattens a second of music into a
+  // few pixels of depth while pitch still spreads the full staff width, so
+  // round heads ran together into a chain of blobs.
+  const heads = P.notes || [];
+  headMesh = new THREE.InstancedMesh(diskGeo, inkMat, Math.max(1, heads.length));
+  headMesh.count = heads.length;
+  // ⚠ `noteZOffset` IS lib/paperpix.mjs's CONTROL, and it lives here on purpose:
+  // it displaces the PRINTED note along the road while the playhead disks keep
+  // flying to the true position, which is the whole class of "the balls and the
+  // sheet disagree" -- the mirror was one instance of it. A payload edit could
+  // not express this, because the payload is what both sides are derived from.
+  const NZ = P.look.noteZOffset ?? 0;
+  heads.forEach((nn, i) => put(headMesh, i, nn.x, DH / 2 + Z_EPS, -nn.t * P.zps + NZ,
+                               P.NOTE_R * 0.74, DH, P.NOTE_R));
+  headMesh.instanceMatrix.needsUpdate = true;
+  sheet.add(headMesh);
+
+  // ---- ledger lines and stems, also boxes ----
+  const extras = [];
+  for (const nn of heads) {
+    const z = -nn.t * P.zps;
+    for (let st = -2; st >= nn.step; st -= 2)
+      extras.push([nn.x, z, P.NOTE_R * 2.3, 0.016, st]);
+    for (let st = 10; st <= nn.step; st += 2)
+      extras.push([nn.x, z, P.NOTE_R * 2.3, 0.016, st]);
+    const up = nn.step < 4;
+    extras.push([nn.x + (up ? 1.15 : -1.15) * P.STEP_X, z, 2.3 * P.STEP_X, 0.012, null]);
+  }
+  if (extras.length) {
+    const em = new THREE.InstancedMesh(lineGeo, lineMat, extras.length);
+    // ⛔ SCALE Y WAS 1 HERE AND THAT WAS CORRECT ONLY WHILE THE GEOMETRY WAS
+    // BoxGeometry(1, LH*0.9, 1) -- the height was BAKED IN. lineGeo is a UNIT
+    // box, so the same call made every ledger line and stem a 1.0-unit-tall
+    // slab: the first frame after the bevel change was a road covered in
+    // vertical grey squares. Swapping a geometry silently changes what a
+    // scale means.
+    extras.forEach((e, i) => put(em, i, e[0], LH * 0.45, e[1], e[2], LH * 0.9, e[3]));
+    em.instanceMatrix.needsUpdate = true;
+    sheet.add(em);
+  }
+
+  // ---- percussion marks: the same primitive, in the road's own colour ----
+  const side = P.side || [];
+  const percCol = new THREE.Color(side.length ? side[0].color : '#ffb45a');
+  const percMat = new THREE.MeshStandardMaterial({
+    color: percCol.clone().multiplyScalar(0.34), roughness: 0.78,
+    emissive: percCol, emissiveIntensity: P.look.percEmissive ?? 0.16,
+    envMap: envRT ? envRT.texture : null, envMapIntensity: P.look.percEnv ?? 0.5,
+    metalness: P.look.percMetal ?? 0.45, side: THREE.DoubleSide });
+  // ⚠ WITH HOLES ON, THE PRINTED MARK IS THE HOLE. Leaving both draws a disk
+  // sitting over the opening, which is exactly the 'painted circle' reading
+  // the holes exist to replace.
+  percMesh = new THREE.InstancedMesh(diskGeo, percMat, Math.max(1, side.length));
+  percMesh.count = (P.look.drumHoles ?? 1) ? 0 : side.length;
+  side.forEach((sd, i) => {
+    const r = P.NOTE_R * (P.look.percR ?? 0.62) * (0.80 + 0.45 * sd.vel);
+    put(percMesh, i, sd.u, DH / 2 + Z_EPS, -sd.t * P.zps + NZ, r * 0.9, DH, r);
+  });
+  percMesh.instanceMatrix.needsUpdate = true;
+  sheet.add(percMesh);
+
+  // ---- the struck-note pool: real disks that GLOW, not sprites over a dot ----
+  // user: "the circle of the note should glow, not just part of some cloud
+  // covering the note". This is that circle, and the glow is emissive through
+  // the bloom pass rather than an additive billboard hovering above it.
+  // ⛔⛔⛔ THE AFTERGLOW NEVER REACHED BLACK, AND THE CAUSE WAS NOT THE DECAY
+  // CURVE. The user: "the note disks are black, but they stay lighted not
+  // fully decaying". The emissive DID reach zero -- but this pool used its own
+  // material (color 0x2a231c, roughness 0.6) and its own 1.04x scale, sitting
+  // proud of the head it covers. So at emissiveIntensity 0 a struck note was
+  // still a LIGHTER, BIGGER disk than an unstruck one, permanently, and they
+  // accumulated down the road as the film went on. Chasing the decay curve
+  // would never have fixed it.
+  //
+  // ⭐ THE FIX IS STRUCTURAL, NOT A TUNING. Each pool disk is now the SAME
+  // geometry and the SAME material parameters as a notehead, plus an emissive
+  // term. At emissiveIntensity 0 it IS a notehead, by construction -- there is
+  // no floor left to get wrong, and "indistinguishable from a never-struck
+  // disk" stops depending on two numbers agreeing.
+  //
+  // ⚠ AND THE POOL MUST NOT BE SMALLER THAN THE NUMBER OF NOTES. It is filled
+  // brightest-first from a sorted list, so a pool that overflows drops the
+  // DIMMEST member -- an ember at 30 % would snap to black the instant a new
+  // note was struck. Sized to the note count so the sort can never truncate.
+  strikePool = [];
+  strikeGroup = new THREE.Group(); scene.add(strikeGroup);
+  // ⭐⭐ THE POOL IS SIZED TO WHAT CAN BE LIT AT ONCE, NOT TO THE WHOLE FILM.
+  // It used to be one Mesh (with its own material) per notehead, and __frame
+  // walks the WHOLE pool every frame — so both memory and per-frame work grew
+  // linearly with length for no gain: a note older than the decay window is
+  // never in S.strikes, so its mesh was permanently invisible.
+  // ⚠ THE BOUND IS EXACT, NOT A GUESS: the census can only ever light notes
+  // inside one decay window, so the most that can be lit simultaneously is the
+  // most notes any window-long span contains — computed here from the payload
+  // by a sliding window. The warning above (a pool that overflows drops the
+  // DIMMEST member and snaps an ember to black) is respected, not weakened.
+  // ⚠ afterFloor > 0 keeps every note lit forever by design; that case keeps the
+  // old per-notehead sizing.
+  const POOL = (() => {
+    const cap = Math.max(P.look.afterPool ?? 0, heads.length + 4);
+    if (true) return cap;
+    const tau = P.look.afterDecay ?? 1.6, fl = P.look.afterFlash ?? 0.0;
+    const W = tau * Math.log((1 + fl) / Math.max(1e-9, P.look.afterCut ?? 0.004));
+    const ts = [];
+    for (const v of (P.voices || [])) for (const n of (v.notes || [])) ts.push(n.t);
+    ts.sort((a, b) => a - b);
+    let j = 0, mx = 0;
+    for (let i = 0; i < ts.length; i++) { while (ts[i] - ts[j] > W) j++; mx = Math.max(mx, i - j + 1); }
+    return Math.min(cap, mx + 4);
+  })();
+  for (let i = 0; i < POOL; i++) {
+    const mat = new THREE.MeshStandardMaterial({ color: inkMat.color.clone(),
+      roughness: inkMat.roughness, metalness: inkMat.metalness,
+      envMap: inkMat.envMap, envMapIntensity: inkMat.envMapIntensity,
+      emissive: new THREE.Color(0, 0, 0), emissiveIntensity: 0,
+      toneMapped: true, side: THREE.DoubleSide });
+    const m = new THREE.Mesh(diskGeo, mat);
+    m.visible = false; m.renderOrder = 2;
+    strikeGroup.add(m); strikePool.push(m);
+  }
+
+  // ---- road labels, as world-space quads ----
+  // ⚠ THE LABEL IS THE ONE THING STILL CARRIED BY A TEXTURE, because three
+  // ships no typeface JSON here (`examples/fonts/` does not exist in this
+  // install) and troika is not installed, so TextGeometry has no font to load.
+  // That puts it back in reach of the exact flipY trap that started round 5 --
+  // so its orientation is NOT asserted anywhere. It is read off a rendered
+  // frame with a crop, by eye, and the result is written in NOTES.md.
+  labelMeshes = [];
+  if (P.look.roadLabels ?? 1) {
+    for (const rd of ROADS) {
+      if (!rd.name) continue;
+      const cv = document.createElement('canvas'); cv.width = 512; cv.height = 128;
+      const g = cv.getContext('2d');
+      g.clearRect(0, 0, 512, 128);
+      // ⚠ ROUND 7: PAYLOAD-DRIVEN, and the default stayed DARK. A first cut
+      // flipped it light for a dark-grey road; the user corrected the road to
+      // LIGHT grey, so dark ink is right again. The value travels with the look
+      // rather than being baked in, which is the actual fix.
+      g.fillStyle = P.look.labelColor ?? '#2b2724';
+      g.font = '600 74px -apple-system, Helvetica, sans-serif';
+      g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(rd.name, 256, 64);
+      const tx = new THREE.CanvasTexture(cv);
+      tx.colorSpace = THREE.SRGBColorSpace; tx.anisotropy = 16;
+      const w = P.look.labelW ?? 0.95, h = w * 128 / 512;
+      const mat = new THREE.MeshStandardMaterial({ map: tx, transparent: true, roughness: 0.95, side: THREE.DoubleSide });
+      // ⚠ ONE LABEL IS NO LABEL. Round 4 drew the name at the heavy bar lines
+      // only -- two in the whole piece -- so for most of the film there was no
+      // label anywhere in frame, and I still recorded it as "drawn". Repeat it
+      // at every bar so the road is named wherever you look.
+      for (const b of P.bars) {
+        const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+        m.rotation.x = -Math.PI / 2;
+        m.position.set(rd.x0, Z_EPS * 1.5, -b.t * P.zps - h * 0.9);
+        sheet.add(m); labelMeshes.push(m);
+      }
+    }
+  }
+}
+
+window.__init = function (payload) {
+  try {
+    P = payload;
+    // ⭐ THE ASSERT ballAt's BINARY SEARCH DEPENDS ON. A comment here used to
+    // CLAIM this check existed while no code did it — exactly the shape this
+    // file warns about elsewhere. An unsorted voice would give a wrong k, and a
+    // wrong ball position is not something any gate downstream would name.
+    _clk = null;
+    (P.voices || []).forEach((v, vi) => {
+      const ns = v.notes || [];
+      for (let i = 1; i < ns.length; i++)
+        if (ns[i].t < ns[i-1].t)
+          throw new Error('voice ' + vi + ' notes not ascending at ' + i +
+                          ': t=' + ns[i-1].t + ' then t=' + ns[i].t);
+    });
+    W = P.width  ?? 1080;
+    H = P.height ?? 1920;
+    const cvs = document.getElementById('c');
+    cvs.width = W; cvs.height = H;
+    // the title block scales with the frame so it does not swamp a 1080-tall shot
+    const fs = H / 1920;
+    document.getElementById('ttl').style.fontSize = (44 * fs).toFixed(1) + 'px';
+    document.getElementById('ttl').style.margin = `${44*fs}px 0 0 ${52*fs}px`;
+    document.getElementById('sub').style.fontSize = (25 * fs).toFixed(1) + 'px';
+    document.getElementById('sub').style.margin = `${14*fs}px 0 0 ${54*fs}px`;
+    R = new THREE.WebGLRenderer({ canvas: cvs, antialias: true });
+    R.setPixelRatio(1); R.setSize(W, H, false);
+    // ⭐⭐⭐ AN ENVIRONMENT, AND WITHOUT IT THE WHOLE MATERIAL DIRECTION FAILS
+    // SILENTLY. The user asked for note disks that cool like metal, and for
+    // surfaces that read as materials rather than plastic primitives. A METAL
+    // MATERIAL WITH NOTHING TO REFLECT RENDERS NEAR-BLACK AND FLAT: metalness
+    // removes the diffuse response, so a metal disk in a scene with no
+    // environment is a featureless hole, and the obvious conclusion -- "black
+    // metal disks were the wrong direction" -- would have been a lighting
+    // diagnosis mistaken for an art-direction one.
+    // RoomEnvironment ships inside three.js, is generated in-process and
+    // fetches nothing, which matters because this harness is offline: a failed
+    // network texture fetch looks exactly like never having tried.
+    // ⛔⛔⛔ ROUND 7: RoomEnvironment WAS THE "DISKS NEVER DECAY" DEFECT.
+    // The user, watching r9: "the note disks does not decay and stay lighted
+    // far away towards the start". I had reported the reach-zero fix as
+    // structural and afterglow.mjs was green. BOTH WERE TRUE AND THE DEFECT WAS
+    // REAL, because it was never the afterglow. MEASURED, two renders of the
+    // SAME frame (track-tight t=6.60):
+    //     afterGain 0 (no afterglow at all) -> every far disk STILL a white
+    //                                          speck, all the way to the horizon
+    //     inkEnv 0   (no env reflection)    -> far disks BLACK; the near ones
+    //                                          correctly red/orange
+    // RoomEnvironment is a bright white studio box. inkMat is metalness 0.85 /
+    // roughness 0.28 -- a near-mirror -- and every disk down the road is seen at
+    // a GRAZING angle, which is exactly where a mirror returns the brightest
+    // part of its surroundings. So each disk carried a permanent specular
+    // highlight that no decay curve could ever remove.
+    // ⚠ AND THE GATE COULD NOT SEE IT, BY CONSTRUCTION: afterglow.mjs
+    // normalises the struck disk against the SAME disk with the glow off, so
+    // the specular is subtracted out of BOTH sides of its ratio. It measured
+    // the right quantity; the quantity was the wrong one. See afterglow.mjs (B).
+    //
+    // ⭐ THE FIX IS A DARKER ENVIRONMENT, NOT NO ENVIRONMENT. envMap 0 makes a
+    // metal render dead-black and featureless, which is the failure the round-6
+    // addendum warned about. So: a custom env scene -- a black room with one
+    // dim soft overhead panel and a weak fill -- PMREM'd the same way. Built
+    // from primitives with no randomness at all, so it is deterministic by
+    // construction and stills-equal-sequence survives.
+    {
+      const pm = new THREE.PMREMGenerator(R);
+      pm.compileEquirectangularShader();
+      let src;
+      if (P.look.envRoom === true) {
+        src = new RoomEnvironment();          // the r9 look, kept for A/B only
+      } else {
+        src = new THREE.Scene();
+        const shell = new THREE.Mesh(
+          new THREE.BoxGeometry(20, 20, 20),
+          new THREE.MeshBasicMaterial({ color: new THREE.Color(P.look.envShell ?? 0x020202),
+                                        side: THREE.BackSide }));
+        src.add(shell);
+        const key = P.look.envKey ?? 0.30, fill = P.look.envFill ?? 0.05;
+        const panel = new THREE.Mesh(new THREE.PlaneGeometry(7, 7),
+          new THREE.MeshBasicMaterial({ color: new THREE.Color(key, key * 0.94, key * 0.86) }));
+        panel.position.set(0, 9.9, 0); panel.rotation.x = Math.PI / 2;
+        src.add(panel);
+        const back = new THREE.Mesh(new THREE.PlaneGeometry(18, 12),
+          new THREE.MeshBasicMaterial({ color: new THREE.Color(fill, fill, fill * 1.08) }));
+        back.position.set(0, 0, -9.9);
+        src.add(back);
+      }
+      envRT = pm.fromScene(src, 0.04);
+      pm.dispose();
+    }
+    R.toneMapping = THREE.ACESFilmicToneMapping;
+    R.toneMappingExposure = P.look.exposure ?? 0.85;
+    R.outputColorSpace = THREE.SRGBColorSpace;
+
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(P.look.bg ?? 0x040405);
+    // ⚠ scene.environment ONLY -- NOT scene.background. Reflections yes; a lit
+    // room behind the road would destroy the black surround the whole look
+    // depends on. envMapIntensity below keeps it a sheen, not a studio.
+    // ⛔⛔ NOT scene.environment. MEASURED, because the first cut of this DID
+    // use it and the road came back a sheet of blown white:
+    //     scene.environment on  -> median luma 0.943, 89 % of frame lit
+    //     scene.environment off -> median luma 0.321, 66 %
+    // and, decisively, paperMat's own envMapIntensity had NO EFFECT AT ALL --
+    // 0.00, 0.02 and 0.05 all rendered byte-for-byte the same. In this three
+    // build the scene environment is not scaled by a material's
+    // envMapIntensity, so there is no way to say "metals reflect it, paper does
+    // not" from the material side.
+    // ⭐ So the env map is assigned PER MATERIAL instead, to the metals only
+    // (see buildSheet). Same reflections on the disks, no IBL flood on the
+    // paper, and envMapIntensity works again because the map is the material's.
+    scene.fog = new THREE.FogExp2(P.look.bg ?? 0x040405, P.look.fog ?? 0.062);
+
+    cam = new THREE.PerspectiveCamera(42, W / H, 0.05, 400);
+
+    // ⚠ DoubleSide: the reverse-angle take can see the sheet's underside and its
+    // START edge, neither of which the following camera ever pointed at.
+    const paperMap = paperTexture();   // also builds paperNormal / paperRough
+    paperMat = new THREE.MeshStandardMaterial({ map: paperMap,
+      normalMap: paperNormal, normalScale: new THREE.Vector2(P.look.paperNormK ?? 0.55, P.look.paperNormK ?? 0.55),
+      roughnessMap: paperRough, roughness: P.look.paperRough ?? 0.99, metalness: 0.0,
+      side: THREE.DoubleSide });   // no envMap: the paper is lit, not reflective
+    // ⭐⭐⭐ THE ROAD NOW HAS REAL HOLES IN IT, ONE PER DRUM HIT.
+    // ⚠⚠ THIS SUPERSEDES A "DO NOT CHANGE" NOTE. Round 5 recorded the falling
+    // drum balls as WANTED, on the user's "drums/kick are pefect!", and told
+    // the next observer not to re-file them. The user has since said: "drums
+    // should be holes and light disks should jump out of them on beat." That
+    // reverses it. The old note is superseded, not correct -- see NOTES.md.
+    const PW = 2 * P.UMAX, PH = P.zlen + 2 * (P.look.sheetPad ?? 7.0);
+    const zmid0 = (P.zNear + P.zFar) / 2;
+    let paper;
+    const HOLES = (P.look.drumHoles ?? 1) ? (P.side || []) : [];
+    if (HOLES.length) {
+      // The plane lies in local XY and is then rotated -90 deg about X, which
+      // sends local +y to world -z. So a hit at world z maps to local
+      // y = zmid - z, and that is the only coordinate conversion here.
+      const sh = new THREE.Shape();
+      sh.moveTo(-PW/2, -PH/2); sh.lineTo(PW/2, -PH/2);
+      sh.lineTo(PW/2, PH/2); sh.lineTo(-PW/2, PH/2); sh.closePath();
+      for (const sd of HOLES) {
+        const r = P.NOTE_R * (P.look.holeR ?? 0.78) * (0.80 + 0.45 * sd.vel);
+        const hy = zmid0 - (-sd.t * P.zps);
+        const h = new THREE.Path();
+        h.absarc(sd.lane ?? sd.u, hy, r, 0, Math.PI * 2, true);
+        sh.holes.push(h);
+      }
+      const geo = new THREE.ShapeGeometry(sh, P.look.holeSegs ?? 22);
+      // ⚠ ShapeGeometry's UVs are the raw XY COORDINATES, not [0,1]. Left as
+      // they come, the paper texture tiles once per world unit and the grain
+      // turns into a moire. Remap to PlaneGeometry's own convention so the
+      // existing texture, normal map and roughness map are all unaffected.
+      const uv = geo.attributes.uv, pos = geo.attributes.position;
+      for (let i = 0; i < uv.count; i++)
+        uv.setXY(i, (pos.getX(i) + PW/2) / PW, (pos.getY(i) + PH/2) / PH);
+      uv.needsUpdate = true;
+      geo.computeVertexNormals();
+      paper = new THREE.Mesh(geo, paperMat);
+    } else {
+      paper = new THREE.Mesh(new THREE.PlaneGeometry(PW, PH, 1, 256), paperMat);
+    }
+    paper.rotation.x = -Math.PI / 2;
+    paper.position.z = zmid0;
+    scene.add(paper);
+
+    // ⭐⭐ THE BOUNDARIES ARE READ OFF THE MESH, NOT RE-DERIVED. lib/seam.mjs
+    // needs the world z of each texture wrap. Working it out a second time from
+    // PH, zmid0, flipY and repeat is exactly the "two representations of one
+    // concept drifting" shape this file already warns about elsewhere — and it
+    // is what made the gate's first cut sample the wrong z and read a CONTROL as
+    // clean. So the page reports what it actually built.
+    window.__paperBounds = () => {
+      const t = paperMat.map, rep = t.repeat.y;
+      const g = paper.geometry.attributes;
+      // measure v -> local y from the geometry itself, then local y -> world z
+      let a = null, b2 = null;
+      for (let i = 0; i < g.uv.count; i++) {
+        const v = g.uv.getY(i), ly = g.position.getY(i);
+        if (!a || v < a.v) a = { v, ly };
+        if (!b2 || v > b2.v) b2 = { v, ly };
+      }
+      const zOf = v => {
+        const ly = a.ly + (v - a.v) / (b2.v - a.v) * (b2.ly - a.ly);
+        return paper.position.z - ly;              // rotation -PI/2: local +y -> world -z
+      };
+      const out = [];
+      for (let k = 1; k < Math.ceil(rep); k++) out.push({ k, v: k / rep, z: zOf(k / rep) });
+      return { repeat: rep, flipY: t.flipY, texH: t.image.height, texW: t.image.width,
+               vLo: a.v, vHi: b2.v, zAtVLo: zOf(a.v), zAtVHi: zOf(b2.v), bounds: out };
+    };
+
+    // ---- the hole WALLS, so an opening reads as depth and not as a painted
+    // black circle. Open-ended cylinders hanging below the road, lit by the
+    // same overhead key, DoubleSide so the far wall is visible through the near
+    // opening.
+    if (HOLES.length && (P.look.holeWalls ?? 1)) {
+      const wallMat = new THREE.MeshStandardMaterial({
+        // ⚠ NOT NEAR-BLACK. A black wall in a black hole is a painted circle
+        // again -- the wall has to CATCH the overhead key for the opening to
+        // read as depth. Warm and mid-dark, so the lit near wall and the
+        // shadowed far wall separate.
+        color: P.look.holeWallColor ?? 0x6e7076, roughness: P.look.holeWallRough ?? 0.5,
+        metalness: P.look.holeWallMetal ?? 0.35,
+        envMap: envRT ? envRT.texture : null, envMapIntensity: P.look.holeWallEnv ?? 0.6,
+        side: THREE.DoubleSide });
+      const wallGeo = new THREE.CylinderGeometry(1, 1, 1, P.look.holeSegs ?? 22, 1, true);
+      const depth = P.look.holeDepth ?? 0.42;
+      const wm = new THREE.InstancedMesh(wallGeo, wallMat, HOLES.length);
+      wm.name = 'holeWalls';
+      const MM = new THREE.Matrix4();
+      HOLES.forEach((sd, i) => {
+        const r = P.NOTE_R * (P.look.holeR ?? 0.78) * (0.80 + 0.45 * sd.vel);
+        MM.compose(new THREE.Vector3(sd.lane ?? sd.u, -depth / 2, -sd.t * P.zps),
+                   new THREE.Quaternion(), new THREE.Vector3(r, depth, r));
+        wm.setMatrixAt(i, MM);
+      });
+      wm.instanceMatrix.needsUpdate = true;
+      scene.add(wm);
+    }
+    buildSheet();
+
+    // ⚠ ROUND 7: the ambient was WARM AMBER (0x3a2f22), which is what made a
+    // grey road read as beige in the first cut of this change. Neutral now, and
+    // payload-driven so the "darker environment" is one number.
+    ambLight = new THREE.AmbientLight(P.look.ambientColor ?? 0x2a2c30, P.look.ambient ?? 0.55);  // was 0x24304f (blue)
+    scene.add(ambLight);
+    const cool = new THREE.DirectionalLight(0xffcf9a, P.look.coolFill ?? 0.32);  // was 0x6f8fff (blue)
+    cool.position.set(0.2, 1.0, -1.0); scene.add(cool);
+
+    // ⭐ THE OVERHEAD KEY LIGHT REVEALS; THE NOTE LIGHT DRAMATISES. Two jobs,
+    // and one lamp cannot do both -- without this the road only exists where a
+    // note light happens to be, and everything else is black.
+    // ⚠ ITS COLOUR IS WARM-NEUTRAL ON PURPOSE. The only ambient here is blue
+    // (0x24304f), and a sheet of paper lit blue still reads as "dark" however
+    // much of it you add. This is near the paper's own #c2b9a4.
+    // DEFAULT 0 so an unset payload renders bit-identically to before it existed.
+    // ⚠ ROUND 7: the key was WARM (0xffe9c8) and it was what made a neutral
+    // grey road still render cream. Neutral key + warm playhead lights is the
+    // whole point of the note the user made: the GROUND is grey, the LIGHT
+    // EFFECT is warm, and you can now tell them apart.
+    overheadLight = new THREE.DirectionalLight(P.look.overheadColor ?? 0xd8dade, P.look.overhead ?? 0.0);
+    overheadLight.position.set(0.0, 10.0, 0.0);
+    overheadLight.target.position.set(0.0, 0.0, 0.0);
+    scene.add(overheadLight, overheadLight.target);
+
+    // one rig per VOICE: a point light that throws the pool, a white core, a halo
+    voiceRigs = P.voices.map((v, i) => {
+      // ⭐⭐ THE HUE COMES FROM THE ROAD'S OWN TRACK COLOUR, and it varies
+      // WITHIN the road so voices stay tellable apart.
+      // ⛔ THIS WAS DEAD DATA. `roads[].color` was carried all the way through
+      // prep into the payload and then used by nothing: the rigs still indexed
+      // a global VOICE_COL palette by GLOBAL voice number, so the bass ball
+      // came out apricot (voice 4 of 5) and the piano's four voices took four
+      // unrelated hues. The band table said one thing and the render did
+      // another, and no check compared them — this project's characteristic
+      // failure, in a new costume.
+      // ⚠ THE FALLBACK IS LEAD, NOT GARNISH: a payload with no `roads` (round 3
+      // and earlier) takes the old palette by the old index, which is what keeps
+      // the byte-identical regression control valid.
+      let hex;
+      const rd = P.roads && P.roads[v.road ?? 0];
+      if (rd && rd.color) {
+        const hsl = {}; new THREE.Color(rd.color).getHSL(hsl);
+        // how many voices of THIS road came before it
+        let within = 0;
+        for (let j = 0; j < i; j++) if ((P.voices[j].road ?? 0) === (v.road ?? 0)) within++;
+        const k = within % 4;
+        hex = '#' + new THREE.Color().setHSL(
+          (hsl.h + k * (P.look.voiceHueSpread ?? 0.016) + 1) % 1,
+          Math.max(0, Math.min(1, hsl.s * (1 - 0.13 * k))),
+          Math.max(0, Math.min(0.95, hsl.l + 0.075 * k))).getHexString();
+      } else hex = VOICE_COL[i % VOICE_COL.length];
+      const col = new THREE.Color(hex);
+      const tint = col.clone().lerp(WARM, 0.55);
+      // ⛔ THE LAMP IS WHITER THAN THE LOOK. The clipping the observer found is
+      // not in the cores -- neutralising those barely moved it -- it is the LIT
+      // PAPER: a warm lamp on warm paper drives the red channel to 255 while
+      // green is still climbing, so the brightest pool posterises to orange
+      // instead of blooming white. The warmth of the film comes from the paper,
+      // the halos and the trail; the lamp itself does not need to carry it.
+      const lampCol = tint.clone().lerp(new THREE.Color(1, 1, 1), P.look.lampWhite ?? 0.55);
+      // ⚠ A POINT LIGHT SITTING ON THE PAPER BLOWS OUT. Illuminance goes as
+      // 1/d^2 and the notehead is 0.03 above the sheet, so the first cut was a
+      // ~40x spike that clipped the whole lower half to white. The lamp is
+      // lifted clear of the paper and its falloff softened; the CORE stays on
+      // the note, which is what the eye reads as "the light is on the note".
+      const light = new THREE.PointLight(lampCol, 0, P.look.lightDist ?? 8, P.look.decay ?? 1.6);
+      light.position.y = P.look.lampLift ?? 0.62;
+      // ⚠ AND THE CORE MUST BE SMALL. At 0.028 it rendered as a ~60 px white
+      // disc that bloom then smeared wider still; the reference's balls are
+      // TIGHT POINTS with a pool around them, not discs. Radius is a look knob
+      // now (coreR) precisely because it interacts with bloomStrength.
+      // ⚠ 0xffffff IS NOT WHITE-HOT. Under ACES tone mapping a 1.0 basic
+      // material lands around 0.8 and the core reads as a grey pebble; the
+      // reference's core CLIPS. Values above 1 are legal and are the point.
+      const cc = col.clone().multiplyScalar(3.2);
+      // ⭐⭐ ROUND 5, BUCKET D: THE PLAYHEAD IS A DISK, NOT A BALL. The user:
+      // "we can also make balls as playhead disks (not balls, flying flat same
+      // as node disks) with slight glow and when they bounce they glow stronger
+      // with the note disks". Same primitive as every notehead, lying flat,
+      // travelling. It never tilts -- a disk that banks into the arc reads as a
+      // coin flipping, not as a playhead.
+      const core = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 28),
+        new THREE.MeshBasicMaterial({ toneMapped: false,
+          // ⛔ A CORE THAT CLIPS IN RED ALONE GOES ORANGE AND POSTERISES. The
+          // observer measured 1134 px at R>=254 while G<254 against 19 truly
+          // white px; round 5's emissive note disks pushed that to 16715 px.
+          // The warmth belongs to the HALO and the point light, which are not
+          // clipped -- the core itself is neutralised so that when it does
+          // clip, it clips to WHITE.
+          color: new THREE.Color(4.60 + cc.r * 0.45, 4.54 + cc.g * 0.45, 4.44 + cc.b * 0.45) }));
+      const pr = P.look.playR ?? (P.NOTE_R * 0.80), ph = (P.look.noteH ?? 0.026) * 0.85;
+      core.userData.base = new THREE.Vector3(pr * 0.74, ph, pr);
+      // ⛔⛔⛔ THE FULL-BRIGHTNESS COLOUR, KEPT, BECAUSE env MUST SCALE IT.
+      // For three rounds this material was set once here and never touched
+      // again, while `apply` scaled only the disk's SIZE and the halo's
+      // OPACITY. So a voice "arriving at env 0.013" was true in STATE and
+      // FULL BRIGHTNESS IN PIXELS: the fade-in existed in the model and never
+      // reached the screen. Measured on the shipped r8 landscape, decoded by
+      // frame NUMBER, 600x300 crop at (300,200): n=221 max luma 121 with 0 px
+      // >=200, then n=222 max 255 with 9704 px >=200. One frame.
+      // ⭐ AND THE SAME OMISSION IS THE ENDING: at the end env decays past the
+      // live>0.01 cutoff while the core is still at full colour, so every rig
+      // SWITCHED OFF rather than dimming out -- 27754 -> 1520 px >=200 between
+      // n=399 and n=400, on the frame a scroller lingers on.
+      core.userData.col = core.material.color.clone();
+      const halo = glowSprite('#fff2dc', P.look.halo ?? 0.26);
+      const halo2 = glowSprite(hex, P.look.halo2 ?? 0.80);
+      const grp = new THREE.Group();
+      grp.add(light, core, halo, halo2);
+      scene.add(grp);
+      return { grp, light, core, halo, halo2, col, tint, notes: v.notes, road: v.road ?? 0 };
+    });
+
+    drumRigs = P.drums.map(d => {
+      const col = new THREE.Color(d.color);
+      const light = new THREE.PointLight(col, 0, 6, P.look.decay ?? 1.6);
+      // ⭐ A FLAT LIGHT DISK, not a ball. The user: "light disks should jump
+      // out of them on beat" -- the same primitive as the playhead, so the two
+      // read as the same family of object.
+      const dr = P.look.drumCoreR ?? 0.030;
+      const core = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 26),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(4.85, 4.74, 4.58), toneMapped: false }));
+      core.scale.set(dr, dr * 0.42, dr);
+      core.userData.base = new THREE.Vector3(dr, dr * 0.42, dr);
+      const halo = glowSprite(d.color, P.look.drumHalo ?? 0.34);
+      const grp = new THREE.Group(); grp.add(light, core, halo);
+      grp.visible = false; scene.add(grp);
+      return { grp, light, core, halo, d, road: d.road ?? 0 };
+    });
+
+    arcGroup = new THREE.Group(); scene.add(arcGroup);
+    buildTrack();   // offline camera track -- see buildTrack() for why offline
+
+    // ⭐ AFTERGLOW. When a ball lands, the NOTEHEAD ITSELF lights and cools, so
+    // the road behind the light carries a trail of recently-played notes still
+    // warm. This is most of why the reference is pleasant to watch: it makes
+    // the PAST visible instead of leaving darkness behind the playhead.
+    // A fixed pool, reused by index, so no allocation happens per frame.
+    // ⛔ THE SPRITE POOL IS RETIRED. It was a camera-facing billboard hovering
+    // ABOVE a painted dot, which is precisely what the user described: "the
+    // circle of the note should glow, not just part of some cloud covering the
+    // note". The glow is now the notehead's OWN disk, emissive, through the
+    // bloom pass -- see strikePool in buildSheet(). glowGroup survives as an
+    // empty group only so paperOnly's visibility handling stays one shape.
+    glowGroup = new THREE.Group(); scene.add(glowGroup);
+
+    comp = new EffectComposer(R);
+    comp.addPass(new RenderPass(scene, cam));
+    const bloom = new UnrealBloomPass(new THREE.Vector2(W, H),
+      // ⚠ THRESHOLD 0.45 BLOOMED THE PAPER ITSELF and the lower half became
+      // fog. Only the cores and the arcs should cross the threshold; the lit
+      // sheet must stay under it.
+      P.look.bloomStrength ?? 1.05, P.look.bloomRadius ?? 0.60, P.look.bloomThreshold ?? 0.82);
+    bloomPass = bloom;
+    comp.addPass(bloom);
+    grade = new ShaderPass(GRADE);
+    grade.uniforms.uVig.value = P.look.vignette ?? 1.0;
+    comp.addPass(grade);
+    comp.addPass(new OutputPass());
+    document.getElementById('ttl').textContent = P.title;
+    document.getElementById('sub').textContent = P.subtitle;
+    window.__ready = true;
+  } catch (e) { window.__err = String(e && e.stack || e); }
+};
+
+// ---- per-frame ------------------------------------------------------------
+// ⭐ HOLD, THEN HOP — and the CAMERA AND THE LIGHT MUST USE THE SAME CURVE.
+// h**2.6 over the whole gap looked right on eighth notes and broke on a
+// two-second chord: the camera kept creeping toward the NEXT onset while the
+// light stayed on the note it was lit for, so the 2.3-unit camera distance
+// collapsed to 0.8 and four cores ballooned at the bottom of the frame.
+// Measured on the 11.1 s frame of the finished file. The hop is now a bounded
+// window at the END of the gap, so a long note holds the shot steady.
+const HOPMAX = 0.55;
+
+// ⭐⭐ ONE CONSTANT GRAVITY, AND THE HEIGHT FALLS OUT OF THE GAP.
+// The road is a timeline, so horizontal speed is constant BY CONSTRUCTION
+// (z = -t*zps and the flight is linear in t). Under a single constant g a hop
+// that must stay airborne for `gap` seconds rises to exactly g*gap^2/8:
+//     y(u) = (g*gap^2/2) * u * (1-u),  u = (t-t0)/(t1-t0),  peak g*gap^2/8
+// so a long gap arcs high and hangs, and sixteenth notes skip low and fast.
+// ⚠ NOTHING IS CLAMPED AND NOTHING IS SPECIAL-CASED -- the variation IS the
+// effect. If the tallest arc leaves the frame that is a CAMERA problem, not a
+// reason to squash the physics back into a range.
+// This replaces a height driven by the pitch LEAP, which had the ball jumping
+// high on a wide interval played fast -- the opposite of ballistic.
+// ⛔ THE g*gap^2/8 PROPORTIONAL RULE IS WITHDRAWN -- it was my inference, and
+// both the user and the footage say otherwise: "pull it low but speed should be
+// constant, only bounce is fast as it gets energy to fly". In the reference the
+// arcs are SHORT and LOW, a couple of note-widths across and about one staff
+// height tall, and they do NOT grow dramatically with the gap.
+// So: a tunable CONSTANT height with only MILD gap scaling. Both knobs laddered.
+// ⭐ LAST INDEX WHOSE NOTE HAS ALREADY STARTED, in O(log n). Same predicate and
+// same tie-break as the linear scan it replaces; -1 when none has.
+function notesIdxAt(ns, t) {
+  const tt = t + 1e-6;
+  let lo = 0, hi = ns.length - 1, r = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1;
+    if (ns[m].t <= tt) { r = m; lo = m + 1; } else hi = m - 1; }
+  return r;
+}
+
+// ⭐ SAME SEARCH OVER A BARE NUMBER ARRAY (the onset clock). Last index whose
+// value is <= t; -1 when none. Identical to the linear `for k ... if (uniq[k]
+// <= t+1e-6) gi = k` it replaces PROVIDED uniq is ascending, which clockData()
+// asserts rather than assumes.
+function idxAtNum(a, t) {
+  const tt = t + 1e-6;
+  let lo = 0, hi = a.length - 1, r = -1;
+  while (lo <= hi) { const m = (lo + hi) >> 1;
+    if (a[m] <= tt) { r = m; lo = m + 1; } else hi = m - 1; }
+  return r;
+}
+
+// ⭐⭐ THE THIRD AND FOURTH O(N) PER-FRAME WALKS, HOISTED. __frame rebuilt the
+// onset clock AND an N-entry Map of onset-time -> mean x on EVERY FRAME. Both
+// are pure functions of the PAYLOAD, which does not change between frames, so
+// at 22x the notes and 22x the frames they were another ~480x of loop work and
+// ~one Map allocation of N entries per frame for the garbage collector.
+// ⚠ CACHED ON P, AND CLEARED BY __init — an isolation render re-inits with a
+// different payload, and a stale clock there would move a camera that must not
+// move.
+let _clk = null;
+function clockData() {
+  if (_clk) return _clk;
+  const uniq = (P.onsets && P.onsets.length)
+    ? P.onsets
+    : (() => { const o = P.voices.flatMap(v => v.notes.map(n => n.t)).sort((a,b)=>a-b);
+               return o.filter((v,i) => i === 0 || v - o[i-1] > 1e-4); })();
+  for (let i = 1; i < uniq.length; i++)
+    if (uniq[i] < uniq[i-1])
+      throw new Error('onset clock not ascending at ' + i + ': ' + uniq[i-1] + ' > ' + uniq[i]);
+  const mx = new Map();
+  for (const v of P.voices) for (const n of v.notes) {
+    const key = Math.round(n.t * 1e4);
+    const e = mx.get(key) || { s: 0, c: 0 }; e.s += n.x; e.c++; mx.set(key, e);
+  }
+  _clk = { uniq, mx };
+  return _clk;
+}
+
+const arcPeak = gap =>
+  (P.look.arcH ?? 0.16) * (1 + (P.look.arcScale ?? 0.35) * Math.min(gap, 1.5));
+
+// ⭐ AND THE PROFILE IS ASYMMETRIC: a fast snap off the notehead, then a long
+// shallow glide down onto the next one. 4u(1-u) is a symmetric parabola and
+// reads as a lazy lob; this rises in the first ~18 % of the flight and glides
+// for the rest, which is what "only the bounce is fast" describes.
+function arcShape(u) {
+  const r = P.look.arcRise ?? 0.18;
+  return u < r ? Math.sin(u / r * Math.PI / 2)          // quick launch
+               : Math.cos((u - r) / (1 - r) * Math.PI / 2); // long glide down
+}
+
+// ⛔ UNUSED since round 2 replaced hold-then-hop with constant speed. Kept
+// deliberately: it is the curve to come back to if constant speed reads too
+// mechanical, and deleting it would lose the tuning that produced HOPMAX.
+function hopf(t, t0, t1) {
+  const gap = t1 - t0;
+  if (gap <= 1e-6) return 0;
+  const d = Math.min(0.75 * gap, HOPMAX);
+  const p = Math.min(1, Math.max(0, (t - (t1 - d)) / d));
+  return p * p * p * (p * (p * 6 - 15) + 10);
+}
+
+function camAt(t, zc, fx, keys) {
+  // ⭐ THE CAMERA IS PARAMETRISED THE WAY IT IS FRAMED, not by two 3-vectors.
+  // eye = (x, height, zc + back), aimed with a pitch and a yaw. That is what
+  // makes "put the light at 68 % of frame height" a solvable number instead of
+  // a guess, and it is also what a zoom/orbit keyframe wants to interpolate.
+  // The first cut interpolated eye/target points and put the light OFF THE
+  // BOTTOM OF THE FRAME -- found by looking at the 5.2 s still.
+  // ⚠ AT back = 1.10 THE STAFF IS 0.8 UNITS WIDE AT 1.1 UNITS AWAY: a note two
+  // staff steps off centre swung to 77 % of the half-frame and the near field
+  // whipped. Distance-to-staff-width is now ~2.9, which is roughly what the
+  // reference frames show.
+  const D = { h: 1.05, back: 2.30, pitch: -14, yaw: 0, x: 0, fov: 42 };
+  let k = D;
+  const kf = keys || P.camera;
+  if (kf && kf.length) {
+    let i = 0;
+    for (let q = 0; q < kf.length; q++) if (kf[q].t <= t) i = q;
+    const j = Math.min(i + 1, kf.length - 1);
+    let f = (j === i || kf[j].t <= kf[i].t) ? 0 : (t - kf[i].t) / (kf[j].t - kf[i].t);
+    f = Math.min(1, Math.max(0, f)); f = f * f * (3 - 2 * f);
+    k = {};
+    for (const key of Object.keys(D)) {
+      const a = kf[i][key] ?? D[key], b = kf[j][key] ?? D[key];
+      k[key] = a + (b - a) * f;
+    }
+  }
+  // ⭐ ROUND 10: a look-driven lateral offset for the KEYFRAME camera, so the
+  // portrait cut can be laddered sideways without editing three keyframes per
+  // rung. ⚠ x AND yaw MOVE TOGETHER: sliding right without re-aiming points the
+  // camera off the road, which is exactly the failure roadpix caught on the
+  // first short camera (8 of 21 road bands entirely off screen). camYawAdd is
+  // therefore not optional decoration -- it is the other half of camXAdd.
+  const dx = P.look.camXAdd ?? 0, dyaw = P.look.camYawAdd ?? 0;
+  const pr = k.pitch * Math.PI / 180, yr = (k.yaw + dyaw) * Math.PI / 180;
+  cam.fov = k.fov; cam.updateProjectionMatrix();
+  cam.position.set(k.x + dx + (fx || 0), k.h, zc + k.back);
+  const dir = new THREE.Vector3(Math.sin(yr) * Math.cos(pr), Math.sin(pr), -Math.cos(yr) * Math.cos(pr));
+  cam.lookAt(cam.position.clone().addScaledVector(dir, 4.0));
+}
+
+// ⛔ arcFor() IS GONE. It built the trail from PER-NOTE ARCS and was replaced
+// wholesale rather than left beside its successor: two trail systems in one
+// file is how the ball and its tail drifted apart in the first place.
+function cometFor(c, col) {
+  // clip to in front of the lens, by depth along the view direction (the
+  // reverse angle broke the raw-z form of this in round 5b)
+  const fwd = cam.getWorldDirection(new THREE.Vector3());
+  const vis = c.pts.filter(q => q.p.clone().sub(cam.position).dot(fwd) > 0.25);
+  if (vis.length < 3) return null;
+  const curve = new THREE.CatmullRomCurve3(vis.map(q => q.p));
+  const N = vis.length - 1, RS = P.look.cometRing ?? 7;
+  // ⭐ THE HEAD IS THE DISK'S OWN RADIUS. The user asked for the tail to come
+  // out of the disk AT DISK SIZE; the old fixed arcR 0.011 was unrelated to
+  // playR and read as a thread leaving a ball.
+  const headR = (P.look.playR ?? (P.NOTE_R * 0.80)) * (P.look.cometHeadK ?? 1.0);
+  const geo = new THREE.TubeGeometry(curve, N, headR, RS, false);
+  const pos = geo.attributes.position;
+  const cols = new Float32Array((N + 1) * (RS + 1) * 4);
+  const tint = new THREE.Color(col);
+  const wp = P.look.cometWidthPow ?? 1.30, ap = P.look.cometAlphaPow ?? 1.70;
+  const gain = (P.look.cometGain ?? 1.05) * (c.envK ?? 1);
+  for (let i = 0; i <= N; i++) {
+    // u = 0 at the head (the ball), 1 at the oldest sample
+    // ⭐ TWO CLAIMS ON u, AND THE TAPER TAKES THE STRONGER. Age alone left a
+    // young comet at 78 % width after 0.2 s, so its final ring was a FLAT
+    // FULL-WIDTH CAP wherever the ribbon happened to end -- in mid-air during a
+    // spawn, or at the camera-clip boundary. Taking the max with the ribbon's
+    // own normalised INDEX forces w and alpha to exactly 0 at the last sample,
+    // whatever its age. "There is no end of the tail" then holds by
+    // construction rather than by the ribbon happening to be old enough.
+    const uAge = vis[Math.min(i, vis.length - 1)].age / c.maxAge;
+    const uIdx = N > 0 ? i / N : 1;
+    // ⚠ `cometTaperAgeOnly` RESTORES THE ORIGINAL BUG ON PURPOSE. It is the
+    // control for entry.mjs (F): with the age-only taper a newborn ribbon sits
+    // at ~78 % width after 0.2 s and presents a flat cap, which is what put
+    // 104,596 px into the sky box in r9. A gate whose control cannot fire is
+    // not a gate, and this one has already shipped a defect once.
+    const u = P.look.cometTaperAgeOnly === true
+            ? Math.min(1, Math.max(0, uAge))
+            : Math.min(1, Math.max(0, Math.max(uAge, uIdx)));
+    const w = Math.pow(1 - u, wp);              // -> EXACTLY 0 at u = 1
+    const al = Math.pow(1 - u, ap) * gain;      // -> EXACTLY 0 at u = 1
+    const ctr = curve.getPoint(N ? i / N : 0);
+    for (let j = 0; j <= RS; j++) {
+      const n = i * (RS + 1) + j;
+      pos.setXYZ(n, ctr.x + (pos.getX(n) - ctr.x) * w,
+                    ctr.y + (pos.getY(n) - ctr.y) * w,
+                    ctr.z + (pos.getZ(n) - ctr.z) * w);
+      cols[n*4] = tint.r * 1.75; cols[n*4+1] = tint.g * 1.75; cols[n*4+2] = tint.b * 1.75;
+      cols[n*4+3] = al;
+    }
+  }
+  pos.needsUpdate = true;
+  geo.setAttribute('color', new THREE.BufferAttribute(cols, 4));
+  // ⚠ ADDITIVE AND depthWrite:false -- a comet is light, not a surface. This is
+  // one of the few places transparency is CORRECT (see the note on materials).
+  return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, depthWrite: false,
+    blending: THREE.AdditiveBlending, toneMapped: false, side: THREE.DoubleSide }));
+}
+
+// ⭐ LIVE LOOK TUNING. Mutates the SAME objects the film renders through, so a
+// value tuned in the preview is the value the film gets -- a preview that
+// forks the scene tunes something you do not ship.
+window.__setLook = function (partial) {
+  Object.assign(P.look, partial || {});
+  if (bloomPass) {
+    bloomPass.strength  = P.look.bloomStrength  ?? 1.05;
+    bloomPass.radius    = P.look.bloomRadius    ?? 0.60;
+    bloomPass.threshold = P.look.bloomThreshold ?? 0.82;
+  }
+  if (overheadLight) overheadLight.intensity = P.look.overhead ?? 0.0;
+  if (R) R.toneMappingExposure = P.look.exposure ?? 0.85;
+  if (window.__t !== undefined) window.__frame(window.__t);
+  return P.look;
+};
+
+// ⭐⭐ THE WRONG-ROAD GATE NEEDS AN INSTRUMENT THE SCENE DOES NOT OWN.
+// A payload check can prove every note was MAPPED to the right road; it cannot
+// prove the right road is what got DRAWN. This projects a road's x-band through
+// the LIVE camera at the current frame, so a gate can photograph the film,
+// argmax the brightest core, and ask whether that pixel is inside the band its
+// own note belongs to. The scene supplies only where it thinks the band is; the
+// PNG is the independent witness.
+// ⭐ WHERE IS THIS WORLD POINT ON SCREEN, according to the LIVE camera?
+// The trail-continuity gate needs the previous notehead's pixel, and computing
+// it outside the scene would mean re-implementing camAt -- i.e. checking the
+// gate's copy of the camera rather than the film's.
+// the lens, readable from outside -- lib/perfcam.mjs needs it to prove the
+// two takes really did move the camera before it trusts 'the state matched'.
+// a point ON the trail's own path, so lib/roadpix.mjs can sample the ribbon
+// instead of the notehead it ends at. ⛔ IT USED TO SAMPLE THE NOTEHEAD ITSELF
+// and round 5 broke that: the struck note's residual emissive (TERM 2) now
+// saturates that pixel to 1.0 with the trail on AND off, so the differential
+// read 0.000 and the gate called a perfectly good trail missing. Sampling just
+// off the head measures TERM 3, the ribbon, which is what it is asking about.
+window.__arcPt = function (x0, t0, x1, t1, s) {
+  const g = t1 - t0;
+  const v = new THREE.Vector3(x0 + (x1 - x0) * s, 0.03 + arcPeak(g) * arcShape(s),
+                              -((t0 + g * s) * P.zps));
+  return { x: v.x, y: v.y, z: v.z };
+};
+
+// ⭐⭐ THE ACCESSOR THAT MAKES A PIXEL ENTRY GATE POSSIBLE. entry.mjs used to
+// read __perf().voices[].env and nothing else, which is exactly why it passed a
+// one-frame 9704 px flash while reporting "arrives at env 0.013" TRUTHFULLY.
+// Its own comment argued a pixel test could not tell an entry flash from a
+// landing flare; that reasoning was wrong and it cost three rounds. Each ball's
+// projected position is knowable and so is the time of its first landing, so a
+// window AT the projection and STRICTLY BEFORE the first landing contains no
+// landing flare by construction.
+// ⭐⭐⭐ THE TRACKING CAMERA, SMOOTHED OFFLINE.
+// The user: "approach versions cameras speed is slow and playhead moves faster
+// out of screen. camera needs to move slower and track position of playhead."
+// The requirement inside that is unambiguous: THE PLAYHEAD MUST NEVER LEAVE
+// FRAME. The old approach take receded at a fixed `rate`, so the performance
+// caught it and walked out of shot -- measured at 35.3 % of frames with bright
+// pixels on the very bottom row.
+//
+// ⛔⛔ AND THIS IS THE TRAP OF THE ROUND. The obvious fix -- a spring or a
+// low-pass on cam.z, updated each frame -- CARRIES STATE ACROSS FRAMES. That
+// breaks the camera as a pure function of t, which breaks framegate's
+// stills-equal-sequence property, which is the evidence the whole
+// performance/camera split rests on. A camera you cannot re-render at an
+// arbitrary t is not a camera track, it is an animation.
+// So the smoothing is done ONCE, OFFLINE, at init: sample the focus position
+// on a fixed grid, box-filter it, keep the array. __camera then just LOOKS IT
+// UP, and stays a pure function of t.
+let trackZ = null, trackX = null, TRK_FPS = 60;
+function buildTrack() {
+  const n = Math.ceil((P.total ?? 16) * TRK_FPS) + 4;
+  const rz = new Float32Array(n), rx = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / TRK_FPS;
+    let best = null;
+    for (let vi = 0; vi < voiceRigs.length; vi++) {
+      // ⛔⛔ ROUND 7b: THE CAMERA MUST NOT CHASE THE FLY-IN. Moving the spawn
+      // start nine units down the road (so the balls stop hovering in the void)
+      // silently MOVED THE CAMERA, because the track is built from the same
+      // ballAt the spawn feeds: the disk-holding time on the `track` take
+      // collapsed 6.20s -> 0.80s and afterglow lost the only camera that could
+      // ask the reach-zero question. Nothing reported the coupling; a gate went
+      // from a verdict to BROKEN and that is the only reason it surfaced.
+      // ⭐ A camera lurching toward a ball that is nine units away and not yet
+      // playing is wrong cinematically as well: the camera follows the
+      // PERFORMANCE, so a spawning voice is not a candidate focus.
+      const b = ballAt(vi, t);
+      if (b && b.live && !b.spawning && (!best || b.env > best.env)) best = b;
+    }
+    // when nothing is playing, fall back to where the ROAD is at time t, so the
+    // track is defined everywhere and never jumps at the first note
+    rz[i] = best ? best.z : -t * P.zps;
+    rx[i] = best ? best.x : 0;
+  }
+  const K = Math.max(1, Math.round((P.look.trackSmooth ?? 0.55) * TRK_FPS));
+  const box = (src) => {
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let a = 0, c = 0;
+      for (let k = -K; k <= K; k++) { const j = Math.min(n - 1, Math.max(0, i + k)); a += src[j]; c++; }
+      out[i] = a / c;
+    }
+    return out;
+  };
+  trackZ = box(rz); trackX = box(rx);
+}
+function trackAt(arr, t) {
+  if (!arr) return 0;
+  const u = Math.min(arr.length - 1, Math.max(0, t * TRK_FPS));
+  const i = Math.floor(u), j = Math.min(arr.length - 1, i + 1), f = u - i;
+  return arr[i] + (arr[j] - arr[i]) * f;
+}
+
+window.__screenPos = (t) => {
+  window.__frame(t);
+  const S = window.__perf(t);
+  const w = W, h = H;
+  return S.voices.map(v => {
+    if (!v.live) return { i: v.i, live: false };
+    const q = new THREE.Vector3(v.x, v.y, v.z).project(cam);
+    return { i: v.i, live: true, spawning: !!v.spawning, env: v.env,
+             // ⭐ ROUND 10: x3/z3 travel with y3 so the entry gate can assert
+             // DIRECTION OF TRAVEL, not just height. Four rounds of entry
+             // defects were each fixed on a value; (D)/(E) assert the shape.
+             y3: v.y, x3: v.x, z3: v.z, onScreen: q.z < 1 && Math.abs(q.x) <= 1 && Math.abs(q.y) <= 1,
+             sx: (q.x + 1) / 2 * w, sy: (1 - q.y) / 2 * h };
+  });
+};
+// ⭐⭐ THE WORLD-SPACE RIBBON GUARD. The screen-space sky box was unusable --
+// its control could not separate the fixed film from the broken one, because on
+// a pulled-back camera that screen region contains road. THE DEFECT WAS NEVER
+// SCREEN-SPACE: it was ribbon geometry sitting high above the ROAD PLANE. This
+// reports the highest point any ribbon reaches, in world units, at time t --
+// camera-independent by construction, and exactly the quantity that was wrong.
+// It accounts for the tube's RADIUS as well as its centreline, because a
+// full-width cap is half a head-radius above its own centre.
+window.__ribbonMaxY = (t) => {
+  window.__frame(t);
+  const S = window.__perf(t);
+  const headR = (P.look.playR ?? (P.NOTE_R * 0.80)) * (P.look.cometHeadK ?? 1.0);
+  const wp = P.look.cometWidthPow ?? 1.30;
+  let mx = -1e9, n = 0;
+  for (const c of (S.comets || [])) {
+    const N = c.pts.length - 1;
+    for (let i = 0; i <= N; i++) {
+      const uAge = c.pts[i].age / c.maxAge;
+      const uIdx = N > 0 ? i / N : 1;
+      const u = P.look.cometTaperAgeOnly === true
+              ? Math.min(1, Math.max(0, uAge))
+              : Math.min(1, Math.max(0, Math.max(uAge, uIdx)));
+      const w = Math.pow(1 - u, wp);
+      mx = Math.max(mx, c.pts[i].p.y + headR * w);
+      n++;
+    }
+  }
+  // ⚠ LENGTH, NOT VERTEX COUNT. A ribbon clamped to zero time-span still has
+  // its full ring count -- the first version of (G2) counted vertices and its
+  // control read 90 against the film's 90, i.e. it could not see the defect at
+  // all. What the eye reads as "no tail" is zero LENGTH along the road.
+  // ⚠ PER VOICE. The first length metric took the MAX ACROSS ALL COMETS, so a
+  // voice with no trail at all read 2.09 -- borrowed from a DIFFERENT voice that
+  // was already playing. Its control read 2.09 against the film's 2.09 and the
+  // gate was blind. Keyed by voice now, so the assertion is about the voice it
+  // names.
+  const len = {};
+  for (const c of (S.comets || [])) {
+    let L = 0;
+    for (let i = 1; i < c.pts.length; i++) L = Math.max(L, c.pts[0].p.distanceTo(c.pts[i].p));
+    len[c.vi] = Math.max(len[c.vi] ?? 0, L);
+  }
+  return { maxY: n ? mx : null, verts: n, len, comets: (S.comets || []).length };
+};
+window.__projectWorld = (x, y, z) => {
+  const q = new THREE.Vector3(x, y, z).project(cam);
+  return { on: q.z < 1 && Math.abs(q.x) <= 1 && Math.abs(q.y) <= 1,
+           sx: (q.x + 1) / 2 * W, sy: (1 - q.y) / 2 * H };
+};
+// the deliberate defect for afterglow.mjs's control: a residual emissive floor
+window.__firstNotes = () => P.voices.map((v, i) => ({ i, t0: v.notes[0].t }));
+window.__camPos = function () { return [cam.position.x, cam.position.y, cam.position.z]; };
+
+window.__project = function (x, y, z) {
+  const v = new THREE.Vector3(x, y, z).project(cam);
+  return { x: (v.x + 1) / 2 * W, y: (1 - (v.y + 1) / 2) * H, behind: v.z >= 1 };
+};
+
+window.__bandScreen = function (r, z) {
+  const rd = (P.roads || [])[r]; if (!rd) return null;
+  const half = rd.halfW ?? 0.5;
+  const out = [];
+  for (const dx of [-half, half]) {
+    const v = new THREE.Vector3(rd.x0 + dx, 0.03, z).project(cam);
+    out.push({ x: (v.x + 1) / 2 * W, y: (1 - (v.y + 1) / 2) * H, behind: v.z >= 1 });
+  }
+  return { x0: Math.min(out[0].x, out[1].x), x1: Math.max(out[0].x, out[1].x),
+           behind: out[0].behind || out[1].behind };
+};
+
+// ⭐⭐⭐ ROUND 5: THE PERFORMANCE AND THE CAMERA ARE TWO LAYERS.
+//
+// The user: "the idea is to play the whole scene in 3d and then we can replay
+// it from different angles or camera moving around while focusing on playing
+// scene and so on."
+//
+//   __perf(t)   THE PERFORMANCE. A pure function of t returning the whole
+//               scene state as plain numbers -- where every playhead disk is,
+//               how bright it is, which notes are glowing and how hard, what
+//               each trail spans, where the drums are in their fall. It does
+//               not read `cam` ANYWHERE. That is the property the whole idea
+//               rests on, and it is gated, not asserted: lib/perfcam.mjs
+//               diffs __perf(t) under two different camera takes and requires
+//               them identical, with __perf(t) vs __perf(t+1/30) as the
+//               control that the diff can tell anything apart at all.
+//
+//   __camera(t, S)  THE CAMERA TAKE. Also a pure function of t. It may READ
+//               the performance's focus point; the performance never reads it.
+//               Takes are DATA (P.takes, selected by P.take), so a re-render
+//               from a new angle is a payload change, not a code change.
+//
+//   __frame(t)  = perf -> camera -> apply -> render. Camera-dependent work
+//               (near-culling, clipping a trail to in front of the lens,
+//               the grade's light position) happens in APPLY, never in perf --
+//               that is exactly the line that keeps take 2 the same performance
+//               as take 1.
+// ⭐⭐⭐ THE BALL'S PATH, AS ONE FUNCTION. Extracted out of __perf so the COMET
+// TAIL can be sampled from the very expression the ball flies along. The old
+// trail was rebuilt from PER-NOTE ARCS -- a second expression of the same
+// curve -- and this file already carries a warning about exactly that kind of
+// pair drifting apart. It also could not satisfy the brief: "there is no end
+// of the tail" is not expressible as a chain of per-arc fades, because every
+// arc JOIN is a discontinuity in width and in brightness.
+// Pure in (vi, t), reads no camera, so perfcam stays valid.
+function ballAt(vi, t) {
+  const rig = voiceRigs[vi];
+  const DEAD = { i: vi, road: rig.road, live: false };
+  const ns = rig.notes;
+  // ⭐⭐ BINARY SEARCH, NOT A SCAN. This line used to walk EVERY note of the
+  // voice on EVERY call, and ballAt is called ~45 times per voice per frame
+  // (the comet samples it backwards). So the per-frame cost was
+  // voices x 45 x notes, and since frames also scale with length the TOTAL cost
+  // was O(N^2) in film length: at 22x the notes and 22x the frames, ~480x the
+  // loop work. The observer measured it at what was then __perf:1524.
+  // ⚠ THE RESULT IS IDENTICAL, NOT APPROXIMATE — same predicate (ns[i].t <= t+1e-6),
+  // same tie-break (the LAST such index), so every frame this produces the k the
+  // scan produced. That is what makes the byte-identical sample check meaningful
+  // as a regression test for it.
+  // ⚠ IT REQUIRES ns SORTED ASCENDING BY t, which __init now ASSERTS rather than
+  // assumes — an unsorted voice would silently give a wrong k here, and a wrong
+  // ball position is not something any gate downstream would call by its name.
+  let k = -1; for (let i = 0; i < ns.length; i++) if (ns[i].t <= t + 1e-6) k = i;
+
+  // ⛔⛔⛔ BALL ENTRY. THIS HAD FAILED TWICE: round 3 "out of nowhere", round
+  // 4 "come out of the notes". The user, on r4: "when playhead reached 3
+  // notes in the row 2 more balls came out of the notes which is wrong. They
+  // should fly in with decreasing speed as they get closer to their
+  // respective note and then continue the usual way."
+  //
+  // The observer measured what it was: a ONE-FRAME POP of 2312 px at
+  // t=8.033 (and ~1000-1200 px at 0.033 / 4.667 / 11.033) -- grp.visible
+  // false to env 1.05 in a single 1/30 s step. No fade, no approach.
+  //
+  // ⭐ THE CONTRACT, so it can be falsified rather than judged:
+  //   (1) a voice whose first note is at t0 is visible from t0 - spawnLead
+  //       (0.75 s = 1.5 beats at 120), so >= 22 frames before it lands;
+  //   (2) it enters from behind and above and DECELERATES;
+  //   (3) its velocity AT t0 equals the arc's launch velocity, so the
+  //       handover into normal flight is invisible; and
+  //   (4) it ARRIVES DIM and ramps up, so entry can never read as a flash.
+  //
+  // (3) is why this is a cubic Hermite and not an ease: Hermite matches
+  // position AND velocity at both ends by construction, so "decelerates into
+  // the note" is a property of the curve rather than a tuning. The launch
+  // velocity is the NUMERICAL DERIVATIVE of the existing flight at t0+eps --
+  // deriving it by hand would be a second expression of the same curve, and
+  // the last two of those drifted apart (see arcPeak).
+  //
+  // ⚠ A VOICE WHOSE FIRST NOTE IS WITHIN spawnLead OF t=0 (this song's first
+  // onset is 0.0175 s) has most of its approach before the film starts. It is
+  // NOT pre-rolled: it enters already close to its note, which reads as
+  // resting on it. Stated rather than hidden.
+  // ⛔⛔⛔ AND IT IS NOT ONLY THE FIRST NOTE. A voice returning after a LONG
+  // REST switched on in place: measured on the shipped file with voice 0's
+  // notes removed for 3 < t < 7 — env 0.0001 dark at t=7.000, then env 1.0531
+  // live at t=7.033. ONE FRAME, 10,500x. That is defect (3) of the five, "a
+  // light hovering stationary in the void", returning at EVERY long rest; a
+  // 12 s sample simply has no rest long enough to show it, and Beethoven's
+  // melody rests fifteen seconds before its first note.
+  // ⭐ THE FIX IS THAT RE-ENTRY AND BIRTH ARE THE SAME EVENT. The approach is
+  // built for ANY target note, and it fires on EXACTLY THE PREDICATE THAT
+  // DARKENED THE VOICE — `gap > arcMaxGap`, the same test that applies the
+  // idle fade. "Faded out on a long gap" and "flies back in" cannot drift
+  // apart, because they are one condition.
+  // ⚠ THE LEAD IS CLAMPED TO THE REST ITSELF: the approach may never begin
+  // before the previous note has been released, so a gap shorter than
+  // spawnLead gets a shorter approach rather than a ball in two places.
+  let spawn = null;
+  {
+    const lead = P.look.spawnLead ?? 0.75;
+    const flightFrom = j => tt => {
+      const kn2 = Math.min(j + 1, ns.length - 1);
+      const g = kn2 === j ? 0 : ns[kn2].t - ns[j].t;
+      const hh = g > 0 ? Math.min(1, Math.max(0, (tt - ns[j].t) / g)) : 0;
+      return new THREE.Vector3(ns[j].x + (ns[kn2].x - ns[j].x) * hh,
+        0.030 + arcPeak(g) * arcShape(hh),
+        -((ns[j].t + (ns[kn2].t - ns[j].t) * hh) * P.zps));
+    };
+    let target = -1, leadUse = lead;
+    if (k < 0) {
+      if (t < ns[0].t - lead) return DEAD;
+      target = 0;
+    } else if (P.look.spawnReentry === true && P.look.spawnReentryOff !== true &&
+               k + 1 < ns.length &&
+               // ⛔⛔⛔ ROUND 15 INVERTS ROUND 13, ON THE USER'S OWN WORDS AND
+               // ABOUT THE EXACT TWO EVENTS THIS BRANCH PRODUCED:
+               //   "starting from 26, one disk on the right side fades and a new
+               //    one shows up and then it happens one more time. Instead it
+               //    should not fade and just keep flying."
+               // Those two are voice 3 (t=30.017) and voice 4 (t=27.875), both on
+               // road 2 — the Bass, the right-hand road. The fly-in was not
+               // mistuned; it was the wrong ANSWER. A voice that already exists
+               // must never die and never be reborn: through a rest its light
+               // STAYS ALIVE and KEEPS TRAVELLING toward its next note.
+               // ⭐ SO THE BRANCH IS OPT-IN NOW (`spawnReentry: true`), AND IT IS
+               // KEPT, not deleted: it is one of the two controls lib/reentry.mjs
+               // needs — `{idleFloor: 0, spawnReentry: true}` reproduces the
+               // round-13 fly-in the user rejected, and the gate must fire on it.
+               // ⚠ BOTH FLAGS TOGETHER, ALWAYS. `spawnReentry` alone against a
+               // live idle floor is a THIRD behaviour, not round 13's: the spawn
+               // env starts at 0 and would SNUFF a light still burning at the
+               // floor. `spawnReentryOff: true` still forces it off, so
+               // reentry-repro.mjs keeps working unchanged.
+               // BIRTH IS UNTOUCHED: the `k < 0` branch above still flies a
+               // voice in from far up the road for its very FIRST note, which is
+               // what Moonlight's Melody does after fifteen seconds of silence,
+               // and entry.mjs still gates it.
+               ns[k + 1].t - ns[k].t > (P.look.arcMaxGap ?? 0.9)) {
+      // ⭐⭐ THE PREDICATE IS DERIVED FROM THE FADE, NOT PICKED. The idle fade
+      // is env *= exp(-(t-noteEnd)/idleFade) starting from env's 0.60 floor, so
+      // it crosses live (0.01) after exactly idleFade*ln(60) = 1.84 s. A voice
+      // flies back in IF AND ONLY IF that fade had time to put it out.
+      // ⚠ THIS MATTERS, IT IS NOT PEDANTRY: gating on `gap > arcMaxGap` alone
+      // would have fired a 0.2 s fly-in between Moonlight's held bass octaves,
+      // which never go dark — a teleport-and-approach on a light the viewer can
+      // still see. 59 gaps in that payload clear arcMaxGap; far fewer go dark.
+      // ⚠⚠ AND THE APPROACH MAY NOT START UNTIL THE FADE HAS FINISHED. A first
+      // cut used leadEff = min(lead, rest), which begins the fly-in at the
+      // note-off — and the spawn env starts at ZERO, so it SNUFFED a light that
+      // was still burning at 0.60. Caught by reentry.mjs on Moonlight: "first
+      // live t=27.418 env 0.6000 spawning=false", the voice still lit where the
+      // gate expected darkness. THE REST IS PARTITIONED: the fade owns DARK,
+      // the fly-in owns whatever is left, capped at spawnLead.
+      const DARK = (P.look.idleFade ?? 0.45) * Math.log(0.60 / 0.01);
+      const restStart = ns[k].t + ns[k].dur;
+      const rest = ns[k + 1].t - restStart;
+      const leadEff = Math.min(lead, rest - DARK);
+      if (leadEff > 0 && t >= ns[k + 1].t - leadEff) { target = k + 1; leadUse = leadEff; }
+    }
+    if (target >= 0) {
+    const t0 = ns[target].t;
+    const flight = flightFrom(target);
+    const lead2 = leadUse;
+    const eps = 1 / 120;
+    const p1 = flight(t0);
+    const v1 = flight(t0 + eps).sub(p1).multiplyScalar(1 / eps);
+    const p0 = p1.clone().add(new THREE.Vector3(
+      (P.look.spawnDx ?? 0.22), (P.look.spawnUp ?? 1.45), (P.look.spawnBack ?? 3.1)));
+    const m0 = p1.clone().sub(p0).multiplyScalar(P.look.spawnV0 ?? 1.75);
+    const m1 = v1.multiplyScalar(lead2);
+    // ⛔⛔⛔ AND THE CURVE WENT UNDER THE PAPER. This is the OTHER half of
+    // "2 more balls came out of the notes", and it is occlusion by the
+    // sheet, not culling: the observer traced v1's spawn dipping to
+    // y = -0.08 and back, measuring 2025 px at its own projected position at
+    // t=7.767, then ZERO for six consecutive frames, then 1375 px as it
+    // re-emerged at t=8.000 -- its note is at t=8.018. Four of five voices
+    // dipped; voice 3, which never goes below y=+0.03, is the clean control.
+    //
+    // MECHANISM: h11 = u^3 - u^2 is NEGATIVE for every u in (0,1), reaching
+    // -0.148 at u=2/3. m1.y is strongly POSITIVE (the flight is climbing out
+    // of the note at t0), so h11*m1.y SUBTRACTS from y through the whole
+    // middle of the approach, and p1.y is only 0.030 to begin with.
+    //
+    // FIX: limit the VERTICAL tangents until the cubic cannot undershoot.
+    // As the scale goes to 0 the y curve degenerates to h00*p0y + h01*p1y,
+    // which is monotone between two points that are both above the floor --
+    // so a solution always exists and bisection always finds it. x and z are
+    // untouched, so the horizontal velocity match that makes the handover
+    // invisible is exactly preserved.
+    // ⚠ WHAT THIS COSTS, STATED: contract item (3) is now "velocity matched
+    // in x and z; vertical limited to stay above the paper". When the limiter
+    // bites, y is C0 at the handover rather than C1.
+    const FLOOR = P.look.spawnFloor ?? 0.030;
+    const ycurve = (uu, sc) => {
+      const a2 = uu*uu, a3 = a2*uu;
+      return (2*a3 - 3*a2 + 1)*p0.y + (a3 - 2*a2 + uu)*m0.y*sc
+           + (-2*a3 + 3*a2)*p1.y + (a3 - a2)*m1.y*sc;
+    };
+    const ymin = sc => { let m = Infinity;
+      for (let q = 0; q <= 32; q++) m = Math.min(m, ycurve(q/32, sc)); return m; };
+    let ys = 1;
+    if (P.look.spawnFloorOff !== true && ymin(1) < FLOOR) {
+      let lo = 0, hi = 1;
+      for (let q = 0; q < 24; q++) { const mid = (lo+hi)/2; if (ymin(mid) >= FLOOR) lo = mid; else hi = mid; }
+      ys = lo;
+    }
+    const u = Math.min(1, Math.max(0, (t - (t0 - lead2)) / lead2));
+    const u2 = u * u, u3 = u2 * u;
+    const h00 = 2*u3 - 3*u2 + 1, h10 = u3 - 2*u2 + u, h01 = -2*u3 + 3*u2, h11 = u3 - u2;
+    const sy = h00*p0.y + h10*m0.y*ys + h01*p1.y + h11*m1.y*ys;
+    spawn = { x: h00*p0.x + h10*m0.x + h01*p1.x + h11*m1.x,
+              // the backstop. The bisection above should make it unnecessary;
+              // it is here so that "never below the paper" is true by
+              // construction and not by trusting a search to converge.
+              y: P.look.spawnFloorOff === true ? sy : Math.max(FLOOR, sy),
+              z: h00*p0.z + h10*m0.z + h01*p1.z + h11*m1.z,
+              env: (P.look.spawnEnv ?? 0.42) * u * u };
+    k = target;
+    }
+  }
+  const kn = Math.min(k + 1, ns.length - 1);
+  // LINEAR in t -- constant speed along the road. Any easing here would be an
+  // acceleration, which is exactly what the user asked to remove.
+  const gap = kn === k ? 0 : ns[kn].t - ns[k].t;
+  const h = gap > 0 ? Math.min(1, Math.max(0, (t - ns[k].t) / gap)) : 0;
+  let x = ns[k].x + (ns[kn].x - ns[k].x) * h;
+  // ⭐ THROUGH A LONG REST THE LIGHT COASTS LOW ALONG ITS LANE INSTEAD OF
+  // ARCING. The arc is a BOUNCE off a notehead, and across a 4.3 s rest there is
+  // nothing to bounce on: arcPeak clamps at gap 1.5 s, so the ball would rise
+  // 0.244 and hang there for four seconds — which is "a light hovering", the
+  // very reading the user rejected. A flat coast is continuous by construction
+  // at both ends, because arcShape(0) = arcShape(1) = 0, so the lane height at
+  // the note it leaves and the note it lands on is unchanged.
+  // ⚠ KEYED ON THE SAME PREDICATE AS THE DARK REST ITSELF (gap > arcMaxGap AND
+  // rest > DARK), NOT ON gap ALONE. Keying on gap would have flattened 20 arcs
+  // in the APPROVED tuning sample (its 1.0 s gaps are held notes with rest 0)
+  // and 57 in Moonlight — measured before the edit, which is why it is written
+  // this way.
+  const longRest = kn !== k && gap > (P.look.arcMaxGap ?? 0.9) &&
+    (ns[kn].t - (ns[k].t + ns[k].dur)) > (P.look.idleFade ?? 0.45) * Math.log(0.60 / 0.01);
+  let y = 0.030 + (longRest ? 0 : arcPeak(gap) * arcShape(h));
+  let z = -((ns[k].t + (ns[kn].t - ns[k].t) * h) * P.zps);
+  const age = t - ns[k].t;
+  let env = 0.60 + 0.55 * Math.exp(-age / 0.16) * (0.5 + 0.5 * ns[k].vel);
+  const done = t - (ns[ns.length-1].t + ns[ns.length-1].dur);
+  if (kn === k && done > 0) env *= Math.max(0, Math.exp(-done / 1.1));
+  // ⛔ A VOICE THAT IS NOT PLAYING MUST NOT STAY LIT. env has a floor of 0.60,
+  // so an idle voice sat at 60 % power parked on its last note.
+  const gapNext = kn === k ? Infinity : ns[kn].t - ns[k].t;
+  const noteEnd = ns[k].t + ns[k].dur;
+  if (gapNext > (P.look.arcMaxGap ?? 0.9) && t > noteEnd) {
+    const dec = Math.exp(-(t - noteEnd) / (P.look.idleFade ?? 0.45));
+    // ⭐⭐ THE FADE DIMS; IT NO LONGER PUTS THE LIGHT OUT. A voice that has
+    // already had a note stays lit through every rest — that is the round-15
+    // rule, and this clamp is the whole of it.
+    // ⭐⭐ THE FLOOR IS NOT PICKED, IT IS SOLVED — against the film's own strikes.
+    // Moonlight's arpeggio already dips to 0.1227 between every pair of notes
+    // (a level the user has watched for 36 s and never called invisible), and
+    // striking out of THAT is the brightest ordinary strike in the film, 7.4x.
+    // A rest floor BELOW it therefore makes the return from a rest a bigger jump
+    // than any ordinary note — measured: at 0.10 the return read 9.4x against an
+    // ordinary maximum of 7.4x, and reentry.mjs (R4) FAILED it. 0.13 sits just
+    // above that dip, so the return IS an ordinary strike.
+    // ⚠ AND IT IS 13x THE 0.01 LIVE THRESHOLD, so the light is never near going
+    // out — against the 10,500x switch-on-in-place the observer measured from
+    // darkness, which is what this whole clamp exists to remove.
+    // ⭐ THE APPROVED TUNING SAMPLE CANNOT MOVE AT THIS VALUE, and that was
+    // checked BEFORE the edit rather than discovered after it: its 11 fading gaps
+    // bottom out at 0.4804, far above the clamp, so max() returns them unchanged.
+    // ⚠ `idleFloor: 0` REPRODUCES THE OLD EXTINGUISHING FADE EXACTLY — it is a
+    // control, not a dead knob (max(0, x) === x for x >= 0).
+    // ⛔ THE LAST NOTE IS NOT A REST. gapNext is Infinity only when there is no
+    // next note, i.e. the voice's part is OVER, and a part that has finished is
+    // allowed to fade out — the `done` decay above owns the end of the film.
+    // ⚠ IN A 90 s FILM THAT MEANS A VOICE FINISHING AT t=30 GOES OUT AT t=30.
+    // Chosen, not assumed: "toward its next note" says nothing about a voice
+    // that has no next note.
+    if (kn !== k) env = Math.max(P.look.idleFloor ?? 0.13, env * dec);
+    else env *= dec;
+  }
+  if (spawn) { x = spawn.x; y = spawn.y; z = spawn.z; env = spawn.env; }
+  return { i: vi, road: rig.road, x, y, z, env, live: env > 0.01,
+           spawning: !!spawn };
+}
+
+// ⭐ THE SCALING RUN'S INSTRUMENT. Object and pool counts, read from the LIVE
+// scene rather than inferred from the payload — the whole point of the scaling
+// question is whether something grows that nobody meant to grow, and a number
+// derived from the payload cannot see that. Read-only; touches nothing.
+window.__stats = function () {
+  let objs = 0, geos = 0, verts = 0;
+  scene.traverse(o => { objs++;
+    if (o.geometry) { geos++;
+      const pa = o.geometry.getAttribute && o.geometry.getAttribute('position');
+      if (pa) verts += pa.count * (o.isInstancedMesh ? (o.count || 1) : 1); } });
+  const vis = [];
+  scene.traverse(o => { if (o.visible === false) return; if (o.isMesh) vis.push(o); });
+  return { pool: strikePool.length, objects: objs, geometries: geos,
+           vertices: verts, visibleMeshes: vis.length,
+           sheetChildren: sheet ? sheet.children.length : -1,
+           labels: labelMeshes.length,
+           mem: (performance.memory && performance.memory.usedJSHeapSize) || -1 };
+};
+
+window.__perf = function (t) {
+  const S = { t, voices: [], drums: [], strikes: [], arcs: [], comets: [], focusX: 0, focusZ: 0 };
+
+  // ⭐ SHARE ONE LIGHT BUDGET ACROSS SOUNDING VOICES. Four independent lamps at
+  // full power turned a four-note chord into a white sheet -- measured on the
+  // 9.6 s still. Dividing by sqrt(n) keeps a single light as punchy as it was
+  // and stops a chord from clipping.
+  let nOn = 0;
+  voiceRigs.forEach(rig => {
+    const ns = rig.notes;
+    if (ns.length && ns[0].t <= t + 1e-6 &&
+        t <= ns[ns.length-1].t + ns[ns.length-1].dur + 1.1) nOn++;
+  });
+  S.share = 1 / Math.sqrt(Math.max(1, nOn));
+
+  voiceRigs.forEach((rig, vi) => {
+    const ns = rig.notes;
+    const bp = ballAt(vi, t);
+    S.voices.push(bp);
+
+    // ---- THE COMET, sampled backwards along the ball's OWN path -----------
+    // ⛔⛔ THE OLD TRAIL WAS A CHAIN OF PER-NOTE ARCS AND IT COULD NOT BE WHAT
+    // THE USER ASKED FOR. Their words: "they need to be like comets out with
+    // thick tails coming out of disk (disk size) and narrowing to the end of
+    // the tail and there is no end of the tail, lines."
+    // Three properties, and the arc chain failed all three:
+    //   - WIDTH AT THE HEAD = THE DISK'S OWN DIAMETER. arcR was a fixed 0.011,
+    //     unrelated to playR, so the tail was a thread leaving a disk.
+    //   - MONOTONE NARROWING. Every arc JOIN restarted the taper at full width,
+    //     so the trail was a string of tapered sausages, not one comet.
+    //   - NO END. The oldest ribbon was retired by arcHistory at fade 0.181
+    //     (melody) / 0.290 (bass) -- a terminating stub at 18-29 % brightness.
+    //     ⚠ RAISING arcHistory DOES NOT FIX THIS, it moves the stub further
+    //     back; the tail has to REACH zero width and zero alpha on its own.
+    // Sampling ballAt backwards gives all three by construction: one strip,
+    // width and alpha are functions of AGE alone, and both hit exactly 0 at
+    // maxAge, so the geometry ends where it is already invisible.
+    {
+      // ⛔⛔⛔ ROUND 7 BLOCKER 1 -- THE COMET WAS DRAWING THE SPAWN ARC.
+      // In every r9 cut, two thick cream tubes hang in the BLACK SKY above the
+      // road in the t=7.5-8.4 s window, detached from everything and ending in
+      // a flat chamfered cap. They are this ribbon, faithfully tracing the
+      // ball's fly-in arc up out of the frame.
+      // ⭐ THE COMET IS THE RECORD OF A PLAYHEAD TRAVELLING THE ROAD, NOT OF IT
+      // ARRIVING AT THE ROAD. So: no ribbon at all while the voice is spawning,
+      // and the sample window is clamped so it can never reach back past the
+      // voice's FIRST LANDING however long cometAge is.
+      // ⚠ Shortening the tail would NOT have fixed this -- it would have left a
+      // shorter tube in the same empty sky.
+      const maxAgeCfg = P.look.cometAge ?? 1.15;
+      const t0v = (P.voices[vi] && P.voices[vi].notes && P.voices[vi].notes.length)
+                ? P.voices[vi].notes[0].t : -1e9;
+      // ⛔⛔⛔ THIS CLAMP WAS THE "NO TAILS ON THE FLY-IN" DEFECT, AND IT
+      // SURVIVED THE FIX THAT WAS SUPPOSED TO REMOVE IT. Round 7's sky-tube fix
+      // had TWO parts: (1) no ribbon while spawning, (2) clamp the sample window
+      // to the voice's FIRST LANDING. Round 11 reverted (1) and left (2) — and
+      // with (2) in place `t - t0v` is NEGATIVE for the whole approach, so
+      // maxAge collapsed to 1e-6 and there was nothing to draw until the ball
+      // bounced. The user saw exactly that, twice: "still has no tails when they
+      // fly in, then once they bounce they got the tails."
+      // ⭐ THE SYMPTOM NAMED THE CAUSE — the tail appearing precisely AT the
+      // first bounce is what a first-landing clamp looks like from the outside.
+      // ⭐ The window now reaches back to the SPAWN START (t0v - spawnLead), so
+      // the trail exists for the whole visible approach.
+      // ⚠ SAFE ONLY BECAUSE OF TWO OTHER PROPERTIES, both load-bearing: the
+      // spawn path now runs ALONG the lane (round 10) rather than arcing into
+      // the sky, and the taper is index-clamped so a newborn ribbon reaches
+      // exactly zero width at its oldest sample. entry.mjs (G) is the
+      // WORLD-SPACE guard that holds both honest.
+      const leadV = P.look.spawnLead ?? 0.75;
+      // ⚠ `cometClampToLanding` RESTORES THE BUG ON PURPOSE: it is (G2)'s control.
+      const maxAge = P.look.cometClampToLanding === true
+                   ? Math.max(1e-6, Math.min(maxAgeCfg, t - t0v))
+                   : Math.max(1e-6, Math.min(maxAgeCfg, t - (t0v - leadV)));
+      const N = P.look.cometSegs ?? 44;
+      const pts = [];
+      // ⛔⛔ ROUND 7 BLOCKER 2 -- DUPLICATE POINTS KILLED THE WHOLE RIBBON.
+      // Comet contribution went to EXACTLY ZERO pixels at t=11.100 in all ten
+      // r9 cuts -- a one-frame disappearance, not a retraction, worth a 14-30
+      // luma step in the whole-frame mean. The balls park at t=11.018, so from
+      // then on ballAt returns the SAME position for successive ages; the
+      // duplicate-point count runs 0 / 1 / 3 / 37 at t = 11.033 / 11.067 /
+      // 11.100 / 12.000. A CatmullRomCurve3 through coincident points has no
+      // defined tangent, and TubeGeometry emits NaN vertices -- the mesh exists,
+      // the state looks perfect, and nothing draws.
+      // ⭐ Dropping coincident samples fixes it AND gives the behaviour that was
+      // wanted anyway: as the ball parks the distinct samples collapse toward
+      // one, so the ribbon RETRACTS over cometAge instead of blinking out.
+      const MINSEP = 1e-4;
+      for (let q = 0; q <= N; q++) {
+        const age = (q / N) * maxAge;
+        const bb = ballAt(vi, t - age);
+        if (!bb || bb.live === false || bb.x === undefined) break;
+        const v3 = new THREE.Vector3(bb.x, bb.y, bb.z);
+        if (pts.length && v3.distanceTo(pts[pts.length - 1].p) < MINSEP) continue;
+        pts.push({ p: v3, age });
+      }
+      // ⛔⛔ THE COMET MUST FADE IN WITH ITS BALL. Caught by the new entry gate
+      // on the first run after the comet landed: voice 3's pop-step went from
+      // 3511 back up to 18793, because the ball's env was correctly ramping
+      // from zero while its TAIL was drawn at full brightness from the first
+      // frame. That is the entry pop again, in a new place -- the same shape as
+      // the original defect (a brightness that ignores env), which is exactly
+      // why the gate is a pixel gate and not a state gate.
+      // ⚠ THE TAIL COMES UP AHEAD OF THE BALL, ON PURPOSE. With a linear envK
+      // the ball and its comet crossed the visibility threshold in the SAME
+      // frame and the two areas appeared together -- voice 3's pop-step went to
+      // 18199 px, close to the --nofade control's own 23405. A gentler exponent
+      // lifts the tail out of the dark first, so the entry reads as something
+      // arriving rather than switching on.
+      const envK = Math.pow(Math.min(1, (bp.env ?? 1) / (P.look.glowRef ?? 0.55)),
+                            P.look.cometEnvPow ?? 0.55);
+      // ⭐⭐ ROUND 11: THE TAIL IS BACK ON THE FLY-IN, and the condition that
+      // made suppression necessary no longer holds. Round 7 suppressed the
+      // ribbon while spawning because it was tracing the fly-in arc UP INTO THE
+      // SKY and ending in a flat full-width octagonal cap. Round 10 moved the
+      // spawn so the ball arrives from far up the road ALONG the lane, so a
+      // trail behind it runs along the road and cannot rise into the sky; and
+      // the taper is now u = max(age/maxAge, i/N), so width and alpha reach
+      // EXACTLY ZERO at the ribbon oldest sample whatever its age -- a newborn
+      // ribbon cannot present a full-width end in any take.
+      // ⚠ BOTH of those are load-bearing. If either is undone this defect comes
+      // straight back, which is why entry.mjs (F) now measures the SKY BOX that
+      // caught it: x>1305,y<302 read 104,596 px in r9 and must stay at 0.
+      if (pts.length >= 3 && envK > 0.001)
+        S.comets.push({ vi, road: rig.road, pts, maxAge, envK });
+    }
+  });
+
+  // ---- percussion: FALL, strike, bounce back up, vanish -------------------
+  // ⭐⭐ THIS IS THE WANTED BEHAVIOUR, NOT AN UNFIXED ONE. The user: "drums/kick
+  // are pefect!". The observer measured it (straight down, world x and z
+  // constant, strike at y=0.05, bounce to ~0.25, gone by +0.75 s) and filed it
+  // as a defect; it is not one. Do not "fix" it, and do not fold it into the
+  // spawn contract above -- that is for the PITCHED voices only.
+  // ---- percussion: WAIT IN THE HOLE, LEAP OUT ON THE BEAT, FALL BACK IN ----
+  // ⛔⛔ REVERSED FROM ROUND 5, ON THE USER'S OWN WORDS: "drums should be holes
+  // and light disks should jump out of them on beat." Round 5 recorded the
+  // straight-down fall as WANTED (their earlier "drums/kick are pefect!") and
+  // instructed the next observer not to re-file it. That record is SUPERSEDED,
+  // not correct. The road now has a real opening at every hit (see __init) and
+  // the disk lives below it until its beat.
+  const G = P.drumGravity;
+  const HD = P.look.holeDepth ?? 0.42;
+  drumRigs.forEach((r, di) => {
+    const rel = t - r.d.t;
+    if (rel < -0.55 || rel > 0.95) { S.drums.push({ i: di, road: r.road, live: false }); return; }
+    let y, al;
+    if (rel < 0) {
+      // waiting, down in the hole: a faint ember visible THROUGH the opening,
+      // so the hole is not a dead black circle between hits
+      y = -HD * (P.look.drumRestK ?? 0.55);
+      al = (P.look.drumRestGlow ?? 0.22) * Math.min(1, (rel + 0.55) / 0.30);
+    } else {
+      // the leap. Unclamped on the way down ON PURPOSE: the parabola carries it
+      // back below y=0 and it disappears into the hole it came out of, which is
+      // what makes the opening read as the thing it came from.
+      const v0 = (P.look.drumLeap ?? 0.72) * G * (0.45 + 0.55 * r.d.vel);
+      y = v0 * rel - 0.5 * G * rel * rel;
+      al = Math.exp(-rel / (P.look.drumFade ?? 0.34));
+    }
+    const k = (rel >= 0 ? 1.6 : 0.7) * al * (0.5 + 0.5 * r.d.vel);
+    S.drums.push({ i: di, road: r.road, live: k > 0.004,
+                   x: r.d.lane, y, z: -r.d.t * P.zps, k, below: y < 0 });
+  });
+
+  // ---- TERM 2: RESIDUAL EMISSION -- the struck note's OWN glow -------------
+  // TERM 1 is ILLUMINATION: the moving disk is a real PointLight, it falls off
+  // with distance, it sums across voices, it vanishes when the disk leaves.
+  // TERM 2 is this: the note's own emissive, triggered at the strike, decaying
+  // on its own clock, owing nothing to where the disk went. It is why the road
+  // BEHIND the playhead reads as recently-played music instead of darkness.
+  // ⚠ NEVER BUY TERM 2 BY INFLATING TERM 1. Widening lightDist to make old
+  // notes glow lights the whole sheet and undoes the lit-fraction work.
+  {
+    const tau = P.look.afterDecay ?? 1.6;
+    const fl = P.look.afterFlash ?? 0.0, flTau = P.look.afterFlashTau ?? 0.10;
+    // ⭐⭐ WINDOWED, AND THE WINDOW IS DERIVED FROM THE DECAY ITSELF. This loop
+    // walked EVERY note in the film on EVERY frame and then sorted them — the
+    // second half of the O(N^2). But `a` is a sum of two DECAYING exponentials,
+    // so it is monotone in age: a note is above `afterCut` if and only if it is
+    // younger than a fixed window, and that window does not grow with the film.
+    //     a(age) = exp(-age/tau) + fl*exp(-age/flTau) <= (1+fl)*exp(-age/tau)
+    // so age > tau*ln((1+fl)/cut) guarantees a <= cut. Conservative by
+    // construction (the flash term only ever ADDS), so the set this produces is
+    // EXACTLY the set the full walk produced — nothing is dropped that was lit.
+    // ⚠ afterFloor > 0 means every note stays lit forever by design; then there
+    // is no window and the full walk is the correct behaviour. Kept.
+    const AGEMAX = (P.look.afterFloor ?? 0) > 0 ? Infinity
+                 : tau * Math.log((1 + fl) / Math.max(1e-9, P.look.afterCut ?? 0.004));
+    const lit = [];
+    for (const v of P.voices) {
+    // ⚠ ITERATION ORDER IS PRESERVED — voice by voice, note by note, exactly as
+    // the full walk did — because the sort below is only stable-equal to the old
+    // one if the input order of the surviving elements is the same.
+    for (let ni = 0; ni < v.notes.length; ni++) {
+      const n = v.notes[ni];
+      if (n.t > t + 1e-6) continue;
+      if (P.look.onlyRoad != null && (v.road ?? 0) !== P.look.onlyRoad) continue;
+      const a = Math.exp(-(t - n.t) / tau) + fl * Math.exp(-(t - n.t) / flTau);
+      // ⚠ the cutoff at which a disk leaves the pool. It must be low enough
+      // that the disk it uncovers -- an identical unstruck head -- is
+      // indistinguishable, or the census itself becomes a visible snap.
+      if (a > (P.look.afterCut ?? 0.004) || (P.look.afterFloor ?? 0) > 0) lit.push({ x: n.x, z: -n.t * P.zps, a });
+    } }
+    lit.sort((p, q) => q.a - p.a);
+    S.strikes = lit.slice(0, strikePool.length);
+  }
+
+  // the focus point the CAMERA may read -- the brightest live playhead
+  let best = null;
+  for (const v of S.voices) if (v.live && (!best || v.env > best.env)) best = v;
+  if (best) { S.focusX = best.x; S.focusZ = best.z; }
+  return S;
+};
+
+// ⭐ CAMERA TAKES ARE DATA. P.takes maps a name to either an array of framing
+// keyframes (the original shape) or {kind:'approach', ...}. P.take names the
+// active one and defaults to 'default', so nothing regresses.
+window.__camera = function (t, S) {
+  // camera road position: the road IS the timeline (z = -t*zps), so a camera
+  // that advances LINEARLY IN t moves at exactly constant speed and always sits
+  // on the sounding position. It must COAST TO A STOP when the music does --
+  // with tc = t flat the camera kept driving into blank road (measured on the
+  // 12.90 s still). This decays the SPEED, so value and velocity are both
+  // continuous at the last onset and there is no lurch.
+  // ⚠⚠ THE CLOCK COMES FROM THE PAYLOAD, NOT FROM P.voices -- an isolation
+  // render that removes voices must not also move the camera.
+  const uniq = (P.onsets && P.onsets.length)
+    ? P.onsets
+    : (() => { const o = P.voices.flatMap(v => v.notes.map(n => n.t)).sort((a,b)=>a-b);
+               return o.filter((v,i) => i === 0 || v - o[i-1] > 1e-4); })();
+  let gi = 0; for (let k = 0; k < uniq.length; k++) if (uniq[k] <= t + 1e-6) gi = k;
+  const mx = new Map();
+  for (const v of P.voices) for (const n of v.notes) {
+    const key = Math.round(n.t * 1e4);
+    const e = mx.get(key) || { s: 0, c: 0 }; e.s += n.x; e.c++; mx.set(key, e);
+  }
+  const tLast = uniq[uniq.length - 1];
+  const coast = P.look.coastTau ?? 0.8;
+  const tc = t <= tLast ? t : tLast + coast * (1 - Math.exp(-(t - tLast) / coast));
+  const zc = -tc * P.zps;
+
+  const takeName = P.look.take ?? P.take ?? 'default';
+  const take = (P.takes && P.takes[takeName]) || null;
+
+  takeCull = (take && take.cullNear != null) ? take.cullNear : null;
+
+  // ⭐⭐⭐ THE SIDE-CROSSING TAKE (round 7). The user: "a variant with camera
+  // view tracking playheads on the side, going with them and then fly over to
+  // the other side and tracking from there".
+  // The camera rides ALONGSIDE the tracked playhead at road level, then arcs
+  // OVER the road to the opposite side and keeps riding. It is one continuous
+  // move, not a cut, because the crossing is a single smoothstep in t.
+  // ⭐ IT CANNOT LOSE THE SUBJECT, BY CONSTRUCTION: the position tracks the
+  // smoothed playhead z and the camera LOOKS AT that playhead every frame. The
+  // fixed-rate recede that framing.mjs fails at 75.9 % had neither property.
+  // ⭐ AND IT IS STILL A PURE FUNCTION OF t -- trackZ/trackX are sampled and
+  // box-filtered ONCE at init, so a cold __frame(9.4) equals the same instant
+  // reached by playing from 0, and perfcam/stills-equal-sequence survive.
+  // ⚠ THE CROSSING MOMENT IS NOT GUESSED. Measured off this payload: the
+  // largest inter-onset gap in the piece is 1.000 s and it begins at t=8.0175,
+  // which is also a HEAVY bar line (P.bars[4]). So the move starts on a phrase
+  // boundary and spends its whole length in the sparsest passage, never
+  // mid-flurry.
+  // ⭐⭐⭐ SEGMENTED CAMERA TRACK — the prototype for the long piece.
+  // The user asked for the fly-over to LAND somewhere different: "maybe as it
+  // flies over it should not take the same side position and maybe move a little
+  // behind like in short." A mirror-image crossing ends where it began; a
+  // JOURNEY ends in a different KIND of shot.
+  // ⭐ SO THE TAKE IS A LIST OF TYPED SHOTS, NOT A BESPOKE MOVE. Each shot type
+  // is a pure function (t) -> POSE {pos, aim, fov}; the track BLENDS POSES with
+  // a smoothstep across a transition window. Adding a shot type is adding one
+  // case; adding a segment is adding one array entry. That is the data model the
+  // choreographed long track needs, and this take is its working test.
+  // ⚠ POSES, NOT PARAMETERS. Interpolating h/pitch/yaw between two different
+  // shot TYPES is meaningless -- they do not parameterise the same way. Position
+  // and aim point are the common currency, and lerping them is a real camera
+  // move.
+  // ⚠ STILL A PURE FUNCTION OF t: trackZ/trackX are sampled and box-filtered
+  // once at init, and the blend reads only t. perfcam and stills-equal-sequence
+  // both survive, which is the whole reason the split exists.
+  if (take && (take.kind === 'side' || take.kind === 'seq')) {
+    const fz = trackAt(trackZ, t), fx = trackAt(trackX, t);
+    const segs = take.segments || [
+      // ⭐ ROUND 11: the START pose reads look-level overrides so it can be
+      // laddered without a take per rung. LAND is untouched by design.
+      { type: 'side',    side: (take.startSide ?? 1) * (P.look.sideDist ?? take.side ?? 4.2),
+                         h: P.look.sideH ?? take.h ?? 1.23,
+        // ⭐ ROUND 11b: `lead` is the START pose's +z offset -- how far BEHIND the
+        // playheads it sits. User: "kind of the same position like in shorts but
+        // to the right side". The Short's camera sits back 4.35; the side take
+        // sat at +0.35. So the Short is the UPPER bound and the old side the
+        // LOWER, and sideBack lands between them. Aim is unchanged and already
+        // tracks (fx, fz - aimAhead), so lateral position and aim move TOGETHER
+        // by construction -- the roadpix failure cannot recur here.
+        lead: P.look.sideBack ?? take.lead ?? 0.35,
+        aimAhead: P.look.sideAhead ?? take.aimAhead ?? 1.4, fov: P.look.sideFov ?? take.fov ?? 58 },
+      // ⭐ THE LANDING SHOT: three-quarter, off to the LEFT and a little BEHIND.
+      // "Behind" is +z, because the flow is toward -z -- so the playheads sit in
+      // the forward part of the frame with road visible ahead of them, which is
+      // what the user asked for and what the Short's camera does.
+      // ⚠ NOT a chase view: qx keeps real lateral offset so the side character
+      // that made the take interesting survives the landing.
+      { type: 'quarter', qx: take.qx ?? -2.35, h: take.qh ?? 1.55,
+        back: take.qback ?? 2.6, aimAhead: take.qAhead ?? 2.2, fov: take.qfov ?? 52 }
+    ];
+    const pose = (sg) => {
+      if (sg.type === 'quarter') {
+        return { pos: new THREE.Vector3(sg.qx, sg.h, fz + sg.back),
+                 aim: new THREE.Vector3(fx * (take.followX ?? 1.0), take.aimY ?? 0.06, fz - sg.aimAhead),
+                 fov: sg.fov };
+      }
+      return { pos: new THREE.Vector3(sg.side, sg.h, fz + sg.lead),
+               aim: new THREE.Vector3(fx * (take.followX ?? 1.0), take.aimY ?? 0.06, fz - sg.aimAhead),
+               fov: sg.fov };
+    };
+    // ⚠ THE TRANSITION MOMENT IS MEASURED, NOT CHOSEN: t=8.0175 is the largest
+    // inter-onset gap in this piece (1.000 s) and a heavy bar line. The long
+    // track must place every transition the same way.
+    const c0 = take.crossT ?? 8.0175, cd = take.crossDur ?? 1.6;
+    const u  = Math.min(1, Math.max(0, (t - c0) / cd));
+    const e  = u * u * (3 - 2 * u);          // smoothstep: value and slope continuous
+    const A = pose(segs[0]), B = pose(segs[Math.min(1, segs.length - 1)]);
+    const pos = A.pos.clone().lerp(B.pos, e);
+    const aim = A.aim.clone().lerp(B.aim, e);
+    // it FLIES OVER rather than sliding across: the lift peaks at the halfway
+    // point, where the camera is over the centre of the road.
+    pos.y += (take.crossLift ?? 2.10) * Math.sin(Math.PI * e);
+    cam.fov = A.fov + (B.fov - A.fov) * e; cam.updateProjectionMatrix();
+    cam.position.copy(pos);
+    cam.lookAt(aim);
+    return;
+  }
+
+  if (take && take.kind === 'approach') {
+    // ⭐⭐ THE REVERSE ANGLE. The user: "even go in front and show how the
+    // playing disks approach as we move camera back." The camera sits AHEAD of
+    // the playhead on the road, faces back down it, and retreats.
+    // ⚠ THE RETREAT RATE IS THE WHOLE SHOT, so it is a payload number and not a
+    // constant: at rate == zps the gap is fixed and the frame is static and
+    // dead; below zps the disks close on the lens, grow, and eventually pass
+    // it. Which of those reads better is the user's call, so it is laddered.
+    // ⭐ TRACKING, when the take asks for it. Instead of receding at a fixed
+    // rate and hoping, the camera sits a fixed GAP ahead of the SMOOTHED
+    // playhead position -- so the subject cannot outrun it, whatever the music
+    // does. The old fixed-rate form is kept below and is the gate's control:
+    // it is the thing that was measured leaving frame.
+    let camZ, camX;
+    if (take.track) {
+      const fz = trackAt(trackZ, t), fx = trackAt(trackX, t);
+      const gap = take.gap ?? 1.9;
+      camZ = fz - gap;
+      camX = (take.x ?? 0) + fx * (take.followX ?? 0.35);
+    } else {
+      const rate = take.rate ?? (P.zps * 0.72);
+      const g0 = take.gap0 ?? 2.6;
+      const gap = Math.max(take.gapMin ?? 0.55, g0 - (P.zps - rate) * t);
+      camZ = zc - gap;
+      camX = (take.x ?? 0) + (S ? S.focusX * (take.followX ?? 0.35) : 0);
+    }
+    cam.fov = take.fov ?? 46; cam.updateProjectionMatrix();
+    cam.position.set(camX, take.h ?? 1.30, camZ);
+    const pr = (take.pitch ?? -13) * Math.PI / 180;
+    // facing BACK down the road: +z
+    const dir = new THREE.Vector3(Math.sin((take.yaw ?? 0) * Math.PI / 180),
+                                  Math.sin(pr), Math.cos(pr));
+    cam.lookAt(cam.position.clone().addScaledVector(dir, 4.0));
+    return;
+  }
+
+  // ---- the default, following take ----------------------------------------
+  // ⭐ FOLLOW THE LIGHT SIDEWAYS TOO. Pitch maps to lateral X on a rotated
+  // staff, so with the camera pinned at x=0 a high note in the near field walks
+  // out of the right-hand edge.
+  // ⚠ A PURE FUNCTION OF t, NOT AN EXPONENTIAL SMOOTHER. A smoother carries
+  // state from the previous frame, so __frame(6.60) called cold would not equal
+  // __frame(6.60) reached by playing from 0 -- stills mode and the film would
+  // disagree and only one of them is checked.
+  const xAt = q => { const e = mx.get(Math.round(q * 1e4)); return e ? e.s / e.c : 0; };
+  let fx;
+  if (gi < uniq.length - 1) {
+    const a = xAt(uniq[gi]), b = xAt(uniq[gi+1]);
+    const u = Math.min(1, Math.max(0, (t - uniq[gi]) / (uniq[gi+1] - uniq[gi])));
+    fx = a + (b - a) * (u * u * (3 - 2 * u));
+  } else fx = xAt(uniq[gi] ?? 0);
+  fx *= (P.look.camFollowX ?? 0.60);
+  camAt(t, zc, fx, Array.isArray(take) ? take : P.camera);
+};
+
+window.__frame = function (t) {
+  try {
+    const S = window.__perf(t);
+    window.__camera(t, S);
+
+    // ================= APPLY. Everything below may read the lens. ===========
+    let lightScreenY = 0.30;
+    const only = P.look.onlyRoad;
+    S.voices.forEach(v => {
+      const rig = voiceRigs[v.i];
+      if (!v.live) { rig.grp.visible = false; return; }
+      // ⚠ A HARD CULL, and it is CAMERA-DEPENDENT ON PURPOSE -- which is why it
+      // lives here and not in __perf. A light still fading when the camera
+      // reaches it fills the frame on the way through.
+      // ⛔⛔ THIS CULL WAS FORWARD-CAMERA-ONLY AND IT EMPTIED THE REVERSE ANGLE.
+      // It used to read `cam.position.z - v.z < cullNear`. With the camera
+      // AHEAD on the road and facing back, cam.z - v.z is about MINUS the gap
+      // -- always negative, always under the threshold -- so EVERY playhead rig
+      // was culled on EVERY frame of the approach take: no disk, no point
+      // light, no halo. The white disks in that take's frames were the struck
+      // note pool, not playheads, and the "72-76 % lit, flat and even" reading
+      // was not a property of the angle at all: with no rigs there is nothing
+      // but overhead and ambient.
+      // ⚠⚠ AND perfcam CANNOT SEE THIS. The performance state was identical
+      // under both takes -- correctly -- because the bug is in APPLY, which is
+      // camera-dependent by design. A gate that proves two layers are separate
+      // says nothing about whether the second layer is right.
+      // Depth along the VIEW DIRECTION is the frame-independent form.
+      const fwd = cam.getWorldDirection(new THREE.Vector3());
+      const depth = new THREE.Vector3(v.x, v.y, v.z).sub(cam.position).dot(fwd);
+      const near = depth < (takeCull ?? P.look.cullNear ?? 1.2);
+      rig.grp.visible = !near && (only == null || rig.road === only);
+      rig.grp.position.set(v.x, v.y, v.z);
+      rig.light.intensity = (P.look.lightPower ?? 0.30) * v.env * S.share;
+      // scale the DISK about its own proportions -- setScalar would fatten it
+      // into a puck on the landing flare.
+      { const b = rig.core.userData.base, kk = 0.85 + 0.5 * v.env;
+        rig.core.scale.set(b.x * kk, b.y * (0.9 + 0.25 * v.env), b.z * kk); }
+      // ⭐ BRIGHTNESS, the half that was missing. `glowRef` is the env at which
+      // the core reaches its full colour; above it nothing changes, so the
+      // established look of a PLAYING voice (env 0.60-1.15) is untouched and
+      // only the entry ramp and the ending decay move. Set glowRef to 0 to get
+      // the old always-full behaviour back -- that is the gate's control.
+      { const gr = P.look.glowRef ?? 0.55;
+        const g = gr <= 0 ? 1 : Math.min(1, Math.max(0, v.env / gr));
+        rig.core.material.color.copy(rig.core.userData.col)
+          .multiplyScalar(Math.pow(g, P.look.glowGamma ?? 1.0)); }
+      rig.halo.material.opacity = Math.min(1, v.env);
+      rig.halo2.material.opacity = Math.min(1, 0.75 * v.env);
+      const q = new THREE.Vector3(v.x, v.y, v.z).project(cam);
+      if (q.z < 1) lightScreenY = Math.min(lightScreenY, (q.y + 1) / 2);
+    });
+    grade.uniforms.uLightY.value = lightScreenY;
+
+    // ---- arcs: rebuilt from scratch every frame ----------------------------
+    // ⭐ THE USER'S "you re-draw pictures" HYPOTHESIS, SETTLED: nothing
+    // accumulates. Every arc mesh is disposed and rebuilt here, so a trail that
+    // does not fade is a GRADIENT problem, not a build-up one -- and it was:
+    // round 4 set arcTailGain 0.55 with falloff 1.2, very nearly a ribbon of
+    // even brightness end to end.
+    while (arcGroup.children.length) {
+      const m = arcGroup.children.pop();
+      m.geometry.dispose(); m.material.dispose();
+    }
+    // ⭐ ONE STRIP PER VOICE, built from the sampled path. Width at the head is
+    // the PLAYHEAD DISK'S OWN DIAMETER, exactly as asked, and both width and
+    // alpha fall monotonically to zero at maxAge -- so the strip's last
+    // vertices are zero-width and fully transparent and there is nothing to
+    // see an end of.
+    for (const c of S.comets) {
+      if (only != null && c.road !== only) continue;
+      const m = cometFor(c, voiceRigs[c.vi].tint);
+      if (m) arcGroup.add(m);
+    }
+
+    S.drums.forEach(d => {
+      const r = drumRigs[d.i];
+      if (!d.live) { r.grp.visible = false; return; }
+      r.grp.visible = (only == null || r.road === only);
+      r.grp.position.set(d.x, d.y, d.z);
+      r.light.intensity = (P.look.drumPower ?? 0.7) * d.k;
+      r.halo.material.opacity = Math.min(1, d.k);
+      // ⛔ setScalar WAS CORRECT ONLY WHILE THE CORE WAS A SPHERE OF RADIUS
+      // drumCoreR -- the radius was baked into the geometry. The core is now a
+      // UNIT cylinder scaled by userData.base, so setScalar(0.6..1.5) made it a
+      // one-and-a-half WORLD UNIT disk and the right half of the frame went
+      // white. This is the second time in this round that swapping a geometry
+      // silently changed what an existing scale call meant (see the ledger
+      // lines); it is worth treating as a pattern rather than two accidents.
+      { const b = r.core.userData.base, kk = 0.6 + 0.9 * d.k;
+        r.core.scale.set(b.x * kk, b.y * kk, b.z * kk); }
+    });
+
+    // ---- the note's own circle lights up -----------------------------------
+    // user: "the circle of the note should glow, not just part of some cloud
+    // covering the note". This is that circle: a disk of the same geometry as
+    // the sheet's notehead, a hair proud of it so it wins the depth test,
+    // emissive through the bloom pass rather than a billboard hovering above.
+    const DH = P.look.noteH ?? 0.026;
+    for (let i = 0; i < strikePool.length; i++) {
+      const m = strikePool[i];
+      if (i >= S.strikes.length) { m.visible = false; continue; }
+      const st = S.strikes[i];
+      m.visible = true;
+      // ⚠ EXACTLY THE HEAD'S SCALE, not 1.04x. The old 4 % oversize was the
+      // other half of "it never goes back to black": even at zero emissive the
+      // struck disk was visibly bigger than its neighbours forever.
+      m.position.set(st.x, DH / 2 + Z_EPS * 1.7, st.z);
+      m.scale.set(P.NOTE_R * 0.74, DH, P.NOTE_R);
+      // ⭐⭐ BLACKBODY COOLING. The user: "the note disks should decay into red
+      // like metal getting cooled." So the decay is a COLOUR ramp, not only an
+      // intensity ramp: white-hot, yellow, orange, deep red, out.
+      // ⚠ THIS IS THE NOTE DISKS ONLY. The user did not ask for it on the
+      // playhead disks and those are deliberately left on their existing
+      // neutral-core look.
+      // ⭐ IT REACHES EXACTLY BLACK BY CONSTRUCTION: the ramp's colour is a
+      // direction and the INTENSITY is proportional to a, so a -> 0 gives
+      // emissive 0 whatever the hue is. A deep-red floor would be the same
+      // defect as the pale floor it replaces, in a different colour.
+      const a = st.a;
+      const cool = (u) => {                       // u = 1 hot .. 0 out
+        const stops = [[0.00, 0.55, 0.00, 0.00],  // barely-there ember
+                       [0.18, 1.00, 0.06, 0.00],  // deep red
+                       [0.40, 1.00, 0.32, 0.04],  // orange
+                       [0.68, 1.00, 0.72, 0.26],  // yellow
+                       [1.00, 1.00, 0.97, 0.90]]; // white-hot
+        let i = 0; while (i < stops.length - 2 && u > stops[i+1][0]) i++;
+        const A = stops[i], B = stops[i+1];
+        const f = Math.min(1, Math.max(0, (u - A[0]) / (B[0] - A[0])));
+        return new THREE.Color(A[1] + (B[1]-A[1])*f, A[2] + (B[2]-A[2])*f, A[3] + (B[3]-A[3])*f);
+      };
+      m.material.emissive.copy(cool(Math.min(1, a)));
+      m.material.emissiveIntensity =
+        Math.min(8, (a + (P.look.afterFloor ?? 0)) * (P.look.afterGain ?? 0.85) * (P.look.strikeEmissive ?? 2.8));
+    }
+
+    // ---- labels must read from WHICHEVER SIDE the camera is on -------------
+    // ⚠ A flat label on the paper reads correctly from one side and MIRRORED
+    // from the other, and the reverse-angle take looks at it from the other.
+    // Flipping it about its own normal is presentation, not performance, so it
+    // belongs here. ⛔ THE ORIENTATION IS NOT ASSERTED ANYWHERE -- it is read
+    // off a rendered frame, in both takes, by cropping and looking. Three
+    // rounds in a row have had it wrong while the code looked right.
+    // ⚠ ROUND 7: the side-crossing take sits AT the playhead's z, so this test
+  // flips every label the camera draws level with -- a mid-shot flicker down
+  // the whole road. `labelFlip:false` freezes it for that take; the result is
+  // read off a frame, like every other orientation claim here.
+  // ⭐ ROUND 7, MEASURED ON FRAMES: freezing it was WRONG. The side take starts
+  // at x=-2.7 where the z-test happens to read correctly, crosses to x=+2.7,
+  // and every label came back MIRRORED for the rest of the shot (seen at
+  // t=9.60 and t=11.00). For a camera that crosses the road, the side it is on
+  // is what decides legibility, so `labelFlip:"x"` tests x instead of z.
+  const lf = P.look.labelFlip;
+  if (lf === false) { for (const m of labelMeshes) m.rotation.z = 0; }
+  // ⚠⚠ ROUND 8: THE SIGN WAS WRONG AND ONLY A FRAME SAID SO. When the side
+  // take started on the LEFT this branch was never exercised at x>0 in a frame I
+  // read; starting on the RIGHT put it there and "Perc" came back MIRRORED at
+  // t=2.00. Sign inverted and re-read off the same frame. FIFTH label
+  // orientation error in this project, and the fifth one found by looking.
+  else if (lf === 'x') { const r = cam.position.x > 0 ? 0 : Math.PI;
+                         for (const m of labelMeshes) m.rotation.z = r; }
+  else for (const m of labelMeshes) m.rotation.z = (cam.position.z < m.position.z) ? Math.PI : 0;
+
+    // ⭐ __paperIso: paperOnly PLUS the sheet geometry, so the frame contains the
+    // paper MAP and nothing else. paperOnly alone keeps staff lines and noteheads
+    // (paperpix needs the ink); (S3) needs them gone, because they are exactly
+    // what swamped the boundary signal when the probe was first built.
+    const ISO = window.__paperIso === true;
+    if (P.look.paperOnly || ISO) {
+      voiceRigs.forEach(r => { r.grp.visible = false; });
+      drumRigs.forEach(r => { r.grp.visible = false; });
+      arcGroup.visible = false; glowGroup.visible = false;
+      if (strikeGroup) strikeGroup.visible = false;
+      // ⚠ AND FLAT-LIGHT IT. Removing the disks removes almost all the light,
+      // and the first cut of this mode measured ink 0.016 against "paper" 0.035
+      // -- both effectively black, and the gate called a correctly printed
+      // sheet blank. A gate starved of light reports a defect that is not there
+      // just as confidently as it misses one that is.
+      if (paperSave === null) paperSave = {
+        amb: ambLight.intensity, over: overheadLight ? overheadLight.intensity : 0,
+        bloom: bloomPass ? bloomPass.strength : 0, fog: scene.fog };
+      // ⚠ ISOLATION NEEDS MORE LIGHT THAN paperpix DOES. paperpix measures INK
+      // against paper and 9.0 is tuned for that; with the sheet gone the frame is
+      // bare paper under fog-free ambient and read a mean lit luma of 30-36,
+      // which put (S3)'s patches under its own 25-luma "too dark to measure"
+      // floor and threw the samples away. 45 measures 80.2. paperOnly is left
+      // exactly where it was.
+      ambLight.intensity = ISO ? (P.look.paperIsoAmbient ?? 45)
+                               : (P.look.paperOnlyAmbient ?? 9.0);
+      if (overheadLight) overheadLight.intensity = 0;
+      if (bloomPass) bloomPass.strength = 0;
+      scene.fog = null;
+      if (ISO) {
+        sheet.visible = false;
+        const hw = scene.getObjectByName('holeWalls'); if (hw) hw.visible = false;
+      }
+    } else {
+      sheet.visible = true;
+      { const hw = scene.getObjectByName('holeWalls'); if (hw) hw.visible = true; }
+      arcGroup.visible = true; glowGroup.visible = true;
+      if (strikeGroup) strikeGroup.visible = true;
+      // ⛔ AND PUT THE LIGHTS BACK. The first cut of this block asserted in its
+      // own comment that clearing the flag restored the scene exactly, and it
+      // did not -- ambient, key, bloom and fog were left where paperOnly had
+      // dumped them. That is the same comment-asserts / code-undoes shape that
+      // produced the mirrored sheet.
+      if (paperSave) {
+        ambLight.intensity = paperSave.amb;
+        if (overheadLight) overheadLight.intensity = paperSave.over;
+        if (bloomPass) bloomPass.strength = paperSave.bloom;
+        scene.fog = paperSave.fog;
+        paperSave = null;
+      }
+    }
+
+    document.getElementById('prg').style.width =
+      (W * Math.min(1, t / (P.total + 1.4))) + 'px';
+    comp.render();
+    window.__t = t;
+  } catch (e) { window.__err = String(e && e.stack || e); }
+};
+</script>

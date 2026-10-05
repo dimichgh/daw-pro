@@ -86,9 +86,22 @@ struct VoiceConversionConvertCommandTests {
         return url
     }
 
+    /// ⚠️ `ProjectStore.engine` is **weak**, and since m24-o the clipId form
+    /// RENDERS the clip's own window before converting — so a store without a
+    /// live engine answers `engineUnavailable` on every clipId call. The
+    /// engines are pinned for the process rather than left to a local
+    /// binding: a dead one would turn these tests green for the wrong reason.
+    @MainActor
+    private enum EngineKeepalive {
+        static var engines: [FakeRenderEngine] = []
+    }
+
     private func makeStore() -> ProjectStore {
         let store = ProjectStore()
         store.media = FakeMedia()
+        let engine = FakeRenderEngine()
+        store.engine = engine
+        EngineKeepalive.engines.append(engine)
         store.generationImportsDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("vc-cmd-dest-\(UUID().uuidString)")
         return store
@@ -199,7 +212,7 @@ struct VoiceConversionConvertCommandTests {
         #expect(track.name == "Voice: my-voice")
     }
 
-    @Test("clipId form: resolves the clip's backing audio and its own start beat as the default atBeat")
+    @Test("clipId form: converts the CLIP'S OWN audio (m24-o), landing at its own start beat")
     func convertVocalsClipIdFormResolvesSource() async throws {
         let store = makeStore()
         let track = store.addTrack(kind: .audio)
@@ -220,7 +233,16 @@ struct VoiceConversionConvertCommandTests {
         #expect(response.ok, "vc.convertVocals failed: \(response.error ?? "?")")
         let calls = await converting.convertCalls
         #expect(calls.count == 1)
-        #expect(calls[0].inputPath == sourceURL.path, "the clip's FULL backing recording is what gets converted")
+        // ⭐ THE m24-o DEFECT PIN, and it is a NEGATIVE one. Until 2026-08,
+        // this asserted `inputPath == sourceURL.path` — the clip's FULL
+        // BACKING RECORDING — which is exactly the defect: a comped/trimmed
+        // take converted its whole untrimmed source and landed at the clip's
+        // beat. What goes to the converter now is a transient extraction of
+        // that clip's own window.
+        #expect(calls[0].inputPath != sourceURL.path,
+                "the backing recording must NOT be what gets converted")
+        #expect(calls[0].inputPath.contains("voice-source-"),
+                "the converter is fed the clip's own extracted window")
 
         let clipId = try #require(response.result?["clipId"]?.stringValue)
         let trackId = try #require(response.result?["trackId"]?.stringValue)

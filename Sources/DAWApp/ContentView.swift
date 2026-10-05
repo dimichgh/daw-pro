@@ -38,6 +38,10 @@ struct ContentView: View {
     /// Gap between the pinned ruler block and the scrolling track area (m13-g) —
     /// reads as a distinct pinned ruler bar over the track panels.
     private static let arrangeBlockGap: CGFloat = 6
+    /// The arrange's shared VERTICAL scroller's coordinate space (m34-a-3).
+    /// Named so the lanes column can report its own top relative to it — the
+    /// horizontal `hScrollSpace` discipline, one axis over.
+    private static let arrangeVScrollSpace = "arrangeVScroll"
 
     /// The clip whose piano roll is open (nil = closed). Only MIDI clips open it.
     /// Hoisted onto AppModel — see `model` above.
@@ -89,6 +93,20 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxHeight: .infinity)
+
+                // ⭐ MUSICAL TYPING (m23-ct) — the on-screen playable keyboard.
+                // Between the workspace and the transport bar: it belongs to the
+                // PERFORMANCE, so it sits next to the transport, and it spans the
+                // window rather than living inside one editor (the piano roll's
+                // gutter is reachable only from the piano roll, which is half of
+                // what this item was filed about).
+                //
+                // Mounted only while the mode is on — a hidden strip would be
+                // chrome for a feature nobody has asked for, and the toggle in the
+                // transport bar is one click away. Extracted to a computed
+                // property, not inlined: this body chain sits AT the type-checker's
+                // limit (see `pickerOverlays`).
+                musicalKeyboardStrip
 
                 TransportBar(engine: engine, densityStore: model.panelDensity)
             }
@@ -164,17 +182,17 @@ struct ContentView: View {
                 )
             }
         }
-        // "Convert to Voice…" sheet (m10-p-5): a centered dark-glass modal over a
-        // scrim (the Quantize idiom) — rendered INSIDE the window so
+        // "Convert Voice…" panel (m24-m leg B): a centered dark-glass modal over
+        // a scrim (the Quantize idiom) — rendered INSIDE the window so
         // `debug.captureUI` can snapshot it. Opened by an audio clip's context
-        // menu and `debug.voicePanel`; the convert rides the SAME client/store
-        // seams as the wire's `vc.convertVocals` clipId-form (one undoable edit).
+        // menu, by Edit ▸ Convert, and by `debug.voicePanel`; the convert rides
+        // the SAME store seam as the wire's `vc.convertClips` (one undoable
+        // edit, one new violet track carrying the whole set).
         .overlay {
-            if let clipID = model.voiceConvertClipID {
-                VoiceConvertSheet(
+            if let clipIDs = model.voiceConvertClipIDs {
+                VoiceConvertClipsSheet(
                     model: model.voicePanel,
-                    clipID: clipID,
-                    clipName: voiceConvertClipName(clipID),
+                    targets: voiceConvertTargets(clipIDs),
                     onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeVoiceConvert() } }
                 )
             }
@@ -225,6 +243,17 @@ struct ContentView: View {
                 )
             }
         }
+        // m23-ap C-F3 — "Replace your hand edits?" Raised by EITHER preset door
+        // (the clip menu's Tune Vocal ▸ <preset>, the note editor's chips) when
+        // the clip carries notes moved or split by hand, and never when it holds
+        // only a preset's own output. In-window, over a scrim (the
+        // RecoveryOfferView shape), so `debug.captureUI` photographs it.
+        // ⚠️ A METHOD, NOT AN INLINE `.overlay { if let … }`: this chain is at
+        // the type-checker's limit, and that one closure made `swift build`
+        // fail with "unable to type-check this expression in reasonable time"
+        // (MEASURED, 2026-09-24). The binding lives in
+        // `PresetReplaceConfirmCard.swift`.
+        .presetReplaceConfirmOverlay(model)
         // Engine-notices popover (m15-e, audit F6): a bottom-anchored dark-glass
         // card listing schedule-time degradations, opened by the transport-bar
         // notices chip (and `debug.postEngineNotice`). Rendered INSIDE the window
@@ -337,25 +366,22 @@ struct ContentView: View {
         // runs off the main actor inside `refresh()`.
         .task { await model.settings.refresh() }
         .onChange(of: firstMIDIClipID) { _, _ in maybeAutoOpen() }
-        // Any clip stretch/pitch/formant change (from a drag OR the control port)
-        // kicks the engine-status poll, so the timeline shimmers a clip while its
-        // offline stretch render is pending and clears when it lands (M5 ii-e).
-        .onChange(of: stretchSignature) { _, _ in model.noteStretchEdit() }
+        // Any change to what a clip's offline render is keyed on (a stretch,
+        // transpose or formant edit, a TUNING: preset, note drag, split, clear,
+        // or a save that repoints the clip's media), from a drag OR the control
+        // port, kicks the engine-status poll, so the timeline shimmers the clip
+        // while its render is pending and clears when it lands (M5 ii-e;
+        // p2-render-indicator — this used to watch ratio/semitones/formant only,
+        // so a tuned clip's render never shimmered).
+        .onChange(of: renderSignature) { _, _ in model.noteStretchEdit() }
     }
 
-    /// Hash of every clip's stretch parameters — changes exactly when a stretch
-    /// edit lands, driving the render-status poll (`.onChange` above).
-    private var stretchSignature: Int {
-        var hasher = Hasher()
-        for track in store.tracks {
-            for clip in track.clips {
-                hasher.combine(clip.id)
-                hasher.combine(clip.stretchRatio)
-                hasher.combine(clip.pitchShiftSemitones)
-                hasher.combine(clip.formantPreserve)
-            }
-        }
-        return hasher.finalize()
+    /// The render-key inputs of every clip that plays from a render. Built by
+    /// `ClipRenderSignature` (DAWAppKit, tested headless), whose doc lists what
+    /// it mirrors from the engine's key and why. It drives the render-status
+    /// poll (`.onChange` above).
+    private var renderSignature: ClipRenderSignature {
+        ClipRenderSignature(tracks: store.tracks)
     }
 
     /// The instrument + AU-effect picker modals (m10-n / m13-g), extracted from
@@ -417,6 +443,23 @@ struct ContentView: View {
                 onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeSamplerEditor() } }
             )
         }
+        // CHOP TO PADS (m39-pads): the door onto `clip.sliceToSampler`, which
+        // had none — an agent could chop a record into 53 playable pads over MCP
+        // and a human could reach it from nowhere. Opened by the pad face's
+        // "CHOP A CLIP…" affordance and `debug.padGrid {openChop:true}`. Chops
+        // through the SAME `store.sliceClipToSampler` the wire calls.
+        if model.chopToPadsOpen {
+            ChopToPadsPanel(
+                model: model.padGrid,
+                densityStore: model.panelDensity,
+                onClose: { withAnimation(.easeOut(duration: 0.15)) { model.closeChopToPads() } },
+                onChop: { model.runChopToPads() }
+            )
+        }
+        // TUNE TO MELODY (M3, W7-TTM3): the clip menu's Tune Vocal ▸ Tune to Melody… card.
+        // HERE, in the builder `body` mounts BEFORE `.presetReplaceConfirmOverlay(model)`, so
+        // the "Replace your hand edits?" card its Apply can raise draws ON TOP of it.
+        TuneToMelodyCardMount(model: model)
         // AU-effect picker (m13-g, audit F6): opened by a Pro channel/bus strip's
         // insert add-menu "Audio Units…" item; UI-only — Add routes through the SAME
         // `store.addEffect(kind:.audioUnit)` the wire uses. Never opened for master.
@@ -585,11 +628,43 @@ struct ContentView: View {
                                 // Draggable sidebar↔timeline splitter (beta m10-d).
                                 sidebarSplitter
                                 arrangeTimeline(.lanes, viewport: bodyViewport)
+                                    // VERTICAL FOLLOW (m34-a-3): report the LANES
+                                    // column's own top in the vertical scroller's
+                                    // space, and its laid-out height.
+                                    //
+                                    // ⭐ MEASURED ON THE LANES, NOT ON THE HStack,
+                                    // AND THAT IS THE POINT: `ArrangeLaneGeometry.
+                                    // laneTops` are in the LANES' content space, so
+                                    // an offset measured against the lanes' own
+                                    // origin compares to them directly — with no
+                                    // assumption about how this HStack aligns its
+                                    // row column against its lane column. Measuring
+                                    // the HStack would silently inherit that
+                                    // alignment into every reveal decision.
+                                    //
+                                    // The GeometryReader rides view-update
+                                    // machinery, not preference machinery, for the
+                                    // m17-b reason recorded on the horizontal
+                                    // report inside TimelineLanesView.
+                                    .background(GeometryReader { laneGeo in
+                                        let minY = laneGeo.frame(in: .named(Self.arrangeVScrollSpace)).minY
+                                        let height = laneGeo.size.height
+                                        Color.clear
+                                            .onChange(of: minY, initial: true) { _, v in
+                                                model.reportArrangeVScroll(-v, contentHeight: height)
+                                            }
+                                            .onChange(of: height, initial: true) { _, v in
+                                                model.reportArrangeVScroll(
+                                                    -laneGeo.frame(in: .named(Self.arrangeVScrollSpace)).minY,
+                                                    contentHeight: v)
+                                            }
+                                    })
                             }
                             // Fill the viewport when content is short (glass panels stay
                             // full height); grow past it when tall (scroll takes over).
                             .frame(minHeight: bodyViewport, alignment: .top)
                         }
+                        .coordinateSpace(name: Self.arrangeVScrollSpace)
                         // Deep-scroll proof (m13-g G3): `debug.arrangeScroll` sets a
                         // target track id + bumps a nonce; the shared scroll jumps to
                         // it so a capture can frame the bottom of a deep session with
@@ -601,12 +676,30 @@ struct ContentView: View {
                                                anchor: model.arrangeScrollToBottom ? .bottom : .top)
                             }
                         }
+                        // VERTICAL FOLLOW (m34-a-3): reveal the take's
+                        // destination row. Same proxy, same `scrollTo(rowID:)`
+                        // mechanism as the deep-scroll seam above — and
+                        // deliberately NOT animated: a follow move may not glide,
+                        // for the reason the horizontal page turn records.
+                        // Nonce-driven, so a repeat of the same row still fires.
+                        .onChange(of: model.arrangeVFollowNonce) { _, _ in
+                            guard let target = model.arrangeVFollowTarget else { return }
+                            proxy.scrollTo(target,
+                                           anchor: model.arrangeVFollowAnchorsBottom ? .bottom : .top)
+                        }
                     }
                 }
                 // Report the live lanes viewport width to the zoom model (m17-b) —
                 // onChange (not inline) so the model mutation never runs mid-render.
                 .onChange(of: lanesViewportW, initial: true) { _, w in
                     model.arrangeViewportWidth = w
+                }
+                // The VERTICAL viewport (m34-a-3) — the scroll's own visible
+                // height, which is this block minus the pinned ruler and the gap.
+                // Reported from the same place `bodyViewport` is computed so the
+                // reveal decision and the layout can never disagree about it.
+                .onChange(of: bodyViewport, initial: true) { _, h in
+                    model.arrangeVViewportHeight = h
                 }
                 // FOLLOW THE PLAYHEAD (m23-c2) — driven from the TRANSPORT
                 // observation path, never from a geometry callback: a `scrollTo`
@@ -618,6 +711,13 @@ struct ContentView: View {
                 // fires on real playback and on nothing else.
                 .onChange(of: store.transport.positionBeats) { _, _ in
                     model.followArrangeTick()
+                    // m34-a-2 / m34-a-3: the growing take region and the
+                    // vertical follow ride the SAME transport observation, for
+                    // the reason stated above — a `scrollTo` (and an engine
+                    // read) issued inside a layout transaction is the m17-b
+                    // hazard, and this path is not one.
+                    store.refreshLiveTakeRegion()
+                    model.followArrangeVerticalTick()
                 }
                 // Pressing play is the moment a user expects the view to take
                 // charge again, so a start clears any manual-scroll suspension.
@@ -674,8 +774,13 @@ struct ContentView: View {
         // ⚠️ IF THOSE PANELS EVER STOP COMPRESSING, THIS PIN OVERFLOWS. That
         // coupling is why it is written down here and not only there.
         .frame(maxHeight: .infinity)
+        // m23-ap p2-b: the term is "a bottom EDITOR PANE is on screen", not "the
+        // ROLL is". ⚠️ `editorPaneFraction` below carries no clip term at all, so
+        // a maximized pitch editor would otherwise take the maximized fraction
+        // while this row stayed un-pinned — and the two frames would over-commit
+        // the window, which is an overflow no headless gate here can see.
         .frame(height: EditorMaximize.arrangeHeight(
-                   maximized: model.panelLayout.editorMaximized && selectedMIDIClip != nil,
+                   maximized: model.panelLayout.editorMaximized && openBottomPaneClip != nil,
                    arrangeSliver: Self.maximizedArrangeSliver))
         // Keep the fix panel's composer pointed at the live audio selection. The
         // panel is thin over the model, so the view (not the model) reads the
@@ -701,6 +806,9 @@ struct ContentView: View {
                 // grid uses the meter GOVERNING THE CLIP'S START beat, so a clip in
                 // a 7/8 section rules bars every 7 beats and a 4/4 clip every 4.
                 beatsPerBar: store.transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                // m23-ap I5-F2: the song's ONE meter map — the roll's ruler, grid,
+                // "BAR n" and playhead snap all read the SONG's bars through it.
+                meterMap: store.transport.meterMap,
                 // The SAME transport source the arrange timeline consumes (no second
                 // ticker) — the piano roll playhead is a rendering of this state.
                 positionBeats: store.transport.positionBeats,
@@ -813,7 +921,11 @@ struct ContentView: View {
                 onClose: { selectedClipID = nil },
                 // m25-b-1: ESCAPE's primary mount. The decision is the app's, and
                 // the arrange workspace's backstop mount calls the same one.
-                onEscape: { model.handleEditorEscape() },
+                // m23-ap I4: the roll hands its two facts (gesture live, notes
+                // selected) and gets the ladder's ONE rung back.
+                onEscape: { live, selected in
+                    model.handleEditorEscape(gestureLive: live, hasSelection: selected)
+                },
                 // m23-d: hear the pitch you drag, and the key you press in the
                 // gutter. The defeat switch is checked HERE rather than in the
                 // view, so the view keeps zero audition policy — and the
@@ -864,7 +976,160 @@ struct ContentView: View {
             )
             .id(clip.id)
             .frame(height: geo.size.height * editorPaneFraction(geoHeight: geo.size.height))
+        } else if let clip = model.openPitchEditorClip {
+            // m23-ap p2-b — THE SECOND BOTTOM PANE. `else if` is not an
+            // arbitration and must not be mistaken for one: the two accessors
+            // resolve the SAME `selectedClipID` and filter on opposite sides of
+            // `isMIDI`, so they cannot both be non-nil (design §3.6). The
+            // ordering is a formality that makes the branch total.
+            editorSplitter(geoHeight: geo.size.height)
+            PitchEditorView(
+                clip: clip,
+                tempoMap: store.transport.tempoMap,
+                // The SAME transport source the arrange consumes — no second
+                // ticker, exactly as the roll above.
+                positionBeats: store.transport.positionBeats,
+                // m12-d, the v1 one-meter-per-clip-view policy: the meter
+                // GOVERNING THE CLIP'S START, matching the roll's call site.
+                beatsPerBar: store.transport.meterMap.beatsPerBar(atBeat: clip.startBeat),
+                layout: model.panelLayout,
+                // The app's ONE peak cache, shared with the arrange and the take
+                // lanes: splits share a file, and a second cache would re-read
+                // every one of them.
+                waveforms: model.waveformStore,
+                // Detection is injected so the pane's model never holds the
+                // store (the `ClipFixModel` precedent, design §5.4).
+                detect: { id in try await store.detectClipPitch(clipId: id) },
+                // C-0 — THE CONTOUR THE RENDER SHAPES AGAINST, through the
+                // store's one door (the same one `clip.getPlayedPitch` asks),
+                // so the line the pane draws comes from the analysis the
+                // render plays and never from the window detection above.
+                renderContour: { id in await store.renderPitchContour(clipId: id) },
+                // Door 2 (§6.2) — THROUGH THE SAME FUNNEL DOOR 1 CALLS, never
+                // through a second `store.autoCorrectClipPitch` of its own.
+                //
+                // ⛔ **THE FIRST DRAFT CALLED THE STORE DIRECTLY AND HANDLED ONLY
+                // `catch`, WHICH RE-CREATED THE EXACT DEFECT DOOR 1 GUARDS
+                // AGAINST.** `autoCorrectClipPitch` RETURNS NORMALLY with
+                // `pitchEdits == nil` when the detector found no voiced runs —
+                // an instrumental, a take under the silence floor — so pressing
+                // "Natural" in this header would have done nothing and said
+                // nothing, on exactly the clip whose own status line says "we
+                // could not hear any sung notes here". `tuneVocalFromContextMenu`
+                // already answers that with a sentence written for a person, and
+                // design §6.2 is explicit: **all doors call ONE store method**,
+                // with no second policy, no second default, no second scale.
+                onApplyPreset: { preset in
+                    model.tuneVocalFromContextMenu(clipID: clip.id, preset: preset)
+                },
+                onClearTuning: { model.clearClipTuningFromContextMenu(clipID: clip.id) },
+                // ⭐ CLOSING IS EXPLICIT BECAUSE OPENING IS (design §3.6). The
+                // roll gets closing for free from deselection; this pane was
+                // opened by a deliberate act and needs a deliberate way out.
+                // Deselecting closes it too — that is the latch's own rule —
+                // but the user must not have to deselect to put it away.
+                onClose: { model.closePitchEditor() },
+                // m23-al: the pane reports that the user just ACTED inside it.
+                // THIS is what ⌘+/⌘−/⌘0 route on, via `EditorSurfaceRouter`.
+                onEngage: { model.editorEngagement.engage(.pitchEditor) },
+                // m23-ap C1/C3 — ONE store write per gesture, through the SAME
+                // `ProjectStore` the wire will call. The cadence is enforced in
+                // `PitchEditorModel`, not here: this closure is handed to the
+                // model at mount and the model is its only caller.
+                onCommitNoteEdit: { commit in
+                    model.commitPitchNoteEdit(clipID: clip.id, commit: commit)
+                },
+                // m23-ap C4 — both axes, through `AppModel`'s own zoom entry
+                // points so the buttons and ⌘+/⌘−/⌘0 share ONE ladder.
+                onZoom: { command in
+                    switch command {
+                    case .timeIn: model.zoomPitchEditorIn()
+                    case .timeOut: model.zoomPitchEditorOut()
+                    case .pitchIn: model.pitchEditorRowZoomIn()
+                    case .pitchOut: model.pitchEditorRowZoomOut()
+                    case .reset:
+                        model.zoomPitchEditorReset()
+                        model.pitchEditorRowZoomReset()
+                    // m23-ap I2 — the pinch: a scale, not a ladder step.
+                    case .timeScale(let ppb): model.setPitchEditorTimeScale(ppb)
+                    }
+                },
+                // The spy seam: the header reports the very strings it drew, so
+                // p2-c's `debug.pitchEditor` echo can publish the screen rather
+                // than a re-derivation of it.
+                chrome: model.pitchEditorChrome,
+                // m23-ap p2-del — ⌫ with this pane open is refused by
+                // `DeleteMenuPolicy` (it would have deleted this very clip) and
+                // swallowed by `handleDeleteKey`, which bumps this nonce so the
+                // pane can say why nothing happened. The pane decides nothing.
+                deleteKeyHintNonce: model.pitchEditorDeleteKeyNonce,
+                // m23-ap interaction batch I6a: ESCAPE's primary mount on THIS
+                // pane, exactly as the roll's `onEscape` above. The decision is
+                // the app's one (`handleEditorEscape`), which the arrange
+                // workspace's backstop mount also calls; the pane routes it
+                // through its model's I4 seam and decides nothing itself.
+                // m23-ap I4: the same two facts and the same one rung as the roll.
+                onEscape: { live, selected in
+                    model.handleEditorEscape(gestureLive: live, hasSelection: selected)
+                },
+                // m23-ap interaction batch I0 — the pane's channel out (the
+                // surface it measured and drew, for `debug.pitchEditor`) and in
+                // (the debug tier's staged steps). App-held, so it outlives the
+                // `.id(clip.id)` rebuild below.
+                interaction: model.pitchEditorInteraction,
+                // m23-ap I1 UI hooks — HEAR THE NOTE: the model's press, drag
+                // step and stop requests go to the app's router, which calls the
+                // store's doors with the switch as their `enabled:` (the roll's
+                // rule above: the UI doors check it, the wire ignores it). The
+                // release audition follows the commit, in `commitPitchNoteEdit`.
+                onAudition: { request in
+                    model.routePitchEditorAudition(request, clipID: clip.id)
+                },
+                // The router's honest-waiting line, drawn on the state row.
+                auditionLine: model.pitchEditorAudition.line,
+                // m23-ap I5 — PLACE THE PLAYHEAD. `effectiveClipSnap` (the snap
+                // in force, the roll's own input above) decides ON/OFF; the pane
+                // places on its own 1/16. The seek goes through the SAME store
+                // door the roll's scrub uses, handed to the pane's model at mount
+                // — the model is its only caller.
+                appSnap: model.effectiveClipSnap,
+                onSeek: { beats in _ = try? store.seek(toBeats: beats) },
+                // m23-ap I5 — FOLLOW: the app-held runtime (it survives the
+                // `.id(clip.id)` rebuild below) and the transport's state, the
+                // roll's two inputs above.
+                follow: model.pitchEditorFollow,
+                isPlaying: store.transport.isPlaying,
+                // UE-1 — "Find sounds with no pitch": the header's button, for a
+                // stored table made before sounds existed, through the SAME
+                // store method `clip.findUnpitchedSounds` calls (one "Find
+                // Sounds" undo step). The pane's model decides when to run it
+                // and shows the answer on its own line.
+                onFindSounds: { await model.findUnpitchedSoundsFromEditor(clipID: clip.id) },
+                // m23-ap I5-F1 — the SONG's meter, so the time ruler names the
+                // bars the transport and the arrange ruler name. The one map,
+                // never a `MeterMap(constant:)` rebuilt here.
+                meterMap: store.transport.meterMap,
+                // p2-ren Stage B″(c) — the "Preview" caption's input: the
+                // app's poll, for THIS clip only.
+                renderAudible: model.pitchEditorRenderAudible(clipID: clip.id)
+            )
+            // B″(c) — THE POLL LIVES EXACTLY AS LONG AS THIS PANE: SwiftUI
+            // cancels it when the pane closes or switches clip.
+            .task(id: clip.id) { await model.pollPitchEditorRenderAudible(clipID: clip.id) }
+            .id(clip.id)
+            .frame(height: geo.size.height * editorPaneFraction(geoHeight: geo.size.height))
         }
+    }
+
+    /// The clip whose BOTTOM EDITOR PANE is on screen — either one (m23-ap p2-b).
+    ///
+    /// ⚠️ **A LAYOUT QUESTION, NOT A SURFACE DECISION.** Anything that decides
+    /// WHICH editor an action targets must go through `AppModel.activeEditorSurface`
+    /// (engagement) or `openEditorSurface` (mount); this exists only so the
+    /// maximize pin and the pane-height expression ask the same question, and it
+    /// is used at exactly the one site that needs it.
+    private var openBottomPaneClip: Clip? {
+        selectedMIDIClip ?? model.openPitchEditorClip
     }
 
     /// The fraction of the window the editor pane is laid out at (m25-b-1) — ONE
@@ -1027,7 +1292,7 @@ struct ContentView: View {
             // Humanize (m25-c): the arrange clip context menu opens the SAME
             // panel the piano roll does. MIDI clips only — the menu hides the
             // entry on audio rather than offering a throw (the sibling
-            // "Quantize…" / "Convert to Voice…" rule).
+            // "Quantize…" / "Convert Voice…" rule).
             onOpenHumanize: { clip in model.openHumanizePanel(clipID: clip.id) },
             // Breath pad (m28-p7, Pro clip menu, MIDI only): the same centered
             // panel the piano-roll BREATH chip opens.
@@ -1035,9 +1300,37 @@ struct ContentView: View {
             onExtractGroove: { clip in
                 model.openQuantizePanel(clipID: clip.id, startExtract: true)
             },
-            // Convert to voice (m10-p-5, Pro clip menu): opens the sheet, which
-            // rides the SAME seams as the wire's vc.convertVocals.
-            onConvertToVoice: { clip in model.openVoiceConvert(clipID: clip.id) },
+            // Chop to Pads… (m39-pads, audio only, BOTH densities): the second
+            // route to the chopper, beside the pad face's own "CHOP A CLIP…".
+            onChopToPads: { clip in model.openChopToPads(clipID: clip.id) },
+            // m23-ap Phase 2 — DOOR 1, the clip context menu's "Tune Vocal"
+            // (design §6.2, the PRIMARY door). ⚠️ `TimelineLanesView` defaults
+            // both closures to a NO-OP, the `onChopToPads` precedent — which is
+            // the right shape for previews and the wrong one to ship: unbound,
+            // the menu entry draws, highlights, dismisses and does nothing.
+            // `PitchTuneDoorSiteTests.contentViewBindsTheDoor` is red until
+            // these two lines exist, and they are deliberately THIN: the whole
+            // of the behaviour (one store call, the refusal bubble, AND the
+            // silent-zero-voiced-run case) lives in `PitchCorrectionStaging`,
+            // so all three doors keep calling one method with one policy.
+            onTuneVocal: { clip, preset in
+                model.tuneVocalFromContextMenu(clipID: clip.id, preset: preset)
+            },
+            onClearPitchEdits: { clip in
+                model.clearClipTuningFromContextMenu(clipID: clip.id)
+            },
+            onOpenPitchEditor: { clip in model.openPitchEditor(clipID: clip.id) },
+            // Tune to Melody… (M3, W7-TTM3): opens the card on the clip. Thin on purpose: the
+            // behaviour is `TuneToMelodyStaging.swift` and DAWAppKit's `TuneToMelodyDoor`.
+            onTuneToMelody: { clip in model.openTuneToMelody(clipID: clip.id) },
+            // Convert Voice… (m24-m leg B, Pro clip menu): opens the panel on
+            // the ids the menu's own title named, which ride the SAME store
+            // seam as the wire's vc.convertClips.
+            onConvertToVoice: { command in model.convertClipsFromContextMenu(command) },
+            // ONE producer for the audio subset of the selection (AppModel), so
+            // the context menu's count, the Edit item's count and the panel's
+            // list can never disagree.
+            selectedAudioClipIDs: model.selectedAudioClipIDs,
             // Crossfade two adjacent/overlapping audio clips (m11-d, Pro clip menu).
             onCrossfadeClips: { trackID, clipID, otherClipID, length in
                 _ = try? store.crossfadeClips(trackId: trackID, clipId: clipID,
@@ -1184,6 +1477,11 @@ struct ContentView: View {
             tempoMap: store.transport.tempoMap,
             tempoLane: model.tempoLaneModel,
             isRecordingTransport: store.transport.isRecording,
+            // m34-a-2: the growing take region. A plain value read off the
+            // store — the DECISION about whether there is one lives in
+            // `TakeRegionPreview` (DAWCore), and `refreshLiveTakeRegion()` is
+            // its one writer, driven from the transport tick below.
+            liveTakeRegion: store.liveTakeRegion,
             // Ruler-block pinning (m13-g): the render mode + horizontal-sync wiring.
             content: content,
             hScrollOffset: arrangeHScroll,
@@ -1357,6 +1655,14 @@ struct ContentView: View {
     private var followHelp: String {
         if model.isFollowSuspended {
             return "Following paused — you scrolled. Click to resume, or press play again"
+        }
+        // m23-cu-1: while a take is rolling the arrange follows even with the
+        // preference off, so the chip is LIT and must say why — and say what a
+        // press will do, which here is "hold still for the rest of this take",
+        // not "turn following off for good".
+        if model.followAutoEngagedByTake {
+            return "Following while you record — the view keeps up with the take. "
+                + "Click to hold it still for this take"
         }
         return model.isFollowingPlayhead
             ? "Following the playhead — the view keeps it in frame while you play"
@@ -1660,6 +1966,86 @@ struct ContentView: View {
         selectedClipID = id
     }
 
+    /// **MUSICAL TYPING's on-screen keyboard (m23-ct)**, mounted only while the
+    /// mode is on.
+    ///
+    /// ⚠️ **THE TWO `.onChange`s ARE STUCK-NOTE SAFETY, NOT BOOKKEEPING.**
+    ///
+    ///  * **`isRecording`** — `ProjectStore.record()` releases every audition
+    ///    voice engine-side as a take begins (m23-d: "a take starts SILENT"). If
+    ///    the controller did not mirror that, the strip would keep lighting keys
+    ///    the engine had already stopped, and the `.recording` indicator would be
+    ///    contradicted by the pixels beside it.
+    ///  * **`activeTrackID`** — clicking another track re-points the sink mid-hold.
+    ///    Without this the held notes would keep ringing on the track the user
+    ///    LEFT (`AuditionController.set` silences the previous track only when it
+    ///    is handed a non-empty set for a new one), so releasing them would try to
+    ///    stop voices on a track that no longer owns them.
+    ///
+    /// Both call the same `refreshMusicalTypingTarget()` the key path calls, so the
+    /// indicator can never be stale relative to the note-on gate.
+    @ViewBuilder
+    private var musicalKeyboardStrip: some View {
+        if model.musicalTyping.isEnabled {
+            MusicalKeyboardStrip(
+                controller: model.musicalTyping,
+                onClose: { model.setMusicalTypingEnabled(false) },
+                onPointerPress: { model.musicalTypingPointerDown(pitch: $0) },
+                // m23-cv — chord mode. Every one of these goes through an
+                // `AppModel` funnel rather than touching the controller directly,
+                // so the mouse, the chips and `debug.musicalTyping` drive ONE path.
+                onChordCellPress: { model.musicalTypingChordCellDown(cellIndex: $0) },
+                // m34-l: THE ONE FUNNEL — the pedal pill, the Tab key and
+                // `debug.musicalTyping {sustain:}` all land in `setSustain`.
+                onToggleSustain: { model.musicalTypingToggleSustain() },
+                onSetPlayMode: { model.setMusicalTypingPlayMode($0) },
+                onSetKey: { model.musicalTyping.setChordKey($0, mode: $1) },
+                onSetVoicingPreset: { model.musicalTyping.setVoicingPreset($0) },
+                onSetProgression: { model.musicalTyping.setProgression($0) },
+                // m34-g — Playbox. Same law: through an `AppModel` funnel, so
+                // the button and `debug.musicalTyping` drive ONE path.
+                onSetAdvanceMode: { model.setMusicalTypingAdvanceMode($0) },
+                onGeneratePlaybox: { model.generatePlaybox() },
+                isGeneratingPlaybox: model.playbox.isBusy,
+                // m39-pads — the third face. Same law as every closure above:
+                // through an `AppModel` funnel, so the mouse, the chips and
+                // `debug.padGrid` drive ONE path.
+                padGrid: model.padGrid,
+                onPadPress: { model.padGridDown(index: $0, normalizedY: $1) },
+                onPadRelease: { model.padGridUp() },
+                onSetBank: { model.padGridSetBank($0) },
+                onOpenChop: { withAnimation(.easeOut(duration: 0.15)) { model.openChopToPads() } }
+            )
+            .onAppear { model.refreshMusicalTypingTarget() }
+            // ⚠️ RELEASES ON BOTH EDGES, AND THAT IS A DECISION, NOT AN
+            // OVERSIGHT. Record-START must release (a note held across the
+            // boundary would open in one world and close in another). Record-STOP
+            // releasing means a key still physically down goes quiet when the
+            // take ends — slightly abrupt, but it guarantees the take's notes are
+            // closed by the app rather than clamped to the take's end by the
+            // engine, and it leaves nothing stuck. Kept deliberately: "gate the
+            // ons, never gate the offs" cuts this way too.
+            .onChange(of: store.transport.isRecording) { _, _ in
+                model.musicalTyping.releaseAll()
+                model.refreshMusicalTypingTarget()
+            }
+            // ⛔ ARMING IS A TARGET-STATE INPUT, SO IT NEEDS ITS OWN REFRESH.
+            // The user arms the track WHILE the strip is up and a take is
+            // rolling — that is the fix the `recordingUnarmed` line tells them to
+            // make, so the indicator has to notice it. ⚠️ NO `releaseAll()` here:
+            // arming is not a boundary, and cutting a held note as a reward for
+            // fixing the problem would be its own defect.
+            .onChange(of: store.tracks.first { $0.id == model.activeTrackID }?.isArmed) { _, _ in
+                model.refreshMusicalTypingTarget()
+            }
+            .onChange(of: model.activeTrackID) { _, _ in
+                model.musicalTyping.releaseAll()
+                model.refreshMusicalTypingTarget()
+            }
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+
     private var header: some View {
         HStack(spacing: 10) {
             Text("DAW PRO")
@@ -1841,15 +2227,29 @@ struct ContentView: View {
         .help("Open the Voice panel — build a voice of your own and convert vocals to it")
     }
 
-    /// The convert sheet's header clip name, resolved against the live store
-    /// (falls back to the track name for an unnamed clip).
-    private func voiceConvertClipName(_ id: UUID) -> String {
+    /// The Convert Voice… panel's clip list, resolved against the LIVE store —
+    /// plain value inputs, so the panel neither reads the store nor knows what a
+    /// `Track` is (the reusable-component rule).
+    ///
+    /// ⚠️ Resolved in the ORDER `clipIDs` carries (start-beat order, set by
+    /// `AppModel.selectedAudioClipIDs`), not in track order: the panel's list,
+    /// the store's per-clip conversion order and the result's `clips` array must
+    /// all read the same way. An id that no longer resolves is DROPPED here
+    /// rather than shown as a placeholder — leg A refuses an unknown id with its
+    /// own teaching message, and the list must not promise a clip that is gone.
+    private func voiceConvertTargets(_ clipIDs: [UUID]) -> [VoiceConvertTarget] {
+        var byID: [UUID: VoiceConvertTarget] = [:]
         for track in store.tracks {
-            if let clip = track.clips.first(where: { $0.id == id }) {
-                return clip.name.isEmpty ? track.name : clip.name
+            for clip in track.clips where clipIDs.contains(clip.id) {
+                byID[clip.id] = VoiceConvertTarget(
+                    id: clip.id,
+                    name: clip.name.isEmpty ? track.name : clip.name,
+                    trackName: track.name,
+                    startBeat: clip.startBeat,
+                    lengthBeats: clip.lengthBeats)
             }
         }
-        return "Audio Clip"
+        return clipIDs.compactMap { byID[$0] }
     }
 
     /// Settings gear chip: opens the glass Settings overlay (API keys). Neutral
@@ -2145,8 +2545,18 @@ private struct ArrangeDeleteKey: ViewModifier {
             // consumes nothing. No `phases:` argument: unlike ⌫ and the arrows,
             // there is no auto-repeat hazard here (the second press finds the mode
             // already off and is a no-op), and Escape is not held down.
+            //
+            // ⚠️ m34-k: THIS BACKSTOP RIDES SwiftUI FOCUS, and m34-j measured that
+            // focus latched dead after any dismissed text field (hits 1→1). The
+            // app's key monitor (`AppModel.handleKeyDownEvent` →
+            // `EscapeKeyMonitorRouting`) now hands Escape to the OPEN editor pane
+            // whenever something there would be taken down, and swallows it, so
+            // this mount sees only what the monitor passed on. The first statement
+            // is its own delivery counter, apart from the roll's mount (the two
+            // used to share `editorEscapeMountHits` alone).
             .onKeyPress(.escape) {
-                model.handleEditorEscape() ? .handled : .ignored
+                KeyPressProbe.arrangeEscapeBackstop += 1   // m34-k probe, first statement
+                return model.handleEditorEscape() ? .handled : .ignored
             }
             .onChange(of: model.arrangeKeyFocusNonce) { _, _ in focused = true }
             // ⭐ m23-fi PROBE — the `@FocusState` VALUE, not the assertion above.

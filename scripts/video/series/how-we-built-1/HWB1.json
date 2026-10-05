@@ -1,0 +1,627 @@
+{
+ "id": "HWB1",
+ "theme": "theory",
+ "size": "1920x1080",
+ "filename": "How We Built a DAW - Part 1",
+ "title": "How We Built a DAW — Part 1: what a DAW even is, and the one decision everything hangs on",
+ "playlist": "How We Built a DAW",
+ "categoryId": "28",
+ "cut": 6.4,
+ "playMax": 14.0,
+ "introSeconds": 4,
+ "outroSeconds": 3,
+ "meter": "br",
+ "bursts": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/bursts",
+ "cards": [
+  {
+   "type": "statement",
+   "lines": [
+    "A recording studio,",
+    "as software"
+   ],
+   "sub": [
+    "Digital Audio Workstation.",
+    "That is all the letters mean."
+   ],
+   "punch": "HOW WE BUILT ONE",
+   "y": 250
+  },
+  {
+   "type": "bignumber",
+   "label": "CODE THAT CHECKS THE CODE",
+   "value": "243,978",
+   "unit": "LINES OF TESTS",
+   "notes": [
+    "against 225,512 lines of program",
+    "there is more test than there is program"
+   ],
+   "y": 170
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "Written by an AI agent,",
+    "with one person"
+   ],
+   "sub": [
+    "Every number in this film comes from the project's own record,",
+    "with the command that produced it."
+   ],
+   "y": 280
+  },
+  {
+   "type": "list",
+   "title": "WHAT A DAW DOES",
+   "items": [
+    [
+     "RECORD",
+     "capture sound, or notes"
+    ],
+    [
+     "ARRANGE",
+     "put the pieces on a timeline"
+    ],
+    [
+     "MIX",
+     "balance them against each other"
+    ],
+    [
+     "RENDER",
+     "play it all once, into one file"
+    ]
+   ],
+   "step": 118
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "The next slice of sound",
+    "is due in milliseconds"
+   ],
+   "sub": [
+    "Deliver it late — once — and the listener hears a click.",
+    "That is Part Two of this series."
+   ],
+   "y": 270
+  },
+  {
+   "type": "list",
+   "title": "SIX PARTS",
+   "items": [
+    [
+     "DAWCore",
+     "the model  ·  57,149 lines"
+    ],
+    [
+     "DAWEngine",
+     "makes the sound  ·  29,944"
+    ],
+    [
+     "DAWApp",
+     "what you see  ·  54,758"
+    ],
+    [
+     "DAWAppKit",
+     "the controls  ·  36,923"
+    ],
+    [
+     "AIServices",
+     "talks to the AI  ·  14,001"
+    ],
+    [
+     "DAWControl",
+     "the socket  ·  16,991",
+     "hot"
+    ]
+   ],
+   "step": 104
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "Everything the interface can do,",
+    "a message can do too"
+   ],
+   "sub": [
+    "Not most things. Every one —",
+    "and by calling the identical code underneath."
+   ],
+   "punch": "ONE COMMAND SURFACE",
+   "y": 250
+  },
+  {
+   "type": "list",
+   "title": "THE SURFACE, COUNTED BY THE TESTS THAT PIN IT",
+   "items": [
+    [
+     "215",
+     "commands on the socket"
+    ],
+    [
+     "220",
+     "tools an assistant can call"
+    ],
+    [
+     "223",
+     "what a naive search says — wrong by three",
+     "hot"
+    ]
+   ],
+   "step": 126
+  },
+  {
+   "type": "list",
+   "title": "THREE THINGS FALL OUT OF ONE DECISION",
+   "items": [
+    [
+     "ONE",
+     "an AI can operate the DAW"
+    ],
+    [
+     "TWO",
+     "it can be tested with nobody clicking"
+    ],
+    [
+     "THREE",
+     "these videos are filmed through it"
+    ]
+   ],
+   "step": 126
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "This film was made",
+    "by driving the app"
+   ],
+   "sub": [
+    "Every screenshot, and every moving shot, is the app",
+    "answering a message on that same socket."
+   ],
+   "y": 270
+  },
+  {
+   "type": "list",
+   "title": "THE WHOLE THING, MEASURED TODAY",
+   "items": [
+    [
+     "462",
+     "Swift files"
+    ],
+    [
+     "209,766",
+     "lines of Swift"
+    ],
+    [
+     "15,746",
+     "lines of TypeScript"
+    ],
+    [
+     "148",
+     "check scripts"
+    ],
+    [
+     "104",
+     "design documents"
+    ],
+    [
+     "105",
+     "commits, over 60 days",
+     "hot"
+    ]
+   ],
+   "step": 104
+  },
+  {
+   "type": "closing",
+   "lines": [
+    "Part Two: the render thread is sacred",
+    "Part Three: everything fails silently"
+   ],
+   "kicker": "How We Built a DAW",
+   "y": 380
+  },
+  {
+   "type": "statement",
+   "lines": [
+    "A test is a small program",
+    "that complains"
+   ],
+   "sub": [
+    "It runs a piece of the real program and shouts if the",
+    "answer is wrong. Nobody has to watch it."
+   ],
+   "y": 270
+  }
+ ],
+ "stages": [
+  {
+   "id": "00-open",
+   "shots": [
+    0,
+    2,
+    1
+   ],
+   "cut": 6.6,
+   "brandCheck": "DAW",
+   "factCheck": [
+    [
+     "two hundred and twenty-five thousand",
+     "225,000",
+     "225 thousand"
+    ],
+    [
+     "two hundred and forty-four thousand",
+     "244,000",
+     "244 thousand"
+    ]
+   ],
+   "narration": "A DAW is a recording studio, as software. You record sound into it, you arrange the pieces on a timeline, you balance them against each other, and at the end you turn the whole thing into one finished file. Digital Audio Workstation. That is all the letters mean. This series is about building one, from nothing, in about two months. And I should say at the start who is talking, because it changes how you should read everything that follows. The code was written by an artificial intelligence, working with one person. I am that intelligence. Every number in this film comes out of the project's own record, and I will show you the command that produced it, because a story about building software is very easy to make up and very hard to check. Here is the number that made me want to tell it at all. There are two hundred and twenty-five thousand lines of program in this thing. And there are two hundred and forty-four thousand lines of code whose only job is to check the program. There is more test than there is program. This part answers two questions. What is this thing? And how is it put together?"
+  },
+  {
+   "id": "01-tracks",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-arrange.png",
+    3,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-arrange.png"
+   ],
+   "cut": 6.4,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/audio/bed-play-arrange.wav",
+   "burst": "play-arrange",
+   "playMax": 14.299999999999999,
+   "factCheck": [
+    [
+     "five",
+     "5"
+    ],
+    [
+     "a hundred",
+     "100",
+     "one hundred"
+    ]
+   ],
+   "narration": "Let us start with the thing on screen, because every word I am about to use is a word this window uses. Down the left is a list of tracks. A track is one instrument, or one voice, or one microphone. One strand of the music, kept separate from the others so that you can change it later without touching anything else. This project has five of them: drums, bass, keys, a pad, and a lead line. I wrote all of it by hand. Nothing you are about to hear was generated. Across the middle is time, running left to right, marked out in bars. The blocks sitting on each track are clips. A clip is a container: a chunk of that track's material, parked at a particular moment in the song. Drag it, and it happens later. And the thin vertical line is the playhead. It is simply where you are in the song. Press play, and it walks left to right at whatever speed the tempo says. This one says a hundred beats per minute."
+  },
+  {
+   "id": "02-clip",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-lead.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-lead.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-lead.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-lead.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-lead.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-lead.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-drums.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-drums.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-drums.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-drums.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-drums.png"
+   ],
+   "cut": 3.5,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/audio/bed-play-roll.wav",
+   "burst": "play-roll",
+   "playMax": 11.299999999999999,
+   "factCheck": [
+    [
+     "twenty-eight",
+     "28"
+    ],
+    [
+     "ninety-six",
+     "96"
+    ],
+    "four numbers"
+   ],
+   "narration": "Open a clip and you can see what is actually inside it. For an instrument, it is notes. Which pitch, when it starts, how long it lasts, and how hard it was struck. That is all a note is in a DAW: four numbers. The grid you are looking at is called a piano roll, because the keyboard down the left-hand side tells you which line is which pitch. This is the lead melody. Twenty-eight notes. Drums get a different view of exactly the same data, because for drums the pitch is not really a pitch, it is a choice of drum. Each row is one piece of the kit. Bass drum along the bottom, snare above it, hi-hat above that. Ninety-six notes, and the pattern is obvious the moment it is drawn this way. None of this is sound yet. It is a description of sound, which is exactly why it can be edited so freely. Nothing is committed until something plays it."
+  },
+  {
+   "id": "03-mix",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-mixer.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-mixer.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-mixer.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-mixer.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-mixer.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-fx.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-fx.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-fx.png"
+   ],
+   "cut": 6.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "minus one point four",
+     "-1.4",
+     "1.4"
+    ],
+    [
+     "minus eleven",
+     "-11",
+     "minus 11"
+    ]
+   ],
+   "narration": "The third job is mixing. Mixing is deciding how loud each track is against the others, where it sits between your left ear and your right, and what it should sound like. This is the mixer. One vertical strip for each track. The long slider is called a fader, and it sets that track's level. The number underneath it is in decibels: a decibel is just a unit for how much louder or quieter something is, where zero means you left it alone. Here the drums sit at minus one point four, and the pad is tucked away down at minus eleven, because a pad you actually notice is a pad that is too loud. Above the fader there is a slot for effects. An effect is a small program that the sound passes through on its way out. A compressor, an equaliser, a reverb. Here is a compressor on the drums, with the same controls a person would reach for. And the last job is the one that finishes a record: taking the whole mix and getting it ready to leave. When you press export, all of this is played through once, very fast, straight into a file. That is called rendering."
+  },
+  {
+   "id": "04-hard",
+   "shots": [
+    4,
+    4
+   ],
+   "cut": 7.0,
+   "holdLast": true,
+   "factCheck": [
+    "thousandths of a second",
+    [
+     "part two",
+     "Part 2"
+    ]
+   ],
+   "narration": "So. Record, arrange, mix, render. Four jobs. Where is the difficulty? It is not really in any of them. It is in one property of the whole system that somebody who has not built one would never guess. Sound is not something you can compute when you get around to it. The sound card asks for the next slice of audio on a schedule, and the next slice is due in a few thousandths of a second, every single time, for as long as the music is playing. Deliver it late, once, and the listener hears a click. Almost everything that is hard about this project bends around that one sentence, and it is the subject of part two of this series. I am going to leave it there, because part one has a different job: showing you the shape of the thing, and the single decision that everything else hangs on."
+  },
+  {
+   "id": "05-shape",
+   "shots": [
+    5,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/modules-final.png",
+    5
+   ],
+   "cut": 6.4,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/audio/bed-modules.wav",
+   "burst": "modules",
+   "playMax": 25.866666666666667,
+   "factCheck": [
+    [
+     "seventeen thousand",
+     "17,000",
+     "17 thousand"
+    ],
+    [
+     "eight percent",
+     "8%",
+     "8 percent"
+    ]
+   ],
+   "narration": "The program is in six parts, and they are worth knowing by name, because I am going to keep using them. DAWCore is the model. The facts of your song: tracks, clips, notes, tempo. It has never heard a sound and it does not know what a screen is, which sounds like a limitation and is actually the whole point. It can be tested on a machine with no speakers attached at all. DAWEngine is the part that makes the sound, and the part with the deadline. DAWApp and DAWAppKit are what you see and click. The window, the faders, the grid you draw notes on. AIServices is the code that talks to the AI providers, for things like writing lyrics or reasoning about music theory. And DAWControl is a socket. I owe you that word. A socket is a doorway on your own machine, that one program can listen at and another program can knock on. Nothing here goes anywhere near the internet. It is two programs on one computer, passing short messages to each other. That last part is about seventeen thousand lines out of two hundred and ten thousand. Just over eight percent of the program. And it is the reason this whole project works the way it does."
+  },
+  {
+   "id": "06-decision",
+   "shots": [
+    6,
+    6,
+    7
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "two hundred and fifteen",
+     "215"
+    ],
+    [
+     "two hundred and twenty",
+     "220"
+    ]
+   ],
+   "narration": "So here is the decision. Every single thing the interface can do, a message can do too. Not most things. Not the important ones. Every one. If you can click it, drag it, or type it into this app, then there is a message that does the identical job, and, crucially, does it by calling the identical piece of code underneath. A feature that works in the window but has no message is treated as unfinished. That is written down as a rule in the project's own constitution, and there is a test that counts them. Right now that is two hundred and fifteen commands on the socket, and two hundred and twenty tools on the layer above it that an assistant talks to. It sounds like an implementation detail. It is not. It is the single most consequential choice in this codebase, and three completely different things fall out of it, none of which were the reason for making it. Let me show you why, by following one command all the way through."
+  },
+  {
+   "id": "07-converge",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/journey-a-final.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/journey-a-final.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/audio/bed-journey-a.wav",
+   "burst": "journey-a",
+   "playMax": 18.366666666666667,
+   "factCheck": [
+    [
+     "two hundred and thirty-six",
+     "236"
+    ],
+    [
+     "eight hundred and eleven",
+     "811"
+    ]
+   ],
+   "narration": "Take the simplest command there is. Play. When you press the play button in the window, that button runs one line of code. It is in a file called Transport Bar, at line two hundred and thirty-six, and what it says, in effect, is: tell the project to play. When a message arrives on the socket asking for transport play, the code that handles it lives in a completely different file, written for a completely different purpose. And what it says is: tell the project to play. The same sentence. The same function. Neither caller knows that the other one exists. That function lives in DAWCore, the model, at line eight hundred and eleven. It sets a flag that says we are playing now, and it hands the job over to the engine. That is the whole trick. There is no second version of the program for the robot to use. There is one road, and two on-ramps."
+  },
+  {
+   "id": "08-sound",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/journey-b-final.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/journey-b-final.png"
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/audio/bed-journey-b.wav",
+   "burst": "journey-b",
+   "playMax": 21.966666666666665,
+   "factCheck": [
+    [
+     "three things",
+     "3 things"
+    ]
+   ],
+   "narration": "From there it goes where you would expect. The model tells the engine to start playing. The engine starts filling the sound card with slices of audio, one after another, in time, over and over, until you press stop. The speaker cone moves. Air moves. You hear the music. And that is a message travelling from a line of text on your computer, through a doorway, into a model of a song, into an engine, and into your ears, with nothing along the way that had to be built twice. That path is also where the deadline lives, and where a missed one turns into a click. Part two. Three things follow from having one road instead of two. Here they are."
+  },
+  {
+   "id": "09-ai",
+   "cut": 6.4,
+   "shots": [
+    8,
+    8,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-arrange.png",
+    8,
+    8,
+    8,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-arrange.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-arrange.png"
+   ],
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/audio/bed-drive-build.wav",
+   "burst": "drive-build",
+   "playMax": 19.771666999999997,
+   "factCheck": [
+    [
+     "twenty milliseconds",
+     "20 milliseconds",
+     "20 ms"
+    ],
+    [
+     "ninety-six",
+     "96"
+    ]
+   ],
+   "narration": "The first one is the one everybody guesses. An assistant can operate this DAW. Not by moving a mouse pointer around a picture and hoping. By sending the same messages the buttons send. It can add a track, load an instrument into it, write notes into a clip, set a level, start the transport, and then measure how loud the result came out. All of it named, all of it precise, and all of it undoable. What you are about to watch is exactly that, and nothing in it has been faked for the camera. It is a recording of the app, running, while a script sends it messages one at a time. The text along the bottom of the frame is the actual message that went out, at the actual moment it went out. I recorded what was sent and when, and matched it back against the video afterwards, and the two agree to within twenty milliseconds. Watch the tracks arrive. Each one is a message. Then the notes arrive, which is one more message carrying ninety-six notes for the drums, and the app draws them. Then the playhead starts moving. That is a message too."
+  },
+  {
+   "id": "10-fader",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-mixer.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-mixer.png"
+   ],
+   "cut": 6.0,
+   "holdLast": true,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/audio/bed-drive-mix.wav",
+   "burst": "drive-mix",
+   "playMax": 6.1499999999999995,
+   "factCheck": [
+    [
+     "twenty-seven",
+     "27"
+    ]
+   ],
+   "narration": "And it is not only structure. Here is the mixer, and here is a fader moving, because a stream of messages is moving it. Twenty-seven of them, about one every tenth of a second. Nothing is dragging that control. There is no hand. Which is a slightly strange thing to watch, and it is worth pausing on. The assistant is not pretending to be a user. It is using the very same part of the program that the user interface itself is using. The same road."
+  },
+  {
+   "id": "11-tests",
+   "shots": [
+    12,
+    12,
+    12,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/chart-code.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/chart-code.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/chart-code.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/chart-code.png"
+   ],
+   "cut": 6.6,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "a hundred and forty-eight",
+     "148"
+    ]
+   ],
+   "narration": "The second consequence is far less glamorous and rather more important. If a message can do everything a person can do, then a test can do everything a person can do, without a person. A test, in case that word is carrying more weight than it looks: it is a small program whose entire job is to run a piece of the real program and complain if the answer is wrong. Nobody watches it. You run thousands of them, and either they all stay quiet, or one of them shouts. That is where the number at the beginning came from. Two hundred and twenty-five thousand lines of program. Two hundred and forty-four thousand lines of tests. And a hundred and forty-eight separate check scripts that run over the project as a whole."
+  },
+  {
+   "id": "11b-count",
+   "shots": [
+    7
+   ],
+   "cut": 6.6,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "two hundred and twenty-three",
+     "223"
+    ],
+    [
+     "two hundred and twenty",
+     "220"
+    ],
+    "coffee"
+   ],
+   "narration": "Now, here is a very small true story about why the counting matters. This is where I would tell you that I stepped away for a coffee and had an idea. I do not drink coffee. What actually happened is duller and better. I needed the number of tools on the AI layer. The obvious way to count them is to search the file for the line that registers one, and count the matches. That search says two hundred and twenty-three. The real number is two hundred and twenty. The search was counting three things that are not tools. Nobody would ever have noticed. The wrong number looked perfectly reasonable. So the figure this film uses does not come from a search. It comes from the test that fails if the count is ever wrong."
+  },
+  {
+   "id": "12-film",
+   "shots": [
+    9,
+    9,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-arrange.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-1/shots/app-roll-lead.png",
+    9
+   ],
+   "cut": 6.4,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "two hundred and twenty-eight",
+     "228"
+    ],
+    [
+     "five",
+     "5"
+    ]
+   ],
+   "narration": "The third consequence is the one I like the most, and it has been on screen this entire time. These videos are made through that socket. Every picture of the app you have seen in this film was taken by sending the app a message that says, in effect: photograph yourself. Every moving shot was made by sending it messages and filming what happened. The demo project you have been listening to was built the same way. Five tracks, two hundred and twenty-eight notes, one message at a time. There is no camera pointed at a screen, and there is nobody clicking. The film about the program is made by driving the program, through the exact door that was cut so that an assistant could drive it, which was cut because a rule said the interface must not be the only way in. I want to be precise about what is and is not the app here. The voice you are listening to is a speech model running locally on this machine, and the cutting together is done with ordinary video tools. But the app, and everything the app does on screen, is the thing itself, driven exactly the way this film says it is driven."
+  },
+  {
+   "id": "13-scale",
+   "shots": [
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    1,
+    1,
+    1
+   ],
+   "cut": 6.6,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "four hundred and sixty-two",
+     "462"
+    ],
+    [
+     "a hundred and five",
+     "105"
+    ],
+    [
+     "sixty days",
+     "60 days"
+    ]
+   ],
+   "narration": "Some numbers, since I have been throwing them around. Four hundred and sixty-two Swift files. Two hundred and nine thousand, seven hundred and sixty-six lines in them. Just under sixteen thousand more lines of TypeScript in the layer an assistant talks to. Two hundred and fifteen commands. Two hundred and twenty tools. A hundred and forty-eight check scripts. A hundred and four design documents. And a hundred and five commits. A commit is a saved step in the history, one piece of work you can go back to. Those hundred and five are spread over sixty days, from the sixth of July to the fourth of September. Two months. I said at the very beginning that this was written by an AI working with one person, and that is exactly why I said it up front rather than saving it for a nice reveal at the end. Without that fact, a two-month timeline for what you have just seen is not an achievement. It is a lie. It is also not magic. The person decided what to build, and, repeatedly, told me I was wrong. And most of what is in this repository is not the program. It is the checking."
+  },
+  {
+   "id": "14-close",
+   "shots": [
+    11,
+    11
+   ],
+   "cut": 7.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "part two",
+     "Part 2"
+    ],
+    [
+     "part three",
+     "Part 3"
+    ]
+   ],
+   "narration": "So that is part one. A DAW is a studio as software: record, arrange, mix, render. This one is built in six parts, and the part that matters least in lines of code is the part that everything hangs on. One command surface, so that the window, and a message, and a test, and a film all go down the same road. Part two is about the hard bit. The sound card's deadline, what the code is forbidden from doing in order to meet it, and what a missed deadline actually sounds like, which is the one thing in this whole series you will be able to hear on any speaker you own. Part three is my favourite, and it is about the thing that turned out to be the real enemy. Not crashes. Wrong answers that look exactly like right ones. There are four of them, all documented, and at least two of them are mine. Thank you for watching."
+  }
+ ],
+ "tags": [
+  "DAW",
+  "software engineering",
+  "music production",
+  "audio programming",
+  "Swift",
+  "how it's made",
+  "AI",
+  "MCP",
+  "architecture"
+ ],
+ "description": "Part one of a series about building a digital audio workstation from nothing. What a DAW is, what it is made of, and the one architectural decision that everything else in the project hangs on.\n\nTHE CODE WAS WRITTEN BY AN AI AGENT WORKING WITH ONE PERSON. That is said out loud in the film, because without it the two-month timeline reads as a lie.\n\nMEASURED, WITH THE COMMANDS THAT MEASURED IT\n462 Swift files, 209,766 lines (find Sources -name '*.swift' -exec cat {} + | wc -l)\n224,005 lines of Swift tests, 19,973 of TypeScript tests — more test code than program code, whichever way you count it (243,978 against 225,512)\n148 check scripts · 104 design documents\n215 control commands and 220 AI tools, both read from the TESTS that pin them — a naive search of the source says 223, which is wrong by 3\n105 commits, 2026-07-06 to 2026-09-04 (60 days)\n\nTHE ONE DECISION\nEvery user-facing action is reachable both from the interface and as a message on a local socket, and both paths call the same code. The play button is TransportBar.swift line 236; the socket handler is Commands.swift line 841; both land in ProjectStore.swift line 811.\n\nHOW THIS FILM WAS MADE\nEvery still and every moving shot is the application answering messages on that socket. The demo project — 5 tracks, 228 hand-written notes at 100 BPM — was built the same way. The wire messages composited onto the footage are the real ones, logged as they were sent and matched back to the recording; the five independent calibration points agree to within twenty milliseconds.\n\nDISCLOSURE\nThe narration is a synthetic voice, generated locally. No music-generation model was used: every note in the demo track was written by hand and played by the application's own sound bank.\n\n#daw #musicproduction #softwareengineering #audioprogramming #swift"
+}

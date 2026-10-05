@@ -53,26 +53,105 @@ final class PlaybackGraph {
         /// A plain `gainDb` edit stays out of the key (it rides `player.volume`);
         /// a time-varying envelope cannot, so it lives here.
         let gainEnvelope: [ClipGainPoint]
+        /// m23-q: the pitch-edit set's digest, `""` when it bends nothing.
+        ///
+        /// ⚠️ **THE EDIT SET CHANGES WHICH FILE THIS NODE OPENS, SO IT IS
+        /// SCHEDULE IDENTITY** — exactly like the three stretch fields above.
+        /// Without it, editing a note re-keys the render CACHE (a new CAF is
+        /// rendered and committed) while the graph, seeing an unchanged key,
+        /// keeps the clip node it already has and goes on playing the OLD
+        /// file: a correction the user made, rendered correctly, and never
+        /// heard. The DIGEST rather than the set itself because `ClipKey` is
+        /// `Equatable` and compared for every clip on every reconcile.
+        ///
+        /// p2-ren Stage A′: a key that differs from a node's ONLY here
+        /// re-resolves IN PLACE (`differsOnlyInEditDigest(from:)`), and keeps
+        /// its node when the answer is the file the node already plays. The
+        /// guarantee above still holds, because a render's completion always
+        /// invalidates its clip (`AudioEngine.kickStretchRender`), whatever this
+        /// key says.
+        var pitchEditSetHash: String
+
+        /// p2-ren Stage A′: true when `other` is this key with a different
+        /// edit digest and nothing else changed: the same clip, the same place,
+        /// the same fades, the same source and the same three stretch fields.
+        func differsOnlyInEditDigest(from other: ClipKey) -> Bool {
+            guard pitchEditSetHash != other.pitchEditSetHash else { return false }
+            var probe = other
+            probe.pitchEditSetHash = pitchEditSetHash
+            return probe == self
+        }
+    }
+
+    /// p2-ren: what a clip's node plays, beside the render its key asks for.
+    enum ClipNodePlays: Equatable, Sendable {
+        /// What the key asks for: its committed render, or the source of a
+        /// clip that renders nothing.
+        case exact
+        /// Stage A, THE BRIDGE (`StretchResolution.bridge`): the file the clip
+        /// played a moment ago, while the render its key asks for is made.
+        case previous
+        /// Stage B, THE PROVISIONAL (`StretchResolution.provisional`): a quick
+        /// stand-in for the render its key asks for, until that render lands.
+        case preview
     }
 
     /// Resolution of one NON-IDENTITY stretched clip at reconcile time.
-    /// Identity clips (`Clip.isStretchIdentity`) never reach the resolver —
-    /// the bypass contract: their schedule is byte-identical to pre-ii-d.
+    /// Identity clips (`StretchRenderCache.needsRender` false) never reach the
+    /// resolver — the bypass contract: their schedule is byte-identical to
+    /// pre-ii-d. m23-q widened the predicate from `Clip.isStretchIdentity` to
+    /// include pitch edits; its one home is now `Clip.rendersThroughStretchCache`
+    /// (m23-ap-p2), which `needsRender` forwards to.
     enum StretchResolution {
         /// The rendered CAF exists — open THIS file instead of the source.
         /// The CAF is timeline-domain audio, so all downstream beat→frame
         /// math (fade bake, piece plans) is already correct.
         case ready(URL)
-        /// Render in flight (or failed): the clip is SKIPPED — honest
-        /// silence, never wrong-speed audio (spec §5). The engine's
-        /// render-completion hook re-resolves through the restart seam.
+        /// p2-ren Stage A, THE BRIDGE: the render the clip asks for is still
+        /// being made, and THIS file plays meanwhile. It is the file the clip's
+        /// node last opened, and it has the same time base as the render
+        /// (`RenderTimeBase`: the source, the ratio, and W once the render reads
+        /// it), so it plays at the right speed and in the right place, with the
+        /// clip's previous pitch and level. It is opened exactly like `.ready`.
+        /// It is never seen offline: the bounce's resolver is a lookup of
+        /// committed renders and cannot answer it. The engine's render
+        /// completion (or failure) replaces it through the restart seam.
+        case bridge(URL)
+        /// p2-ren Stage B, THE PROVISIONAL: the render the clip asks for is
+        /// still being made, and THIS quick stand-in for it plays meanwhile:
+        /// the clip's last committed render (same time base) with the frames
+        /// the edit changes spliced in from a span render
+        /// (`ProvisionalRender`). Opened exactly like `.ready`; never seen
+        /// offline (the bounce's resolver reads committed renders only); the
+        /// render's completion replaces it (at once, or at the next
+        /// reschedule while the transport rolls: `swapClipFileInPlace`).
+        case provisional(URL)
+        /// Render in flight (or failed) and no bridge available: the clip is
+        /// SKIPPED — honest silence, never wrong-speed audio (spec §5). The
+        /// engine's render-completion hook re-resolves through the restart seam.
         case pending
     }
 
     private final class ClipNode {
         let player = AVAudioPlayerNode()
-        let file: AVAudioFile
-        let key: ClipKey
+        /// `var` since p2-ren Stage B: a deferred final swap replaces a
+        /// provisional with its final, of the same format and length, under
+        /// the STOPPED player (`swapClipFileInPlace`).
+        var file: AVAudioFile
+        /// `var` since p2-ren Stage A′: a node that keeps playing the same file
+        /// through an edit that changed only its edit digest ADOPTS the new key
+        /// (`reconcile`'s changed-key loop), so the next pass compares equal.
+        var key: ClipKey
+        /// p2-ren Stage A: what this node plays. `.previous` is a BRIDGE
+        /// (`StretchResolution.bridge`), the clip's previous file, while the
+        /// render its key asks for is being made. On the NODE, not in a
+        /// per-pass ledger: a bridged clip keeps its node across later passes
+        /// (its key no longer changes), so no later pass re-resolves it, and
+        /// only the node still knows what it plays. `var` since Stage A′: an
+        /// adopted node takes the in-place answer's kind.
+        var plays: ClipNodePlays
+        /// Stage A's name for `plays == .previous`.
+        var isBridge: Bool { plays == .previous }
         /// Main-actor domain copy for schedule-time work (fade bake evaluates
         /// `Clip.envelopeGain`); refreshed every reconcile pass so parameter
         /// edits (gainDb) stay current without a rebuild.
@@ -83,10 +162,11 @@ final class PlaybackGraph {
         /// read position is stateful — sharing it would race.
         private var bakeFile: AVAudioFile?
 
-        init(file: AVAudioFile, key: ClipKey, clip: Clip) {
+        init(file: AVAudioFile, key: ClipKey, clip: Clip, plays: ClipNodePlays = .exact) {
             self.file = file
             self.key = key
             self.clip = clip
+            self.plays = plays
         }
 
         func bakeReader() throws -> AVAudioFile {
@@ -94,6 +174,13 @@ final class PlaybackGraph {
             let reader = try AVAudioFile(forReading: file.url)
             bakeFile = reader
             return reader
+        }
+
+        /// p2-ren Stage B: the node now plays `newFile` (a deferred final
+        /// swap); the bake reader follows it on its next use.
+        func replaceFile(_ newFile: AVAudioFile) {
+            file = newFile
+            bakeFile = nil
         }
 
         // MARK: R1 enqueue ledger (m19-f)
@@ -362,6 +449,46 @@ final class PlaybackGraph {
     /// stopped the mixer previews `value(atBeat:)` (stopped WYSIWYG).
     var masterAutomation: [AutomationLane] = []
 
+    // MARK: Modulation (m39-e)
+
+    /// The project's MASTER modulation sources/routes — the `masterEffects` /
+    /// `masterAutomation` twin, pushed by `AudioEngine` (live) /
+    /// `OfflineRenderer.render` (offline).
+    var masterModulationSources: [ModulationSource] = []
+    var masterModulationRoutes: [ModulationRoute] = []
+    /// Monotonic; the render side re-seeks nothing (every source is
+    /// position-absolute) but the generation still gates snapshot adoption in
+    /// the instrument, exactly as `ParamSnapshot.generation` does.
+    private var modulationGeneration: UInt64 = 0
+    /// Last published modulation input per strip (`nil` UUID key = master), so
+    /// an unchanged strip does not churn the retire bin, and a MACRO-ONLY
+    /// change takes the one-atomic-store path §7.2 specifies instead of a
+    /// republish.
+    private var publishedModulation: [UUID: ModulationPublishKey] = [:]
+    private var publishedMasterModulation: ModulationPublishKey?
+
+    /// Everything a strip's snapshot is derived from. Equatable so the publish
+    /// pass can tell "nothing changed" from "a macro moved" from "rebuild".
+    struct ModulationPublishKey: Equatable {
+        var strip: ModulationSnapshotBuilder.Strip
+        var originSample: Int64
+        var positionValid: Bool
+
+        /// The same key with every macro VALUE zeroed — equal keys under this
+        /// normalisation mean the graph is structurally identical and only a
+        /// macro moved.
+        var structural: ModulationPublishKey {
+            var copy = self
+            copy.strip.sources = copy.strip.sources.map { source in
+                guard case .macro = source.params else { return source }
+                var normalised = source
+                normalised.params = .macro(MacroSourceParams(value: 0))
+                return normalised
+            }
+            return copy
+        }
+    }
+
     // MARK: Per-insert spectrum arms (m23-r2a)
 
     /// MIRROR of `AudioEngine.spectrumArms`, which is the ONE HOME of the arm
@@ -448,6 +575,105 @@ final class PlaybackGraph {
     /// clip-player asymmetry, design §2.3).
     private(set) var referenceScheduled = false
 
+    // MARK: Clip-note audition lane (I1, design 2026-09-24-pitch-editor-interaction-batch §4)
+
+    /// Live-only clip-note audition lane flag, **DEFAULT FALSE**: the
+    /// `referenceLaneEnabled` shape and fail-safe, verbatim. Only the live
+    /// `AudioEngine` sets it (in `wireGraphHooks`, before the first
+    /// `ensureMasterSandwich`), so `OfflineRenderer`'s graphs never carry the
+    /// voice and every offline byte-invariant holds by construction.
+    ///
+    /// With the flag TRUE the sandwich builder attaches, once per graph:
+    ///
+    ///     clipAuditionPlayers[0] ─► clipAuditionMixers[0] ─┐
+    ///     clipAuditionPlayers[1] ─► clipAuditionMixers[1] ─┼─► mainMixerNode ─► master chain ─► output
+    ///     clipAuditionPlayers[2] ─► clipAuditionMixers[2] ─┘
+    ///
+    /// STATIC for the graph's life: attached before the engine first renders
+    /// (so the m16-h attach-while-running class never applies), never re-wired,
+    /// never announce-capable. It is NOT a strip: no inserts, no sends, no
+    /// automation, no stem identity. That is I1's named cost: the voice skips
+    /// the edited track's inserts. The buffer it plays is read, faded and
+    /// levelled OFF the render thread (`ClipSpanAuditionReader`); only
+    /// `playClipAudition` / `fadeOutClipAudition` / `reapFadedClipAudition` /
+    /// `stopClipAudition` touch the players and mixers, from the main actor.
+    /// Zero new render-thread code: six stock nodes (three pairs, below).
+    ///
+    /// ⭐ PLAYER → MIXER PAIRS, SO A NEW BUFFER NEVER CUTS A SOUNDING ONE
+    /// (I1-F1, RT review H7: two pairs; I1-F2 made it three, see "THREE PAIRS,
+    /// NOT TWO" below). MEASURED 2026-09-25 in manual rendering
+    /// (`ClipSpanRenderTests.stopStepProbe`, `.rampVariantsProbe`):
+    ///  * `stop()` mid-buffer at a peak of a 0.5 cosine steps by 0.4957, 7.6×
+    ///    the waveform's own largest step (0.0653): a click;
+    ///  * a MIXER's `outputVolume` written 1 → 0 is RAMPED, linearly, never
+    ///    stepping more than the waveform does: silent 32 ms after the write
+    ///    at a 512-frame render quantum, 86 ms at 4096 (3 of 3 sequences);
+    ///  * a PLAYER's `volume` (the mixer's INPUT bus) depends on the topology:
+    ///    with two players on one shared mixer it STEPPED by 0.4957, exactly a
+    ///    cut (4 of 4 sequences); with each player on its own mixer it ramped
+    ///    (4 of 4). Undocumented AVAudioMixerNode behaviour, so nothing leans
+    ///    on it.
+    /// So each player has its own mixer, the fades ride the MIXERS'
+    /// `outputVolume` (the one knob that ramped in every topology measured),
+    /// and a new buffer starts on the idle pair while the sounding pair fades
+    /// out: a crossfade with no gap and no added latency, which a drag heard
+    /// step by step needs.
+    ///
+    /// ⭐ THREE PAIRS, NOT TWO (I1-F2, RT re-review NH-E). A volume write lands
+    /// at the NEXT render call, and the ramp then runs over whole calls. With
+    /// two pairs, a second new buffer arriving before the first fade had been
+    /// rendered found only the fading pair free and stopped it at full level.
+    /// MEASURED 2026-09-25 in manual rendering
+    /// (`ClipSpanRenderTests.doubleSwapProbe`, every call one IO buffer, cuts
+    /// at waveform peaks, `voiceNeverCuts`' limit 0.2309):
+    ///  * two swaps between the same two render calls: max |Δ| 0.4976 at 512
+    ///    AND at 4096 frames, a full cut;
+    ///  * one call apart: 0.2803 at 512 frames (the ramp spans ~3 calls there);
+    ///    0.1147 at 4096 (it ends inside one call);
+    ///  * two or more calls apart: within the limit at both.
+    /// Two deliveries ~45 ms apart (a drag's span renders) share one 4096-frame
+    /// call gap (85 ms) about half the time, so the cut was reachable. The third
+    /// pair is idle when the second swap comes, and `playClipAudition` stops a
+    /// fading pair only when no pair is idle, the one whose fade began first.
+    /// MEASURED after: two swaps k = 0…5 calls apart stay within the limit at
+    /// both sizes (worst 0.1989, 4096 frames, k 0; `doubleSwapGate`). What
+    /// remains: THREE new buffers between the same two render calls still
+    /// step 0.4976 at both sizes (at 4096 frames, three deliveries inside
+    /// ~85 ms); one call apart they stay within (`doubleSwapProbe`'s
+    /// three-swap rows).
+    var clipAuditionLaneEnabled = false
+
+    /// How many player → mixer pairs the voice has (see above).
+    static let clipAuditionPairCount = 3
+    /// The voice's players, `clipAuditionPairCount` of them (empty without the
+    /// lane). One carries the newest buffer; the others are idle or fading out.
+    private(set) var clipAuditionPlayers: [AVAudioPlayerNode] = []
+    /// Each player's own input to the main mix, index for index. Unity
+    /// except while fading (the level is baked into the buffer); written to 1
+    /// before every start, so a fade or an engine start never leaves a pair at
+    /// another level (the m22-g lesson: a written volume is not assumed to
+    /// survive a start).
+    private(set) var clipAuditionMixers: [AVAudioMixerNode] = []
+    /// Which pair carries the newest buffer.
+    private var clipAuditionActive = 0
+    /// The player carrying the newest buffer (I1's single-voice accessor).
+    var clipAuditionPlayer: AVAudioPlayerNode? {
+        clipAuditionPlayers.indices.contains(clipAuditionActive)
+            ? clipAuditionPlayers[clipAuditionActive] : nil
+    }
+    /// The mixer of the pair carrying the newest buffer.
+    var clipAuditionMixer: AVAudioMixerNode? {
+        clipAuditionMixers.indices.contains(clipAuditionActive)
+            ? clipAuditionMixers[clipAuditionActive] : nil
+    }
+    /// m19-f-style ledger, per player: raised by a schedule, lowered by a
+    /// stop, so an idle lane costs no start/stop handshakes.
+    private var clipAuditionScheduledFlags: [Bool] = []
+    /// Per player: when its fade-out began, or nil when it is not fading.
+    private var clipAuditionFadeStarted: [ContinuousClock.Instant?] = []
+    /// True while any player holds a schedule (sounding or fading).
+    var clipAuditionScheduled: Bool { clipAuditionScheduledFlags.contains(true) }
+
     private(set) var signature: [UUID: [ClipKey]] = [:]
     private(set) var instrumentSignature: [UUID: InstrumentTrackKey] = [:]
     /// Structural routing identity per source (audio + instrument) track.
@@ -483,12 +709,16 @@ final class PlaybackGraph {
     /// the no-restart republish.
     private var activeAutomationLanes:
         [UUID: (volume: AutomationLane?, pan: AutomationLane?,
-                effectParams: [AutomationSchedule.EffectParamLaneSpec])] = [:]
+                effectParams: [AutomationSchedule.EffectParamLaneSpec],
+                requireAnchor: Bool)] = [:]
     /// Lanes behind each strip's currently PUBLISHED schedule (main-actor
-    /// bookkeeping only).
+    /// bookkeeping only). `requireAnchor` rides along because the roll-start
+    /// and loop-extend publishes rebuild from THIS record, and a strip can
+    /// need a schedule for its anchor alone (m39-e).
     private var publishedAutomationLanes:
         [UUID: (volume: AutomationLane?, pan: AutomationLane?,
-                effectParams: [AutomationSchedule.EffectParamLaneSpec])] = [:]
+                effectParams: [AutomationSchedule.EffectParamLaneSpec],
+                requireAnchor: Bool)] = [:]
     /// The last tracks `applyParameters` saw — `startAllPlayers` re-runs the
     /// parameter pass with them so the override pin lands at roll start.
     private var lastParameterTracks: [Track] = []
@@ -521,6 +751,10 @@ final class PlaybackGraph {
         // AUSampler for a sound-bank track (m10-n) arrives through the same
         // seam — no new provider needed. Pending/failed/missing → silence.
         case .soundBank: return self.audioUnitProvider(track) ?? SilentPlaceholderInstrument()
+        // m39-dm — a built-in kind, so there is no provider and no placeholder
+        // branch: `resolvedDrumKit` turns a nil payload into the FACTORY kit,
+        // which means a drum track sounds the moment it is created.
+        case .drumSynth: return DrumSynthInstrument(params: descriptor.resolvedDrumKit)
         }
     }
 
@@ -529,7 +763,64 @@ final class PlaybackGraph {
     /// answer also KICKS the render job there); OfflineRenderer wires a pure
     /// cache lookup after the mixdown wait. nil (default, tests) means every
     /// non-identity clip is pending — silence, never wrong-speed audio.
+    /// p2-ren Stage A: the engine may also answer `.bridge` (the clip's
+    /// previous file, same time base); the offline lookup never does.
     var stretchResolver: (@MainActor (Clip) -> StretchResolution)?
+
+    /// p2-ren Stage A: told, on the main actor, about EVERY file the add loop
+    /// opens for an audio clip (the domain clip, the file's URL, its length in
+    /// frames), identity clips included (their source is what their first
+    /// edit bridges on). `AudioEngine` keeps the last one per clip: the
+    /// bridge's memo lives in the engine because `rebuildEngine` discards the
+    /// graph and keeps the caches. nil (offline renders, tests) = nothing kept.
+    var onClipFileOpened: (@MainActor (Clip, URL, AVAudioFramePosition) -> Void)?
+
+    /// p2-ren Stage B: the same event with what the node plays (`.preview` for
+    /// a provisional). A separate hook so Stage A's stays as it was; fired
+    /// right after `onClipFileOpened`, while the node is not yet visible
+    /// through `clipPlays(clipID:)` (the track's node is published at the end
+    /// of its pass).
+    var onClipNodeOpened: (@MainActor (Clip, URL, ClipNodePlays) -> Void)?
+
+    /// p2-ren Stage A′: what one clip's resolution told the reconcile to do.
+    enum ResolvedPlayback {
+        /// Open this file; it plays as `ClipNodePlays` says.
+        case file(URL, ClipNodePlays)
+        /// No node: the render is pending (or failed) and nothing may stand in.
+        case pending
+    }
+
+    /// THE ONE RESOLUTION of what an audio clip plays, for the add loop and
+    /// for Stage A′'s in-place re-resolve alike: its source when it renders
+    /// nothing (identity clips never invoke the resolver: the bypass
+    /// contract), else what `stretchResolver` answers. Each call is one
+    /// resolver call, with its side effects (a render kick, the bridge count),
+    /// so `reconcile` makes at most one per clip per pass.
+    private func resolvePlayback(_ clip: Clip, sourceURL: URL) -> ResolvedPlayback {
+        guard StretchRenderCache.needsRender(clip) else { return .file(sourceURL, .exact) }
+        switch stretchResolver?(clip) {
+        case .ready(let rendered): return .file(rendered, .exact)
+        case .bridge(let previous): return .file(previous, .previous)
+        case .provisional(let stand): return .file(stand, .preview)
+        case .pending, nil: return .pending
+        }
+    }
+
+    /// p2-ren Stage A′: true when the last `reconcile` kept a node playing a
+    /// stand-in (a bridge) under a NEW key without a schedule change. Nothing
+    /// restarts for such a pass, so no `scheduleAll` reports it; the engine
+    /// reads this and, when the transport is rolling (the stand-in is being
+    /// HEARD), asks `postRenderNoticesForPlayback()` to say what plays.
+    private(set) var adoptedInterimInLastPass = false
+
+    /// p2-ren Stage A′: the render notices a schedule pass would post, posted
+    /// now: for a rolling transport whose clip kept playing a stand-in through
+    /// an edit (no restart, so no `scheduleAll`). Once per episode, exactly
+    /// like the schedule pass (`postPendingRenderSilence`). Never call it for
+    /// a stopped transport: an edit's reconcile is not playback (p2-notice).
+    func postRenderNoticesForPlayback() {
+        postPendingRenderSilence()
+    }
 
     /// Per-track meter frames, called on the main actor. Fed by a tap on each
     /// track mixer; drives both the live engine's handler and offline tests.
@@ -537,8 +828,9 @@ final class PlaybackGraph {
 
     /// Engine-notices sink (m15-e, audit F6): one `EngineNoticeEvent` per
     /// schedule-time degradation — the bake-failure fallbacks ("timing wins":
-    /// the clip still sounds, on time, unshaped) and the stretch-pending
-    /// silence transition. Every post happens inside this @MainActor class's
+    /// the clip still sounds, on time, unshaped) and pending-render silence
+    /// (posted by the schedule pass that plays it, never by the edit that
+    /// caused it — m23-ap-p2 p2-notice). Every post happens inside this @MainActor class's
     /// schedule/reconcile code — control plane only, the render thread gains
     /// nothing. AudioEngine forwards into the store's ring; OFFLINE graphs
     /// (OfflineRenderer, bare test graphs) leave it nil by design — a bounce
@@ -547,12 +839,67 @@ final class PlaybackGraph {
     var noticeSink: ((EngineNoticeEvent) -> Void)?
 
     /// Clip ids whose stretch-pending silence has already been NOTICED
-    /// (m15-e): reconcile re-resolves pending clips on every pass, so the
-    /// notice posts once per clip per pending EPISODE — a `.ready` resolution
-    /// re-arms the gate (a later re-edit back into pending posts again).
-    /// Session-bounded; a graph rebuild starts empty and honestly re-posts
-    /// clips that are still silent.
+    /// (m15-e): the notice posts once per clip per pending EPISODE. An
+    /// episode ends when the clip stops being pending by ANY route — its
+    /// render lands (`.ready`), it returns to identity, or it leaves the
+    /// model — because every reconcile pass prunes this set to the clips
+    /// that pass left pending (`stretchPendingClips`); a later re-edit back
+    /// into pending posts again. Session-bounded; a graph rebuild starts
+    /// empty and honestly re-posts clips that are still silent.
     private var stretchPendingNoticed: Set<UUID> = []
+
+    /// One audio clip the LAST reconcile pass left WITHOUT a node because its
+    /// stretch/tuning render is pending — i.e. a clip any schedule pass will
+    /// play as silence (m23-ap-p2 p2-notice).
+    private struct PendingRenderSilence {
+        let clip: Clip
+        let beat: Double
+    }
+
+    /// The pending-render ledger, in track/clip order (so a multi-clip post
+    /// order is deterministic): rebuilt WHOLE by every reconcile pass, read by
+    /// `scheduleAll`, which is where the `clip-stretch-pending` notice posts.
+    ///
+    /// ⚠️ **WHY THE NOTICE IS NOT POSTED WHERE THE CLIP IS FOUND PENDING.**
+    /// Reconcile is what an EDIT runs — `ProjectStore`'s pitch edits call
+    /// `engine.tracksDidChange` with the transport STOPPED — so posting there
+    /// lit the amber chip after every tuning or note drag, claiming a sound
+    /// "played not as set" when nothing had played (measured on staging
+    /// 2026-09-24: 11 ms after `clip.autoCorrectPitch`, no playback sent; the
+    /// render was ready in 0.36–0.83 s). And the play start does NOT
+    /// re-resolve a pending clip: nothing on the play path reconciles, and
+    /// `scheduleAll` walks ClipNodes only, which a pending clip never got. So
+    /// reconcile records, and the schedule pass — reached in the live engine
+    /// only through `AudioEngine.startPlayers` (play, record, seek/tempo/
+    /// edit-while-rolling restarts, rebuild resume, recovery) — reports.
+    private var stretchPendingClips: [PendingRenderSilence] = []
+
+    /// p2-ren Stage A: one audio clip the last reconcile pass left playing a
+    /// BRIDGE, its previous file, while its render is being made. Stage B:
+    /// or a PROVISIONAL (`plays == .preview`).
+    private struct PendingRenderBridge {
+        let clip: Clip
+        let beat: Double
+        var plays: ClipNodePlays = .previous
+    }
+
+    /// The bridge ledger, in track/clip order: rebuilt WHOLE at the end of
+    /// every reconcile pass FROM THE NODES (a bridged node survives later
+    /// passes, which never re-resolve it), read by `scheduleAll`, where
+    /// `clip-render-previous` posts, for the same reason `clip-stretch-pending`
+    /// posts there and not at the edit.
+    private var stretchBridgedClips: [PendingRenderBridge] = []
+
+    /// Clip ids whose bridge has already been NOTICED: once per clip per bridge
+    /// EPISODE, the `stretchPendingNoticed` discipline. An episode ends when
+    /// the clip stops playing a bridge by any route: its render lands, it
+    /// fails, its time base changes, or it leaves the model.
+    private var stretchBridgeNoticed: Set<UUID> = []
+
+    /// p2-ren Stage B: clip ids whose PROVISIONAL has already been noticed
+    /// (`clip-render-preview`), once per clip per preview episode, the same
+    /// discipline as `stretchBridgeNoticed`.
+    private var stretchPreviewNoticed: Set<UUID> = []
 
     /// Clip ids whose media OPEN failed at graph-build time and have already
     /// posted their `clip-file-missing` notice (m16-c, audit F2): the skipped
@@ -673,6 +1020,7 @@ final class PlaybackGraph {
     /// cold-builds a fresh one from the model.
     @discardableResult
     func reconcile(tracks: [Track]) -> Bool {
+        adoptedInterimInLastPass = false
         // A graph marked for rebuild is about to be discarded — no further
         // mutation may touch its (once-rendered) engine. Report "changed"
         // so no caller can mistake the refusal for a clean no-op.
@@ -803,7 +1151,8 @@ final class PlaybackGraph {
                         stretchRatio: $0.stretchRatio,
                         pitchShiftSemitones: $0.pitchShiftSemitones,
                         formantPreserve: $0.formantPreserve,
-                        gainEnvelope: $0.gainEnvelope)
+                        gainEnvelope: $0.gainEnvelope,
+                        pitchEditSetHash: PitchEditSetDigest.hex($0.pitchEdits))
             }
         }
 
@@ -832,6 +1181,17 @@ final class PlaybackGraph {
         }
 
         // 2 + 3. Added tracks, then per-track clip diffs by ClipKey.
+        // m23-ap-p2 p2-notice: this pass's pending-render clips, committed to
+        // `stretchPendingClips` with the signatures at the end of the pass.
+        var pendingThisPass: [PendingRenderSilence] = []
+        // p2-ren Stage A′: the answer each clip's in-place re-resolve got THIS
+        // pass. A clip whose node is torn down anyway takes the same answer in
+        // the add loop, so the resolver (which kicks renders and counts
+        // bridges) is asked ONCE per clip per pass, as before A′.
+        var resolvedThisPass: [UUID: ResolvedPlayback] = [:]
+        // p2-ren Stage A′: nodes that kept playing their file and adopted a
+        // new key, by track, so the change test below does not count them.
+        var adoptedKeys: [(trackID: UUID, key: ClipKey)] = []
         for track in audioTracks {
             let keys = newSignature[track.id] ?? []
             var node: TrackNode
@@ -864,6 +1224,29 @@ final class PlaybackGraph {
                     if let domainClip = clipByID[clipID] { clipNode.clip = domainClip }
                     continue
                 }
+                // p2-ren Stage A′ (design §5 "Tier 1b", §11 step 8): NO RESTART AT
+                // THE EDIT. A key that differs ONLY in its edit digest is
+                // re-resolved here, in place (which still kicks the render). When
+                // the answer is the very file this node plays (the bridge on
+                // it, or the source of a clip that renders nothing again), the
+                // node keeps playing and adopts the new key, so this pass does
+                // not count as a schedule change and a rolling transport is not
+                // restarted. Any other answer tears the node down as before, and
+                // the add loop below opens that answer without asking again.
+                if let newKey = keyByID[clipID], let domainClip = clipByID[clipID],
+                   let sourceURL = newKey.url, newKey.differsOnlyInEditDigest(from: clipNode.key) {
+                    let answer = resolvePlayback(domainClip, sourceURL: sourceURL)
+                    resolvedThisPass[clipID] = answer
+                    if case .file(let url, let plays) = answer,
+                       url.standardizedFileURL == clipNode.file.url.standardizedFileURL {
+                        clipNode.key = newKey
+                        clipNode.clip = domainClip
+                        clipNode.plays = plays
+                        adoptedKeys.append((track.id, newKey))
+                        if plays != .exact { adoptedInterimInLastPass = true }
+                        continue
+                    }
+                }
                 clipNode.player.stop()
                 teardownDetach(clipNode.player)
                 node.clips.removeValue(forKey: clipID)
@@ -874,40 +1257,65 @@ final class PlaybackGraph {
             for key in keys where node.clips[key.id] == nil {
                 guard let url = key.url else { continue }  // no media (MIDI lands in M3)
                 guard let domainClip = clipByID[key.id] else { continue }
-                // Stretch swap (M5 ii-d): a non-identity clip opens its
-                // rendered CAF instead of the source; while the render is
-                // pending the clip gets NO node — silence, never wrong-speed
-                // audio. The pending clip stays in `signature`, so this loop
-                // re-resolves on every reconcile pass and the engine's
-                // render-completion restart lands the CAF. Identity clips
-                // never invoke the resolver (the bypass contract).
-                var fileURL = url
-                if !domainClip.isStretchIdentity {
-                    switch stretchResolver?(domainClip) {
-                    case .ready(let rendered):
-                        stretchPendingNoticed.remove(key.id)
-                        fileURL = rendered
-                    case .pending, nil:
-                        // m15-e (audit F6): the clip is being scheduled as
-                        // SILENCE — surface it once per pending episode.
-                        if stretchPendingNoticed.insert(key.id).inserted {
-                            noticeSink?(EngineNoticeEvent(
-                                code: "clip-stretch-pending",
-                                message: "'\(domainClip.name)' is still being time-stretched — it plays as silence until the stretch is ready.",
-                                beat: key.startBeat))
-                        }
-                        continue
-                    }
+                // Stretch swap (M5 ii-d): a clip that renders (a stretch,
+                // transpose or tuning — `Clip.rendersThroughStretchCache`)
+                // opens its rendered CAF instead of the source; while the
+                // render is pending the clip gets NO node — silence, never
+                // wrong-speed or untuned audio. The pending clip stays in
+                // `signature`, so this loop re-resolves on every reconcile
+                // pass and the engine's render-completion restart lands the
+                // CAF. Identity clips never invoke the resolver (the bypass
+                // contract). p2-ren Stage A: a pending clip with a BRIDGE (its
+                // previous file, same time base) opens that file instead of
+                // going silent. The resolution is `resolvePlayback`; a clip the
+                // changed-key loop already re-resolved this pass (Stage A′)
+                // takes that answer, never a second one.
+                let fileURL: URL
+                let plays: ClipNodePlays
+                switch resolvedThisPass[key.id] ?? resolvePlayback(domainClip, sourceURL: url) {
+                case .file(let resolved, let kind):
+                    // `.exact`: the committed render or the source (the episode
+                    // ends here; the pass-end prune of `stretchPendingNoticed`
+                    // re-arms the gate). `.previous`: opened exactly like
+                    // `.exact`; the node is marked, so the schedule pass says
+                    // what is playing (`clip-render-previous`) and a failed
+                    // render can end it (`isPlayingBridge`).
+                    fileURL = resolved
+                    plays = kind
+                case .pending:
+                    // m15-e (audit F6) → m23-ap-p2 p2-notice: RECORD, do
+                    // not post. A reconcile is what an edit runs, with the
+                    // transport usually stopped; the silence is reported
+                    // when a schedule pass actually plays it
+                    // (`postPendingRenderSilence`, from `scheduleAll`).
+                    pendingThisPass.append(
+                        PendingRenderSilence(clip: domainClip, beat: key.startBeat))
+                    continue
                 }
+                let bridged = plays != .exact
                 do {
                     let file = try AVAudioFile(forReading: fileURL)
-                    let clipNode = ClipNode(file: file, key: key, clip: domainClip)
+                    let clipNode = ClipNode(file: file, key: key, clip: domainClip,
+                                            plays: plays)
                     engine.attach(clipNode.player)
                     engine.connect(clipNode.player, to: node.sumMixer, format: file.processingFormat)
                     node.clips[key.id] = clipNode
                     // A clip that opens again healed — re-arm its notice.
                     fileOpenFailedNoticed.remove(key.id)
+                    // p2-ren Stage A: every successful open, identity clips
+                    // included, is what the next edit may bridge on.
+                    onClipFileOpened?(domainClip, fileURL, file.length)
+                    onClipNodeOpened?(domainClip, fileURL, plays)
                 } catch {
+                    if bridged {
+                        // p2-ren Stage A: a bridge that will not open is no
+                        // bridge. The clip is what it would have been without
+                        // one, pending silence, and never a `clip-file-missing`
+                        // naming a cache file the user never chose.
+                        pendingThisPass.append(
+                            PendingRenderSilence(clip: domainClip, beat: key.startBeat))
+                        continue
+                    }
                     // Skip this clip, keep playing the rest. m16-c (audit F2):
                     // a skipped clip gets NO player node, so the m16-a play
                     // guard (`startAllPlayers` walks existing ClipNodes only)
@@ -1126,6 +1534,15 @@ final class PlaybackGraph {
                                         of: node.chainHost)
         }
 
+        // p2-ren Stage A′: a node that adopted its new key plays exactly what it
+        // played, so its key change is not a schedule change. The OLD signature
+        // takes the adopted key before the comparison; everything else about
+        // the pass (another clip, a move, a routing edit) still counts.
+        for (trackID, key) in adoptedKeys {
+            if let index = signature[trackID]?.firstIndex(where: { $0.id == key.id }) {
+                signature[trackID]?[index] = key
+            }
+        }
         let changed = newSignature != signature
             || newInstrumentSignature != instrumentSignature
             || newRoutingSignature != routingSignature
@@ -1134,6 +1551,31 @@ final class PlaybackGraph {
         instrumentSignature = newInstrumentSignature
         routingSignature = newRoutingSignature
         busSignature = newBusSignature
+        // m23-ap-p2 p2-notice: the ledger is this pass's pending set, WHOLE —
+        // so a clip whose render landed, whose tuning was removed, or which
+        // left the model is never reported at the next play; and an episode
+        // that ended here re-arms its notice.
+        stretchPendingClips = pendingThisPass
+        stretchPendingNoticed.formIntersection(pendingThisPass.map(\.clip.id))
+        // p2-ren Stage A: the bridge ledger, WHOLE, read off the NODES in
+        // track/clip order. A bridge opened in an earlier pass is still on its
+        // node, and no pass after the one that opened it re-resolves it.
+        // Stage B: a node playing a PROVISIONAL is on the same ledger, with
+        // its own kind and its own episode set.
+        var bridgedThisPass: [PendingRenderBridge] = []
+        for track in audioTracks {
+            guard let node = trackNodes[track.id] else { continue }
+            for clip in track.clips {
+                guard let plays = node.clips[clip.id]?.plays, plays != .exact else { continue }
+                bridgedThisPass.append(PendingRenderBridge(clip: clip, beat: clip.startBeat,
+                                                           plays: plays))
+            }
+        }
+        stretchBridgedClips = bridgedThisPass
+        stretchBridgeNoticed.formIntersection(
+            bridgedThisPass.filter { $0.plays == .previous }.map(\.clip.id))
+        stretchPreviewNoticed.formIntersection(
+            bridgedThisPass.filter { $0.plays == .preview }.map(\.clip.id))
         return changed
     }
 
@@ -1502,7 +1944,8 @@ final class PlaybackGraph {
         let rolling = automationRollContext != nil
         var newActiveLanes:
             [UUID: (volume: AutomationLane?, pan: AutomationLane?,
-                    effectParams: [AutomationSchedule.EffectParamLaneSpec])] = [:]
+                    effectParams: [AutomationSchedule.EffectParamLaneSpec],
+                    requireAnchor: Bool)] = [:]
         for track in tracks {
             let mixer: AVAudioMixerNode?
             switch track.kind {
@@ -1528,15 +1971,53 @@ final class PlaybackGraph {
             // While STOPPED the knobs rule (no schedule → no render stores),
             // and a lane disabled/removed while ROLLING reverts the effect
             // to its knob params render-side on the next quantum.
-            let effectParams = AutomationSchedule.resolveEffectParamLanes(
+            let lanes = AutomationSchedule.resolveEffectParamLanes(
                 automation: track.automation, effects: track.effects)
-            newActiveLanes[track.id] = (volumeLane, panLane, effectParams)
+            // m39-e P3: a modulated-but-UNAUTOMATED effect param needs a
+            // synthetic one-point hold track carrying the knob value, or
+            // `storeEffectParams` never visits it and the route is silently
+            // inert (§3.3). Appended AFTER the real lanes, so no real lane's
+            // position — and therefore no cursor — moves.
+            let syntheticLanes = ModulationSnapshotBuilder.syntheticEffectParamLanes(
+                routes: track.modulationRoutes, effects: track.effects,
+                automation: track.automation)
+            let effectParams = lanes + syntheticLanes
+            // m39-e §3.3: a route joins the `activeLane` neutralisation
+            // EXACTLY as a lane does, or the knob applies TWICE — once on the
+            // mixer node and once in the stage that carries the base.
+            let modulatesVolume = ModulationSnapshotBuilder.modulates(
+                .volume, routes: track.modulationRoutes)
+            let modulatesPan = ModulationSnapshotBuilder.modulates(
+                .pan, routes: track.modulationRoutes)
+            // ⭐ THE ANCHOR REQUIREMENT IS BOOKKEPT, NOT RECOMPUTED PER SITE.
+            // A strip whose only automation is a volume/pan ROUTE still needs
+            // a schedule — not for its points (it has none) but for its
+            // ANCHOR, which is how the render side learns the transport
+            // position. Before this was carried here, `startAllPlayers` and
+            // `extendLoopAutomation` rebuilt their publishes from
+            // `activeAutomationLanes` alone, saw a lanes-free strip, and
+            // published NIL — wiping the anchor `applyParameters` had just
+            // published, at roll start, LIVE AND OFFLINE. With no anchor the
+            // render path takes `applyModulationWithoutSchedule`, where
+            // position-dependent sources hold NEUTRAL, so every LFO→volume
+            // route rendered byte-identical to no modulation at all.
+            let requireAnchor = modulatesVolume || modulatesPan
+            newActiveLanes[track.id] = (volumeLane, panLane, effectParams, requireAnchor)
+            // The value the mixer WOULD carry with no modulation — the base
+            // the stage offsets when no lane is in control at that position.
+            let baseVolume = volumeLane?.value(atBeat: playheadBeat) ?? track.volume
+            let basePan = panLane?.value(atBeat: playheadBeat) ?? track.pan
             var pan = Float(track.pan)
             if let panLane {
                 // Override rule: rolling → the render stage pans, the mixer
                 // sits at center; stopped → WYSIWYG preview of the lane.
                 pan = rolling ? 0 : Float(panLane.value(atBeat: playheadBeat) ?? track.pan)
             }
+            // A pan ROUTE neutralises the node rolling OR stopped: the
+            // modulation snapshot lives across stop (§7.8), so a macro on pan
+            // keeps working with the transport parked and the node must not
+            // also be panning.
+            if modulatesPan { pan = 0 }
             // Same-value pan writes are swallowed by the property cache even
             // when engine.start() has just reset the underlying AU parameter
             // to 0 (measured) — route through the adjacent float so the write
@@ -1565,20 +2046,52 @@ final class PlaybackGraph {
                 // supplies the lane gain); stopped → WYSIWYG lane preview.
                 gain = rolling ? 1 : (volumeLane.value(atBeat: playheadBeat) ?? track.volume)
             }
+            // A volume ROUTE pins the node to unity rolling OR stopped — the
+            // stage supplies base × modulation. MUTE/SOLO GATING STAYS ON THE
+            // NODE: `gated ? 0` survives, and 0 × anything is still 0, so a
+            // muted strip with a tremolo is silent rather than quietly pulsing.
+            if modulatesVolume, !gated { gain = 1 }
             mixer.outputVolume = Float(gain)
             // No-restart republish: lanes changed under a rolling transport →
             // rebuild THIS strip's schedule against the same anchor/epoch.
             // Player schedules and reconcile signatures are untouched.
+            //
+            // m39-e: a strip whose ONLY automation is a volume/pan route still
+            // needs a schedule — not for its points (it has none) but for its
+            // ANCHOR. `quantumStart` is how the render side learns the
+            // transport position, and without it an LFO on the fader would
+            // never move. `requireAnchor` builds the empty-point schedule that
+            // carries it; effect-param routes are already covered, because
+            // their synthetic hold tracks make `effectParams` non-empty.
+            // ⚠️ THE ANCHOR IS PART OF THE CHANGE DETECTION, and it has to be.
+            // Comparing lanes alone leaves a DEAD STATE no later pass can
+            // escape: once any publish records (nil, nil, []) for a strip, a
+            // modulation-only strip matches on every lane, so the first branch
+            // never fires — and the second is unreachable because the entry is
+            // no longer nil. The anchor requirement then can never be
+            // satisfied, however many parameter passes run.
             if rolling, let published = publishedAutomationLanes[track.id],
                published.volume != volumeLane || published.pan != panLane
-                   || published.effectParams != effectParams {
+                   || published.effectParams != effectParams
+                   || published.requireAnchor != requireAnchor {
                 publishAutomation(for: track.id, volume: volumeLane, pan: panLane,
-                                  effectParams: effectParams)
+                                  effectParams: effectParams, requireAnchor: requireAnchor)
             } else if rolling, publishedAutomationLanes[track.id] == nil,
-                      volumeLane != nil || panLane != nil || !effectParams.isEmpty {
+                      volumeLane != nil || panLane != nil || !effectParams.isEmpty
+                          || requireAnchor {
                 publishAutomation(for: track.id, volume: volumeLane, pan: panLane,
-                                  effectParams: effectParams)
+                                  effectParams: effectParams, requireAnchor: requireAnchor)
             }
+            // The modulation snapshot publishes on EVERY pass (stopped
+            // included) — it is the seam that gives live/offline parity for
+            // free, and §7.8 requires it to live across stop.
+            publishModulation(
+                forTrack: track.id,
+                strip: ModulationSnapshotBuilder.Strip(
+                    sources: track.modulationSources, routes: track.modulationRoutes,
+                    effects: track.effects, instrument: track.instrument,
+                    isInstrumentTrack: track.kind == .instrument,
+                    baseVolume: baseVolume, basePan: basePan))
             // Send levels land in place on the dedicated gain nodes — never
             // structural (level is excluded from RoutingKey by design). Pan
             // on send nodes is never touched: start() resets it to 0, which
@@ -1616,6 +2129,21 @@ final class PlaybackGraph {
                     synth.apply(params: (track.instrument ?? .default).polySynth)
                 case let sampler as SamplerInstrument:
                     sampler.apply(params: (track.instrument ?? .default).resolvedSampler)
+                // ⛔⛔ m39-dm — THE WORST SITE IN THE WHOLE INSTRUMENT PATH, AND
+                // IT IS NOT COMPILER-FORCED. This is a `switch` over an
+                // EXISTENTIAL with a `default:`, not over `InstrumentDescriptor
+                // .Kind`, so adding a kind does not break this file. Without
+                // this branch the drum machine constructs, renders, sounds and
+                // NEVER RECEIVES A PARAMETER CHANGE for the life of the
+                // session — every knob turn succeeding and doing nothing.
+                //
+                // Every test that builds an instrument WITH its params and then
+                // renders passes regardless. Only a test that edits a parameter
+                // on a LIVE graph and re-renders can fail, which is why
+                // `DrumSynthLiveGraphTests` exists and why plant P10 deletes
+                // exactly these two lines.
+                case let drums as DrumSynthInstrument:
+                    drums.apply(params: (track.instrument ?? .default).resolvedDrumKit)
                 default:
                     break
                 }
@@ -1641,12 +2169,24 @@ final class PlaybackGraph {
         // automation is in no reconcile signature by construction.
         if rolling {
             let activeMasterLane = masterAutomation.activeLane(for: .volume)
+            let masterAnchor = ModulationSnapshotBuilder.modulates(
+                .volume, routes: masterModulationRoutes)
             if let published = publishedMasterVolumeLane {
-                if published != activeMasterLane { publishMasterAutomation(activeMasterLane) }
-            } else if activeMasterLane != nil {
-                publishMasterAutomation(activeMasterLane)
+                if published != activeMasterLane {
+                    publishMasterAutomation(activeMasterLane, requireAnchor: masterAnchor)
+                }
+            } else if activeMasterLane != nil || masterAnchor {
+                publishMasterAutomation(activeMasterLane, requireAnchor: masterAnchor)
             }
         }
+        // m39-e: the master strip's modulation snapshot, published on every
+        // pass exactly like the strips' (§7.8 — it lives across stop).
+        publishMasterModulation(strip: ModulationSnapshotBuilder.Strip(
+            sources: masterModulationSources, routes: masterModulationRoutes,
+            effects: masterEffects, instrument: nil, isInstrumentTrack: false,
+            baseVolume: masterAutomation.activeLane(for: .volume)?
+                .value(atBeat: playheadBeat) ?? manualMasterVolume,
+            basePan: 0))
         // Per-insert spectrum arms (m23-r2a) — the ONE re-application point,
         // and it must be HERE, at the TAIL: an arm can only land on a unit
         // that exists, and this is the only place where every strip's chain
@@ -1710,17 +2250,104 @@ final class PlaybackGraph {
     /// unrolled shape. Without a loop the build is the linear one, verbatim.
     private func publishAutomation(
         for trackID: UUID, volume: AutomationLane?, pan: AutomationLane?,
-        effectParams: [AutomationSchedule.EffectParamLaneSpec]
+        effectParams: [AutomationSchedule.EffectParamLaneSpec],
+        // ⛔ NO DEFAULT, DELIBERATELY. Both roll-start publishes omitted this
+        // argument and silently wiped modulation anchors; a default is what
+        // let them. Every call site states it.
+        requireAnchor: Bool
     ) {
         guard let context = automationRollContext,
               let renderer = automationRenderer(for: trackID) else { return }
         var schedule: AutomationSchedule?
-        if volume != nil || pan != nil || !effectParams.isEmpty {
+        if volume != nil || pan != nil || !effectParams.isEmpty || requireAnchor {
             schedule = buildRollSchedule(context: context, volume: volume,
-                                         pan: pan, effectParams: effectParams)
+                                         pan: pan, effectParams: effectParams,
+                                         requireAnchor: requireAnchor)
         }
         renderer.publish(schedule)
-        publishedAutomationLanes[trackID] = (volume, pan, effectParams)
+        publishedAutomationLanes[trackID] = (volume, pan, effectParams, requireAnchor)
+    }
+
+    // MARK: - Modulation publish (m39-e)
+
+    /// Project-absolute sample position of the roll anchor, and whether there
+    /// IS one. `AutomationSchedule`'s `t = 0` is the transport beat the
+    /// schedule was built from, so every modulation source is evaluated at
+    /// `origin + p` — or an LFO would restart its phase on every play press
+    /// and §3.2's position-absolute determinism would be false in exactly the
+    /// case it exists to guarantee.
+    private func modulationOrigin() -> (sample: Int64, valid: Bool) {
+        guard let context = automationRollContext else { return (0, false) }
+        let rate = graphFormat().sampleRate
+        let seconds = context.tempoMap.seconds(from: 0, to: context.fromBeat)
+        return (Int64((seconds * rate).rounded()), true)
+    }
+
+    /// Builds and publishes one strip's modulation snapshot to its automation
+    /// renderer (P2/P3) and — on an instrument strip — to the instrument (P1).
+    ///
+    /// ⭐ A MACRO-ONLY change takes the one-atomic-store path §7.2 specifies:
+    /// no rebuild, no republish, no retire-bin churn. Anything else rebuilds.
+    private func publishModulation(forTrack trackID: UUID,
+                                   strip: ModulationSnapshotBuilder.Strip) {
+        let origin = modulationOrigin()
+        let key = ModulationPublishKey(strip: strip, originSample: origin.sample,
+                                       positionValid: origin.valid)
+        guard let renderer = automationRenderer(for: trackID) else { return }
+        if let previous = publishedModulation[trackID], previous == key { return }
+        if let previous = publishedModulation[trackID],
+           previous.structural == key.structural,
+           let live = renderer.currentModulation {
+            storeMacros(of: strip, into: live)
+            instrumentNodes[trackID]?.renderer.publishModulation(live)
+            publishedModulation[trackID] = key
+            return
+        }
+        modulationGeneration &+= 1
+        let snapshot = ModulationSnapshotBuilder.build(
+            strip: strip, generation: modulationGeneration,
+            timelineID: automationRollTimelineID, sampleRate: graphFormat().sampleRate,
+            originSample: origin.sample, positionValid: origin.valid)
+        renderer.publishModulation(snapshot)
+        // P1: the instrument evaluates the same snapshot inside the per-frame
+        // loop it already runs. Non-participating instruments inherit the
+        // protocol's default no-op, so Sampler/TestTone/EventCapture need no edit.
+        instrumentNodes[trackID]?.renderer.publishModulation(snapshot)
+        publishedModulation[trackID] = key
+    }
+
+    /// The MASTER twin — same builder, same generation counter, same timeline.
+    private func publishMasterModulation(strip: ModulationSnapshotBuilder.Strip) {
+        guard let renderer = masterAutomationRenderer else { return }
+        let origin = modulationOrigin()
+        let key = ModulationPublishKey(strip: strip, originSample: origin.sample,
+                                       positionValid: origin.valid)
+        if let previous = publishedMasterModulation, previous == key { return }
+        if let previous = publishedMasterModulation,
+           previous.structural == key.structural,
+           let live = renderer.currentModulation {
+            storeMacros(of: strip, into: live)
+            publishedMasterModulation = key
+            return
+        }
+        modulationGeneration &+= 1
+        renderer.publishModulation(ModulationSnapshotBuilder.build(
+            strip: strip, generation: modulationGeneration,
+            timelineID: automationRollTimelineID, sampleRate: graphFormat().sampleRate,
+            originSample: origin.sample, positionValid: origin.valid))
+        publishedMasterModulation = key
+    }
+
+    /// `mod.setMacro`'s delivery: one atomic store per macro slot, in the same
+    /// slot order the builder assigns.
+    private func storeMacros(of strip: ModulationSnapshotBuilder.Strip,
+                             into snapshot: ModulationSnapshot) {
+        var slot = 0
+        for source in strip.sources.prefix(ModulationLimits.maxSources) {
+            guard case .macro(let params) = source.params else { continue }
+            snapshot.storeMacro(slot: slot, value: Float(params.value))
+            slot += 1
+        }
     }
 
     /// ONE schedule build for the current roll, shared by the strip and the
@@ -1732,7 +2359,8 @@ final class PlaybackGraph {
     private func buildRollSchedule(
         context: (fromBeat: Double, tempoMap: TempoMap, mode: AutomationSchedule.Mode),
         volume: AutomationLane?, pan: AutomationLane?,
-        effectParams: [AutomationSchedule.EffectParamLaneSpec]
+        effectParams: [AutomationSchedule.EffectParamLaneSpec],
+        requireAnchor: Bool
     ) -> AutomationSchedule? {
         automationGeneration += 1
         if let state = loopUnroll {
@@ -1752,14 +2380,16 @@ final class PlaybackGraph {
                 tempoMap: state.tempoMap,
                 sampleRate: graphFormat().sampleRate,
                 generation: automationGeneration, mode: context.mode,
-                timelineID: automationRollTimelineID)
+                timelineID: automationRollTimelineID,
+                requireAnchor: requireAnchor)
         }
         return AutomationSchedule.build(
             volumeLane: volume, panLane: pan, effectParamLanes: effectParams,
             fromBeat: context.fromBeat, tempoMap: context.tempoMap,
             sampleRate: graphFormat().sampleRate,
             generation: automationGeneration, mode: context.mode,
-            timelineID: automationRollTimelineID)
+            timelineID: automationRollTimelineID,
+            requireAnchor: requireAnchor)
     }
 
     // MARK: - Master volume automation (m15-c)
@@ -1775,13 +2405,15 @@ final class PlaybackGraph {
     /// Builds and publishes the MASTER schedule against the current roll
     /// context (nil lane → unpublish) — `publishAutomation` for the master
     /// owner, same generation counter, same timeline, same (shared) builder.
-    private func publishMasterAutomation(_ volumeLane: AutomationLane?) {
+    private func publishMasterAutomation(_ volumeLane: AutomationLane?,
+                                         requireAnchor: Bool) {
         guard let context = automationRollContext,
               let renderer = masterAutomationRenderer else { return }
         var schedule: AutomationSchedule?
-        if volumeLane != nil {
+        if volumeLane != nil || requireAnchor {
             schedule = buildRollSchedule(context: context, volume: volumeLane,
-                                         pan: nil, effectParams: [])
+                                         pan: nil, effectParams: [],
+                                         requireAnchor: requireAnchor)
         }
         renderer.publish(schedule)
         publishedMasterVolumeLane = .some(volumeLane)
@@ -1796,11 +2428,19 @@ final class PlaybackGraph {
     /// the node — the null path's `mainMixerNode.outputVolume` ownership
     /// (AudioEngine/OfflineRenderer) is byte-identical to pre-m15-c.
     private func applyMasterVolume(playheadBeat: Double) {
+        // m39-e: a master volume ROUTE joins the override rule exactly as a
+        // lane does — the pre-walk stage in the master chain host carries base
+        // × modulation, so the node must sit at unity or the knob applies twice.
+        let modulated = ModulationSnapshotBuilder.modulates(
+            .volume, routes: masterModulationRoutes)
         if let lane = masterAutomation.activeLane(for: .volume) {
-            let gain = automationRollContext != nil
+            let gain = (automationRollContext != nil || modulated)
                 ? 1.0
                 : (lane.value(atBeat: playheadBeat) ?? manualMasterVolume)
             engine.mainMixerNode.outputVolume = Float(gain)
+            masterFaderUnderLaneAuthority = true
+        } else if modulated {
+            engine.mainMixerNode.outputVolume = 1
             masterFaderUnderLaneAuthority = true
         } else if masterFaderUnderLaneAuthority {
             engine.mainMixerNode.outputVolume = Float(manualMasterVolume)
@@ -1916,6 +2556,36 @@ final class PlaybackGraph {
         } else {
             engine.connect(chainHost, to: engine.outputNode, format: format)
         }
+        if clipAuditionLaneEnabled {
+            // I1: clipAuditionPlayer → clipAuditionMixer → mainMixerNode. Fresh
+            // stock nodes, attached HERE for the reference lane's reason above
+            // (before the engine ever starts/renders in every production path,
+            // so the m16-h attach-while-running raise class never applies).
+            // Connected at the GRAPH format, and the buffer arrives already in
+            // it: a player node does not convert a scheduled buffer
+            // (AVAudioPlayerNode.h, FORMATS), so the detached read converts.
+            // I1-F1: player → mixer pairs, I1-F2: three of them (see
+            // `clipAuditionLaneEnabled`: the crossfade that replaces a cut rides
+            // each MIXER's volume, and a second swap inside a fade finds an
+            // idle pair).
+            let players = (0..<Self.clipAuditionPairCount).map { _ in AVAudioPlayerNode() }
+            let mixers = (0..<Self.clipAuditionPairCount).map { _ in AVAudioMixerNode() }
+            for (player, mixer) in zip(players, mixers) {
+                engine.attach(player)
+                engine.attach(mixer)
+                engine.connect(player, to: mixer, fromBus: 0, toBus: 0, format: format)
+                // The strips' own connect form: one more input on the main
+                // mixer, so the voice passes the master fader and the master
+                // chain, as a strip does.
+                engine.connect(mixer, to: engine.mainMixerNode, format: format)
+                mixer.outputVolume = 1
+            }
+            clipAuditionPlayers = players
+            clipAuditionMixers = mixers
+            clipAuditionActive = 0
+            clipAuditionScheduledFlags = Array(repeating: false, count: players.count)
+            clipAuditionFadeStarted = Array(repeating: nil, count: players.count)
+        }
         let processor: EffectChainProcessor
         if let hosted = ChainHostAU.chainProcessor(of: chainHost) {
             processor = hosted
@@ -2018,6 +2688,144 @@ final class PlaybackGraph {
         guard referenceScheduled, let player = referencePlayer else { return }
         player.stop()
         referenceScheduled = false
+    }
+
+    // MARK: - Clip-note audition lane control (I1, control plane only)
+
+    /// The format the clip-note audition voice is connected at, and so the
+    /// format every buffer it plays must already be in.
+    var clipAuditionFormat: AVAudioFormat { graphFormat() }
+
+    /// Plays ONE prepared audition buffer, now (I1). The buffer is already in
+    /// `clipAuditionFormat`, faded and levelled (`ClipSpanAuditionReader`).
+    /// One audition at a time, WITHOUT A CUT (I1-F1, H7): the buffer starts on
+    /// an idle player (at unity, written here before every start, so a fade
+    /// or an engine start never leaves it at another level) and the player
+    /// that was sounding fades out through its volume ramp, to be stopped by
+    /// `reapFadedClipAudition` once silent. Returns false when the lane is
+    /// absent or AVFAudio raised; a raise converts to one stderr line and a
+    /// skipped audition, never a crash, and the ledger stays raised so the
+    /// next stop still clears the queue (the reference lane's asymmetry). No
+    /// completion handler, on purpose: it would fire on a non-main thread, and
+    /// nothing here needs one.
+    ///
+    /// I1-F2 (RT re-review NH-E): the new buffer starts on an IDLE pair; a
+    /// fading pair is stopped for it only when no pair is idle, and then the
+    /// one whose fade began first (`nextClipAuditionPair`). With three pairs a
+    /// second swap inside a fade never cuts. ⚠️ What remains: a THIRD buffer
+    /// before the first fade has been rendered stops that pair at what is
+    /// left of its level (the lane doc's three-swap row).
+    @discardableResult
+    func playClipAudition(_ buffer: AVAudioPCMBuffer) -> Bool {
+        guard clipAuditionPlayers.count == Self.clipAuditionPairCount else { return false }
+        let previous = clipAuditionActive
+        let next = nextClipAuditionPair()
+        let player = clipAuditionPlayers[next]
+        do {
+            try withObjCExceptionBarrier("clip audition start") {
+                if clipAuditionScheduledFlags[next] { player.stop() }
+                clipAuditionMixers[next].outputVolume = 1
+                player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+                clipAuditionScheduledFlags[next] = true
+                clipAuditionFadeStarted[next] = nil
+                player.play()
+                if next != previous, clipAuditionScheduledFlags[previous],
+                   clipAuditionFadeStarted[previous] == nil {
+                    clipAuditionMixers[previous].outputVolume = 0
+                    clipAuditionFadeStarted[previous] = .now
+                }
+            }
+            clipAuditionActive = next
+            return true
+        } catch {
+            FileHandle.standardError.write(Data(
+                "PlaybackGraph: clip audition start raised — audition skipped: \(error)\n".utf8))
+            return false
+        }
+    }
+
+    /// The pair the next buffer starts on (I1-F2, NH-E): the newest pair
+    /// itself when it holds nothing (the lane is idle); otherwise a pair that
+    /// holds nothing; otherwise the pair whose fade began FIRST, the one most
+    /// likely silent by now. Never the pair carrying the newest buffer while
+    /// another exists. A non-newest pair that holds a schedule is always
+    /// fading (the swap that left it faded it, or a raised fade stopped it);
+    /// one that somehow is not counts as the youngest.
+    private func nextClipAuditionPair() -> Int {
+        let newest = clipAuditionActive
+        guard clipAuditionScheduledFlags[newest] else { return newest }
+        let others = clipAuditionPlayers.indices.filter { $0 != newest }
+        if let idle = others.first(where: { !clipAuditionScheduledFlags[$0] }) { return idle }
+        let now = ContinuousClock.now
+        return others.min {
+            (clipAuditionFadeStarted[$0] ?? now) < (clipAuditionFadeStarted[$1] ?? now)
+        } ?? newest
+    }
+
+    /// True while a player is fading out and not yet stopped.
+    var clipAuditionIsFading: Bool {
+        clipAuditionPlayers.indices.contains {
+            clipAuditionScheduledFlags[$0] && clipAuditionFadeStarted[$0] != nil
+        }
+    }
+
+    /// Silences the voice WITHOUT A CUT (H7): every sounding pair's MIXER
+    /// volume goes to 0, and the mixer ramps it down. Nothing is stopped here;
+    /// `reapFadedClipAudition(olderThan:)` stops each once its ramp is done.
+    /// Returns true when a player is fading.
+    @discardableResult
+    func fadeOutClipAudition() -> Bool {
+        for index in clipAuditionPlayers.indices
+        where clipAuditionScheduledFlags[index] && clipAuditionFadeStarted[index] == nil {
+            do {
+                try withObjCExceptionBarrier("clip audition fade") {
+                    clipAuditionMixers[index].outputVolume = 0
+                }
+                clipAuditionFadeStarted[index] = .now
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "PlaybackGraph: clip audition fade raised — stopping instead: \(error)\n".utf8))
+                stopClipAuditionPlayer(index)
+            }
+        }
+        return clipAuditionIsFading
+    }
+
+    /// Stops every player whose fade began at least `age` ago, and puts its
+    /// mixer back to unity while it is silent.
+    func reapFadedClipAudition(olderThan age: Duration) {
+        let now = ContinuousClock.now
+        for index in clipAuditionPlayers.indices {
+            guard clipAuditionScheduledFlags[index], let started = clipAuditionFadeStarted[index],
+                  now - started >= age else { continue }
+            stopClipAuditionPlayer(index)
+        }
+    }
+
+    /// Stops the voice and clears its queue AT ONCE, every player: for a
+    /// voice already silent (its buffer ended), a graph being torn down, or
+    /// (I1-F2, NH-B) an engine that is not rendering, where a fade would never
+    /// ramp. Ledger-gated: an idle lane costs nothing.
+    func stopClipAudition() {
+        for index in clipAuditionPlayers.indices { stopClipAuditionPlayer(index) }
+    }
+
+    private func stopClipAuditionPlayer(_ index: Int) {
+        guard clipAuditionScheduledFlags.indices.contains(index),
+              clipAuditionScheduledFlags[index] else { return }
+        clipAuditionScheduledFlags[index] = false
+        clipAuditionFadeStarted[index] = nil
+        let player = clipAuditionPlayers[index]
+        let mixer = clipAuditionMixers[index]
+        do {
+            try withObjCExceptionBarrier("clip audition stop") {
+                player.stop()
+                mixer.outputVolume = 1
+            }
+        } catch {
+            FileHandle.standardError.write(Data(
+                "PlaybackGraph: clip audition stop raised: \(error)\n".utf8))
+        }
     }
 
     /// One strip's permanent insert sandwich (audio tracks and buses alike):
@@ -2126,6 +2934,89 @@ final class PlaybackGraph {
                 trackNodes[trackID]?.clips.removeValue(forKey: clipID)
             }
         }
+        // Its render just landed: no schedule pass may report it as pending
+        // silence before the reconcile that follows re-resolves it.
+        stretchPendingClips.removeAll { $0.clip.id == clipID }
+        // p2-ren Stage A: nor as playing its previous version — its bridge
+        // node is gone (a landed render, or a failed one ending the bridge).
+        stretchBridgedClips.removeAll { $0.clip.id == clipID }
+    }
+
+    /// p2-ren Stage A: true while this clip's node plays a BRIDGE, its previous
+    /// file, because the render its key asks for is still being made. The
+    /// engine's failure rule reads it: a render that fails ends a bridge that
+    /// plays, and touches nothing when none does.
+    func isPlayingBridge(clipID: UUID) -> Bool {
+        clipNode(for: clipID)?.isBridge ?? false
+    }
+
+    /// p2-ren Stage B: what this clip's node plays, or nil when it has none.
+    func clipPlays(clipID: UUID) -> ClipNodePlays? {
+        clipNode(for: clipID)?.plays
+    }
+
+    /// p2-ren Stage B: the file this clip's node has open, or nil.
+    func clipFileURL(clipID: UUID) -> URL? {
+        clipNode(for: clipID)?.file.url
+    }
+
+    /// p2-ren Stage B: every file a clip node has open (the provisional
+    /// store's garbage collector never deletes one of these).
+    var openClipFileURLs: Set<URL> {
+        var urls: Set<URL> = []
+        for node in trackNodes.values {
+            for clip in node.clips.values { urls.insert(clip.file.url.standardizedFileURL) }
+        }
+        return urls
+    }
+
+    /// p2-ren Stage B — THE DEFERRED FINAL SWAP (design §6 step 9, §11 step
+    /// 12): the clip's node, which plays a PROVISIONAL, now plays `url` (its
+    /// committed final) under the same player, key and schedule identity.
+    /// Refused (false, nothing changed) unless the node plays a provisional
+    /// and the new file has exactly its format and length, so every frame
+    /// position the next schedule pass computes is the one it computed.
+    ///
+    /// ⚠️ **ONLY WITH THE PLAYER STOPPED**: the engine calls it after
+    /// `stopAllPlayers` (its `restart` and `stopPlayback`), never while a
+    /// player streams (the streaming-thread rule: a file a player reads is
+    /// never changed under it; here the reader itself is replaced while
+    /// nothing reads it). Main actor; the render thread is untouched.
+    func swapClipFileInPlace(clipID: UUID, to url: URL) -> Bool {
+        guard let node = clipNode(for: clipID), node.plays == .preview,
+              let file = try? AVAudioFile(forReading: url),
+              file.processingFormat == node.file.processingFormat,
+              file.length == node.file.length else { return false }
+        node.player.stop()
+        node.replaceFile(file)
+        node.plays = .exact
+        stretchBridgedClips.removeAll { $0.clip.id == clipID }
+        onClipFileOpened?(node.clip, url, file.length)
+        return true
+    }
+
+    /// p2-ren Stage B: the provisional that landed IS the file this clip's
+    /// bridge already plays (a timing-only edit, whose render is predicted
+    /// identical to its base): the node is relabelled a preview in place, with
+    /// no teardown and no reschedule. False (nothing changed) otherwise.
+    func relabelBridgeAsPreview(clipID: UUID, url: URL) -> Bool {
+        guard let node = clipNode(for: clipID), node.plays == .previous,
+              node.file.url.standardizedFileURL == url.standardizedFileURL else { return false }
+        node.plays = .preview
+        if let index = stretchBridgedClips.firstIndex(where: { $0.clip.id == clipID }) {
+            stretchBridgedClips[index].plays = .preview
+        }
+        return true
+    }
+
+    /// p2-ren Stage B: would `swapClipFileInPlace` accept `url` for this clip
+    /// right now? (The engine asks at the final's completion, to choose
+    /// between deferring the swap and replacing the node at once.)
+    func canSwapClipFileInPlace(clipID: UUID, to url: URL) -> Bool {
+        guard let node = clipNode(for: clipID), node.plays == .preview,
+              let file = try? AVAudioFile(forReading: url) else { return false }
+        return file.processingFormat == node.file.processingFormat
+            && file.length == node.file.length
     }
 
     /// Tears down ONE instrument track's node (unpublish + flush, tap off,
@@ -2360,6 +3251,13 @@ final class PlaybackGraph {
         clipNode(for: clipID)?.player
     }
 
+    /// Test seam (I1): the file one clip's player node OPENED, which is the
+    /// render or the source that playback actually plays. The clip-note
+    /// audition must resolve the same file (`AuditionEngineTests`).
+    func clipFileURLForTesting(clipID: UUID) -> URL? {
+        clipNode(for: clipID)?.file.url
+    }
+
     private func clipNode(for clipID: UUID) -> ClipNode? {
         for node in trackNodes.values {
             if let clip = node.clips[clipID] { return clip }
@@ -2408,6 +3306,9 @@ final class PlaybackGraph {
         // Stage the timeline mapping the next startAllPlayers rolls
         // automation with (the pendingEvents convention).
         stagedAutomationStart = (startBeats, tempoMap)
+        // m23-ap-p2 p2-notice: THIS pass is what plays a pending-render clip
+        // as silence, so this is where that is reported — never at the edit.
+        postPendingRenderSilence()
         forEachClip { clip in
             let fileRate = clip.file.processingFormat.sampleRate
             let fileLength = clip.file.length
@@ -2597,6 +3498,79 @@ final class PlaybackGraph {
                 loopUnroll?.midiNoteIDBase[trackID] = build.nextNoteID
             }
         }
+    }
+
+    // MARK: - Pending-render silence notice (m15-e → m23-ap-p2 p2-notice)
+
+    /// Posts `clip-stretch-pending` for every clip in the pending-render
+    /// ledger that has not been noticed in its current episode. Called ONLY
+    /// from `scheduleAll`: in the live engine that is `AudioEngine.startPlayers`
+    /// — a transport start, a record start, a restart while rolling (seek,
+    /// tempo, an edit, a loop change), a rebuild resume, a recovery — so a
+    /// stopped transport posts nothing however many edits reconcile. An
+    /// offline bounce's graph has no `noticeSink` (and waits for its renders).
+    /// Main-actor control code; the render thread gains nothing.
+    private func postPendingRenderSilence() {
+        for pending in stretchPendingClips
+        where stretchPendingNoticed.insert(pending.clip.id).inserted {
+            noticeSink?(EngineNoticeEvent(
+                code: "clip-stretch-pending",
+                message: Self.stretchPendingMessage(for: pending.clip),
+                beat: pending.beat))
+        }
+        // p2-ren Stage A: a bridged clip is NOT silent, so it never gets the
+        // copy above ("plays as silence", which would lie about it). It says
+        // what it plays instead, once per bridge episode, from this same pass.
+        // Stage B: a provisional says it is a preview, once per episode.
+        for bridged in stretchBridgedClips {
+            switch bridged.plays {
+            case .previous:
+                guard stretchBridgeNoticed.insert(bridged.clip.id).inserted else { continue }
+                noticeSink?(EngineNoticeEvent(
+                    code: "clip-render-previous",
+                    message: Self.renderPreviousMessage(for: bridged.clip),
+                    beat: bridged.beat))
+            case .preview:
+                guard stretchPreviewNoticed.insert(bridged.clip.id).inserted else { continue }
+                noticeSink?(EngineNoticeEvent(
+                    code: "clip-render-preview",
+                    message: Self.renderPreviewMessage(for: bridged.clip),
+                    beat: bridged.beat))
+            case .exact:
+                continue
+            }
+        }
+    }
+
+    /// The `clip-render-preview` copy (p2-ren Stage B; design §6 step 10): a
+    /// clip plays a quick preview of the change, and the exact version
+    /// replaces it on its own.
+    static func renderPreviewMessage(for clip: Clip) -> String {
+        "'\(clip.name)' is playing a quick preview of your change; "
+            + "the exact version replaces it in a moment."
+    }
+
+    /// The `clip-render-previous` copy (p2-ren Stage A; design §5 step 5): a
+    /// clip whose change is still being prepared plays the way it sounded
+    /// before, and says so in words a beginner can act on.
+    static func renderPreviousMessage(for clip: Clip) -> String {
+        "'\(clip.name)' is playing its previous version for a moment: "
+            + "your latest change is still being prepared."
+    }
+
+    /// The `clip-stretch-pending` copy. m23-ap-p2 p2-notice split it: a TUNED
+    /// clip — pitch edits, no time-stretch and no transpose — is waiting for
+    /// its tuned version, and calling that "time-stretched" named something
+    /// the user never did. Every other pending clip keeps the stretch wording
+    /// verbatim, because it really is being time-stretched (a clip that is
+    /// stretched AND tuned included). The code stays `clip-stretch-pending`
+    /// for both: it is a stable wire key, and the ring coalesces by it.
+    static func stretchPendingMessage(for clip: Clip) -> String {
+        if clip.hasPitchEdits && clip.isStretchIdentity {
+            return "The tuned version of '\(clip.name)' is still being prepared — "
+                + "the clip plays as silence until it's ready."
+        }
+        return "'\(clip.name)' is still being time-stretched — it plays as silence until the stretch is ready."
     }
 
     // MARK: - Loop cycle unroll (m14-a L-1, design-m13f-gapless-loop §4-A)
@@ -2957,15 +3931,18 @@ final class PlaybackGraph {
         for trackID in trackIDs {
             guard let lanes = activeAutomationLanes[trackID],
                   lanes.volume != nil || lanes.pan != nil || !lanes.effectParams.isEmpty
+                      || lanes.requireAnchor
             else { continue }
             publishAutomation(for: trackID, volume: lanes.volume, pan: lanes.pan,
-                              effectParams: lanes.effectParams)
+                              effectParams: lanes.effectParams,
+                              requireAnchor: lanes.requireAnchor)
         }
         // The master lane extends with the strips (m15-c): same unrolled
         // blocks, same timeline, so its values stay correct across every
         // pre-queued cycle.
         if let lane = masterAutomation.activeLane(for: .volume) {
-            publishMasterAutomation(lane)
+            publishMasterAutomation(lane, requireAnchor: ModulationSnapshotBuilder.modulates(
+                .volume, routes: masterModulationRoutes))
         }
     }
 
@@ -3203,11 +4180,15 @@ final class PlaybackGraph {
         for trackID in trackIDs {
             let lanes = activeAutomationLanes[trackID]
             publishAutomation(for: trackID, volume: lanes?.volume, pan: lanes?.pan,
-                              effectParams: lanes?.effectParams ?? [])
+                              effectParams: lanes?.effectParams ?? [],
+                              requireAnchor: lanes?.requireAnchor ?? false)
         }
         // The MASTER lane rolls with the strips (m15-c): same context, same
         // anchor/epoch, same builder.
-        publishMasterAutomation(masterAutomation.activeLane(for: .volume))
+        publishMasterAutomation(
+            masterAutomation.activeLane(for: .volume),
+            requireAnchor: ModulationSnapshotBuilder.modulates(
+                .volume, routes: masterModulationRoutes))
         // Re-run the parameter pass so the override pins (gain 1 / pan 0)
         // land now that the context is rolling. Live, the anchor lead-in
         // absorbs the mixer's internal ramp before schedule t=0; offline,
@@ -3408,6 +4389,8 @@ final class PlaybackGraph {
         }
         trackNodes.removeAll()
         signature.removeAll()
+        stretchPendingClips.removeAll()  // no clip is scheduled now, silent or otherwise
+        stretchBridgedClips.removeAll()  // p2-ren Stage A: nor bridged
         for node in instrumentNodes.values {
             node.renderer.publish(nil)
             node.renderer.requestFlush()

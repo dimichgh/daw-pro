@@ -1,0 +1,473 @@
+{
+  "set": "djfilter",
+  "description": "m39-i, the .djFilter insert: ONE bipolar knob, which is the whole instrument. Every variant plays the IDENTICAL sustained saw-pad chord (8 bars at 120 BPM) so nothing but the filter differs.\n\nTHE EFFECT IS A MOTION, NOT A SETTING, so every filtered variant is an automated SWEEP on `position` rather than a parked value \u2014 out from the centre to the extreme at bar 5, and back to the centre by bar 9. A DJ filter held still is a tone control.\n\nNO VARIANT DIFFERS ON TWO THINGS AT ONCE, and the axes are nested rather than mixed: variants 1 -> 2 -> 3 move on POSITION (none / sweep down / sweep up), and variants 2 -> 4 move on RESONANCE alone \u2014 variant 4 is variant 2's sweep, byte-for-byte in every other parameter, with resonance raised from 0.2 to 0.9.\n\nWHAT TO LISTEN FOR. Variant 1 is the pad untouched, so you know what is being taken away. In 'sweep-down-lp' the knob turns POSITIVE and a low-pass falls from 20 kHz down to about 56 Hz: the BRIGHTNESS leaves first and the chord goes muffled, underwater, then comes back. In 'sweep-up-hp' the knob turns NEGATIVE and a high-pass climbs from 20 Hz up to about 7 kHz: the WEIGHT leaves first and the chord goes thin and radio-like before filling back in. In 'high-resonance' the same downward sweep grows a whistle that rides along just above the cutoff \u2014 the singing edge that is what people mean by a DJ filter.\n\nWHAT WOULD MAKE THIS INAUDIBLE: nothing on a normal system \u2014 this axis removes whole halves of the spectrum. But 'high-resonance' is measurably QUIETER than 'sweep-down-lp' and that is deliberate, not a mistake: the resonant section is scaled by sqrt(0.707/Q) so a Q-10 peak cannot slam the mix, which costs about 11.5 dB of passband at full resonance. If you judge that variant purely on level you will pick the wrong one; listen for the whistle, not the loudness.\n\nERRATA E4, RULED 2026-09-19: the knob direction was REVERSED after this set was first written, to match the hardware it imitates \u2014 a club mixer's filter knob is low-pass to the LEFT and high-pass to the RIGHT, and the frozen contract had it inverted with no rationale. The variant NAMES and the SOUNDS they describe are unchanged; the signed `position` values behind them were swapped instead, so 'sweep-down-lp' is still the muffled one.",
+  "variants": [
+    {
+      "name": "no-filter",
+      "role": "control",
+      "axis": "no filter at all \u2014 the pad untouched, so you know what is being taken away",
+      "render": {
+        "durationSeconds": 17
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.4,
+            "sustain": 0.85,
+            "release": 0.6,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.7,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7,
+            "subLevel": 0.35,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 72,
+                "startBeat": 0,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "sweep-down-lp",
+      "axis": "position sweeps 0 -> -0.85 -> 0 \u2014 a LOW-pass falling to ~56 Hz, so the treble leaves first (the muffled, underwater one)",
+      "render": {
+        "durationSeconds": 17
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.4,
+            "sustain": 0.85,
+            "release": 0.6,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.7,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7,
+            "subLevel": 0.35,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "djFilter",
+            "params": {
+              "position": 0,
+              "resonance": 0.2,
+              "slopeDbPerOct": 24,
+              "deadZoneWidth": 0.04,
+              "resonanceTrack": 0
+            }
+          },
+          "as": "filter"
+        },
+        {
+          "command": "automation.addLane",
+          "params": {
+            "trackId": "$pad",
+            "target": "effectParam",
+            "effectId": "$filter",
+            "paramName": "position"
+          },
+          "as": "lane"
+        },
+        {
+          "command": "automation.setPoints",
+          "params": {
+            "trackId": "$pad",
+            "laneId": "$lane",
+            "points": [
+              {
+                "beat": 0,
+                "value": 0
+              },
+              {
+                "beat": 16,
+                "value": -0.85
+              },
+              {
+                "beat": 32,
+                "value": 0
+              }
+            ]
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 72,
+                "startBeat": 0,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "sweep-up-hp",
+      "axis": "position sweeps 0 -> +0.85 -> 0 \u2014 a HIGH-pass climbing to ~7 kHz, so the bass leaves first (the thin, radio-like one)",
+      "render": {
+        "durationSeconds": 17
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.4,
+            "sustain": 0.85,
+            "release": 0.6,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.7,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7,
+            "subLevel": 0.35,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "djFilter",
+            "params": {
+              "position": 0,
+              "resonance": 0.2,
+              "slopeDbPerOct": 24,
+              "deadZoneWidth": 0.04,
+              "resonanceTrack": 0
+            }
+          },
+          "as": "filter"
+        },
+        {
+          "command": "automation.addLane",
+          "params": {
+            "trackId": "$pad",
+            "target": "effectParam",
+            "effectId": "$filter",
+            "paramName": "position"
+          },
+          "as": "lane"
+        },
+        {
+          "command": "automation.setPoints",
+          "params": {
+            "trackId": "$pad",
+            "laneId": "$lane",
+            "points": [
+              {
+                "beat": 0,
+                "value": 0
+              },
+              {
+                "beat": 16,
+                "value": 0.85
+              },
+              {
+                "beat": 32,
+                "value": 0
+              }
+            ]
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 72,
+                "startBeat": 0,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "high-resonance",
+      "axis": "RESONANCE 0.2 -> 0.9, on sweep-down-lp's identical downward sweep \u2014 the only difference is how hard the corner sings",
+      "render": {
+        "durationSeconds": 17
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.02,
+            "decay": 0.4,
+            "sustain": 0.85,
+            "release": 0.6,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.7,
+            "unisonVoices": 6,
+            "unisonDetuneCents": 14,
+            "unisonStereoSpread": 0.7,
+            "subLevel": 0.35,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "djFilter",
+            "params": {
+              "position": 0,
+              "resonance": 0.9,
+              "slopeDbPerOct": 24,
+              "deadZoneWidth": 0.04,
+              "resonanceTrack": 0
+            }
+          },
+          "as": "filter"
+        },
+        {
+          "command": "automation.addLane",
+          "params": {
+            "trackId": "$pad",
+            "target": "effectParam",
+            "effectId": "$filter",
+            "paramName": "position"
+          },
+          "as": "lane"
+        },
+        {
+          "command": "automation.setPoints",
+          "params": {
+            "trackId": "$pad",
+            "laneId": "$lane",
+            "points": [
+              {
+                "beat": 0,
+                "value": 0
+              },
+              {
+                "beat": 16,
+                "value": -0.85
+              },
+              {
+                "beat": 32,
+                "value": 0
+              }
+            ]
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 60,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 67,
+                "startBeat": 0,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 72,
+                "startBeat": 0,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

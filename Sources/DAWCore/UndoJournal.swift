@@ -64,6 +64,13 @@ struct EditState: Equatable {
     /// edits. No engine intent in P1 (the lane lands with P2). Defaults to
     /// nil so entries captured before this field existed still compare equal.
     var reference: ReferenceSlot? = nil
+    /// MASTER modulation (m39-e; journaled since W7-MODP, 2026-10-04). Until then the master strip's sources
+    /// and routes were missing here, so a master `mod.*` edit recorded NO undo entry (the before/after compare
+    /// saw no change) and no undo or redo restored them. Track modulation always rode `tracks`. The restore
+    /// funnel pushes `masterModulationChanged` when they moved (the `masterAutomation` twin). Defaults to `[]`
+    /// so entries captured before this field existed still compare equal.
+    var masterModulationSources: [ModulationSource] = []
+    var masterModulationRoutes: [ModulationRoute] = []
 }
 
 /// One undo (or redo) record: the state captured BEFORE an edit, a

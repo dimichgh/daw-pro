@@ -159,6 +159,43 @@ struct ClipQuantizeAudioCommandTests {
         #expect(response.error == "audio engine not available")
     }
 
+    @Test("I5-F4 round 3 — a grid finer than 1/1024 beat, or not finite, is refused in words that name the finest grid allowed, before detection, also at strength 0 and alongside divisions; 1/1024 itself reaches the engine")
+    func refusesAbsurdGridsInWords() async throws {
+        let engine = FakeTransientEngine()
+        engine.stubMarkers = [
+            TransientMarker(timeSeconds: 0.55, strength: 1.0),
+            TransientMarker(timeSeconds: 0.95, strength: 0.8),
+            TransientMarker(timeSeconds: 1.55, strength: 0.6),
+        ]
+        let (router, store) = makeRouter(engine: engine)
+        let (trackID, clipID) = try await addAudioClip(router)
+        func send(_ extra: [String: JSONValue]) async -> ControlResponse {
+            var p: [String: JSONValue] = ["trackId": .string(trackID), "clipId": .string(clipID)]
+            p.merge(extra) { _, new in new }
+            return await router.handle(ControlRequest(id: "x", command: "clip.quantizeAudio", params: p))
+        }
+        let variants: [[String: JSONValue]] = [[:], ["strength": .number(0)], ["divisions": .number(4)]]
+        for grid in [1e-20, 1e-300, Double.leastNonzeroMagnitude, 0.0009, Double.infinity] {
+            for extra in variants {
+                var params = extra
+                params["gridBeats"] = .number(grid)
+                let r = await send(params)
+                #expect(!r.ok, "gridBeats \(grid) \(extra) must be refused")
+                #expect(r.error?.contains("at least 1/1024 beat (0.0009765625)") == true,
+                        "gridBeats \(grid) \(extra): \(r.error ?? "no error")")
+            }
+        }
+        #expect(engine.detectCalls == 0)
+        #expect(store.tracks[0].clips.count == 1)
+        // 0 keeps its shipped wording.
+        let zero = await send(["gridBeats": .number(0)])
+        #expect(zero.error?.contains("'gridBeats' must be greater than 0") == true)
+        // POSITIVE CONTROL: the floor itself passes the wire and reaches the engine.
+        let finest = await send(["gridBeats": .number(1.0 / 1024)])
+        #expect(finest.ok, "\(finest.error ?? "")")
+        #expect(engine.detectCalls == 1)
+    }
+
     @Test("clip.quantizeAudio is a registered command")
     func commandRegistered() {
         #expect(CommandRouter.allCommands.contains("clip.quantizeAudio"))

@@ -222,10 +222,37 @@ struct TimelineLanesView: View {
     var onOpenBreathPad: (_ clip: Clip) -> Void = { _ in }
     /// Opens the Quantize panel focused on the extract affordance (both kinds).
     var onExtractGroove: (_ clip: Clip) -> Void = { _ in }
-    /// Opens the "Convert to Voice…" sheet for an AUDIO clip (m10-p-5, Pro clip
-    /// menu; sp-c). UI-only — routes to `openVoiceConvert`, whose sheet rides
-    /// the SAME client/store seams as the wire's `vc.convertVocals`.
-    var onConvertToVoice: (_ clip: Clip) -> Void = { _ in }
+    /// Opens **Chop to Pads…** on this clip (m39-pads) — AUDIO clips only, and
+    /// in BOTH densities. Routes to `openChopToPads(clipID:)`, which selects the
+    /// clip before showing the card.
+    var onChopToPads: (_ clip: Clip) -> Void = { _ in }
+    /// Applies a one-click tuning preset to a clip (m23-ap Phase 2, design §6.2
+    /// Door 1) — AUDIO clips only, and in BOTH densities. Routes to
+    /// `AppModel.tuneVocalFromContextMenu(clipID:preset:)`, which calls the SAME
+    /// `ProjectStore.autoCorrectClipPitch` the wire's `clip.autoCorrectPitch`
+    /// calls. The preset travels as the enum, never as a resolved options blob,
+    /// so the view can never invent a strength, a retune time or a scale.
+    var onTuneVocal: (_ clip: Clip, _ preset: PitchCorrectionPreset) -> Void = { _, _ in }
+    /// Removes a clip's pitch edits (`ProjectStore.clearClipPitchEdits`, via
+    /// `AppModel.clearClipTuningFromContextMenu(clipID:)`).
+    var onClearPitchEdits: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the note editor pane on the named clip. See `ClipBlock`'s copy for
+    /// why this exists as its own seam rather than reusing the tune callbacks.
+    var onOpenPitchEditor: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the **Tune to Melody** card on the named clip (M3, W7-TTM3; Tune Vocal ▸ Tune to
+    /// Melody…), via `AppModel.openTuneToMelody(clipID:)`. Whether the item is live is decided
+    /// from this view's own `tracks` and `tempoMap` (`TuneToMelodyMenu.availability`).
+    var onTuneToMelody: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the **Convert Voice…** panel (m24-m leg B, Pro clip menu; sp-c).
+    /// UI-only — routes to `openVoiceConvert(clipIDs:)`, whose panel rides the
+    /// SAME store seam as the wire's `vc.convertClips`. The COMMAND (title +
+    /// resolved ids) travels with the call so the panel can never open on a
+    /// different set from the one the menu named.
+    var onConvertToVoice: (_ command: VoiceConvertCommand) -> Void = { _ in }
+    /// Every AUDIO clip in the arrange selection, ordered by start beat — read
+    /// from `AppModel.selectedAudioClipIDs`, the ONE producer, rather than
+    /// re-derived here from `selection` + `tracks`.
+    var selectedAudioClipIDs: [UUID] = []
     /// Crossfades two adjacent/overlapping audio clips (m11-d, Pro clip menu),
     /// wired to `ProjectStore.crossfadeClips`.
     var onCrossfadeClips: (_ trackID: UUID, _ clipID: UUID, _ otherClipID: UUID,
@@ -450,6 +477,20 @@ struct TimelineLanesView: View {
     /// True while the transport is recording — the tempo lane is read-only then
     /// (map edits are refused mid-take; the lane greys its handles to match).
     var isRecordingTransport: Bool = false
+
+    /// The PROVISIONAL take region (m34-a-2) — the growing block drawn over the
+    /// destination lane(s) while a take is rolling, nil the rest of the time.
+    ///
+    /// ⛔ **IT ARRIVES AS A VALUE AND LEAVES AS PIXELS. Nothing about it is
+    /// interactive**: it is not in `tracks[…].clips`, so selection, the marquee,
+    /// drag/trim, the clipboard and undo cannot reach it even in principle, and
+    /// the layer that draws it is `.allowsHitTesting(false)` so the empty-lane
+    /// gestures underneath it (double-click to create, right-click to paste)
+    /// keep working exactly as they do with nothing drawn there.
+    ///
+    /// The DECISION about whether to draw is `TakeRegionPreview`'s, in DAWCore,
+    /// where it is headless-testable — this view has no opinion and no fallback.
+    var liveTakeRegion: ProvisionalTakeRegion? = nil
 
     // MARK: - Ruler-block pinning (m13-g)
 
@@ -890,6 +931,7 @@ struct TimelineLanesView: View {
                 emptyLaneHintLayer
                 loopBand
                 clipBlocks
+                liveTakeRegionBlock
                 crossfadeSeams
                 takeLanes
                 automationLanes
@@ -926,6 +968,7 @@ struct TimelineLanesView: View {
                     // playhead / refusal bubble, which must read over it.
                     emptyLaneHintLayer
                     clipBlocks
+                    liveTakeRegionBlock
                     crossfadeSeams
                     takeLanes
                     automationLanes
@@ -1265,7 +1308,21 @@ struct TimelineLanesView: View {
                     onOpenHumanize: { onOpenHumanize(clip) },
                     onOpenBreathPad: { onOpenBreathPad(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
-                    onConvertToVoice: { onConvertToVoice(clip) },
+                    onChopToPads: { onChopToPads(clip) },
+                    onTuneVocal: { preset in onTuneVocal(clip, preset) },
+                    onClearPitchEdits: { onClearPitchEdits(clip) },
+                    onOpenPitchEditor: { onOpenPitchEditor(clip) },
+                    tuneToMelodyAvailability: {
+                        TuneToMelodyMenu.availability(vocal: clip, tracks: tracks,
+                                                      tempoMap: tempoMap)
+                    },
+                    onTuneToMelody: { onTuneToMelody(clip) },
+                    voiceConvertCommand: VoiceConvertMenuPolicy.clipContextCommand(
+                        clickedClipID: clip.id,
+                        clickedClipIsAudio: !clip.isMIDI && clip.audioFileURL != nil,
+                        clickedClipIsSelected: selection.contains(clip.id),
+                        selectedAudioClipIDs: selectedAudioClipIDs),
+                    onConvertToVoice: onConvertToVoice,
                     crossfadeNextClipID: isPro ? crossfadeNeighbor(for: clip, in: track) : nil,
                     onCrossfadeWithNext: { length in
                         if let other = crossfadeNeighbor(for: clip, in: track) {
@@ -1310,6 +1367,88 @@ struct TimelineLanesView: View {
             }
         }
     }
+
+    // MARK: - The growing take region (m34-a-2)
+
+    /// The PROVISIONAL block that appears on the destination lane the moment a
+    /// take captures its first note and grows, whole beat by whole beat, until
+    /// the real clip replaces it at stop.
+    ///
+    /// ⭐⭐ **IT MUST BE LEGIBLE AS *NOT YET A CLIP*, AT A GLANCE, WITHOUT
+    /// READING ANYTHING** — a performer looking at the screen mid-take has no
+    /// attention to spend. Three cues, all pulling the same way:
+    ///
+    /// • **Amber** (`DAWTheme.record`), which in this app means record/warning
+    ///   and NOTHING else. No clip is ever amber: audio clips are green-ish
+    ///   tints, MIDI clips violet/cyan, AI clips violet. So the colour alone
+    ///   already says "this is the recording, not your material".
+    /// • **A dashed outline.** Every real clip in this timeline is drawn with a
+    ///   SOLID edge; a dashed one is not a shape the arrange otherwise contains,
+    ///   which is what makes it read as provisional rather than as a variant.
+    /// • **A translucent fill (0.10)**, so the grid and any clip underneath show
+    ///   THROUGH it. A solid block would claim to have replaced what is under
+    ///   it; this is honest about being an overlay on ground that still belongs
+    ///   to whatever is already there.
+    ///
+    /// The corner radius matches a real clip's (5), deliberately: the shape is
+    /// the same *kind* of object, and making it a different shape as well as a
+    /// different colour and edge would read as an unrelated piece of chrome.
+    ///
+    /// ⚠️ **THE READOUT IS SF MONO AND SAYS THE NOTE COUNT** — the numeric-
+    /// readout rule, and the one fact that distinguishes "the take is running
+    /// and capturing" from "the view is stuck". It is suppressed below 46 pt of
+    /// width rather than truncated (the `showGain` idiom): a clipped word is
+    /// worse than no word.
+    @ViewBuilder
+    private var liveTakeRegionBlock: some View {
+        if let region = liveTakeRegion {
+            let width = max(3, CGFloat(region.lengthBeats) * pixelsPerBeat)
+            let originX = CGFloat(region.startBeat) * pixelsPerBeat
+            ZStack(alignment: .topLeading) {
+                // One block per destination lane. A multi-armed take lands one
+                // clip PER instrument track, so previewing one lane would be a
+                // half-truth about what stop is going to create.
+                ForEach(takeRegionRows(region), id: \.self) { index in
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(DAWTheme.record.opacity(0.10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5)
+                                .strokeBorder(DAWTheme.record.opacity(0.85),
+                                              style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                        )
+                        .overlay(alignment: .topLeading) {
+                            if width >= Self.takeRegionLabelMinWidth {
+                                Text("REC \(region.noteCount)")
+                                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                    .foregroundStyle(DAWTheme.record)
+                                    .lineLimit(1)
+                                    .fixedSize()
+                                    .padding(.leading, 5)
+                                    .padding(.top, 3)
+                            }
+                        }
+                        .shadow(color: DAWTheme.record.opacity(0.35), radius: 6)
+                        .frame(width: width, height: rowHeight)
+                        .offset(x: originX, y: laneTop(index))
+                }
+            }
+            // ⛔ THE NON-NEGOTIABLE LINE. Without it a half-recorded region would
+            // swallow the empty-lane double-click and the lane's right-click
+            // menu for the whole take, and a future edit could give it a gesture
+            // — the data-loss shape this feature must never grow.
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// Row indices for a region's destination tracks, in track order. A
+    /// destination that no longer exists (deleted mid-take) simply drops out —
+    /// the same tolerance `finishTake` shows when it lands.
+    private func takeRegionRows(_ region: ProvisionalTakeRegion) -> [Int] {
+        tracks.indices.filter { region.trackIDs.contains(tracks[$0].id) }
+    }
+
+    /// Below this width the "REC n" readout is suppressed rather than clipped.
+    private static let takeRegionLabelMinWidth: CGFloat = 46
 
     // MARK: - Crossfade seams (m11-d)
 
@@ -2175,7 +2314,10 @@ struct TimelineLanesView: View {
     /// takes no transport, so "a track added mid-playback still shows the hint"
     /// is structural rather than promised).
     private var emptyLaneHints: [ArrangeEmptyLaneHint] {
-        ArrangeEmptyLaneHints.hints(for: tracks)
+        // m34-a-2: a lane with a take rolling onto it is not empty-and-waiting.
+        // See `ArrangeEmptyLaneHints.hint` for what the screenshot showed.
+        ArrangeEmptyLaneHints.hints(for: tracks,
+                                    recordingTrackIDs: liveTakeRegion?.trackIDs ?? [])
     }
 
     /// The hover ghost line (m17-c #2): a faint NEUTRAL hairline at the
@@ -2898,13 +3040,53 @@ private struct ClipBlock: View {
     /// Opens the Quantize panel focused on the extract affordance (both kinds —
     /// `groove.extract` supports MIDI onsets and audio transients).
     var onExtractGroove: () -> Void = {}
+    /// Opens **Chop to Pads…** (m39-pads) — audio only, both densities.
+    var onChopToPads: () -> Void = {}
+
+    // MARK: Tune Vocal (m23-ap Phase 2 — the preset door, design §6.2 Door 1)
+
+    /// Applies one of `PitchCorrectionPreset.offeredInUI`'s one-click tunings to
+    /// THIS clip — audio only, both densities. Routes to
+    /// `AppModel.tuneVocalFromContextMenu`, which calls the SAME
+    /// `ProjectStore.autoCorrectClipPitch` the wire's `clip.autoCorrectPitch`
+    /// calls, with the SAME `preset.options()` (chromatic scale) the wire
+    /// resolves when no key is named. One store method, one policy, one default
+    /// — design §6.2's "all three doors call ONE store method".
+    var onTuneVocal: (PitchCorrectionPreset) -> Void = { _ in }
+    /// Removes this clip's pitch edits entirely (`ProjectStore.clearClipPitchEdits`
+    /// via `AppModel.clearClipTuningFromContextMenu`). Offered ONLY when the clip
+    /// actually carries edits — a "Remove Tuning" over a never-tuned clip is a
+    /// control whose only possible outcome is nothing happening.
+    var onClearPitchEdits: () -> Void = {}
+    /// Opens the note editor pane on THIS clip (`AppModel.openPitchEditor`).
+    ///
+    /// ⭐ THE PANE EXISTED FOR A WHILE WITH NO HUMAN DOOR. p2-b built and
+    /// rendered the whole surface, `AppModel.openPitchEditor(clipID:)` was
+    /// waiting, and the only thing missing was this one `Button` — in a file
+    /// that agent had been told to stay out of. **A capability nobody can
+    /// reach is indistinguishable from one that was never built**, and it
+    /// would have read as "the editor is not done" in every later summary.
+    var onOpenPitchEditor: () -> Void = {}
+    /// Tune to Melody (M3, W7-TTM3): whether Tune Vocal ▸ Tune to Melody… is live for THIS
+    /// clip. A closure, asked when the menu is built (`TuneToMelodyMenuItem`), so the block's
+    /// playhead-rate rebuilds never pay for it. The lanes view answers with
+    /// `TuneToMelodyMenu.availability`, the store's own per-note test.
+    var tuneToMelodyAvailability: () -> TuneToMelodyMenu.Availability = {
+        TuneToMelodyMenu.Availability(isEnabled: false, help: TuneToMelodyCopy.noMelodyUnderVocal)
+    }
+    /// Opens the Tune to Melody card on THIS clip (`AppModel.openTuneToMelody`).
+    var onTuneToMelody: () -> Void = {}
 
     // MARK: Convert to voice (m10-p-5)
 
-    /// "Convert to Voice…" (audio clips only, Pro menu — sp-c): opens the
-    /// convert sheet, which rides the SAME client/store seams as the wire's
-    /// `vc.convertVocals` clipId-form.
-    var onConvertToVoice: () -> Void = {}
+    /// What this block's *Convert Voice…* entry says and targets (m24-m leg B),
+    /// or nil when the entry must not exist at all (a MIDI clip has no
+    /// recording to convert — hidden, never offered-then-errored). Resolved by
+    /// `VoiceConvertMenuPolicy`, ONE producer for the label and the ids.
+    var voiceConvertCommand: VoiceConvertCommand?
+    /// Opens the Convert Voice… panel on `voiceConvertCommand`'s clips. The
+    /// command is handed back rather than recomputed, the `onDelete` law.
+    var onConvertToVoice: (VoiceConvertCommand) -> Void = { _ in }
 
     // MARK: Crossfade (m11-d)
 
@@ -3874,6 +4056,97 @@ private struct ClipBlock: View {
         // playhead-anchored route.
         Button(cutCommand.title) { onClipboardClip(.cut, cutCommand) }
         Button(copyCommand.title) { onClipboardClip(.copy, copyCommand) }
+        // ═══ CHOP TO PADS (m39-pads) — AUDIO ONLY, AND IN BOTH DENSITIES ═══
+        //
+        // ⭐ **DELIBERATELY OUTSIDE THE `if pro` BLOCK, on Delete's argument.**
+        // Chopping a recording onto pads is not clip-EDIT chrome; it is how a
+        // recording BECOMES an instrument you can play. Before this entry the
+        // only route to the chopper was Musical Typing ▸ PADS ▸ "CHOP A CLIP…"
+        // — three gestures deep, behind a strip that is off by default, i.e.
+        // exactly the "operation reachable by only one route is an operation
+        // that goes missing" failure m23-cf paid for two entries up.
+        //
+        // AUDIO ONLY, and hidden rather than offered-then-errored (the
+        // "Quantize…" / "Convert Voice…" rule): `sliceClipToSampler` throws on
+        // a MIDI clip, which has no recording to cut. The `audioFileURL` half
+        // matches `voiceConvertCommand`'s own audio test below — a clip can be
+        // non-MIDI and still have no file behind it yet.
+        if !clip.isMIDI, clip.audioFileURL != nil {
+            Divider()
+            Button("Chop to Pads…") { onChopToPads() }
+            // ═══ TUNE VOCAL (m23-ap Phase 2, design §6.2 Door 1) ═══
+            //
+            // ⭐ **OUTSIDE THE `if pro` BLOCK, ON DELETE'S AND CHOP'S ARGUMENT.**
+            // Tuning a vocal is not expert chrome — it is the single most asked-for
+            // thing anyone does to a recorded voice, and "an operation reachable by
+            // only one route is an operation that goes missing" (m23-cf). Until this
+            // entry the preset actions existed as data, as a store op, as a wire verb
+            // and as an MCP tool, and as NOTHING A PERSON COULD CLICK.
+            //
+            // SHARES the audio-only gate above rather than repeating it: the
+            // predicate is character-for-character the same one ("hidden rather than
+            // offered-then-errored", the "Quantize…" / "Convert Voice…" rule), and a
+            // second copy would be a second place for it to drift. `autoCorrectClipPitch`
+            // rejects a MIDI clip with `pitchDetectionRequiresAudioClip` and a
+            // file-less clip through `detectClipPitch`'s own teaching refusal, so both
+            // halves of the gate are real refusals the user never has to meet.
+            //
+            // ⭐ **`offeredInUI`, NEVER `allCases` — AND SINCE 2026-09-24 THAT IS ALL
+            // FOUR.** Hard Tune was withheld while the render built every curve with
+            // no contour, so it played as a stronger Tight wearing the label "the
+            // robot effect". The render now shapes against the detected whole-file
+            // contour and the label is true, so the menu offers it.
+            // `PitchCorrectionPreset.offeredInUI`'s own doc holds the measurement
+            // (measured on the real vocal, per held note), and
+            // `uiDoorOffersEveryPresetTheRenderHonours` pins the list. Hard Tune is
+            // listed LAST with no hairline before it — the same flat order as the
+            // note editor's four chips. It is a different algorithm, not a fourth
+            // rung (`PitchCorrectionPreset.ladder`); its tooltip, the preset's own
+            // `summary`, is what says so.
+            //
+            // The label is the preset's `displayName` and the tooltip its `summary`,
+            // both taken VERBATIM from `PitchCorrectionPresets.swift` (design §6.1:
+            // "use these strings verbatim") — already written for someone who has
+            // never used a tuner, and never re-worded here.
+            Menu("Tune Vocal") {
+                ForEach(PitchCorrectionPreset.offeredInUI) { preset in
+                    Button(preset.displayName) { onTuneVocal(preset) }
+                        .help(preset.summary)
+                }
+                // Only when there is tuning to remove. `clip.pitchEdits` is the
+                // clip's OWN field read straight off the block's model value, so
+                // the entry appears the moment the store writes and disappears the
+                // moment it clears — there is no second copy of this state to go
+                // stale. It is also the ONE thing on screen that says the tuning
+                // took at all, until the note view lands.
+                Divider()
+                // Tune to Melody (M3, W7-TTM3; design §3.4): each sung note tuned to the
+                // MIDI melody under it. SHOWN AND GREYED when no MIDI note plays under this
+                // vocal, with the reason drawn under it (`TuneToMelodyMenuItem`), never
+                // hidden: the person learns the operation exists and what it wants first.
+                // Live exactly when the store would accept a melody
+                // (`TuneToMelodyMenu.availability` asks the store's own
+                // `MelodyTuning.notes(of:under:tempoMap:)`).
+                TuneToMelodyMenuItem(availability: tuneToMelodyAvailability,
+                                     action: onTuneToMelody)
+                // The way in to the note editor. Worded for someone who has
+                // never used one: "Note Editor" names the thing, the ellipsis
+                // is AppKit's promise that a surface opens rather than
+                // something happening to the clip immediately.
+                Button("Open Note Editor…") { onOpenPitchEditor() }
+                if clip.pitchEdits != nil {
+                    Divider()
+                    Button("Remove Tuning") { onClearPitchEdits() }
+                        // m23-ap I7b (design §17.4) — Remove Tuning wipes the
+                        // whole note table, and a cleared note's silence lives
+                        // in it: this ALSO brings every cleared note back. The
+                        // help says so, with the count — the note editor's own
+                        // "Remove tuning" carries the same sentence.
+                        .help(PitchEditorNoteMenu.removeTuningHelp(
+                            clearedNoteCount: clip.pitchEdits?.segments.filter(\.isCleared).count ?? 0))
+                }
+            }
+        }
         // The separator is CONDITIONAL because in SIMPLE density on a NON-TAKE
         // clip both blocks below are empty, so an unconditional one would be a
         // trailing rule with nothing under it — in the beginner density, on the
@@ -3964,7 +4237,7 @@ private struct ClipBlock: View {
                 // Humanize (m25-c) — quantize's inverse, and MIDI-only for the
                 // same reason: `humanizeClipNotes` throws `notAMIDIClip` on an
                 // audio clip, so the entry simply does not exist there (hidden,
-                // never offered-then-errored — the "Convert to Voice…" rule two
+                // never offered-then-errored — the "Convert Voice…" rule two
                 // entries down, and the sibling "Quantize…" above).
                 //
                 // ⛔ DO NOT ADD `clip.takeGroupID == nil` HERE (m25-c-2). Both
@@ -3986,13 +4259,20 @@ private struct ClipBlock: View {
                 Button("Breath Pad…") { onOpenBreathPad() }
             }
             Button("Extract Groove…") { onExtractGroove() }
-            // Convert to voice (m10-p-5): AUDIO clips only — a MIDI clip has no
-            // recording to convert (the store's voiceConversionSource law), so
-            // the item simply doesn't exist there (hidden, never
-            // offered-then-errored). Pro-only like every clip-menu entry (sp-c).
-            if !clip.isMIDI {
+            // CONVERT VOICE… (m24-m leg B): AUDIO clips only — a MIDI clip has
+            // no recording to convert, so the item simply doesn't exist there
+            // (hidden, never offered-then-errored). Pro-only like every
+            // clip-menu entry (sp-c).
+            //
+            // ⭐ THE TITLE NAMES THE BLAST RADIUS (the m23-cf rule): right-click
+            // a clip that IS in the selection and it reads "Convert 3 Clips to
+            // Voice…" and converts three; right-click one that is NOT and it
+            // reads "Convert Clip to Voice…", converts that one, and leaves the
+            // selection alone. Both come out of `VoiceConvertMenuPolicy` with
+            // the ids attached, so the words and the action cannot disagree.
+            if let command = voiceConvertCommand {
                 Divider()
-                Button("Convert to Voice…") { onConvertToVoice() }
+                Button(command.title) { onConvertToVoice(command) }
             }
         }
     }

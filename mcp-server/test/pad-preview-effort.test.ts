@@ -272,3 +272,130 @@ test("an app-side gesture refusal surfaces as an MCP tool error, message verbati
   assert.ok(r.isError, "an app-side refusal must be a tool error, never a silent success");
   assert.match(r.content[0].text as string, /no pad gesture is open/);
 });
+
+// ---------------------------------------------------------------------------
+// m34-f step ② — pad_play_effort, the LIVE-PERFORMANCE sibling.
+//
+// ⭐ FOLDED INTO THIS FILE ON PURPOSE, not given one of its own: the two tools
+// share a handler case in Commands.swift and differ in EXACTLY ONE thing
+// (whether the value is recorded), so the assertions that matter most are the
+// COMPARISONS. Two files would let the pair drift with nothing reading both.
+
+test("pad_play_effort forwards pad.playEffort — a DIFFERENT command from its preview sibling", async () => {
+  const trackId = randomUUID();
+  queuedResult = {
+    trackId,
+    gesture: "begin",
+    controller: 11,
+    controllerValue: 64,
+    value: 0.5,
+    streaming: true,
+    delivered: true,
+    audible: true,
+    capturedPoints: 1,
+    recording: true,
+  };
+  await client.callTool({
+    name: "pad_play_effort",
+    arguments: { trackId, gesture: "begin", value: 0.5 },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0]!.command,
+    "pad.playEffort",
+    "the performance tool must NOT quietly forward to the preview verb — that is the " +
+      "whole defect this item exists to prevent, one layer up"
+  );
+  assert.deepEqual(calls[0]!.params, {
+    trackId,
+    gesture: "begin",
+    value: 0.5,
+    expressionCC: undefined,
+  });
+});
+
+test("pad_play_effort takes the SAME parameter set as pad_preview_effort, no more and no less", async () => {
+  const listed = await client.listTools();
+  const play = listed.tools.find((t) => t.name === "pad_play_effort");
+  const preview = listed.tools.find((t) => t.name === "pad_preview_effort");
+  assert.ok(play, "pad_play_effort must be registered");
+  assert.ok(preview, "pad_preview_effort must still be registered");
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const keys = (t: any) => Object.keys(t.inputSchema.properties ?? {}).sort();
+  assert.deepEqual(
+    keys(play),
+    keys(preview),
+    "the two verbs differ ONLY in whether the value is recorded; a parameter on one and " +
+      "not the other means they have drifted"
+  );
+  assert.deepEqual(keys(play), ["expressionCC", "gesture", "trackId", "value"]);
+});
+
+test("pad_play_effort's description promises recording and names the three conditions; pad_preview_effort's still promises the opposite", async () => {
+  const listed = await client.listTools();
+  const play = listed.tools.find((t) => t.name === "pad_play_effort")!;
+  const preview = listed.tools.find((t) => t.name === "pad_preview_effort")!;
+
+  // The performance verb must SAY it records, and must say when it does not —
+  // an agent that cannot tell the two apart will reach for the wrong one.
+  assert.match(play.description!, /record it into the take/i);
+  assert.match(play.description!, /ARMED/);
+  assert.match(play.description!, /capturedPoints/);
+  assert.match(play.description!, /recording/);
+
+  // ⛔ AND THE PREVIEW VERB'S PROMISE MUST NOT HAVE BEEN QUIETLY WIDENED. Its
+  // contract ("nothing is recorded") is load-bearing for every agent already
+  // using it; adding a sibling must not change what the old one claims.
+  assert.match(preview.description!, /nothing is recorded/i);
+  assert.match(preview.description!, /Refused while a take is recording/i);
+});
+
+test("pad_play_effort rejects an unknown key and out-of-range values at the MCP boundary", async () => {
+  const trackId = randomUUID();
+  const bad = await client.callTool({
+    name: "pad_play_effort",
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    arguments: { trackId, gesture: "begin", value: 0.5, pressure: 0.9 } as any,
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.ok((bad as any).isError, "an unknown key must never reach the app");
+  assert.equal(calls.length, 0, "a rejected call makes no bridge call at all");
+
+  const tooLoud = await client.callTool({
+    name: "pad_play_effort",
+    arguments: { trackId, gesture: "move", value: 1.5 },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  assert.ok((tooLoud as any).isError, "value is 0-1, enforced at the boundary");
+  assert.equal(calls.length, 0);
+});
+
+test("pad_play_effort's recording:false is a REAL ANSWER, not a tool error", async () => {
+  const trackId = randomUUID();
+  // Performed on an unarmed track during no take: it sounded and was kept
+  // nowhere. That is the honesty light doing its job, not a failure.
+  const stubbed = {
+    trackId,
+    gesture: "move",
+    controller: 11,
+    controllerValue: 90,
+    value: 0.71,
+    streaming: true,
+    delivered: true,
+    audible: true,
+    capturedPoints: 0,
+    recording: false,
+  };
+  queuedResult = stubbed;
+
+  const result = await client.callTool({
+    name: "pad_play_effort",
+    arguments: { trackId, gesture: "move", value: 0.71 },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const r = result as any;
+  assert.ok(!r.isError, "expression that reached no take is a successful call that SAYS so");
+  assert.deepEqual(parseJSON(r), stubbed);
+});

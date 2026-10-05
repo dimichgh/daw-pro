@@ -92,6 +92,21 @@ enum KeyPressProbe {
     // the key-code route is preferred because it needs no modifier and so cannot
     // be confused with the separate question of whether chords should delete.)
     //
+    // ⚠️⚠️ **THE TWO ARROW COUNTERS BELOW STOPPED ANSWERING "DID THE ARROW
+    // WORK?" AT m34-j, EXACTLY AS THE DELETE COUNTERS DID AT m23-cf-3.** The
+    // arrow keys now ride `ArrowNudgeMonitorRouting` through the app's `NSEvent`
+    // monitor, which SWALLOWS an owned key before SwiftUI sees it — so in the
+    // ordinary working case these counters DO NOT MOVE for a real arrow press.
+    // A gate that read them as "the nudge happened" would go GREEN BY GOING
+    // BLIND at the precise moment the feature started working.
+    //
+    // ⭐ WHAT THEY STILL MEASURE, AND IT IS WORTH KEEPING: whether the SwiftUI
+    // MOUNT was reachable. That is how m34-j was diagnosed — the counters read
+    // 12/12 across clip switches (refuting the item's stated premise) and 0/3 in
+    // the state a dismissed text field leaves behind (finding the real one).
+    // Use `arrowNudgeMonitorSeq` / `arrowNudgeMonitorRefusedBy` for the monitor
+    // tier, and CLIP MOVEMENT for whether the user's clip actually moved.
+    //
     /// `ContentView.ArrangeDeleteKey.onKeyPress(keys: [.leftArrow, .rightArrow])`.
     static var arrangeHorizontalArrow = 0
     /// `ContentView.ArrangeDeleteKey.onKeyPress(keys: [.upArrow, .downArrow])`.
@@ -102,6 +117,23 @@ enum KeyPressProbe {
     static var markerRenameEscape = 0
     /// `TrackListView`'s track rename field, `.onKeyPress(.escape)`.
     static var trackRenameEscape = 0
+
+    // ⚠️⚠️ m34-k — THE TWO EDITOR ESCAPE COUNTERS BELOW STOP ANSWERING "DID
+    // ESCAPE WORK?" THE MOMENT THEY ARE ADDED, exactly as the arrows' did at
+    // m34-j: the app's key monitor now SWALLOWS every Escape it hands to an
+    // editor, so in the working case these mounts see nothing. What they still
+    // measure is whether a SwiftUI mount was reachable at all — and a mount that
+    // fires means the monitor PASSED the key on (a refusal, or nothing to take
+    // down). Read `escapeKeyMonitorSeq`/`…RefusedBy`/`…Target` for the monitor
+    // tier and the editor's own STATE (selection, maximized) for the effect.
+    //
+    /// `PianoRollView`'s own `.onKeyPress(.escape)` — the maximized roll's mount.
+    static var pianoRollEscape = 0
+    /// `ContentView.ArrangeDeleteKey`'s `.onKeyPress(.escape)` — the arrange
+    /// workspace's BACKSTOP. Before this, it and the roll's mount bumped the one
+    /// shared `AppModel.editorEscapeMountHits`, so no probe could say WHICH of
+    /// them a press reached (m34-j's assessment names that as its limit).
+    static var arrangeEscapeBackstop = 0
 
     // MARK: Focus ground truth — the `@FocusState` VALUES, not the assertions
     //
@@ -143,6 +175,8 @@ enum KeyPressProbe {
         automationLaneDelete += 1
         markerRenameEscape += 1
         trackRenameEscape += 1
+        pianoRollEscape += 1
+        arrangeEscapeBackstop += 1
     }
 
     /// Every counter and focus mirror, as the debug echo's `keyPressProbe` object.
@@ -153,6 +187,8 @@ enum KeyPressProbe {
             "automationLaneDelete": .number(Double(automationLaneDelete)),
             "markerRenameEscape": .number(Double(markerRenameEscape)),
             "trackRenameEscape": .number(Double(trackRenameEscape)),
+            "pianoRollEscape": .number(Double(pianoRollEscape)),
+            "arrangeEscapeBackstop": .number(Double(arrangeEscapeBackstop)),
             "arrangeWorkspaceFocused": .bool(arrangeWorkspaceFocused),
             "automationLanesFocusedCount": .number(Double(automationLanesFocused.count)),
             "markerRenameFieldFocused": .bool(markerRenameFieldFocused),

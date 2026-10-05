@@ -1,0 +1,28 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "reggae-riddim",
+  "name": "Reggae Riddim",
+  "summary": "A reggae rhythm section with a forward bass and an off-beat guitar that you can send into a long dub echo.",
+  "songForm": "reggae",
+  "genres": ["reggae"],
+  "tracks": [
+    { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 1.45, "mixerPreset": "drum-room",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 0, "bankMSB": 120, "bankLSB": 0 } },
+      "sends": [ { "bus": "dub-echo", "level": 0.15 } ] },
+    { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.47, "mixerPreset": "bass-round",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 33 } } },
+    { "key": "skank-guitar", "name": "Skank Guitar", "kind": "instrument", "volume": 1.45, "pan": 0.4,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 27 } },
+      "sends": [ { "bus": "dub-echo", "level": 0.3 }, { "bus": "room", "level": 0.25 } ] },
+    { "key": "organ", "name": "Organ", "kind": "instrument", "pan": -0.4, "volume": 0.5,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 16 } },
+      "sends": [ { "bus": "room", "level": 0.25 } ] },
+    { "key": "dub-echo", "name": "Dub Echo", "kind": "bus",
+      "inserts": [ { "kind": "delay", "params": { "sync": 1, "division": 0.75, "feedback": 0.6, "mix": 1,
+                                                  "highCutHz": 3000 } } ] },
+    { "key": "room", "name": "Room", "kind": "bus",
+      "inserts": [ { "kind": "reverb", "params": { "mix": 1, "roomSize": 0.5 } } ] }
+  ]
+}

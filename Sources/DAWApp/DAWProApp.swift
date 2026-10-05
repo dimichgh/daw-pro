@@ -20,7 +20,16 @@ struct DAWProApp: App {
                     // Running from `swift run` (no app bundle): become a real
                     // foreground app so the window shows and takes focus.
                     NSApplication.shared.setActivationPolicy(.regular)
-                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    // C5b-4b — a staging gate that must leave the user's focus
+                    // where it is sets DAWPRO_STAGING_NO_ACTIVATE=1 and skips
+                    // ONLY the activation (the `.regular` policy above is what
+                    // gives an unbundled binary its window at all). Opt-IN, not
+                    // a staging default: `m23r3b-live-layers.mjs` F0 asserts a
+                    // staging app is ACTIVE at launch, and every focus gate
+                    // measures under that ambient.
+                    if ProcessInfo.processInfo.environment["DAWPRO_STAGING_NO_ACTIVATE"] != "1" {
+                        NSApplication.shared.activate(ignoringOtherApps: true)
+                    }
                     // Enforce the MEASURED window floor (m10-j) directly on the
                     // NSWindow too — belt-and-suspenders with the root
                     // `.frame(minWidth:minHeight:)` — so a user drag can never shrink
@@ -74,7 +83,14 @@ final class AppModel {
     /// The local ACE-Step song generator + its sidecar manager, SHARED with the
     /// control router (so the Sketchpad panel and the `ai.*` wire path talk to
     /// the same job state) and used directly by the Sketchpad model.
-    let songGenerator: ACEStepClient
+    ///
+    /// p2-sing-0: this is the LIFECYCLE-TRACKED handle, never the raw
+    /// `ACEStepClient`. The raw client is built inline inside the tracker at the
+    /// one construction site in `init`, so no handle on it exists to reach around
+    /// the tracker. Every submission, from every origin, opens a job with the
+    /// model lifecycle coordinator, which is what stops an RVC (or SoulX) boot
+    /// from evicting ACE mid-song.
+    let songGenerator: LifecycleTrackingSongGenerator
     let sidecarManager: SidecarManager
 
     /// The unified generation-progress registry (m17-h): EVERY generation job
@@ -100,6 +116,40 @@ final class AppModel {
     /// `debug.captureUI` renders the same instance the panel shows.
     let lyricsWorkshop: LyricsWorkshopModel
 
+    /// **PLAYBOX (m34-g): the AI produces the INVITATION, the human produces the
+    /// PERFORMANCE.** Resolves a chord-progression generator from the SAME key
+    /// chain the Settings panel manages, reads the live project's key / tempo /
+    /// section as context, and applies the finished degrees to the Musical
+    /// Typing chord row's lit-key overlay.
+    ///
+    /// ⛔⛔ **IT LIGHTS KEYS AND NOTHING ELSE.** No note is sounded and no clip
+    /// is written on the user's behalf — the take is played, on the keys,
+    /// through the ordinary live capture path. Owned here so
+    /// `debug.musicalTyping` can drive it and `debug.captureUI` renders the same
+    /// instance the strip shows.
+    let playbox: PlayboxModel
+
+    /// Playbox's on-the-beat tick phase (m34-g). Mutated only by
+    /// `sampleMusicalTypingBeat`, on the main actor.
+    ///
+    /// warning: `@ObservationIgnored` — it is sampled ~30 times a second and
+    /// nothing draws it. Observing it would invalidate the window at the poll
+    /// rate to show a number no pixel carries.
+    @ObservationIgnored var musicalTypingBeatDriver = MusicalTypingBeatDriver()
+
+    /// The poll that feeds the driver (m34-g). Runs ONLY while chord mode is on
+    /// AND the user has chosen on-the-beat — the other two modes need no clock,
+    /// so they pay nothing.
+    ///
+    /// warning: a `Timer`, deliberately, and NOT an `onChange` on
+    /// `transport.positionBeats`. `MusicalKeyboardStrip`'s own doc records that
+    /// it *"reads no transport clock and mounts no TimelineView, so a running
+    /// transport does not tick it"* — observing the playhead from that view to
+    /// get a tick would re-evaluate a 17-cell Canvas 30 times a second and
+    /// silently retract a documented property. The `stretchPollTimer`
+    /// precedent, one file over.
+    @ObservationIgnored var musicalTypingBeatTimer: Timer?
+
     /// Whether the WRITE-WITH-AI workshop is expanded inside the Sketchpad panel.
     /// Driven by the panel's disclosure and the `ui.showLyricsWorkshop` command.
     var showLyricsWorkshop = false
@@ -121,26 +171,86 @@ final class AppModel {
     /// SECOND local sidecar (127.0.0.1:8002, `scripts/rvc/`). SHARED with the
     /// control router (the `sidecarManager` precedent) so the Voice panel and
     /// the `vc.*` wire path never diverge on sidecar/boot state.
+    ///
+    /// p2-sing-0: `voiceConversionClient` is the LIFECYCLE-TRACKED handle (the raw
+    /// `VoiceConversionClient` is built inline inside the tracker in `init`), so
+    /// every `convert`/`train`, from the panel or the wire, holds an RVC job open
+    /// while it runs, and an ACE boot cannot evict RVC mid-conversion.
     let voiceConversionManager: VoiceConversionManager
-    let voiceConversionClient: VoiceConversionClient
+    let voiceConversionClient: LifecycleTrackingVoiceConverter
 
     /// The Voice panel's headless model (m10-p-5): local voice DATASETS under
     /// app support, the voice-engine banner (user copy), the facade voice
-    /// list, the honest Train state machine, and the convert-clip action.
+    /// list, the honest Train state machine, and the Convert Voice… action.
     /// Owned here (like `clipFix`) so `debug.voicePanel` can drive it and
     /// `debug.captureUI` renders the same instance the live panel shows.
-    /// Convert rides the SAME store/client seams as the wire's
-    /// `vc.convertVocals` (no parallel mutation path).
+    /// Convert rides the SAME store seam as the wire's `vc.convertClips`
+    /// (no parallel mutation path).
     let voicePanel: VoicePanelModel
 
     /// Whether the Voice panel is open in the Arrange workspace. Driven by the
     /// header VOICE chip and `debug.voicePanel`.
     var showVoicePanel = false
 
-    /// The audio clip the "Convert to Voice…" sheet is open for (nil =
-    /// closed). Set by the clip context menu and `debug.voicePanel`; the sheet
-    /// renders as a centered overlay (the named in-window modal pattern).
-    var voiceConvertClipID: UUID?
+    /// The audio clips the **Convert Voice…** panel is open for (nil = closed;
+    /// m24-m leg B). Set by the clip context menu, Edit ▸ Convert and
+    /// `debug.voicePanel`; the panel renders as a centered overlay (the named
+    /// in-window modal pattern).
+    ///
+    /// ⚠️ **A LIST, NOT AN ID** — the ratified action is selection-driven, and
+    /// the single-clip case is just `count == 1`. The order is the order the
+    /// panel lists them in (by start beat, matching
+    /// `ClipVoiceConversionResult.clips`).
+    var voiceConvertClipIDs: [UUID]?
+
+    /// The track header a dragged voice model is currently over, and the verdict
+    /// that row is showing (nil = no voice drag is over any header) — m24-m
+    /// **leg C**.
+    ///
+    /// ⭐ **MODEL STATE, NOT VIEW `@State`, for the `selectedConvertVoiceID`
+    /// reason**: a hover held in a row's `@State` is unreachable from a debug
+    /// seam, which makes the drop affordance unphotographable — and "a UI phase
+    /// is not done until someone has looked at it" is not satisfiable for a
+    /// state no capture can stage.
+    var voiceModelDropHover: VoiceModelDropHover?
+
+    /// Which row actually PAINTED the drop chip, reported by the chip itself.
+    ///
+    /// ⚠️ **GROUND TRUTH FROM THE VIEW, never an echo of the input** — the
+    /// `trackHeaderDrag` `indicatorY` rule: "non-null mid-drag is the only
+    /// positive proof the affordance exists; *gone after* alone passes
+    /// vacuously against an implementation that never drew one". A build that
+    /// kept `voiceModelDropHover` and drew nothing would pass every check that
+    /// reads only the hover.
+    private(set) var voiceDropPaintedTrackID: UUID?
+    /// The face that row painted — true = the violet accept chip, false = the
+    /// amber refusal. Reported alongside the id so a capture-less gate can still
+    /// distinguish the two.
+    private(set) var voiceDropPaintedAccepts: Bool?
+    /// Bumped on every paint/unpaint, so a seam can wait (bounded) for the row
+    /// to confirm it re-rendered before a capture is taken (the m23-e echo-seam
+    /// law: a shot taken straight after the echo can frame the PREVIOUS state,
+    /// which does not merely fail a gate — it can stale-GREEN one).
+    private(set) var voiceDropRenderSeq = 0
+
+    /// The drop chip appeared on `trackID`.
+    func noteVoiceDropChipRendered(trackID: UUID, accepts: Bool) {
+        voiceDropPaintedTrackID = trackID
+        voiceDropPaintedAccepts = accepts
+        voiceDropRenderSeq &+= 1
+    }
+
+    /// The drop chip on `trackID` went away.
+    ///
+    /// **Guarded on identity** because SwiftUI does not order one row's
+    /// `onDisappear` against another's `onAppear`: when a drag slides from row A
+    /// to row B, A's teardown must not erase B's paint.
+    func noteVoiceDropChipRemoved(trackID: UUID) {
+        guard voiceDropPaintedTrackID == trackID else { return }
+        voiceDropPaintedTrackID = nil
+        voiceDropPaintedAccepts = nil
+        voiceDropRenderSeq &+= 1
+    }
 
     /// The instrument picker's headless model (m10-n-3): the three-section browser
     /// + GM program browser + Simple "Instrument Sets" + `InstrumentChoice`
@@ -150,6 +260,11 @@ final class AppModel {
     /// providers; selection converges on `ProjectStore.setInstrument` — the SAME
     /// one-command surface the wire uses.
     let instrumentPicker: InstrumentPickerModel
+
+    /// m34-c: the ONE sound-bank download coordinator (see its construction in
+    /// `init` for why one instance is load-bearing). Held so it outlives the
+    /// closures the picker and the router hold over it.
+    let soundBankDownloads: SoundBankDownloadCoordinator
 
     /// The track the instrument picker is open for (nil = closed). Set by the
     /// track-header / mixer instrument chip and the `debug.instrumentPicker`
@@ -219,6 +334,30 @@ final class AppModel {
     /// and `debug.samplerEditor`; the card renders as a centered overlay.
     var samplerEditorTrackID: UUID?
 
+    /// **THE PAD GRID's headless model (m39-pads)** — which square holds which
+    /// slice, which bank is showing, and the chop card's settings. Owned here so
+    /// `debug.padGrid` drives the SAME instance `debug.captureUI` renders.
+    ///
+    /// ⚠️ The GRID is drawn inside `MusicalKeyboardStrip`'s third face rather
+    /// than in a modal of its own, so there is no `padGridTrackID`: the pad
+    /// target is `activeTrackID`, the same resolution the live-note sink uses.
+    /// Two resolutions would draw one instrument's pads and sound another's.
+    /// ⚠️ **A PLACEHOLDER UNTIL `installPadGrid()` RUNS, and that shape is
+    /// forced by Swift's two-phase init, not chosen.** The real model must hold
+    /// `self.musicalTyping` and close over `self.activeTrackID`, and a class
+    /// may not read ANY property of `self` until every stored property has a
+    /// value — so it cannot be built in the initialiser at all. The default
+    /// below carries its own throwaway controller and is replaced whole on the
+    /// line after `installMusicalTyping()`. `PadGridModel.isBound` is false on
+    /// it, which is what makes "never installed" a NAMEABLE state rather than a
+    /// grid that looks like an empty kit.
+    var padGrid = PadGridModel(typing: MusicalTypingController(),
+                               zones: { [] }, targetName: { nil })
+
+    /// Is the CHOP TO PADS card up? A centered overlay, in the window content
+    /// so `debug.captureUI` can photograph it (the captureUI law).
+    var chopToPadsOpen = false
+
     /// The Quantize & Groove panel's headless model (m11-a): the grid/strength/
     /// swing/ends state, the groove picker (built-in swings + saved templates), and
     /// the extract affordance. Owned here (like `instrumentPicker`) so the
@@ -255,10 +394,18 @@ final class AppModel {
     /// the dot the hand moves between them, the live drag preview and the ONE
     /// commit on release. Owned here (like `humanizeModel`) so `debug.breathPad`
     /// drives the SAME instance `debug.captureUI` renders. Its two closures
-    /// converge on `ProjectStore.applyEffortShape` and `ProjectStore.previewEffort`
-    /// — the SAME methods `clip.applyEffortShape` and `pad.previewEffort` use, so
-    /// this adds NO wire surface (the m10-c/sp-b pure-view rule).
+    /// converge on `ProjectStore.applyEffortShape` and (since m34-f step ②)
+    /// `ProjectStore.playLiveExpression` — the SAME methods
+    /// `clip.applyEffortShape` and `pad.playEffort` use, so this adds NO wire
+    /// surface (the m10-c/sp-b pure-view rule).
     let breathPad: BreathPadModel
+
+    /// m34-f step ② — the live-EXPRESSION seam, the `LiveNoteSink` twin. Held
+    /// here (rather than captured into the pad's closure) so `debug.breathPad`
+    /// can read the ENGINE's own capture verdict back out of the same object the
+    /// pad pushed through, instead of asking the pad what it believes it did.
+    /// Two instruments on one question; them disagreeing is the signal.
+    let liveExpressionSink: LivePlayExpressionSink
 
     /// The breath pad's HARDWARE section (m28-knob-ui): which knob on the user's
     /// desk drives the pad, and what we last heard from it.
@@ -442,6 +589,21 @@ final class AppModel {
                                                            to: arrangeSelection) {
                 pianoRollNoteSelection.dropForWidenedArrangeSelection()
             }
+            // m23-ap p2-b — ⭐ "SELECTING AWAY **CLOSES**", the chosen half of
+            // design §3.6's named pair. The accessor's `id == selectedClipID`
+            // term would only HIDE the pane; without this the latch survives, so
+            // open A → select B → select A again would make the pane spring back,
+            // which is a surprise a novice cannot explain.
+            //
+            // ⚠️ THE PREDICATE IS "CHANGED TO ANYTHING **ELSE**", LITERALLY —
+            // not "changed". `openPitchEditor` writes the selection FIRST and the
+            // latch second, and a bare `oldValue != arrangeSelection` here would
+            // clear the latch that call is about to set. Widening a selection
+            // while the focus clip stays put likewise leaves the pane alone.
+            if pitchEditorRequestedClipID != nil,
+               arrangeSelection.focusID != pitchEditorRequestedClipID {
+                pitchEditorRequestedClipID = nil
+            }
         }
     }
 
@@ -616,11 +778,52 @@ final class AppModel {
     /// view's `@State` so it survives a clip switch and so the `debug.followPlayhead`
     /// echo can report BOTH surfaces' ground truth from one place.
     let pianoRollFollow = FollowPlayheadModel()
+    /// m23-ap I5 — the PITCH EDITOR's follow runtime, the `pianoRollFollow` twin:
+    /// its own instance (scrolling the note editor must not suspend the roll or
+    /// the arrange), app-held so it survives the pane's `.id(clip.id)` rebuild,
+    /// and reading the SAME one persisted `panelLayout.followPlayhead` flag.
+    let pitchEditorFollow = FollowPlayheadModel()
     /// The lanes' LAID-OUT content width, reported by the lanes' own geometry. The
     /// follow clamp's ceiling — computing it here instead would fork
     /// `TimelineLanesView.totalBeats`'s padding heuristic into a second source of
     /// truth. `@ObservationIgnored`: nothing renders it, so it must not invalidate.
     @ObservationIgnored var arrangeContentWidth: CGFloat = 0
+
+    // MARK: Vertical follow to the armed row (m34-a-3)
+
+    /// The arrange's VERTICAL follow runtime — its own `FollowPlayheadModel`
+    /// instance, because the arrange's vertical scroller genuinely is a
+    /// different scroller from its horizontal one (`ContentView`'s
+    /// `ScrollView(.vertical)` vs the lanes' `ScrollView(.horizontal)`), which
+    /// is exactly the "one instance per scrolling surface" that class
+    /// documents.
+    ///
+    /// ⚠️ **A SECOND INSTANCE OF ONE POLICY IS NOT A SECOND POLICY.** The
+    /// suspend/rearm rule, the manual-scroll detector and the counters are all
+    /// the shipped ones; only the LANDING rule differs (`rowReveal`, not
+    /// `pageOffset`), and it differs because the vertical axis follows a row
+    /// that does not move — see `FollowPlayhead.rowReveal`.
+    let arrangeVFollow = FollowPlayheadModel()
+    /// The lanes' live VERTICAL offset, reported by the lanes' own geometry in
+    /// the vertical scroller's coordinate space — so it is measured against the
+    /// LANES' own origin and `ArrangeLaneGeometry.laneTops` compare to it
+    /// directly, with no assumption about how the row column and the lane column
+    /// are aligned inside their shared `HStack`.
+    @ObservationIgnored var arrangeVScrollReported: CGFloat = 0
+    /// The vertical scroller's visible height, reported by the workspace.
+    @ObservationIgnored var arrangeVViewportHeight: CGFloat = 0
+    /// The lanes' LAID-OUT content height — the vertical clamp's ceiling
+    /// (m25-b-4's rule: clamp at the top too, against the NEW height). Measured
+    /// from the live layout, never derived from a row count, because the ladder
+    /// is non-uniform the moment a track opens its automation or takes section.
+    @ObservationIgnored var arrangeVContentHeight: CGFloat = 0
+    /// The row a vertical reveal should scroll to, and which edge it lands
+    /// against — applied by the shared `ScrollViewReader` on a nonce bump, the
+    /// `debug.arrangeScroll` mechanism minus its animation (neither a zoom nor a
+    /// follow move may glide).
+    var arrangeVFollowTarget: UUID?
+    var arrangeVFollowAnchorsBottom = false
+    var arrangeVFollowNonce = 0
     // MARK: Piano-roll zoom (m21-c)
 
     /// True while the piano-roll editor holds SwiftUI key focus (reported by the
@@ -955,10 +1158,24 @@ final class AppModel {
         // that WAS made should stand. Nor does m25-m's click-empty-to-deselect —
         // see `explicitActiveTrackID`'s own doc for the caret argument.
         explicitActiveTrackID = nil
-        // Move keyboard focus onto the arrange so DELETE reaches it. Bumped on
-        // EVERY click, including a plain re-click of an already-selected clip:
-        // opening the piano roll steals focus back (its `.onAppear`), so a
-        // one-shot flag would leave the arrange permanently unfocused for MIDI.
+        // Re-assert SwiftUI key focus on the arrange workspace. Bumped on EVERY
+        // click, including a plain re-click of an already-selected clip.
+        //
+        // ⚠️ CORRECTED AT m34-k (m23-ap I7b-2). This said "so DELETE reaches it"
+        // and "opening the piano roll steals focus back (its `.onAppear`)". Both
+        // were stale, and the second was never a measurement:
+        //   • ⌫ has not depended on this focus since m23-cf-3, the arrows since
+        //     m34-j, and Escape since m34-k — all three ride the key monitor
+        //     (`handleKeyDownEvent`).
+        //   • The roll's `.onAppear` claim is a coin flip, not a steal: m23-al
+        //     measured `pianoRollEditorFocused` alternating 6 true / 6 false
+        //     across clip switches and true only on the opening click of one clip;
+        //     I7b measured it false on 7 of 7 Escape presses with the roll open,
+        //     maximized and three notes selected.
+        // What the bump still buys: the arrange scope's `.onKeyPress` mounts,
+        // kept as additive wiring (the Escape backstop, the two arrow mounts),
+        // become reachable again after m34-j's dead state — a dismissed text
+        // field drops this focus until a clip is clicked, and this is that click.
         arrangeKeyFocusNonce &+= 1
         // m23-al: and the SEPARATE, higher-level question — the user just acted
         // in the ARRANGE, so the arrange is the surface ⌘+/⌘−/⌘0 aim at. These two
@@ -1259,6 +1476,54 @@ final class AppModel {
         openEditorClip != nil && pianoRollNoteSelection.hasSelection
     }
 
+    /// m23-ap p2-del — THE ONE HOME for "is the NOTE EDITOR open?" as the routes
+    /// that REMOVE a clip ask it. Read by `deleteMenuItem`, `deleteKeyRouting`
+    /// and (p2-del-2) `clipboardItem`, for Cut, and by nothing else. This is the
+    /// `pianoRollWouldConsumeKey` extraction's rule: one property, one reader
+    /// per door, no second spelling to drift.
+    ///
+    /// ⭐ **THE OPENNESS VERDICT, VERBATIM — the one ⌘A's `.pitchEditorOpen` arm
+    /// reads (m34-d).** Not `openPitchEditorClip != nil` spelled raw (that drops
+    /// the WORKSPACE term the router folds in), not `activeEditorSurface`
+    /// (engagement: a pane the user has not clicked into yet can lose its clip
+    /// to ⌫ just as easily), and never a focus flag (measured non-deterministic,
+    /// `EditorSurfaceRouter` C1–C3).
+    ///
+    /// ⚠️ **IT REFUSES; IT ROUTES NOTHING.** `DeleteMenuPolicy` answers
+    /// `.pitchEditorOpen` from it — the menu greys, the key is swallowed with a
+    /// hint — and no delete is ever sent INTO the pane. `ClipboardMenuPolicy`
+    /// answers the same for CUT only: Edit ▸ Cut greys, so ⌘X runs no action
+    /// and no Cut code runs to raise a hint (the ⌫ hint names Cut instead).
+    /// Copy is not governed. Choosing a surface is still `pianoRollWouldConsumeKey`'s
+    /// job and the lanes'. Design I4 (§7) adds the pane's own note-selection
+    /// term beside this one, not instead.
+    var pitchEditorPaneOpen: Bool {
+        openEditorSurface.reason == .pitchEditorOpen
+    }
+
+    /// m23-ap I4 — THE ONE HOME for "would the open NOTE EDITOR claim ⌫?": the
+    /// pane is open (the openness verdict above, verbatim) AND its interaction
+    /// bridge reports a note selection. `pianoRollWouldConsumeKey`'s shape —
+    /// on screen AND holding a selection — and, like it, NEVER engagement or
+    /// focus (design P6). Read by `deleteMenuItem` and `deleteKeyRouting`, the
+    /// two doors that feed `DeleteMenuPolicy.pitchEditorHasNoteSelection`.
+    ///
+    /// Belt and braces, knowingly: the bridge's `hasNoteSelection` is written
+    /// by the pane itself and cleared by `clearSurface(from:)` when it goes,
+    /// and the policy's arm ALSO reads `pitchEditorOpen`, so a stale bit cannot
+    /// swallow a ⌫ meant for the clips once the pane is shut.
+    var pitchEditorWouldConsumeKey: Bool {
+        pitchEditorPaneOpen && pitchEditorInteraction.hasNoteSelection
+    }
+
+    /// UE-2 — THE ONE HOME for what KINDS the open note editor's selection
+    /// holds (`PitchEditorInteractionBridge.selectionKinds`): the noun of the
+    /// Edit menu's Clear ("Clear Selected Sounds"). Read by `deleteMenuItem`
+    /// and `deleteKeyRouting`, beside `pitchEditorWouldConsumeKey`.
+    var pitchEditorSelectionKinds: Set<PitchEditorNoteMenu.Kind> {
+        pitchEditorInteraction.selectionKinds
+    }
+
     /// The Edit ▸ Delete item — title, target surface, enabled state.
     ///
     /// ⚠️ THE POLICY LIVES IN `DAWAppKit.DeleteMenuPolicy`, NOT HERE, and its doc
@@ -1284,6 +1549,16 @@ final class AppModel {
             // (`liveSelectionIndex` is an `Int?`), so the count of claiming lanes
             // IS the count of points a delete would remove.
             automationPointCount: automationPointSelection.lanesWithSelection.count,
+            // m23-ap p2-del: the note editor open greys this item — Edit ▸
+            // Delete is a door to the same vocal clip ⌫ would have deleted.
+            pitchEditorOpen: pitchEditorPaneOpen,
+            // m23-ap I4 → I7b: notes selected in the open pane — a LIVE
+            // "Clear Selected Notes", the same action as ⌫ and the pane's
+            // right-click Clear.
+            pitchEditorHasNoteSelection: pitchEditorWouldConsumeKey,
+            // UE-2: its NOUN — "Clear Selected Sounds" over sounds, "Clear
+            // Selected" over a mix (the right-click menu's nouns).
+            pitchEditorSelectionKinds: pitchEditorSelectionKinds,
             arrangeClipCount: arrangeSelection.count)
     }
 
@@ -1316,6 +1591,13 @@ final class AppModel {
             return true
         case .automationPoints:
             automationPointSelection.requestDelete()
+            return true
+        case .pitchEditorNotes:
+            // m23-ap I7b — the note editor's selected notes: the SAME bridge
+            // request ⌫ makes, landing in the pane's one Clear action
+            // (`PitchEditorModel.performNoteAction(.clear)`), so Edit ▸ Delete,
+            // ⌫ and the right-click Clear journal identically.
+            pitchEditorInteraction.requestDelete()
             return true
         case .arrangeClips:
             return deleteArrangeSelection()
@@ -1380,8 +1662,11 @@ final class AppModel {
     /// re-evaluates the title and the enabled flag whenever any of them moves.
     var copyMenuItem: ClipboardMenuItem { clipboardItem(.copy) }
 
-    /// Edit ▸ Cut. Resolves through the SAME body as Copy — Cut is "Copy, plus
-    /// the delete that already ships", so its enablement can never drift.
+    /// Edit ▸ Cut (and ⌘X, its key equivalent). Resolves through the SAME body
+    /// as Copy — Cut is "Copy, plus the delete that already ships", so its
+    /// enablement cannot drift from Copy's except in the ONE named place where
+    /// that delete is refused: the note editor open (m23-ap p2-del-2,
+    /// `ClipboardMenuPolicy.copyMenuItem`'s step 5).
     var cutMenuItem: ClipboardMenuItem { clipboardItem(.cut) }
 
     private func clipboardItem(_ verb: ClipboardVerb) -> ClipboardMenuItem {
@@ -1393,6 +1678,10 @@ final class AppModel {
             // `handleArrangeNudgeKey`'s fifth guard and `deleteMenuItem` read.
             pianoRollHasNoteSelection: pianoRollWouldConsumeKey,
             automationPointCount: automationPointSelection.lanesWithSelection.count,
+            // m23-ap p2-del-2: the note editor open greys Edit ▸ Cut, and so
+            // ⌘X does nothing. It is a door to the same vocal clip ⌫ would have
+            // deleted. Handed to BOTH verbs; the policy reads it for `.cut` only.
+            pitchEditorOpen: pitchEditorPaneOpen,
             arrangeClipCount: arrangeSelection.count)
     }
 
@@ -1454,36 +1743,59 @@ final class AppModel {
     /// only — no arrange-wide select-all was invented) and the measurement that
     /// answers the rename-field objection.
     ///
-    /// ⚠️⚠️ **THIS IS THE ONE EDIT-MENU ITEM THAT ROUTES ON `activeEditorSurface`,
-    /// AND THE DIVERGENCE FROM ITS TWO SIBLINGS IS DELIBERATE.**
+    /// ⚠️⚠️ **THIS IS THE ONE EDIT-MENU ITEM THAT ROUTES ON `openEditorSurface`,
+    /// AND THE DIVERGENCE FROM ITS TWO SIBLINGS IS DELIBERATE — TWICE OVER.**
     /// `deleteMenuItem` and `clipboardItem` route on `pianoRollWouldConsumeKey`
     /// and this property's own doc explains why they must: engagement comes apart
     /// from "would the roll consume this", and routing DELETE by engagement would
     /// delete clips while notes sat selected. **That term cannot express THIS
     /// question at all** — `pianoRollWouldConsumeKey` requires a note selection to
-    /// already exist, and a select-all is pressed precisely when one does not. So
-    /// this reads the engagement verdict, which is the tree's one home for "which
-    /// surface is the user working in". Three items, three questions, three terms.
+    /// already exist, and a select-all is pressed precisely when one does not.
     ///
-    /// EVERY INPUT IS `@Observable` (`editorEngagement.lastEngaged`,
-    /// `workspaceMode`, `selectedClipID`, `store.tracks`, `isModalPresented`), so
-    /// the item cannot go stale.
+    /// ⭐⭐ **AND IT NO LONGER READS `activeEditorSurface` EITHER (m34-d,
+    /// 2026-08-30) — THE USER OVERRULED THAT, VERBATIM: *"Make it work whenever
+    /// the editor is open."*** ⌘A did nothing on the first press because opening
+    /// a clip is a gesture in the ARRANGE, so the engagement verdict answered
+    /// `.arrange` for a roll the user was looking at. MEASURED end-to-end before
+    /// the fix (`scripts/gates/m34d-select-all-editor-open.mjs`): a REAL posted
+    /// ⌘A reached the real menu and selected nothing, then selected everything
+    /// after one `act:"engage"` — delivery was never the defect.
+    ///
+    /// ⚠️ **⌘+/⌘−/⌘0 DID NOT MOVE WITH IT, AND ⌫ DID NOT EITHER.** The ruling
+    /// named one keystroke; `SelectAllMenuPolicy`'s banner carries why openness is
+    /// safe for a key with no other meaning and unsafe for a key both surfaces
+    /// claim. Three items, three questions, three terms — still.
+    /// ⭐ m23-ap p2-del qualifies that for ⌫ WITHOUT reversing it: openness may
+    /// now REFUSE ⌫ (the note editor open → `pitchEditorPaneOpen` → greyed item,
+    /// swallowed key, hint line) because a refusal destroys nothing — the same
+    /// argument that made ⌘A safe to widen. It still never ROUTES ⌫ anywhere.
+    /// p2-del-2 carries the same refusal to Edit ▸ Cut / ⌘X, and to nothing else.
+    ///
+    /// EVERY INPUT IS `@Observable` (`workspaceMode`, `selectedClipID`,
+    /// `store.tracks`, `isModalPresented`), so the item cannot go stale.
+    /// ⭐ ONE FEWER INPUT THAN BEFORE: `editorEngagement.lastEngaged` is no
+    /// longer read here at all, which is the fix stated as a dependency.
     var selectAllMenuItem: SelectAllMenuItem {
         SelectAllMenuPolicy.editMenuItem(
-            activeSurface: activeEditorSurface.surface,
+            openSurface: openEditorSurface,
             isModalPresented: isModalPresented,
             // ⚠️ STORE TRUTH, NOT THE ROLL'S DRAFT — the policy's parameter doc
             // names the one state where they differ and why it is unreachable
             // outside a live gesture. The roll's `draft` is `@State private`.
-            rollNoteCount: openEditorClip?.notes?.count ?? 0)
+            rollNoteCount: openEditorClip?.notes?.count ?? 0,
+            // m23-ap I4 — the note editor's DRAWN notes, as its pane reports
+            // them (observable, moved on change only). Not store truth, and the
+            // policy's parameter doc says why it cannot be.
+            pitchEditorNoteCount: pitchEditorInteraction.drawnNoteCount)
     }
 
     /// Edit ▸ Select All fired.
     ///
     /// RE-RESOLVED AT CLICK TIME, `performMenuDelete`'s rule and for its reason.
     ///
-    /// ⚠️ RETURNS `false` — DECLINING — EVERYWHERE EXCEPT THE ROLL, and that is
-    /// the feature working rather than failing. MEASURED 2026-08-13: a
+    /// ⚠️ RETURNS `false` — DECLINING — EVERYWHERE EXCEPT THE ROLL (and, since
+    /// m23-ap I4, the open note editor), and that is the feature working rather
+    /// than failing. MEASURED 2026-08-13: a
     /// `validateMenuItem` returning false greys the row AND the ⌘A key equivalent
     /// runs no action (0 invocations, against a positive control that ran 1), and
     /// an UNCLAIMED `selectAll:` behaved identically before this feature existed —
@@ -1498,6 +1810,12 @@ final class AppModel {
             // `PianoRollNoteSelectionBridge.selectAllNonce` for why a user
             // keystroke must not ride a debug seam.
             pianoRollNoteSelection.requestSelectAll()
+            return true
+        case .pitchEditorNotes:
+            // m23-ap I4 — the NOTE EDITOR resolves it on its own drawn notes:
+            // its model is `@State private` too, so the request rides the
+            // pane's bridge, never its debug staging nonce (the roll's rule).
+            pitchEditorInteraction.requestSelectAll()
             return true
         case nil:
             return false
@@ -2209,10 +2527,63 @@ final class AppModel {
             || quantizePanelClipID != nil
             || humanizePanelClipID != nil
             || breathPadClipID != nil
-            || voiceConvertClipID != nil
+            || voiceConvertClipIDs != nil
+            // m39-pads. ⚠️ THE OBLIGATION ABOVE, HONOURED: the CHOP TO PADS
+            // card is a scrimmed centered modal, and it is open with an AUDIO
+            // CLIP SELECTED by construction — which is exactly the state where
+            // an unguarded DELETE would destroy the very clip the card is about
+            // to chop.
+            || chopToPadsOpen
             || showExportSheet
             || showUndoHistory
             || showSettings
+            // m34-k — THE OBLIGATION ABOVE, HONOURED LATE. The "Replace your hand
+            // edits?" card (`PresetReplaceConfirmCard`, m23-ap C-F3) is a scrimmed
+            // centred modal and was never listed, so every reader of this flag —
+            // ⌫, the arrows, Escape, the Edit menu — treated the app as modal-free
+            // while it was up. Found by m34-k: the card owns Escape through a KEY
+            // EQUIVALENT (its Cancel), which runs AFTER both the key monitor and
+            // the `.onKeyPress` mounts. MEASURED on the pre-m34-k build (m23-ap
+            // I7b-2 A/B): with the note editor maximized, Escape under the card
+            // left the mode behind it and the card stayed up — the backstop,
+            // unblocked, took `.exitMaximize` and consumed the key.
+            || pitchPresetReplaceGate.pending != nil
+            // W7-TTM3 — the Tune to Melody card: a scrimmed centred modal over an AUDIO clip,
+            // where an unguarded ⌫ would delete the vocal it is about to tune.
+            || tuneToMelodyDoor.card != nil
+            // m23-ap I1 UI hooks, item 8 (found by I7b-2) — THE CRASH-RECOVERY
+            // OFFER, the OUTERMOST scrimmed modal (`RecoveryOfferView`), was
+            // never listed either: Escape with it up went to the editor behind it
+            // (m34-k's house rule: a dismissal key belongs to whatever is on top),
+            // and ⌫ could reach a clip behind the sheet that asks about unsaved
+            // work. ⭐ WHAT ESCAPE DOES TO THE SHEET ITSELF: NOTHING, ON PURPOSE.
+            // Its two buttons, Discard and Restore, carry no key equivalent and
+            // the sheet mounts no Escape handler, so with this term the key is
+            // passed by the monitor, refused by the ladder (`blocked`) and
+            // claimed by no one. Escape must never mean "discard the recovered
+            // work"; the choice stays an explicit click.
+            // `EscapeKeyMonitorSiteTests` pins both halves.
+            || recoveryOffer != nil
+    }
+
+    /// Whether something ABOVE the editors owns Escape right now — the ladder's
+    /// `blocked` term, and its ONE home for BOTH of Escape's routes: the
+    /// SwiftUI mounts (through `handleEditorEscape`) and the key monitor
+    /// (through `EscapeKeyMonitorRouting.route`, m34-k).
+    ///
+    ///  • a blocking modal (`isModalPresented`, the preset card included);
+    ///  • a live text field (`isArrangeTextEditingFocused`) — Escape reverts it;
+    ///  • ⭐ THE EXPLAIN MODE (m34-k). Its exit is a hidden
+    ///    `.keyboardShortcut(.cancelAction)` button (`ContentView
+    ///    .explainEscHandler`), and that key equivalent runs LAST — the key
+    ///    monitor AND the `.onKeyPress` mounts both see Escape first (MEASURED,
+    ///    m23-ap I7b-2 A/B). Before m34-k this term did not name explain, so with
+    ///    the editor maximized the workspace backstop took `.exitMaximize` and
+    ///    consumed the key: the user was left IN explain mode with the editor
+    ///    un-maximized behind it (measured on the pre-m34-k build). Not a modal
+    ///    (it blocks no ⌫ and no arrow), so it is named here and only here.
+    var escapeIsOwnedElsewhere: Bool {
+        isModalPresented || isArrangeTextEditingFocused || explain.isActive
     }
 
     func handleArrangeDeleteKey() -> Bool {
@@ -2237,42 +2608,103 @@ final class AppModel {
     /// which are two different bugs with the same visible symptom.
     ///
     /// ⚠️⚠️ **IT COUNTS MOUNT HITS, NOT KEY PRESSES, AND ITS NAME SAYS SO.** Escape
-    /// has TWO mounts; when the decision REFUSES, the roll's mount reports
-    /// `.ignored` and the press bubbles to the workspace mount, which asks again —
-    /// so ONE refused press moves this by TWO. (A press that is CONSUMED stops at
-    /// the first mount and moves it by one.) Named `…MountHits` rather than
+    /// has THREE mounts since m23-ap I6a, and one press meets at most TWO of them:
+    /// the focused bottom pane's (the roll's, or the note editor pane's — only one
+    /// pane is ever open) and the workspace backstop. When the decision REFUSES,
+    /// the pane's mount reports `.ignored` and the press bubbles to the workspace
+    /// mount, which asks again — so ONE refused press moves this by TWO. (A press
+    /// that is CONSUMED stops at the first mount and moves it by one.) The note
+    /// editor pane also counts its OWN mount's deliveries
+    /// (`PitchEditorChromeLedger.escapeMountHits`, echoed by `debug.pitchEditor`),
+    /// which is what tells its mount apart from the backstop. Named `…MountHits` rather than
     /// `…FunnelSeq` for the m25-d law this repo already paid for: a readout whose
     /// name promises something other than what it counts is worse than no readout,
     /// because the reader has no reason to doubt it. Non-observable on purpose:
     /// nothing renders from it.
     @ObservationIgnored private(set) var editorEscapeMountHits = 0
 
-    /// ESCAPE's ONE decision, shared by BOTH of its mounts — the roll's own
-    /// `.onKeyPress(.escape)` and the arrange workspace's key scope. Returns
-    /// whether the keystroke was consumed; `false` leaves both mounts reporting
+    /// ESCAPE's ONE decision, shared by ALL THREE of its mounts — the roll's own
+    /// `.onKeyPress(.escape)`, the note editor pane's (m23-ap I6a, through its
+    /// model's I4 seam `PitchEditorModel.handleEscapeKey`), and the arrange
+    /// workspace's key scope. Answers the rung the press takes (since I4); a
+    /// rung that does not consume the key (`.pass`) leaves every mount reporting
     /// `.ignored`, so Escape keeps propagating exactly as it did before this item.
     ///
-    /// ⭐ TWO MOUNTS, ONE DECISION — the m23-cf lesson, applied before it could be
-    /// paid for again. Three focus-gated views claiming DELETE were measured to be
-    /// a coin flip in this tree, and the fix was to stop letting focus decide what
-    /// a key MEANS: every claimant asks the same question. Here the roll's mount
-    /// covers the ordinary case (the roll holds focus; it asserts it on appear) and
-    /// the workspace mount is the backstop for focus sitting elsewhere in the
-    /// arrange — a track row, the ruler, a lane. Both land here.
+    /// ⭐ THREE MOUNTS, ONE DECISION — the m23-cf lesson, applied before it could
+    /// be paid for again. Three focus-gated views claiming DELETE were measured to
+    /// be a coin flip in this tree, and the fix was to stop letting focus decide
+    /// what a key MEANS: every claimant asks the same question. Here the bottom
+    /// pane's mount covers the ordinary case (the roll or the note editor holds
+    /// focus; each asserts it on appear) and the workspace mount is the backstop
+    /// for focus sitting elsewhere in the arrange — a track row, the ruler, a
+    /// lane. All land here.
     ///
     /// ⭐ SET, NEVER TOGGLE. If both mounts somehow ran for one press, the second
     /// would be a no-op rather than a re-maximize. A toggle here would make the
     /// feature's correctness depend on SwiftUI's propagation being exactly-once.
     ///
-    /// The refusals live in `EditorMaximize.escapeExits` (headless, tested):
-    /// a modal owns Escape, and so does a live rename field.
-    func handleEditorEscape() -> Bool {
+    /// ⭐⭐ I4 — THE LADDER (`EditorEscapeLadder`, headless, tested). An editor's
+    /// mount hands the two facts only the focused editor has — is a gesture
+    /// live, is anything selected — and this adds the two only the app has: is
+    /// the mode on, and does a modal or a live rename field own the key
+    /// (`blocked`, checked first). The ladder picks ONE rung, nearest thing
+    /// first. The app applies the rung that is its own (`.exitMaximize`, SET
+    /// false) and hands the rung back; the editor applies `.cancelGesture` /
+    /// `.clearSelection` to its own `@State` model and answers `.handled`
+    /// exactly when `rung.consumesKey`.
+    ///
+    /// ⚠️ **THE ROLL'S ESCAPE CHANGED HERE, ON PURPOSE (design §13).** It used to
+    /// go straight to exit-maximize and leave a note selection alone; with notes
+    /// selected it now clears them first, and the NEXT press leaves the mode.
+    func handleEditorEscape(gestureLive: Bool, hasSelection: Bool) -> EditorEscapeRung {
         editorEscapeMountHits &+= 1
-        guard EditorMaximize.escapeExits(maximized: panelLayout.editorMaximized,
-                                         modalPresented: isModalPresented,
-                                         textEditing: isArrangeTextEditingFocused)
-        else { return false }
-        panelLayout.setEditorMaximized(false)
+        let rung = EditorEscapeLadder.resolve(
+            gestureLive: gestureLive, hasSelection: hasSelection,
+            maximized: panelLayout.editorMaximized,
+            blocked: escapeIsOwnedElsewhere)
+        if rung == .exitMaximize {
+            panelLayout.setEditorMaximized(false)
+        }
+        return rung
+    }
+
+    /// The arrange workspace's BACKSTOP mount (focus is in a track row, the
+    /// ruler, a lane — not in an editor). It has no editor facts to hand over,
+    /// so it asks the SAME ladder with none: the only rung it can reach is the
+    /// mode's, which is `EditorMaximize.escapeExits`'s truth table exactly (that
+    /// function now forwards to the ladder). A selection in an editor that does
+    /// not hold focus is therefore left alone — Escape takes down the thing in
+    /// front of the user, and an unfocused editor is not in front.
+    func handleEditorEscape() -> Bool {
+        handleEditorEscape(gestureLive: false, hasSelection: false).consumesKey
+    }
+
+    /// THE KEY MONITOR'S ESCAPE (m34-k): hand the key to the OPEN editor pane's
+    /// own Escape path, or pass it on. Returns whether it was handed over — the
+    /// monitor swallows exactly then.
+    ///
+    /// `EscapeKeyMonitorRouting.route` decides, from the open-pane verdict (the
+    /// ⌘A ruling's `openEditorSurface`, never engagement, never focus), the
+    /// pane's REPORTED selection (the ⌫ terms), the mode, and
+    /// `escapeIsOwnedElsewhere`. The pane then runs its own body — the roll's
+    /// `handleEscape`, the note editor's `handleEscapeKey(appDecision:)` —
+    /// which asks `handleEditorEscape(gestureLive:hasSelection:)` with its LIVE
+    /// facts: so `editorEscapeMountHits` still moves once per press, the ladder
+    /// is asked by one route and never restated, and each rung is applied by its
+    /// owner (the mode by this model, the gesture and the selection by the pane).
+    func handleEscapeFromKeyMonitor() -> Bool {
+        let target = EscapeKeyMonitorRouting.route(
+            open: openEditorSurface.reason,
+            rollHasSelection: pianoRollNoteSelection.hasSelection,
+            pitchEditorHasSelection: pitchEditorInteraction.hasNoteSelection,
+            maximized: panelLayout.editorMaximized,
+            blocked: escapeIsOwnedElsewhere)
+        escapeKeyMonitorTarget = target
+        switch target {
+        case .pianoRoll?: pianoRollNoteSelection.requestEscape()
+        case .pitchEditor?: pitchEditorInteraction.requestEscape()
+        case nil: return false
+        }
         return true
     }
 
@@ -2333,6 +2765,62 @@ final class AppModel {
     @ObservationIgnored private(set) var deleteKeyMonitorSeq = 0
     @ObservationIgnored private(set) var deleteKeyMonitorRefusedBy: DeleteKeyMonitorRefusal?
 
+    /// m23-ap p2-del — HOW MANY DELETE KEYSTROKES THE OPEN NOTE EDITOR SWALLOWED,
+    /// as a request to the pane to show its hint line. `handleDeleteKey` bumps it
+    /// on the `.pitchEditorOpen` refusal; `PitchEditorView` watches it and calls
+    /// `PitchEditorModel.refuseDeleteKey()` — the `PianoRollNoteSelectionBridge.
+    /// deleteNonce` shape, because the pane's model is `@State private` and
+    /// nothing outside can reach it.
+    ///
+    /// ⚠️ **OBSERVABLE, UNLIKE THE TWO MONITOR FIELDS ABOVE, AND IT HAS TO BE:** the
+    /// pane re-reads it through `ContentView`, and an `@ObservationIgnored`
+    /// nonce would never re-render the pane, so the key would be swallowed in
+    /// silence — "a tool that refused and a tool that did nothing must not look
+    /// the same". It moves only on a ⌫ pressed with the pane open, so the
+    /// invalidation it costs is one pane body per refused keystroke.
+    ///
+    /// A NONCE, NOT A STRING: the words are `DeleteMenuPolicy.pitchEditorOpenHint`
+    /// and live beside the rule that produces them; pressing ⌫ twice is two
+    /// requests with identical payloads, which only a counter can tell apart.
+    private(set) var pitchEditorDeleteKeyNonce = 0
+
+    /// m34-j — THE ARROW MONITOR'S TIER, the `deleteKeyMonitorSeq` twin: how many
+    /// ARROW key-downs reached the `NSEvent` monitor, and which guard refused the
+    /// last one.
+    ///
+    /// ⚠️⚠️ **THIS EXISTS BECAUSE THE OLD INSTRUMENT STOPS WORKING THE MOMENT
+    /// THE FIX LANDS.** `KeyPressProbe.arrangeHorizontalArrow` counts entries
+    /// into the SwiftUI mount, and once this monitor swallows an owned arrow
+    /// SwiftUI never sees it, so that counter stops moving for real keys — the
+    /// exact transition ⌫ went through at m23-cf-3 ("A BARE ⌦ CANNOT ANSWER THIS
+    /// ANY MORE"). A gate still written against the mount counters would go
+    /// GREEN BY GOING BLIND. `scripts/gates/m34j-arrow-nudge-delivery.mjs` reads
+    /// CLIP MOVEMENT for every verdict and these two fields only to name a
+    /// refusal.
+    ///
+    /// ⚠️ `.otherKey` NEVER APPEARS HERE, for the delete twin's reason: it means
+    /// "not an arrow key", and those fall through to the other branches without
+    /// touching either field — otherwise every keystroke in the app would bump
+    /// this.
+    @ObservationIgnored private(set) var arrowNudgeMonitorSeq = 0
+    @ObservationIgnored private(set) var arrowNudgeMonitorRefusedBy: ArrowNudgeMonitorRefusal?
+
+    /// m34-k — THE ESCAPE MONITOR'S TIER, the arrows' twin: how many Escape
+    /// key-downs reached the `NSEvent` monitor, which guard refused the last one,
+    /// and which open editor the last ELIGIBLE one was handed to (`nil` = passed
+    /// on untouched: nothing open had anything to take down, or something above
+    /// the editors owns Escape).
+    ///
+    /// ⚠️ THE OLD INSTRUMENT STOPS ANSWERING AT THIS FIX, as the arrows' did at
+    /// m34-j: an Escape the monitor hands over is swallowed, so the SwiftUI
+    /// mounts' counters (`KeyPressProbe.pianoRollEscape`/`arrangeEscapeBackstop`,
+    /// `PitchEditorChromeLedger.escapeMountHits`) stay FLAT in the working case.
+    /// Verdicts read the editor's STATE (its selection, `editorMaximized`); these
+    /// fields only name a refusal or a route. `.otherKey` never appears here.
+    @ObservationIgnored private(set) var escapeKeyMonitorSeq = 0
+    @ObservationIgnored private(set) var escapeKeyMonitorRefusedBy: EscapeKeyMonitorRefusal?
+    @ObservationIgnored private(set) var escapeKeyMonitorTarget: EscapeKeyMonitorTarget?
+
     /// WHICH SURFACE OWNS A DELETE KEYSTROKE — resolved by `DeleteMenuPolicy`,
     /// never here.
     ///
@@ -2368,6 +2856,11 @@ final class AppModel {
             // `deleteMenuItem` read — never a second spelling of it.
             pianoRollHasNoteSelection: pianoRollWouldConsumeKey,
             automationPointCount: automationPointSelection.lanesWithSelection.count,
+            pitchEditorOpen: pitchEditorPaneOpen,
+            // m23-ap I4 — the SAME home `deleteMenuItem` reads.
+            pitchEditorHasNoteSelection: pitchEditorWouldConsumeKey,
+            // UE-2 — and the same noun (the debug seam's `deleteKeyTitle`).
+            pitchEditorSelectionKinds: pitchEditorSelectionKinds,
             arrangeClipCount: arrangeSelection.count)
     }
 
@@ -2423,6 +2916,13 @@ final class AppModel {
     /// user — `deleteArrangeSelection` puts up the bubble — it is just not
     /// reported as "nobody wanted this key".
     ///
+    /// ⭐ m23-ap p2-del — "A SURFACE OWNED IT" NOW HAS ONE OWNER THAT DELETES
+    /// NOTHING: the open NOTE EDITOR. Its refusal (`.pitchEditorOpen`) returns
+    /// `true` with no surface, the pane draws a hint, and the vocal clip it
+    /// shows is untouched. The return is `DeleteMenuItem.consumesKeystroke`,
+    /// which is `surface != nil` for every other state — so nothing that shipped
+    /// before this item changes its answer.
+    ///
     /// ⚠️ AND `false` MUST STILL MEAN `.ignored` AT EVERY CALL SITE, so a DELETE
     /// nobody owns keeps propagating exactly as it does today.
     @discardableResult
@@ -2447,13 +2947,32 @@ final class AppModel {
             pianoRollNoteSelection.requestDelete()
         case .automationPoints:
             automationPointSelection.requestDelete()
+        case .pitchEditorNotes:
+            // ⭐ m23-ap I7b — NOTES SELECTED IN THE OPEN NOTE EDITOR: ⌫ CLEARS
+            // them (the user's `delete-clears = yes`). The pane is asked through
+            // its bridge (the roll's `requestDelete` shape) and runs its one
+            // Clear action — the right-click Clear's too. The vocal clip the
+            // pane shows is never the target. I4 kept this a refusal until the
+            // clear and its look existed; they do now.
+            pitchEditorInteraction.requestDelete()
         case .arrangeClips:
             // The arrange's own guard stack, deliberately — see
             // `handleArrangeDeleteKey`. Its result is DISCARDED on purpose: a
             // store refusal is not "the key was unclaimed" (see the banner).
             _ = handleArrangeDeleteKey()
         case nil:
-            return false
+            // ⛔ m23-ap p2-del — THE OPEN NOTE EDITOR OWNS THE KEY AND SAYS WHY
+            // NOTHING HAPPENED. The routing refused by name so the vocal clip
+            // the pane shows is never deleted; the pane is asked to draw its
+            // hint, and the keystroke is SWALLOWED (`consumesKeystroke`) — handed
+            // back, it would re-enter this funnel through a `.onKeyPress` delete
+            // mount and end unclaimed at AppKit. Every OTHER refusal still returns false and
+            // keeps propagating: `DeleteMenuRefusal.consumesKeystroke` is true
+            // for this one case only (I4's second, `.pitchEditorNotes`, became
+            // the live surface above at I7b), and `DeleteKeyRoutingTests` pins
+            // that.
+            if routing.refusedBy == .pitchEditorOpen { pitchEditorDeleteKeyNonce &+= 1 }
+            return routing.consumesKeystroke
         }
         return true
     }
@@ -2973,6 +3492,153 @@ final class AppModel {
         return nil
     }
 
+    // MARK: - The pitch editor pane (m23-ap Phase 2, p2-b)
+
+    /// THE LATCH BEHIND THE SECOND BOTTOM PANE — set ONLY by an explicit open
+    /// (`openPitchEditor(clipID:)`), cleared by `closePitchEditor()` and by
+    /// selecting any other clip (see `arrangeSelection`'s `didSet`).
+    ///
+    /// ⭐⭐ **A LATCH AND NOT A DERIVATION, AND THE REASON IS A PRODUCT ONE**
+    /// (design §3.6). A MIDI clip *is* notes, so a note editor is always the
+    /// right editor for it and auto-opening is correct. An audio clip may be a
+    /// drum loop, a rendered stem, a field recording or a vocal — and SwiftF0 is
+    /// a **monophonic** detector. Auto-opening a vocal pitch editor on every
+    /// audio-clip selection would make a claim the app cannot support, on the
+    /// majority of audio clips in a real project. **So opening it is an explicit
+    /// act.**
+    private var pitchEditorRequestedClipID: UUID?
+
+    /// m23-ap C-F3: the preset doors' "ask before replacing hand edits" gate,
+    /// and the one request its confirm card shows. ONE gate for both doors
+    /// (the clip menu and the note editor's chips), because both reach
+    /// `tuneVocalFromContextMenu`. Behaviour in `PitchCorrectionStaging.swift`.
+    let pitchPresetReplaceGate = PitchPresetReplaceGate()
+
+    /// Tune to Melody (M3, W7-TTM3): the clip menu's Tune Vocal ▸ Tune to Melody… card, and
+    /// the one store call it makes. Behaviour in DAWAppKit's `TuneToMelodyDoor`; wiring in
+    /// `TuneToMelodyStaging.swift`.
+    let tuneToMelodyDoor = TuneToMelodyDoor()
+
+    /// p2-ren Stage B″(c) — what the pitch editor's clip is PLAYING, polled
+    /// while the pane is open (`pollPitchEditorRenderAudible`), keyed by the
+    /// clip it was read for so a clip switch can never show the last clip's
+    /// answer. `nil` while no poll runs.
+    private(set) var pitchEditorRenderPoll: PitchEditorRenderPoll?
+    /// How many times the poll WROTE `pitchEditorRenderPoll` — one per change,
+    /// never one per tick (`debug.pitchEditor`'s `renderPoll.writes`). Plain
+    /// state, not observed: nothing draws it.
+    @ObservationIgnored private(set) var pitchEditorRenderPollWrites = 0
+
+    /// One poll's answer: the clip, and `ProjectStore.renderAudible` for it.
+    struct PitchEditorRenderPoll: Equatable {
+        let clipID: UUID
+        let audible: ClipRenderAudible?
+    }
+
+    /// The pane's `renderAudible` input: the poll's answer for THIS clip, or nil.
+    func pitchEditorRenderAudible(clipID: UUID) -> ClipRenderAudible? {
+        pitchEditorRenderPoll?.clipID == clipID ? pitchEditorRenderPoll?.audible : nil
+    }
+
+    /// ⭐ **THE POLL — PULL, BECAUSE THE ENGINE PUSHES NOTHING** (Stage B″(c)).
+    /// `renderAudible` is read on demand (the snapshot asks it per tuned clip),
+    /// so the pane's "Preview" caption needs someone to ask. Run by
+    /// `ContentView` as the pane's `.task(id: clip.id)`: it lives exactly as long
+    /// as the pane is open on this clip — SwiftUI cancels it on close and on a
+    /// clip switch — and it runs on the main actor, never near the render
+    /// thread. Each ask is the snapshot's own call (`store.renderAudible`, one
+    /// walk over the graph's track nodes), made only for a clip that renders
+    /// (`rendersThroughStretchCache`, the snapshot's own gate), every
+    /// `PitchEditorRenderCaption.pollInterval`. It writes only on a CHANGE, so a
+    /// steady state invalidates nothing.
+    func pollPitchEditorRenderAudible(clipID: UUID) async {
+        while !Task.isCancelled {
+            var audible: ClipRenderAudible?
+            for track in store.tracks {
+                guard let clip = track.clips.first(where: { $0.id == clipID }) else { continue }
+                if clip.rendersThroughStretchCache {
+                    audible = store.renderAudible(trackID: track.id, clipID: clipID)
+                }
+                break
+            }
+            let next = PitchEditorRenderPoll(clipID: clipID, audible: audible)
+            // ⚠️ COMPARE FIRST: `@Observable` invalidates on ASSIGNMENT, not
+            // on change, and a same-value write every tick would re-render
+            // the pane at the poll's rate.
+            if next != pitchEditorRenderPoll {
+                pitchEditorRenderPoll = next
+                pitchEditorRenderPollWrites += 1
+            }
+            do {
+                try await Task.sleep(for: PitchEditorRenderCaption.pollInterval)
+            } catch {
+                break
+            }
+        }
+        // Stopped: take down THIS clip's answer only — a switch's new poll may
+        // already have written the next clip's.
+        if pitchEditorRenderPoll?.clipID == clipID {
+            pitchEditorRenderPoll = nil
+            pitchEditorRenderPollWrites += 1
+        }
+    }
+
+    /// The clip the PITCH EDITOR is actually open on: the explicit request,
+    /// re-resolved against the live store and filtered to AUDIO.
+    ///
+    /// Four properties fall out of this shape, and each is the reason for a term
+    /// (design §3.6):
+    ///
+    ///  1. **The two panes are mutually exclusive BY CONSTRUCTION, not by
+    ///     arbitration.** Both resolve the SAME `selectedClipID`; the roll's
+    ///     accessor requires `isMIDI`, this requires `!isMIDI`. They cannot both
+    ///     be non-nil, so no one-at-a-time rule has to be written, tested or kept
+    ///     in sync.
+    ///  2. **Selecting another clip closes it**, because the `id ==
+    ///     selectedClipID` term fails — no `onChange` watcher needed.
+    ///  3. **A deleted clip closes it**, because the store lookup returns nil: a
+    ///     stale id after an undo resolves to nil here and the pane goes away.
+    ///  4. ⚠️ **THE ROLL'S CENSUS STAYS AT 14.** This accessor does not mention
+    ///     `openEditorClip`, and an implementer who finds themselves adding a
+    ///     mention should stop — that is the second-computation failure
+    ///     `EditorSurfaceOwnershipSiteTests` exists to catch.
+    var openPitchEditorClip: Clip? {
+        guard let id = pitchEditorRequestedClipID, id == selectedClipID else { return nil }
+        for track in store.tracks {
+            if let clip = track.clips.first(where: { $0.id == id }), !clip.isMIDI {
+                return clip
+            }
+        }
+        return nil
+    }
+
+    /// Open the pitch editor on an audio clip — the ONE explicit door
+    /// (`ClipBlock`'s "Open Note Editor…" context item today; `view.openPitchEditor`
+    /// when p2-c lands).
+    ///
+    /// ⚠️ **SELECTION FIRST, LATCH SECOND, AND THE ORDER IS LOAD-BEARING.**
+    /// `selectedClipID`'s setter runs `arrangeSelection`'s `didSet`, which clears
+    /// a latch pointing at any OTHER clip; writing the latch first would have that
+    /// pass throw it away again.
+    ///
+    /// No filtering here beyond the store lookup: a MIDI clip simply never
+    /// resolves through `openPitchEditorClip`, so the pane stays shut rather than
+    /// opening empty. The DOOR is the place that hides itself (the "Chop to
+    /// Pads" rule — hidden, never offered-then-errored).
+    func openPitchEditor(clipID: UUID) {
+        selectedClipID = clipID
+        pitchEditorRequestedClipID = clipID
+    }
+
+    /// Close the pitch editor, leaving the clip selected.
+    ///
+    /// ⭐ **AN EXPLICIT DOOR, BECAUSE OPENING IS EXPLICIT.** The roll gets
+    /// closing for free from deselection; this does not — a pane that opened on
+    /// a deliberate act has to be closeable by one (design §3.6).
+    func closePitchEditor() {
+        pitchEditorRequestedClipID = nil
+    }
+
     /// WHICH EDITING SURFACE THE USER IS WORKING IN (m23-al) — the ONE accessor,
     /// and the only thing `zoomIn`/`zoomOut`/`zoomReset` are allowed to read.
     ///
@@ -2990,7 +3656,40 @@ final class AppModel {
         EditorSurfaceRouter.resolve(
             workspaceIsArrange: workspaceMode == .arrange,
             rollOpen: openEditorClip != nil,
+            pitchEditorOpen: openPitchEditorClip != nil,
             lastEngaged: editorEngagement.lastEngaged)
+    }
+
+    /// WHICH EDITING SURFACE IS **OPEN IN FRONT OF THE USER** (m34-d) — the
+    /// engagement-free sibling of `activeEditorSurface`, and the ONE accessor
+    /// ⌘A is allowed to read.
+    ///
+    /// ⭐ **THE USER'S RULING, VERBATIM (2026-08-30): *"Make it work whenever the
+    /// editor is open."*** ⌘A did nothing on the first press after opening a
+    /// clip, because `activeEditorSurface` answers "which editor did the user
+    /// last ENGAGE" and opening a clip is a gesture in the ARRANGE. Full
+    /// argument, including why ⌘+ and ⌫ deliberately did NOT move with it, in
+    /// `SelectAllMenuPolicy`'s banner.
+    ///
+    /// ⚠️ **THIS IS NOT A SECOND COMPUTATION OF `activeEditorSurface`, WHICH IS
+    /// WHAT THE READER CENSUS EXISTS TO CATCH.** It passes the SAME two raw
+    /// terms to the SAME router file, and `EditorSurfaceRouter.resolve` is itself
+    /// implemented on top of `openSurface` — so there is exactly one computation
+    /// of "is a roll on screen at all" in the tree, and these two accessors are
+    /// two questions asked of it, not two answers to one question. A site that
+    /// wants openness must call THIS, never spell `openEditorClip != nil`
+    /// inline: that boolean never constructs `OpenEditorSurface` and silently
+    /// drops the workspace term.
+    ///
+    /// ⭐ SECOND READER SINCE m23-ap p2-del: `pitchEditorPaneOpen`, the note-editor
+    /// refusal shared by the DELETE routes and (p2-del-2) Edit ▸ Cut / ⌘X. It asks
+    /// this verdict "is the note editor in front of the user", which is this
+    /// accessor's question exactly.
+    var openEditorSurface: OpenEditorSurface {
+        EditorSurfaceRouter.openSurface(
+            workspaceIsArrange: workspaceMode == .arrange,
+            rollOpen: openEditorClip != nil,
+            pitchEditorOpen: openPitchEditorClip != nil)
     }
 
     // MARK: Space-bar transport toggle (m17-d)
@@ -3011,7 +3710,7 @@ final class AppModel {
     /// next reader misses a whole feature. ONE monitor, not two — the key codes
     /// are disjoint, so a second monitor would buy nothing and add an
     /// installation order nobody controls.
-    @ObservationIgnored private var keyDownMonitor: Any?
+    @ObservationIgnored var keyDownMonitor: Any?
 
     /// The ONE content window (the WindowGroup window hosting ContentView),
     /// captured when `applyWindowFloor()` runs on its appearance. The space
@@ -3041,10 +3740,32 @@ final class AppModel {
     /// `handleKeyDownEvent` so the `debug.keySpace` seam runs the SAME code
     /// path with a synthesized event (real key injection needs Accessibility
     /// the staging binary lacks — measured law).
+    /// ⭐⭐ **THREE EVENT TYPES SINCE m23-ct, AND THE TWO NEW ONES EXIST ONLY SO A
+    /// NOTE CANNOT GET STUCK.** Space and ⌫ are one-shot commands and never needed
+    /// a key-UP; a playable keyboard needs note-off on release, needs to hear
+    /// about a ⌘ chord engaging (macOS is *asserted* — not verified here — to
+    /// withhold key-up while ⌘ is down), and must survive the window going
+    /// inactive mid-hold.
+    ///
+    /// ⚠️⚠️ **BRANCH ON `event.type` BEFORE TOUCHING ANYTHING ELSE.**
+    /// `NSEvent.characters`, `.charactersIgnoringModifiers` and `.isARepeat`
+    /// **raise** on a `.flagsChanged` event — reading one before the switch would
+    /// turn every ⇧ press in the app into a crash. `.keyCode` and `.modifierFlags`
+    /// are the only two safe on all three.
+    ///
+    /// ONE monitor still, not three: the m23-cf-3 argument is unchanged — a second
+    /// monitor would buy nothing and add an installation order nobody controls.
     private func installSpaceKeyMonitor() {
-        keyDownMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyDownMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .keyUp, .flagsChanged]
+        ) { [weak self] event in
             guard let self else { return event }
-            return self.handleKeyDownEvent(event)
+            switch event.type {
+            case .keyDown: return self.handleKeyDownEvent(event)
+            case .keyUp: return self.handleKeyUpEvent(event)
+            case .flagsChanged: return self.handleFlagsChangedEvent(event)
+            default: return event
+            }
         }
     }
 
@@ -3062,6 +3783,25 @@ final class AppModel {
     /// therefore the same escape hatch the space bar has always used, and it is
     /// checked FIRST only because reading it first makes the file honest; the
     /// key codes are disjoint, so this is documentation and not arbitration.
+    ///
+    /// ⭐⭐⭐ FOUR KEY CLASSES SINCE m34-j (FIVE SINCE m34-k), AND THE FOURTH ONE
+    /// IS THE LAW THE OTHERS WERE MISSING: **WHEN YOU RESCUE ONE KEY FROM A BROKEN ROUTE,
+    /// ENUMERATE EVERY OTHER RIDER ON THAT ROUTE THE SAME DAY.** m23-cf-3 fixed
+    /// ⌫ and left ←/→/↑/↓ and Escape on the focus path it had just declared
+    /// unreliable, because the rescue was framed as "fix delete" rather than
+    /// "fix the class" — and the arrows were still latched dead twenty days
+    /// later. The arrow branch below is that debt paid, and since m34-k so is
+    /// ESCAPE (the fifth key class): it reaches the OPEN editor pane's own
+    /// Escape path through its bridge — the roll's and the note editor's
+    /// `.onKeyPress(.escape)` mounts and `ContentView`'s backstop all rode the
+    /// focus path — and passes on to the two rename FIELDS'
+    /// mounts (`TimelineLanesView`, `TrackListView`) through its text-editing
+    /// refusal, because those ride the field editor's focus, which works.
+    ///
+    /// ⚠️ ALL FIVE KEY SETS ARE DISJOINT — space 49, ⌫/⌦ 51/117, Escape 53,
+    /// arrows 123–126, and none of `MusicalTypingRouting.allCaps`'s layout keys
+    /// (`escapeIsDisjointFromEveryOtherMonitorKey` pins Escape's half) — so the
+    /// order below remains documentation rather than arbitration.
     func handleKeyDownEvent(_ event: NSEvent) -> NSEvent? {
         let deleteDecision = DeleteKeyMonitorRouting.decide(
             keyCode: event.keyCode,
@@ -3086,15 +3826,105 @@ final class AppModel {
             // double-fire.
             return handleDeleteKey() ? nil : event
         }
+        // ⭐⭐ THE ARROW NUDGES (m34-j) — THE THIRD KEY RESCUED FROM SwiftUI
+        // FOCUS, AND THE REASON IT NEEDED RESCUING IS NOT THE ONE THE ITEM
+        // PREDICTED. Full measurement in `ArrowNudgeMonitorRouting`'s banner;
+        // the one-line version is that dismissing ANY text field drops
+        // `ArrangeDeleteKey`'s `@FocusState` and never restores it, so every
+        // `.onKeyPress` mount on that view is latched dead until the user clicks
+        // a clip again. ⌫ survives that state (measured, same run) only because
+        // m23-cf-3 put it here.
+        //
+        // ⚠️ SWALLOW ON `handled`, PASS THROUGH OTHERWISE — and `handled` is the
+        // SAME term `.onKeyPress` maps to `.handled`/`.ignored` today, read off
+        // the SAME `handleArrangeNudgeKey`. That is the whole behaviour-
+        // preservation argument, and it is structural rather than a promise:
+        // every pass-through the mounts have (a ⌘/⌃ chord, ⇧/⌥ on the vertical
+        // axis falling through to the lanes' `ScrollView`, an empty selection,
+        // the Mix console, a modal) returns `handled: false` and therefore
+        // returns the event, exactly as `.ignored` does. And every consumption
+        // they have — including the two deliberate refusals that still consume,
+        // `.pianoRollNoteEdit` and `.automationPointEdit` — returns `handled:
+        // true` and is swallowed, exactly as `.handled` is.
+        //
+        // ⚠️ CANNOT DOUBLE-FIRE, by m23-cf-3's argument unchanged: a key this
+        // owns never reaches SwiftUI, and in the states where it passes the
+        // event on, the mount asks this same one decision and gets this same
+        // answer. Unlike the delete mounts, the arrow mounts need NO `phases:`
+        // change for this — they already ask for `[.down, .repeat]`, and a
+        // repeat that gets past this branch got past it by being refused, which
+        // means the mount will refuse it too.
+        let arrowDecision = ArrowNudgeMonitorRouting.decide(
+            keyCode: event.keyCode,
+            responder: Self.transportKeyResponder(event.window?.firstResponder),
+            window: transportKeyWindow(event.window))
+        if arrowDecision.refusedBy != .otherKey {
+            arrowNudgeMonitorSeq += 1
+            arrowNudgeMonitorRefusedBy = arrowDecision.refusedBy
+            if let arrowKey = arrowDecision.key {
+                let axis: ArrangeNudgeAxisKey
+                switch arrowKey {
+                case .horizontal(let direction): axis = .horizontal(direction)
+                case .vertical(let direction): axis = .vertical(direction)
+                }
+                // The chord goes STRAIGHT THROUGH to the policy — this tier has
+                // no opinion about modifiers (see the predicate's banner).
+                let outcome = handleArrangeNudgeKey(
+                    axis, modifiers: Self.transportKeyModifiers(event.modifierFlags))
+                return outcome.handled ? nil : event
+            }
+            return event
+        }
+        // ⭐⭐ ESCAPE (m34-k) — THE FOURTH KEY RESCUED FROM SwiftUI FOCUS, AND THE
+        // ONE THAT IS A DISMISSAL KEY. Measured dead twice: after any dismissed
+        // text field (m34-j's assessment, hits 1→1), and — the I4 ladder's whole
+        // point — on the maximized roll with notes selected (I7b, 7 of 7 presses
+        // landed on the backstop, which left the mode and kept the selection).
+        //
+        // ⚠️ SWALLOW ONLY WHAT AN EDITOR WOULD HAVE TAKEN; PASS EVERYTHING ELSE.
+        // Escape belongs to whatever is on top, and this monitor runs before the
+        // window's key equivalents and before any responder. So: a text field,
+        // another window, a chord or a repeat is refused by the predicate; a
+        // modal, the preset card or the explain mode blocks the ladder
+        // (`escapeIsOwnedElsewhere`); and with nothing to take down in the OPEN
+        // pane, `route` answers nil. Every one of those returns the event
+        // untouched — exactly what the mounts' `.ignored` does.
+        //
+        // ⚠️ THE EFFECT IS THE PANE'S, APPLIED ONE HOP LATER: the roll's and the
+        // pane's models are `@State private`, so the key is handed to the pane's
+        // OWN Escape path through its bridge, which re-asks the one ladder with
+        // its LIVE facts. `route` only predicts, and its prediction never claims
+        // a key the live answer would not consume (see `EscapeKeyMonitorRouting`).
+        let escapeDecision = EscapeKeyMonitorRouting.decide(
+            keyCode: event.keyCode,
+            modifiers: Self.transportKeyModifiers(event.modifierFlags),
+            isRepeat: event.isARepeat,
+            responder: Self.transportKeyResponder(event.window?.firstResponder),
+            window: transportKeyWindow(event.window))
+        if escapeDecision.refusedBy != .otherKey {
+            escapeKeyMonitorSeq += 1
+            escapeKeyMonitorRefusedBy = escapeDecision.refusedBy
+            escapeKeyMonitorTarget = nil
+            guard escapeDecision.eligible else { return event }
+            return handleEscapeFromKeyMonitor() ? nil : event
+        }
         let decision = TransportKeyRouting.decide(
             keyCode: event.keyCode,
             modifiers: Self.transportKeyModifiers(event.modifierFlags),
             isRepeat: event.isARepeat,
             responder: Self.transportKeyResponder(event.window?.firstResponder),
             window: transportKeyWindow(event.window))
-        guard decision == .toggleTransport else { return event }
-        toggleTransportFromSpaceKey()
-        return nil
+        if decision == .toggleTransport {
+            toggleTransportFromSpaceKey()
+            return nil
+        }
+        // ⭐ MUSICAL TYPING (m23-ct) — LAST, and the ordering is documentation
+        // rather than arbitration: the three key sets are DISJOINT. Space (49) and
+        // ⌫/⌦ (51/117) are not in `MusicalTypingRouting.allCaps`, and none of the
+        // 21 layout keys is a transport or delete key. So the space bar still
+        // starts playback and ⌫ still deletes WHILE the mode is on — which is the
+        // point: you play along with the transport.
+        return handleMusicalTypingKeyDown(event)
     }
 
     /// The granted toggle: the play/pause button's EXACT funnel
@@ -3113,7 +3943,7 @@ final class AppModel {
     /// option set. Only command/option/control/shift block the toggle — caps
     /// lock, fn, and numeric-pad flags deliberately don't (caps lock being on
     /// must not kill the space bar).
-    private static func transportKeyModifiers(_ flags: NSEvent.ModifierFlags) -> TransportKeyModifiers {
+    static func transportKeyModifiers(_ flags: NSEvent.ModifierFlags) -> TransportKeyModifiers {
         let device = flags.intersection(.deviceIndependentFlagsMask)
         var mods: TransportKeyModifiers = []
         if device.contains(.command) { mods.insert(.command) }
@@ -3133,7 +3963,7 @@ final class AppModel {
     /// (`AppKitWindow`), which conforms to neither → `.none`; a focused rename
     /// TextField puts `_SystemTextFieldFieldEditor` (an `NSTextView`) first →
     /// `.textEditing` via the `NSText` branch.
-    private static func transportKeyResponder(_ responder: NSResponder?) -> TransportKeyResponder {
+    static func transportKeyResponder(_ responder: NSResponder?) -> TransportKeyResponder {
         guard let responder else { return .none }
         if responder is NSText { return .textEditing }
         if responder is any NSTextInputClient { return .textEditing }
@@ -3142,7 +3972,7 @@ final class AppModel {
 
     /// Main-window-only guard: only events aimed at THE content window toggle.
     /// nil window (an unresolvable synthesized window number) is `.secondary`.
-    private func transportKeyWindow(_ window: NSWindow?) -> TransportKeyWindow {
+    func transportKeyWindow(_ window: NSWindow?) -> TransportKeyWindow {
         guard let window, window === contentWindow else { return .secondary }
         return .main
     }
@@ -3173,6 +4003,31 @@ final class AppModel {
     /// read off-main once and reused by every clip that windows it.
     let waveformStore = WaveformStore()
 
+    /// m23-ap p2-b — WHAT THE PITCH EDITOR'S HEADER ACTUALLY DREW. App-held so
+    /// it survives the pane's own rebuilds and so `p2-c`'s `debug.pitchEditor`
+    /// echo can publish the screen rather than a second derivation of it. See
+    /// `PitchEditorChromeLedger`; the `pianoRollBarOpsStyle` precedent, and
+    /// deliberately non-observable for the same reason (it is written during
+    /// `body`).
+    @ObservationIgnored let pitchEditorChrome = PitchEditorChromeLedger()
+
+    /// m23-ap interaction batch I0 — the pitch editor pane's two-way channel
+    /// (`PitchEditorInteractionBridge`, the `pianoRollNoteSelection` shape): the
+    /// surface it MEASURED (scroll offsets, viewport, content) and DREW (the notes'
+    /// rects, the press in flight) out, for `debug.pitchEditor`; the debug tier's
+    /// staged steps and the Escape request in. App-held so it survives the pane's
+    /// `.id(clip.id)` rebuilds. The echo's handler lives in
+    /// `PitchEditorDebugStaging.swift`.
+    let pitchEditorInteraction = PitchEditorInteractionBridge()
+
+    /// m23-ap I1 UI hooks — HEAR THE NOTE IN THE PITCH EDITOR. Turns the pane
+    /// model's audition requests (press, drag step, stop) and its landed
+    /// commits (the release) into the store's audition doors, with the switch
+    /// (`panelLayout.auditionEnabled`) as their `enabled:`, and owns the pane's
+    /// honest-waiting line ("Preparing your note…"). App-held, so it outlives
+    /// the pane's `.id(clip.id)` rebuilds; `debug.pitchEditor` echoes it.
+    @ObservationIgnored let pitchEditorAudition: PitchEditorAuditionRouter
+
     /// Per-panel Simple/Pro density (M8 sp-a). App-side sticky PREFERENCE (never
     /// project data): the UserDefaults backing persists each panel's mode under
     /// `panelDensity.<panelID>`, so it survives close/reopen and relaunch. Driven
@@ -3199,6 +4054,23 @@ final class AppModel {
     /// path the header chips drive. Deliberately NOT a `panelLayout` dimension:
     /// session state, never persisted, never project data — see the type's doc.
     let stepSequencer = StepSequencerBridge()
+
+    /// ⭐ **MUSICAL TYPING (m23-ct) — the ONLY real-time note input this user can
+    /// have.** They own no hardware MIDI controller, so every one of
+    /// `Sources/DAWEngine/MIDIInput/`'s doors is shut for them. This object is the
+    /// mode flag, the octave/velocity state, and THE one ledger of what is
+    /// sounding; the computer keyboard writes it through `handleKeyDownEvent`, the
+    /// on-screen `MusicalKeyboardStrip` writes it through the pointer, and the
+    /// strip renders from it — so the two surfaces cannot disagree about what is
+    /// held.
+    ///
+    /// ⚠️ **SESSION STATE, NEVER PERSISTED**, and unlike `panelLayout` that is not
+    /// merely house style: a mode that silently re-claims 21 letter keys on the
+    /// next launch is the single worst thing to restore without being asked.
+    ///
+    /// The sink is wired in `init` (it needs `store` and `self`), which is why
+    /// this is a `var` with a default rather than a `let`.
+    var musicalTyping = MusicalTypingController()
 
     /// The in-app control-server port SETTING (beta m10-l). Like `panelLayout` it's
     /// an app-side sticky PREFERENCE (never project data) — the UserDefaults backing
@@ -3280,6 +4152,13 @@ final class AppModel {
     /// Retains the `NSApplication.willTerminateNotification` observer so the
     /// clean-exit lock removal (crash-b) stays live for the app's lifetime.
     @ObservationIgnored private var terminationObserver: (any NSObjectProtocol)?
+
+    /// Retains the `NSApplication.didResignActiveNotification` observer that
+    /// releases held Musical Typing notes (m23-ct). ⚠️ NOT `private`: it is
+    /// installed from `MusicalTypingStaging.swift`, where the rest of that
+    /// feature's app-tier wiring lives (the m23-cq-1 shape — this file is ~10.4k
+    /// lines and agents have died to a watchdog reading it).
+    @ObservationIgnored var musicalTypingResignObserver: (any NSObjectProtocol)?
 
     /// A synthetic master-analysis snapshot the session vibe meter prefers over the
     /// live engine poll (M8 vm-b). nil in normal use (the meter reads
@@ -3744,7 +4623,9 @@ final class AppModel {
         clipStretchStatuses[clipID] ?? .idle
     }
 
-    /// Kicks a bounded poll cycle after a stretch edit: the engine debounces
+    /// Kicks a bounded poll cycle after any edit that re-keys a clip's render
+    /// (a stretch, transpose, formant or tuning edit, or a save that repoints
+    /// its media — `ClipRenderSignature`, p2-render-indicator): the engine debounces
     /// 250 ms then renders in the background, so we sample `clipStretchStatus` at
     /// 10 Hz for a grace window (catching the debounce → rendering → done arc) and
     /// stop once nothing is pending past the deadline.
@@ -3803,6 +4684,13 @@ final class AppModel {
             engine?.effectState(forEffect: effectID)
         }
         store.media = AudioFileImporter()
+        // SF3→SF2 conversion at import (m31-h). The `store.media` seam exactly:
+        // DAWCore declares the protocol, DAWEngine owns the vendored decoder,
+        // and the app is where the two meet. Without this line the app still
+        // runs — `.sf3` import simply keeps m31-g's honest refusal — so the
+        // wiring is what turns the capability on, never what makes a `.sf3`
+        // loadable: the extension gates are untouched and still reject it.
+        store.soundBankLibrary.vorbisDecoder = StbVorbisDecoder()
         // Crash-recovery autosave (M9 crash-b): detect a prior crash (a surviving
         // session.lock) BEFORE writing this session's lock, then run the rolling
         // 30-s snapshot loop. This supersedes the legacy `startAutosave` in-place
@@ -3814,7 +4702,13 @@ final class AppModel {
         // (flushForTransition) with no other cleanup path — prune to the newest
         // few at launch.
         store.pruneUntitledRecoveryBundles()
+        // p2-ren B″ (design erratum E9): a crashed session's provisional
+        // renders (`<cache>/Provisional/<pid>-<uuid>`) are swept at LAUNCH, not
+        // at this session's first provisional build. Dead pids only: a live
+        // staging instance or a second app sharing the cache keeps its folder.
+        engine.wipeDeadProvisionalSessions()
         self.store = store
+        self.pitchEditorAudition = PitchEditorAuditionRouter(doors: store)
         self.engine = engine
         // If a crash left restorable unsaved work, stage the launch offer (the
         // sheet reads this; nil = no offer). `recoveryStatus()` also confirms the
@@ -3881,7 +4775,21 @@ final class AppModel {
         // One song generator + sidecar manager, shared with the router so the
         // panel's own generate/import and the `ai.*` wire path never diverge on
         // job state or audio caching.
-        let songGenerator = ACEStepClient()
+        //
+        // ⭐ p2-sing-0 — the raw `ACEStepClient` is wrapped ONCE, right here, in
+        // the lifecycle tracker, and every other handle below (the three origin
+        // observers, the presence poll, the clip-fix status poll, the router) is
+        // built over the tracked one. Every accepted submission, from every
+        // origin, opens a job with the coordinator, and the first terminal status
+        // any poller sees closes it. Before this, the Sketchpad's and the import
+        // seam's jobs were invisible to eviction, and an RVC boot mid-song
+        // SIGTERMed ACE. ⚠️ Do NOT bind the raw client to a name: a handle on it
+        // is a way around the tracker. The wire's own job hooks
+        // (`noteACEJobStarted`) stay; the coordinator keys jobs by id, so the
+        // double registration is harmless (pinned by
+        // `LifecycleTrackingSongGeneratorTests`).
+        let songGenerator = LifecycleTrackingSongGenerator(
+            wrapping: ACEStepClient(), coordinator: ModelLifecycleCoordinator.shared)
         let sidecarManager = SidecarManager()
         self.songGenerator = songGenerator
         self.sidecarManager = sidecarManager
@@ -3892,7 +4800,11 @@ final class AppModel {
         // button and the wire's vc.sidecarStart track the SAME boot, and the
         // panel's convert/train ride the SAME client the vc.* commands use.
         let voiceConversionManager = VoiceConversionManager()
-        let voiceConversionClient = VoiceConversionClient()
+        // p2-sing-0: tracked, for the reason given on `songGenerator` above. Every
+        // `convert`/`train` holds an RVC job open while it runs. The raw client is
+        // built inline so that no handle on it exists.
+        let voiceConversionClient = LifecycleTrackingVoiceConverter(
+            wrapping: VoiceConversionClient(), coordinator: ModelLifecycleCoordinator.shared)
         self.voiceConversionManager = voiceConversionManager
         self.voiceConversionClient = voiceConversionClient
 
@@ -3938,10 +4850,12 @@ final class AppModel {
         // (recordings are app-side data; trained MODELS stay facade-owned in
         // scripts/rvc/runtime/voices/ — never duplicated here), sidecar
         // status/start through the shared manager, voices/train/convert
-        // through the shared client, and the clip-source + import seams
-        // through the SAME two store methods the wire's vc.convertVocals
-        // calls (`voiceConversionSource` / `importConvertedVoice`) — the
-        // m10-n-3 "one command surface" law.
+        // through the shared client, and — since m24-m leg B — the whole
+        // Convert Voice… action through `ProjectStore.convertClipsToVoice`,
+        // the SAME store method the wire's `vc.convertClips` calls (the
+        // m10-n-3 "one command surface" law). `voiceConversionSource` stays
+        // wired for DATASET samples only: a training sample is a file to copy,
+        // so it wants the backing recording.
         self.voicePanel = VoicePanelModel(
             datasetsRoot: VoicePanelModel.defaultDatasetsRoot(),
             sidecarStatus: { [voiceConversionManager] in await voiceConversionManager.status() },
@@ -3957,10 +4871,21 @@ final class AppModel {
                 guard let store else { throw DebugError("project store unavailable") }
                 return try store.voiceConversionSource(clipId: clipID)
             },
-            importConverted: { [weak store] url, trackName, atBeat in
+            // m24-m leg A: the whole action in ONE store call — every selected
+            // clip extracted over its own window (m24-o), converted through the
+            // injected closure, and landed on ONE new violet track at the same
+            // beats in ONE undoable edit, all-or-nothing. The UI passes the
+            // client's convert exactly as `CommandRouter` does for
+            // `vc.convertClips`, so there is no parallel mutation path.
+            // m24-n: `provenance` rides straight through — the panel model
+            // composes it (it knows the voice's display name from the list the
+            // picker showed) and the store attaches it to the track it makes.
+            // Nothing in between interprets it.
+            convertClips: { [weak store] clipIDs, trackName, provenance, convert in
                 guard let store else { throw DebugError("project store unavailable") }
-                return try store.importConvertedVoice(
-                    fileURL: url, trackName: trackName, atBeat: atBeat)
+                return try await store.convertClipsToVoice(
+                    clipIds: clipIDs, trackName: trackName,
+                    provenance: provenance, convert: convert)
             })
 
         // The REFERENCE panel model (m22-g P3). Constructed bare here (its
@@ -3969,11 +4894,18 @@ final class AppModel {
         self.referencePanel = ReferencePanelModel()
 
         // The unified generation-progress registry (m17-h): its own polls read
-        // the RAW client (never a decorator — no self-observation loop) and the
-        // sidecar manager's own status; a sidecar death mid-job posts an
-        // engine notice through the SAME handler funnel the engine uses (the
-        // `debug.postEngineNotice` path), so the transport chip lights up —
-        // failed card + notice, never silent.
+        // the lifecycle-tracked client and the sidecar manager's own status; a
+        // sidecar death mid-job posts an engine notice through the SAME handler
+        // funnel the engine uses (the `debug.postEngineNotice` path), so the
+        // transport chip lights up — failed card + notice, never silent.
+        //
+        // ⚠️ NEVER an OBSERVING decorator here (a `GenerationObservingGenerator`):
+        // it would feed each of this registry's own polls back into it, a
+        // self-observation loop. The lifecycle tracker (p2-sing-0) is not one. It
+        // reports to nothing but the model lifecycle coordinator, and it cannot
+        // name this registry at all (AIServices sits below DAWAppKit). Reading
+        // through it is loop-free, and it lets a terminal poll from the card close
+        // the job.
         let generationPresence = GenerationPresenceModel(
             status: { [songGenerator] jobID in
                 try await songGenerator.generationStatus(jobID: jobID)
@@ -4007,7 +4939,9 @@ final class AppModel {
             return false
         }
 
-        // ONE real client, THREE origin-tagged observers (m17-h) — job state
+        // ONE real client, THREE origin-tagged observers (m17-h), all built
+        // ABOVE the lifecycle tracker (p2-sing-0), so a Sketchpad or import
+        // submission registers its job exactly like a wire one — job state
         // and audio caching stay unified in `songGenerator`; only the presence
         // tag differs. The Sketchpad's awaits the auto-start boot (its generate
         // is a panel action, free to take the boot inline); the wire's and the
@@ -4063,6 +4997,24 @@ final class AppModel {
                 return try await store.importClipFix(jobID: jobID)
             })
 
+        // m34-c: ONE sound-bank download coordinator for the whole app, built
+        // HERE and handed to BOTH the picker (below) and the CommandRouter
+        // (further down). ⚠️ That sharing is load-bearing, not tidiness: two
+        // instances would each hold their own single-flight guard, so a
+        // download the user starts in the picker would be invisible to
+        // `instrument.soundBankDownloadStatus` and an agent could start a
+        // second 206 MB transfer on top of it.
+        //
+        // The install function is bound to THE STORE'S OWN `SoundBankLibrary`,
+        // so a finished download lands in exactly the directory
+        // `store.availableSoundBanks()` scans — the m23-n3a lesson (weights
+        // that download successfully into a layout the catalog cannot see are
+        // a silent failure only a user ever hits).
+        let soundBankDownloads = SoundBankDownloadCoordinator(
+            installFunction: SoundBankDownloadCoordinator.liveInstallFunction(
+                library: store.soundBankLibrary))
+        self.soundBankDownloads = soundBankDownloads
+
         // The instrument picker model (m10-n-3): all data flows in through
         // store-backed providers so the headless model stays off the engine
         // bridge; a missing bank's throw is swallowed to an honest empty listing
@@ -4078,7 +5030,16 @@ final class AppModel {
             importer: { [weak store] url in
                 guard let store else { throw DebugError("project store unavailable") }
                 return try store.importSoundBank(from: url)
-            })
+            },
+            // m34-c. Same shape as the providers above: the model holds
+            // closures, never the actor, so it stays headless and testable.
+            downloadableBanks: { [weak store] in
+                guard let store else { return [] }
+                return SoundBankDownloadCoordinator.offerings(library: store.soundBankLibrary)
+            },
+            startDownload: { id in try await soundBankDownloads.start(bankID: id) },
+            downloadStatus: { await soundBankDownloads.status() },
+            cancelDownload: { try await soundBankDownloads.cancel() })
 
         // The AU-effect picker model (m13-g): the installed AU EFFECTS flow in
         // through a store-backed provider (the SAME `availableAudioUnitEffects`
@@ -4188,6 +5149,30 @@ final class AppModel {
                 _ = try store.setInstrument(id: trackID, sampler: params)
             })
 
+        // THE PAD GRID (m39-pads). Every injector is a LIVE read — the zones,
+        // the track name, the AI provenance and the selected clip are all
+        // resolved fresh on each access, never snapshotted at open time, so an
+        // agent's `clip.sliceToSampler` over the wire redraws the grid the user
+        // is looking at.
+        //
+        // ⚠️ `self` is captured for the injectors on purpose: they resolve
+        // through `activeTrackID` and `selectedClipID`, which are AppModel's own
+        // computed state, and there is no second home for either. `[unowned
+        // self]` rather than `[weak self]` because the model is a stored
+        // property of this object and cannot outlive it.
+        //
+        // ⛔ THE CHOP GOES THROUGH `store.sliceClipToSampler` — the SAME method
+        // `clip.sliceToSampler` calls, so the card and the wire cannot diverge.
+        // No parallel mutation path.
+        //
+        // ⚠️ THE PAD GRID IS NOT BUILT HERE. It resolves through
+        // `activeTrackID` / `selectedClipID` — `self`'s own computed state —
+        // which Swift's two-phase init forbids touching from an initialiser at
+        // all. `installPadGrid()`, on the line after `installMusicalTyping()`,
+        // builds and binds it; `PadGridSiteTests` reads this source for both
+        // the declaration and that call, because a grid left unbound draws an
+        // empty kit and says nothing about it.
+
         // The Quantize & Groove model (m11-a): the built-in MPC swings are computed
         // once; the saved-template list, Apply, and Extract all route through the
         // store methods the wire uses (`quantizeClipNotes` = ONE undo step via its
@@ -4244,6 +5229,14 @@ final class AppModel {
                 return store.compEditRefusal(clipID: clipID)
             })
 
+        // m34-f step ② — the live-EXPRESSION sink, built BEFORE the pad because
+        // the pad's preview closure targets it. ⚠️ A LOCAL FIRST, then stored:
+        // this runs before every stored property is initialised, so READING
+        // `self` here is illegal (the `MusicalTypingController` precedent a few
+        // hundred lines below).
+        let expressionSink = LivePlayExpressionSink(store: store)
+        self.liveExpressionSink = expressionSink
+
         // The BREATH PAD (m28-p7). Two closures, two store methods, and the
         // model owns every rule between them.
         //
@@ -4259,9 +5252,20 @@ final class AppModel {
                                                   angleRadians: angle, radius: radius,
                                                   air: air)
             },
-            preview: { [weak store] trackID, value, phase in
-                guard let store else { return }
-                _ = try store.previewEffort(trackID: trackID, value: value, phase: phase)
+            // m34-f step ② — THE LIVE-EXPRESSION SEAM. The closure targets
+            // `LiveExpressionSink`, not the store directly, for the reason
+            // `LiveNoteSink` exists: ③'s modulation panel and ④'s grid push the
+            // same kind of value and must not each grow their own pipe.
+            //
+            // ⛔ **`playLiveExpression`, NOT `previewEffort`, AND THE SWAP IS
+            // THE ITEM.** The preview verb throws `transportBusy` mid-take by
+            // design and records nothing — correct for auditioning a shape,
+            // and a silent lie for a performance. Both of those remain true of
+            // that method; the pad simply no longer uses it.
+            preview: { [weak expressionSink] trackID, value, phase in
+                guard let expressionSink else { return nil }
+                return try expressionSink.setExpression(trackID: trackID, effort: value,
+                                                        phase: phase)
             })
 
         // The pad's HARDWARE section (m28-knob-ui). Four closures and no store
@@ -4349,6 +5353,42 @@ final class AppModel {
                 sketchpad?.lyrics = lyrics
             })
 
+        // m34-g — PLAYBOX. Same three seams as the workshop above, for the same
+        // reasons: a FACTORY (so a key pasted into Settings works without a
+        // relaunch, and so the no-key case is discovered at press time), a
+        // context provider read FRESH on every press (so a tempo change or a
+        // modulation lands), and an applier so the model never reaches the
+        // controller directly.
+        //
+        // ⚠️ THE KEY AND THE SCALE COME FROM THE CHORD ROW'S OWN PICKERS, not
+        // from a guess: they are what the user chose and what every lit key is
+        // already voiced in. Tempo and section come from the project, because
+        // macro.songSkeleton establishes both and a Playbox sequence that
+        // ignored them would fight the arrangement the user already has.
+        // ⚠️ A LOCAL, NOT `self.musicalTyping` — this runs before every
+        // stored property is initialised, so READING self here is illegal
+        // (writing to it is not). The one controller is created here and
+        // handed to both, which is also what keeps Playbox and the strip
+        // pointed at the same object rather than at two.
+        let typing = MusicalTypingController()
+        self.musicalTyping = typing
+        self.playbox = PlayboxModel(
+            makeGenerator: {
+                try resolveChordProgressionGenerator(
+                    environment: ProcessInfo.processInfo.environment, store: keyStore)
+            },
+            contextProvider: { [weak store] in
+                var request = PlayboxRequest(keyTonic: typing.chordKey,
+                                             keyMode: typing.chordKeyMode)
+                guard let store else { return request }
+                let here = store.transport.positionBeats
+                request.tempoBPM = store.transport.tempoMap.bpm(atBeat: here)
+                let reached = store.markers.filter { $0.beat <= here }
+                request.sectionName = reached.max { $0.beat < $1.beat }?.name
+                return request
+            },
+            applier: { plan in typing.applyPlaybox(plan) })
+
         // Resolve the bind port through the m10-l resolver: env override > the
         // persisted in-app setting > default 17600. With no env AND no setting this
         // is byte-identical to the pre-m10-l inline read (17600). THE ENV OVERRIDE
@@ -4366,7 +5406,11 @@ final class AppModel {
             // agent submits lands on the unified progress card tagged "wire";
             // the import seam gets its own "import"-tagged wrapper. Both wrap
             // the SAME `songGenerator`, so job state stays unified.
-            songGenerator: wireGenerator, keyStore: keyStore,
+            songGenerator: wireGenerator,
+            // m34-c: THE SAME actor the instrument picker drives (constructed
+            // above). See its own doc for why one instance is load-bearing.
+            soundBankDownloads: soundBankDownloads,
+            keyStore: keyStore,
             // Hand the resolved endpoint to the router so `app.connectionInfo` can
             // report it (the server owns the router, so it can't ask back). Value
             // in, no cycle.
@@ -4377,7 +5421,12 @@ final class AppModel {
         // m18-b: the wedge monitor must exist before the server so the queue
         // tier can consult it on every frame. Strong capture is cycle-free
         // (server → closure → monitor; the monitor references nothing back).
-        let livenessMonitor = MainActorLivenessMonitor()
+        // WF: every breadcrumb names its writer — the log is shared by the
+        // user's live app and every staging launch.
+        let livenessMonitor = MainActorLivenessMonitor(
+            origin: MainActorLiveness.originTag(
+                pid: ProcessInfo.processInfo.processIdentifier, port: Int(port),
+                processName: ProcessInfo.processInfo.processName))
         self.livenessMonitor = livenessMonitor
         // m23-av: the AU-prepare in-flight read is `nonisolated` end to end
         // (engine → registry → NSLock-protected ledger), so the queue tier can
@@ -4448,6 +5497,11 @@ final class AppModel {
         // it reads store state only through the toggle funnel, no init order
         // dependency, but keeping bootstrap side effects at the tail is house style.
         installSpaceKeyMonitor()
+        // Musical Typing (m23-ct): hand the controller its sink and its
+        // stuck-note safety net. AFTER `installSpaceKeyMonitor` because the note
+        // keys ride the very monitor it installs.
+        installMusicalTyping()
+        installPadGrid()
         // edit.pasteClips (m26-k): AppModel conforms to EditPasteControlling
         // directly (EditPasteWireSurface.swift) — no separate owned object is
         // needed, since AppModel already IS the paste's one home
@@ -4458,6 +5512,18 @@ final class AppModel {
         // `@State`, the same non-retaining-router precedent as
         // `copilotEngine`/`pluginUI`.
         router.editPaste = self
+        // view.* (M35): AppModel conforms to ViewUIControlling directly
+        // (ViewUIWireSurface.swift) — the `editPaste` shape verbatim, and for
+        // the same reason: AppModel already IS the one home for the capture
+        // window, the arrange selection, the workspace mode, the layout store
+        // and the four editor cards, so a second owned object would only be a
+        // place for those to drift. Beside `router.editPaste` at the TAIL of
+        // init rather than up beside `router.pluginUI`, because assigning
+        // `self` as a value requires every stored property to be definitely
+        // initialized first and this is a designated initializer. `self` is
+        // retained by DAWProApp's own `@State` — the same non-retaining-router
+        // precedent as `copilotEngine`/`pluginUI`/`editPaste`.
+        router.viewUI = self
     }
 
     /// Binds the REFERENCE panel model to the store (m22-g P3). Every READ goes
@@ -4746,6 +5812,8 @@ final class AppModel {
                 return try self.defaultsDomainDebug(params)
             case "debug.arrangeScroll":
                 return try self.setArrangeScroll(params)
+            case "debug.takeRegion":
+                return self.takeRegionDebug()
             case "debug.arrangeZoom":
                 return try self.arrangeZoomDebug(params)
             case "debug.viewZoom":
@@ -4778,6 +5846,10 @@ final class AppModel {
                 return try self.keySpaceDebug(params)
             case "debug.mainActorWedge":
                 return try self.mainActorWedgeDebug(params)
+            case "debug.padGrid":
+                // m39-pads. App tier, deliberately off `allCommands` and off
+                // MCP — see `padGridDebug`.
+                return try self.padGridDebug(params)
             case "debug.mixerAddAU":
                 return self.mixerAddAUDebug(params)
             case "debug.effectPicker":
@@ -4806,8 +5878,27 @@ final class AppModel {
                 return self.insertLabelsDebug(params)
             case "debug.pianoRollBarOps":
                 return self.pianoRollBarOpsDebug(params)
+            // m23-ap Phase 2, item p2-c — the pitch editor's echo (design
+            // §12.4). Handler in `PitchEditorDebugStaging.swift` (the
+            // m23-cq-1 shape: debug tier, off allCommands/MCP, kept out of
+            // this file). `{}` is the read-only echo; since interaction batch
+            // I0, `{act, …}` stages one step into the open pane first.
+            case "debug.pitchEditor":
+                return try self.pitchEditorDebug(params)
+            // m23-ap C-F3 — the preset door and its "Replace your hand
+            // edits?" card, driven through the MENU'S OWN funnel. Handler in
+            // `PitchCorrectionStaging.swift` (debug tier, off allCommands/MCP).
+            case "debug.tuneVocal":
+                return try self.tuneVocalDebug(params)
             case "debug.stepSequencer":
                 return try self.stepSequencerDebug(params)
+            // m23-ct — MUSICAL TYPING, both surfaces. Handler in
+            // `MusicalTypingStaging.swift` (the m23-cq-1 shape: debug tier, off
+            // allCommands/MCP, kept out of this file). ⭐ It injects BELOW
+            // `NSEvent` — a seam that needed a real keystroke would test nothing
+            // in an unbundled staging binary (the m23-g1 law).
+            case "debug.musicalTyping":
+                return try self.musicalTypingDebug(params)
             case "debug.grSeed":
                 return try self.setGRSeed(params)
             case "debug.referenceSeed":
@@ -4848,6 +5939,8 @@ final class AppModel {
                 return self.clipFixStateResponse()
             case "debug.voicePanel":
                 return try self.voicePanelDebug(params)
+            case "debug.voiceModelDrop":
+                return try self.voiceModelDropDebug(params)
             case "debug.instrumentPicker":
                 return self.instrumentPickerDebug(params)
             case "debug.quantizePanel":
@@ -5063,17 +6156,28 @@ final class AppModel {
     }
 
     /// `debug.panelLayout {sidebarWidth?, editorFraction?, rowHeight?,
-    /// pianoRollPPB?, pianoRollRowHeight?, mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
+    /// pianoRollPPB?, pitchEditorPPB?, pianoRollRowHeight?, pitchEditorRowHeight?,
+    /// mixerInsertsCollapsed?, followPlayhead?, auditionEnabled?,
     /// waveformNormalize?, waveformVerticalZoom?, editorMaximized?,
-    /// pianoRollMinimap?, reset?}` —
+    /// pianoRollMinimap?, pianoRollCenterPitch?, reset?}` —
     /// stages the adjustable window layout (beta m10-d)
     /// so a headless capture / E2E can drive the arrange sidebar width, the bottom
     /// editor's height fraction, the global track-row height, and (m21-c) the
     /// piano-roll zoom before `debug.captureUI` (the `debug.panelDensity`
     /// precedent: writes straight to the shared `panelLayout` store so the live
-    /// splitters reflect it). Debug tier ONLY — off `allCommands`/MCP (window layout
+    /// splitters reflect it). Debug tier — off `allCommands`/MCP (window layout
     /// is a UI preference, not an invokable capability; agents drive the protocol,
-    /// not the chrome). Every field is optional; `reset:true` restores the defaults
+    /// not the chrome).
+    ///
+    /// ⚠️ **"ONLY" NO LONGER HOLDS FOR ONE KEY, AS OF M35.** `editorMaximized` is
+    /// ALSO reachable from production through `view.panelLayout` (which exposes
+    /// it and the workspace mode, and nothing else) — see the narrowed rule in
+    /// `docs/DESIGN-LANGUAGE.md` and the argument at that key's line below. This
+    /// handler is unchanged, byte-for-byte, and remains the ONE home for every
+    /// other key here; the two tiers share `panelLayout`'s setters, they do not
+    /// fork them.
+    ///
+    /// Every field is optional; `reset:true` restores the defaults
     /// FIRST (so `{reset:true, rowHeight:48}` resets then applies 48). Values are
     /// clamped by the store, and the result echoes the APPLIED (post-clamp) values.
     /// The piano-roll zoom lives HERE, not in a `debug.arrangeZoom` sibling: it is
@@ -5085,6 +6189,17 @@ final class AppModel {
         if let f = params["editorFraction"]?.doubleValue { panelLayout.setEditorFraction(CGFloat(f)) }
         if let h = params["rowHeight"]?.doubleValue { panelLayout.setRowHeight(CGFloat(h)) }
         if let z = params["pianoRollPPB"]?.doubleValue { panelLayout.setPianoRollPPB(CGFloat(z)) }
+        // m23-ap p2-b — DEBUG TIER on purpose (design §5.8): `view.panelLayout`
+        // owns only what determines WHAT A CAPTURE CAN SEE and accepts exactly
+        // two keys, so this one is a rejected unknown key there, deliberately.
+        if let z = params["pitchEditorPPB"]?.doubleValue { panelLayout.setPitchEditorPPB(CGFloat(z)) }
+        // m23-ap C4 — the pitch editor's VERTICAL zoom, same tier and same
+        // argument as its horizontal twin above. ⚠️ `pitchEditorRowHeight`, NOT
+        // `pianoRollRowHeight`: three slots on this axis name three different
+        // surfaces (see `PanelLayoutStore.pitchEditorRowHeightKey`).
+        if let r = params["pitchEditorRowHeight"]?.doubleValue {
+            panelLayout.setPitchEditorRowHeight(CGFloat(r))
+        }
         // m25-b-4: the roll's VERTICAL zoom — one more `PanelLayoutStore` slot, and
         // it rides here for the reason recorded above rather than as a new verb: a
         // pitch-row height changes no project byte and no sound, so it is view
@@ -5122,13 +6237,29 @@ final class AppModel {
             panelLayout.setWaveformVerticalZoom(CGFloat(z))
         }
         // m25-b-1: the MAXIMIZED editor mode. One more `PanelLayoutStore` slot, so
-        // it rides here for the `waveformNormalize` reasons — and the WIRE DECISION
-        // is deliberate rather than inherited: `docs/DESIGN-LANGUAGE.md` records
-        // adjustable layout as "a documented NON-INVOKABLE window preference — no
-        // wire command / MCP tool", every one of the nine sibling slots obeys it,
-        // and an `allCommands` entry would break the wire-count pins for a control
-        // that changes no project byte and no sound. An agent that wants the notes
-        // reads `project.snapshot`; how tall the pane is drawn is not its business.
+        // it rides here for the `waveformNormalize` reasons.
+        //
+        // ⚠️⚠️ **THE WIRE DECISION ON THIS ONE SLOT WAS RE-OPENED AND CHANGED AT
+        // M35 — the comment that used to stand here is now HALF WRONG, so it is
+        // rewritten rather than left to be believed.** `docs/DESIGN-LANGUAGE.md`
+        // still records adjustable layout as "a documented NON-INVOKABLE window
+        // preference — no wire command / MCP tool", and every OTHER slot in this
+        // handler still obeys it. But that rule is now NARROWED by two named
+        // exceptions: `editorMaximized` and the workspace mode are reachable from
+        // production as `view.panelLayout` (M35 m35-d).
+        //
+        // The m25-b-1 argument was not wrong; a DIFFERENT argument reaches the
+        // same control. m25-b-1 asked "does this change a project byte or a
+        // sound?" — no, so chrome. M35 asks "does this change what a CAPTURE CAN
+        // SEE?" — and it does: M35 shipped `view.capture`, so an agent that can
+        // photograph the app and cannot frame it has half a capability. Every
+        // other key in this handler still fails the second question too (they
+        // change what an eye prefers about something already on screen), which is
+        // why exactly two moved and `view.panelLayout` REJECTS the rest by name.
+        //
+        // ⛔ This line is still the ONLY writer of the slot. `view.panelLayout`
+        // does not fork it — it calls the same `panelLayout.setEditorMaximized`
+        // through `AppModel.applyViewPanelLayout` (ViewUIWireSurface.swift).
         //
         // ⚠️ ECHOED ALONGSIDE `editorFraction`, WHICH IS THE POINT OF ECHOING IT:
         // the two are INDEPENDENT (maximize never writes the fraction), so a gate
@@ -5143,12 +6274,33 @@ final class AppModel {
         // that wants to know where the notes are reads `project.snapshot`; where a
         // human happens to be LOOKING is not a capability.
         if let m = params["pianoRollMinimap"]?.boolValue { panelLayout.setPianoRollMinimap(m) }
+        // Scrolls the OPEN roll's pitch axis so this pitch sits in the middle of
+        // the note grid. The odd one out here — every other key above is a
+        // remembered dimension, this is a one-shot EVENT, so it is applied LAST
+        // (a row-height change in the same call re-pins the axis, and doing it the
+        // other way round would silently undo the focus) and it is NOT echoed
+        // below: there is no persisted value to report, and echoing the requested
+        // pitch would read as "the roll is showing this", which the reply cannot
+        // know. Read the frame, not the reply.
+        //
+        // WHY: the roll opens anchored high in the 128-row stack, so a low clip
+        // (a 49 Hz heartbeat at C1) opens on an empty grid — notes present in the
+        // minimap and the velocity lane, and below the viewport. MEASURED: at the
+        // 10 pt row-height floor -- the CLAMP, which is where a request for 5
+        // lands -- the grid still bottomed out at F2 with the notes below it, so
+        // shrinking rows is not a workaround. See
+        // `PanelLayoutStore.pianoRollFocusPitch`.
+        if let p = params["pianoRollCenterPitch"]?.doubleValue {
+            panelLayout.requestPianoRollFocus(pitch: Int(p.rounded()))
+        }
         return .object([
             "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
             "editorFraction": .number(Double(panelLayout.editorFraction)),
             "rowHeight": .number(Double(panelLayout.rowHeight)),
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
+            "pitchEditorPPB": .number(Double(panelLayout.pitchEditorPPB)),
             "pianoRollRowHeight": .number(Double(panelLayout.pianoRollRowHeight)),
+            "pitchEditorRowHeight": .number(Double(panelLayout.pitchEditorRowHeight)),
             "mixerInsertsCollapsed": .bool(panelLayout.mixerInsertsCollapsed),
             "followPlayhead": .bool(panelLayout.followPlayhead),
             "auditionEnabled": .bool(panelLayout.auditionEnabled),
@@ -5193,7 +6345,12 @@ final class AppModel {
         if params["rearm"]?.boolValue == true { rearmFollow() }
         if params["resetCounters"]?.boolValue == true {
             arrangeFollow.resetCounters()
+            // m34-a-3: the vertical runtime zeroes with the others, or a gate
+            // measuring "scrolls during this take" would read a total carried
+            // over from the previous one.
+            arrangeVFollow.resetCounters()
             pianoRollFollow.resetCounters()
+            pitchEditorFollow.resetCounters()
         }
         // A simulated POINTER scroll (gate seam): moves the named surface's scroller
         // without registering an expected offset, which is exactly what a drag looks
@@ -5205,10 +6362,22 @@ final class AppModel {
             let surface = params["surface"]?.stringValue ?? "arrange"
             switch surface {
             case "arrange": applyArrangeHScroll(CGFloat(raw))
+            // m34-a-3: the VERTICAL axis' drag seam. It reaches the detector the
+            // same way a real vertical drag does — through `reportOffset` with an
+            // offset follow never asked for — and deliberately does NOT move the
+            // scroller: this app has no offset-precise vertical scroll (m25-b-4),
+            // and what makes a drag a drag as far as the detector can know is the
+            // unexpected REPORT, not the pixels.
+            case "arrangeVertical":
+                reportArrangeVScroll(CGFloat(raw), contentHeight: arrangeVContentHeight)
             case "pianoRoll": pianoRollFollow.scrollExternally(to: CGFloat(raw))
+            // m23-ap I5 — the pitch editor's scroller lives in its view state,
+            // like the roll's, so it travels the same `scrollExternally` seam.
+            case "pitchEditor": pitchEditorFollow.scrollExternally(to: CGFloat(raw))
             default:
                 throw DebugError(
-                    "unknown surface \"\(surface)\" — expected \"arrange\" or \"pianoRoll\"")
+                    "unknown surface \"\(surface)\" — expected \"arrange\", "
+                    + "\"arrangeVertical\", \"pianoRoll\" or \"pitchEditor\"")
             }
         }
         // Geometry is echoed LIVE where the app owns it. The follow model only
@@ -5231,11 +6400,45 @@ final class AppModel {
             ])
         }
         return .object([
+            // The PERSISTED preference — unchanged meaning, so every gate
+            // written against it still reads what it always read.
             "enabled": .bool(panelLayout.followPlayhead),
+            // m23-cu-1, ADDITIVE: what the ARRANGE actually runs on, and
+            // whether a rolling take is the only reason it is true. Without
+            // these a gate cannot tell "follow is on" from "follow is on
+            // because we are recording", which is the entire sub-item.
+            "enabledEffective": .bool(arrangeFollowEnabled),
+            "autoEngagedByTake": .bool(followAutoEngagedByTake),
             "isPlaying": .bool(store.transport.isPlaying),
+            "isRecording": .bool(store.transport.isRecording),
             "arrange": surface(arrangeFollow, contentWidth: arrangeContentWidth,
                                viewportWidth: arrangeViewportWidth),
+            // m34-a-3, ADDITIVE: the arrange's VERTICAL axis. Its own runtime,
+            // its own geometry, and its own enable — a gate cannot otherwise
+            // tell "the view scrolled down to the armed row" from "the view
+            // paged sideways", which is the whole sub-item. Reported under
+            // height-named keys because they ARE heights; the shared `surface`
+            // helper's width names would be a small lie in a debug echo whose
+            // only job is to be believed.
+            "arrangeVertical": .object([
+                "offset": .number(Double(arrangeVFollow.reportedOffset)),
+                "viewportHeight": .number(Double(arrangeVViewportHeight)),
+                "contentHeight": .number(Double(arrangeVContentHeight)),
+                "suspended": .bool(arrangeVFollow.isSuspended),
+                "expectedOffset": arrangeVFollow.expectedOffset.map { JSONValue.number(Double($0)) } ?? .null,
+                "scrolls": .number(Double(arrangeVFollow.scrollCount)),
+                "offsetReports": .number(Double(arrangeVFollow.offsetReportCount)),
+                "enabledEffective": .bool(arrangeVerticalFollowEnabled),
+                "followRowId": arrangeVerticalFollowRow.map { JSONValue.string($0.uuidString) } ?? .null,
+                "rowTop": arrangeVerticalFollowRowTopForDebug.map { JSONValue.number(Double($0)) } ?? .null,
+                "rowHeight": .number(Double(arrangeLaneGeometry.rowHeight)),
+                "nonce": .number(Double(arrangeVFollowNonce)),
+                "anchorsBottom": .bool(arrangeVFollowAnchorsBottom),
+            ]),
             "pianoRoll": surface(pianoRollFollow),
+            // m23-ap I5, ADDITIVE: the pitch editor's runtime — geometry as its
+            // own model last saw it, the roll's reason (it lives in view state).
+            "pitchEditor": surface(pitchEditorFollow),
         ])
     }
 
@@ -5293,6 +6496,7 @@ final class AppModel {
                 "minWidth": .number(Double(WindowFloor.minWidth)),
                 "minHeight": .number(Double(WindowFloor.minWindowContentHeight)),
                 "layoutMinHeight": .number(Double(WindowFloor.minHeight)),
+                "occlusionVisible": .bool(false),
             ])
         }
         // The floor is also enforced on the NSWindow itself; re-assert here so a
@@ -5328,6 +6532,11 @@ final class AppModel {
             // The OTHER quantity, kept reachable: the SwiftUI layout floor below the
             // titlebar (what `ContentView`'s root `.frame` and `ExportSheetLayout` use).
             "layoutMinHeight": .number(Double(WindowFloor.minHeight)),
+            // WF: whether the window is being DRAWN (AppKit's own occlusion state —
+            // false when another app covers it, it is minimized, or the display
+            // sleeps). A gate about compositing (`wedge-render-pending.mjs`) is
+            // blind while this is false, and must refuse rather than pass.
+            "occlusionVisible": .bool(window.occlusionState.contains(.visible)),
         ])
     }
 
@@ -5414,6 +6623,52 @@ final class AppModel {
         return arrangeScrollResponse()
     }
 
+    /// `debug.takeRegion` — the m34-a-2 seam: what the arrange is drawing over
+    /// the destination lane RIGHT NOW, while a take rolls.
+    ///
+    /// **STRICTLY READ-ONLY, and it takes no parameters at all** — there is
+    /// nothing here to stage. The region is derived state with exactly one
+    /// writer (`ProjectStore.refreshLiveTakeRegion`), so a settable version
+    /// would be a second producer able to agree with the real one by luck; the
+    /// m11-a bare-call-is-read-only law taken to its limit.
+    ///
+    /// ⚠️ **DEBUG TIER ONLY — off `allCommands`/MCP, so ZERO new wire surface**
+    /// (the m10-c/sp-b pure-view rule stated at `debug.followPlayhead`). Drawing
+    /// a preview of a clip that is being recorded is view chrome: it adds no
+    /// operation an agent could not already perform, and the take itself is
+    /// already fully wire-driven through `transport.record` / `transport.stop`.
+    /// A gate needs to SEE what the lanes drew; nobody needs to set it.
+    ///
+    /// It reports `pending` alongside `region` on purpose: without the take
+    /// snapshot, a `region: null` is ambiguous between "no take", "a loop take"
+    /// (refused, by design) and "a take that has not captured a note yet" — and
+    /// those three are exactly what this item's arms have to tell apart.
+    private func takeRegionDebug() -> JSONValue {
+        let region = store.liveTakeRegion
+        let pending = store.pendingTakeInfo
+        return .object([
+            "isRecording": .bool(store.transport.isRecording),
+            "playheadBeat": .number(store.transport.positionBeats),
+            "region": region.map { r in
+                JSONValue.object([
+                    "startBeat": .number(r.startBeat),
+                    "lengthBeats": .number(r.lengthBeats),
+                    "noteCount": .number(Double(r.noteCount)),
+                    "trackIds": .array(r.trackIDs.map { .string($0.uuidString) }),
+                ])
+            } ?? .null,
+            "pending": pending.map { p in
+                JSONValue.object([
+                    "startBeat": .number(p.startBeat),
+                    "takeNumber": .number(Double(p.takeNumber)),
+                    "isLoopTake": .bool(p.isLoopTake),
+                    "instrumentTrackIds": .array(p.instrumentTrackIDs.map { .string($0.uuidString) }),
+                    "audioTrackIds": .array(p.audioTrackIDs.map { .string($0.uuidString) }),
+                ])
+            } ?? .null,
+        ])
+    }
+
     private func arrangeScrollResponse() -> JSONValue {
         .object([
             "ok": .bool(true),
@@ -5498,18 +6753,21 @@ final class AppModel {
     func zoomIn() {
         switch activeEditorSurface.surface {
         case .pianoRoll: zoomPianoRollIn()
+        case .pitchEditor: zoomPitchEditorIn()
         case .arrange: zoomArrangeIn()
         }
     }
     func zoomOut() {
         switch activeEditorSurface.surface {
         case .pianoRoll: zoomPianoRollOut()
+        case .pitchEditor: zoomPitchEditorOut()
         case .arrange: zoomArrangeOut()
         }
     }
     func zoomReset() {
         switch activeEditorSurface.surface {
         case .pianoRoll: zoomPianoRollReset()
+        case .pitchEditor: zoomPitchEditorReset()
         case .arrange: zoomArrangeReset()
         }
     }
@@ -5523,6 +6781,57 @@ final class AppModel {
     func zoomPianoRollIn() { panelLayout.setPianoRollPPB(PianoRollZoom.zoomedIn(panelLayout.pianoRollPPB)) }
     func zoomPianoRollOut() { panelLayout.setPianoRollPPB(PianoRollZoom.zoomedOut(panelLayout.pianoRollPPB)) }
     func zoomPianoRollReset() { panelLayout.setPianoRollPPB(PianoRollZoom.defaultPixelsPerBeat) }
+
+    // MARK: Pitch-editor zoom (m23-ap p2-b)
+
+    /// The second bottom pane's horizontal zoom entry points — `zoomPianoRollIn`'s
+    /// shape, one surface over: every driver (the ⌘ router above and
+    /// `debug.panelLayout {pitchEditorPPB}`) mutates the ONE persisted
+    /// `panelLayout.pitchEditorPPB` slot, clamped by the store, and the pane's
+    /// `PitchEditorGeometry` re-reads it.
+    ///
+    /// The LADDER is `PianoRollZoom`'s, shared rather than copied: a second
+    /// ladder would let the two bottom panes disagree about what "one step in"
+    /// means. ⚠️ NOTHING HERE MAY CALL `editorEngagement.engage` — a router that
+    /// engaged the surface it just routed to would be self-confirming and would
+    /// latch forever (`EditorSurfaceOwnershipSiteTests.noZoomEntryPointEngages`).
+    func zoomPitchEditorIn() { panelLayout.setPitchEditorPPB(PianoRollZoom.zoomedIn(panelLayout.pitchEditorPPB)) }
+    func zoomPitchEditorOut() { panelLayout.setPitchEditorPPB(PianoRollZoom.zoomedOut(panelLayout.pitchEditorPPB)) }
+    func zoomPitchEditorReset() { panelLayout.setPitchEditorPPB(PianoRollZoom.defaultPixelsPerBeat) }
+    /// m23-ap I2 — THE PINCH's entry point: a continuous scale rather than a
+    /// ladder step (`PitchEditorPinch.tick` computed it from the gesture-start
+    /// scale; the store clamps it). The pane routes here through
+    /// `onZoom(.timeScale)` because it writes no slot itself
+    /// (`PitchEditorInteractionSiteTests.theZoomClusterUsesTheOneLadder`).
+    /// ⚠️ NO `engage` HERE EITHER: the GESTURE engages, before it asks — this is
+    /// on `EditorSurfaceOwnershipSiteTests.zoomEntryPoints`.
+    func setPitchEditorTimeScale(_ ppb: CGFloat) { panelLayout.setPitchEditorPPB(ppb) }
+
+    /// The pitch editor's VERTICAL zoom entry points (m23-ap C4) — the
+    /// semitone-row height. `rowZoomIn`'s shape, one surface over, on the ONE
+    /// persisted `panelLayout.pitchEditorRowHeight` slot and the SHARED
+    /// `PianoRollZoom` ladder.
+    ///
+    /// ⚠️ **DRIVEN BY THE PANE'S OWN ZOOM CLUSTER, NOT BY ⌃⌘=/−/0.** Those menu
+    /// items call `rowZoomIn/Out/Reset`, which write the ROLL's slot
+    /// unconditionally — so while the pitch editor is engaged they still target
+    /// the roll. That is a real routing gap and it is REPORTED rather than
+    /// patched here: `rowZoom*` is deliberately off `EditorSurfaceRouter`
+    /// (`rowZoomIn`'s own doc argues why, on the ground that the arrange has no
+    /// counterpart), and now that this pane DOES have one, changing it is a
+    /// change to that tested policy and belongs with it.
+    ///
+    /// ⚠️ NOTHING HERE MAY CALL `editorEngagement.engage` — the self-confirming
+    /// latch `EditorSurfaceOwnershipSiteTests.noZoomEntryPointEngages` pins.
+    func pitchEditorRowZoomIn() {
+        panelLayout.setPitchEditorRowHeight(PianoRollZoom.tallerRow(panelLayout.pitchEditorRowHeight))
+    }
+    func pitchEditorRowZoomOut() {
+        panelLayout.setPitchEditorRowHeight(PianoRollZoom.shorterRow(panelLayout.pitchEditorRowHeight))
+    }
+    func pitchEditorRowZoomReset() {
+        panelLayout.setPitchEditorRowHeight(PianoRollZoom.defaultRowHeight)
+    }
 
     // MARK: Piano-roll VERTICAL zoom — pitch-row height (m25-b-4)
 
@@ -5633,13 +6942,128 @@ final class AppModel {
 
     // MARK: - Follow the playhead (m23-c2)
 
-    /// The ONE opt-in flag both following surfaces read.
-    var isFollowingPlayhead: Bool { panelLayout.followPlayhead }
+    /// ⭐⭐ **THE FLAG THE ARRANGE ACTUALLY FOLLOWS ON (m23-cu-1): the persisted
+    /// preference OR a rolling take.**
+    ///
+    /// The user's report was *"it would be good to autoposition on the area
+    /// where the notes are placed and progress as user keeps playing"* — and
+    /// follow ALREADY worked during a take, end to end (measured live on
+    /// staging: with the preference on, a 6 s take issued a page scroll and
+    /// moved the arrange from offset 0 to 934.5; with it off, zero scrolls).
+    /// The only thing between the user and the behaviour they asked for was
+    /// `PanelLayoutModel.defaultFollowPlayhead == false`.
+    ///
+    /// ⚠️ **This is an OR, deliberately, NOT a flip of that default and NOT a
+    /// state machine.** Flipping the default would start every existing
+    /// session scrolling, which is the surprise m23-c2 made this setting
+    /// opt-in to avoid. Saving/restoring the preference around a take would
+    /// mean WRITING a user preference the user never touched — forbidden by
+    /// two standing precedents in this tree (`PianoRollMinimap.swift:202` and
+    /// the m25-f-3 record, both of which deliberately leave
+    /// `layout.followPlayhead` alone) — and a crash mid-take would strand the
+    /// override permanently. An OR needs no restore: the extra term simply
+    /// stops being true when `isRecording` clears.
+    ///
+    /// ⛔⛔ **IT MUST BE READ AT *BOTH* ARRANGE SITES — `followArrangeTick`
+    /// (the issuer) AND `reportArrangeHScroll` (the manual-scroll detector).**
+    /// If the two ever disagree, the detector judges scrolls the issuer made
+    /// while believing follow is off, blames the user for them, and suspends;
+    /// that disagreement, not the scrolling, is the m25-r "two owners of one
+    /// scroll" failure. `ArrangeFollowEnableSiteTests` pins both call sites.
+    ///
+    /// The piano roll is NOT included: it reads `layout.followPlayhead`
+    /// directly (`PianoRollView.swift:1084`) and is left exactly as it was.
+    /// Vertical follow to the armed track's row is m23-cu-3 and is not this.
+    var arrangeFollowEnabled: Bool {
+        panelLayout.followPlayhead || store.transport.isRecording
+    }
+
+    /// True when the arrange is following ONLY because a take is rolling — the
+    /// state the FOLLOW chip needs to distinguish, because a click on it there
+    /// means something different (see `toggleFollowPlayhead`).
+    var followAutoEngagedByTake: Bool {
+        !panelLayout.followPlayhead && store.transport.isRecording
+    }
+
+    /// ⭐⭐ **THE FLAG THE ARRANGE FOLLOWS *VERTICALLY* ON (m34-a-3): the
+    /// horizontal effective flag AND a rolling take.**
+    ///
+    /// ⛔⛔ **IT MUST BE READ AT *BOTH* VERTICAL SITES — `followArrangeVerticalTick`
+    /// (the ISSUER) and `reportArrangeVScroll` (the manual-scroll DETECTOR)** —
+    /// for the reason spelled out in full on `arrangeFollowEnabled`: a detector
+    /// running on a different flag from its issuer judges follow's own scrolls
+    /// as the user's, blames them, and suspends mid-take.
+    /// `ArrangeFollowEnableSiteTests` pins all four sites.
+    ///
+    /// ⚠️ **THE `&& isRecording` TERM IS NOT REDUNDANT, EVEN THOUGH IT IS
+    /// CURRENTLY IMPLIED.** `arrangeFollowEnabled` is `preference || isRecording`,
+    /// so today the conjunction reduces to `isRecording` — but the two facts it
+    /// states are different facts, and only one of them is about this axis.
+    /// **There is nothing to follow vertically except a take**: the armed row is
+    /// where a take LANDS, and during ordinary playback scrolling to it would
+    /// move the view toward a track for no reason the user could name. Writing
+    /// the term keeps that true if the horizontal flag's definition ever
+    /// changes, instead of silently enabling vertical follow during playback.
+    var arrangeVerticalFollowEnabled: Bool {
+        arrangeFollowEnabled && store.transport.isRecording
+    }
+
+    /// The row a vertical reveal aims at: the take's FIRST destination track.
+    ///
+    /// ⭐ **THE TAKE'S SNAPSHOT, NOT THE LIVE `isArmed` FLAGS.** Arm toggles
+    /// mid-take deliberately do not move where a take lands
+    /// (`ProjectStore.record()` snapshots its destinations), so following live
+    /// arm state would scroll to a lane the clip is not coming to — the same
+    /// reason `ProvisionalTakeRegion` carries the snapshot. Instrument
+    /// destinations come first because that is where the provisional region is
+    /// drawn; an audio-only take falls back to its own destination, so an audio
+    /// take on a far-off row still gets revealed.
+    var arrangeVerticalFollowRow: UUID? {
+        guard let pending = store.pendingTakeInfo else { return nil }
+        return pending.instrumentTrackIDs.first ?? pending.audioTrackIDs.first
+    }
+
+    /// The reveal row's content-space top, for the `debug.followPlayhead` echo
+    /// only — so a gate can say WHY a reveal did or did not happen instead of
+    /// inferring it. Reads the SAME reported ladder the issuer reads; it is not
+    /// a second computation of a row position (`ArrangeLaneGeometry`'s law).
+    var arrangeVerticalFollowRowTopForDebug: CGFloat? {
+        guard let rowID = arrangeVerticalFollowRow,
+              let index = store.tracks.firstIndex(where: { $0.id == rowID }),
+              arrangeLaneGeometry.laneTops.indices.contains(index) else { return nil }
+        return arrangeLaneGeometry.laneTops[index]
+    }
+
+    /// What the FOLLOW chip's LIT face reports.
+    ///
+    /// ⚠️ **It reads the EFFECTIVE flag, not the persisted one, and that is the
+    /// chip's own law applied in the other direction.** `followChip` documents
+    /// three faces "because two would lie", on the grounds that a chip glowing
+    /// while the view sits still claims to follow and does not. A chip sitting
+    /// DARK while a take drags the view across the timeline is the same lie
+    /// inverted — it claims the view is still and it is moving. So during a
+    /// take the chip lights, and `toggleFollowPlayhead` gives that lit face an
+    /// action that means what pressing it looks like it means.
+    var isFollowingPlayhead: Bool { arrangeFollowEnabled }
 
     /// Whichever follow surface is currently suspended by a manual scroll — what
     /// the FOLLOW chip's paused face reports.
+    ///
+    /// Split per surface (m23-cu-1) rather than gated on one flag: the arrange
+    /// counts whenever the ARRANGE is following (preference or take), the roll
+    /// only under the preference, because the roll is never auto-engaged. A
+    /// single `panelLayout.followPlayhead &&` guard would have hidden a
+    /// take-time arrange suspension behind the roll's rule.
     var isFollowSuspended: Bool {
-        panelLayout.followPlayhead && (arrangeFollow.isSuspended || pianoRollFollow.isSuspended)
+        (arrangeFollowEnabled && arrangeFollow.isSuspended)
+            // m34-a-3: a vertical stand-down counts too. The chip's PAUSED face
+            // would otherwise lie in the one direction it has never been allowed
+            // to lie in — claiming the view is following while a deliberate
+            // vertical scroll has stood half of it down.
+            || (arrangeVerticalFollowEnabled && arrangeVFollow.isSuspended)
+            || (panelLayout.followPlayhead && pianoRollFollow.isSuspended)
+            // m23-ap I5: the pitch editor reads the same preference as the roll.
+            || (panelLayout.followPlayhead && pitchEditorFollow.isSuspended)
     }
 
     /// The FOLLOW chip's action. While follow is PAUSED (the user scrolled during
@@ -5649,6 +7073,22 @@ final class AppModel {
     func toggleFollowPlayhead() {
         if isFollowSuspended {
             rearmFollow()
+        } else if followAutoEngagedByTake {
+            // ⛔⛔ **LIT BY THE TAKE, NOT BY THE PREFERENCE — SO THE PRESS MUST
+            // NOT WRITE THE PREFERENCE (m23-cu-1).** `setFollowPlayhead(!false)`
+            // here would turn following permanently ON at the exact moment the
+            // user pressed a lit chip to make the view HOLD STILL: the opposite
+            // of the press, and sticky. Instead it stands the arrange down for
+            // the rest of this take, through the SAME `isSuspended` state a
+            // manual scroll sets — reusing the one who-owns-the-scroll policy
+            // rather than adding a second. `rearmFollow()` on the next
+            // transport start clears it, so the stand-down never outlives the
+            // take, and the persisted preference is exactly what it was.
+            arrangeFollow.standDown()
+            // m34-a-3: BOTH axes. The press means "stop moving the view", and a
+            // chip that stilled the horizontal while the vertical kept revealing
+            // rows would be a control that did half of what it says.
+            arrangeVFollow.standDown()
         } else {
             setFollowPlayhead(!panelLayout.followPlayhead)
         }
@@ -5666,7 +7106,14 @@ final class AppModel {
     /// user expects the view to take charge again.
     func rearmFollow() {
         arrangeFollow.rearm()
+        // m34-a-3: the vertical axis re-arms with the horizontal one. A
+        // stand-down on either must never outlive the take that caused it, and
+        // the transport-start edge is the one moment a user expects the view to
+        // take charge again — on both axes at once, since they are one gesture
+        // as far as the person watching is concerned.
+        arrangeVFollow.rearm()
         pianoRollFollow.rearm()
+        pitchEditorFollow.rearm()
     }
 
     /// One transport tick's follow for the ARRANGE lanes. Driven from the
@@ -5682,13 +7129,69 @@ final class AppModel {
     func followArrangeTick() {
         guard workspaceMode == .arrange else { return }
         guard let target = arrangeFollow.target(
-            isEnabled: panelLayout.followPlayhead,
+            // m23-cu-1: the EFFECTIVE flag (preference OR rolling take). MUST
+            // stay identical to `reportArrangeHScroll`'s — see
+            // `arrangeFollowEnabled` for what a disagreement costs.
+            isEnabled: arrangeFollowEnabled,
             isPlaying: store.transport.isPlaying,
             playheadX: CGFloat(store.transport.positionBeats) * arrangePPB,
             viewportWidth: arrangeViewportWidth,
             contentWidth: arrangeContentWidth,
             currentOffset: arrangeHScrollReported) else { return }
         applyArrangeHScroll(target)
+    }
+
+    /// One transport tick's VERTICAL follow for the arrange (m34-a-3): reveal
+    /// the row the take is landing on, if and only if it is entirely out of
+    /// view.
+    ///
+    /// ⭐ **THE LANDING IS `ScrollViewProxy.scrollTo(rowID:anchor:)`, NOT AN
+    /// OFFSET WRITE** — the `debug.arrangeScroll` mechanism, which is the only
+    /// vertical scroll this app has ever performed and is therefore the one with
+    /// evidence behind it. m25-b-4 records why an offset-precise vertical scroll
+    /// is fraught here (its target has to land strictly inside a layout-real
+    /// marker or `scrollTo` lands somewhere other than the value asked for). The
+    /// analytic offset is still computed — it is what DECIDES, and what seeds the
+    /// detector's baseline so the proxy's landing is absorbed as our own issue
+    /// rather than blamed on the user.
+    ///
+    /// Driven from the TRANSPORT observation path like `followArrangeTick`, and
+    /// never from a geometry callback, for the m17-b reason stated there.
+    func followArrangeVerticalTick() {
+        guard workspaceMode == .arrange else { return }
+        guard let rowID = arrangeVerticalFollowRow,
+              let index = store.tracks.firstIndex(where: { $0.id == rowID }),
+              arrangeLaneGeometry.laneTops.indices.contains(index) else { return }
+        guard let reveal = arrangeVFollow.rowRevealTarget(
+            // m34-a-3: the EFFECTIVE vertical flag. MUST stay identical to
+            // `reportArrangeVScroll`'s — see `arrangeVerticalFollowEnabled`.
+            isEnabled: arrangeVerticalFollowEnabled,
+            isPlaying: store.transport.isPlaying,
+            rowTop: arrangeLaneGeometry.laneTops[index],
+            rowHeight: arrangeLaneGeometry.rowHeight,
+            viewportHeight: arrangeVViewportHeight,
+            contentHeight: arrangeVContentHeight,
+            currentOffset: arrangeVScrollReported) else { return }
+        arrangeVFollowTarget = rowID
+        arrangeVFollowAnchorsBottom = reveal.anchorsBottom
+        arrangeVFollowNonce += 1
+    }
+
+    /// The lanes' live VERTICAL offset (ground truth from their own geometry):
+    /// drives the reveal decision and follow's manual-scroll detector.
+    func reportArrangeVScroll(_ offset: CGFloat, contentHeight: CGFloat) {
+        arrangeVScrollReported = offset
+        arrangeVContentHeight = contentHeight
+        arrangeVFollow.reportOffset(offset,
+                                    // m34-a-3: the same EFFECTIVE flag the issuer
+                                    // reads, for the reason on
+                                    // `arrangeVerticalFollowEnabled`. A detector on
+                                    // a different flag blames the user for follow's
+                                    // own scrolls and suspends mid-take.
+                                    isEnabled: arrangeVerticalFollowEnabled,
+                                    isPlaying: store.transport.isPlaying,
+                                    contentWidth: contentHeight,
+                                    viewportWidth: arrangeVViewportHeight)
     }
 
     /// The lanes' live horizontal offset (ground truth from their own geometry):
@@ -5698,7 +7201,13 @@ final class AppModel {
         arrangeHScroll = offset
         arrangeHScrollReported = offset
         arrangeFollow.reportOffset(offset,
-                                   isEnabled: panelLayout.followPlayhead,
+                                   // m23-cu-1: same EFFECTIVE flag the issuer
+                                   // reads, for the reason on
+                                   // `arrangeFollowEnabled`. Not `panelLayout.
+                                   // followPlayhead` — that would make the
+                                   // detector blame the user for follow's own
+                                   // take-time scrolls.
+                                   isEnabled: arrangeFollowEnabled,
                                    isPlaying: store.transport.isPlaying,
                                    contentWidth: arrangeContentWidth,
                                    viewportWidth: arrangeViewportWidth)
@@ -5800,7 +7309,9 @@ final class AppModel {
             "workspaceMode": .string(workspaceMode.rawValue),
             "arrangePPB": .number(Double(arrangePPB)),
             "pianoRollPPB": .number(Double(panelLayout.pianoRollPPB)),
+            "pitchEditorPPB": .number(Double(panelLayout.pitchEditorPPB)),
             "pianoRollRowHeight": .number(Double(panelLayout.pianoRollRowHeight)),
+            "pitchEditorRowHeight": .number(Double(panelLayout.pitchEditorRowHeight)),
             // THE INSTRUMENT, NOT AN INPUT (m23-al). Reported here beside the
             // verdict precisely so the DIVERGENCE between SwiftUI focus and the
             // active surface is visible on the wire rather than being the bug.
@@ -6158,6 +7669,12 @@ final class AppModel {
     ///     effect. And `deleteKeyHandled` means "a surface OWNED the key", never
     ///     "something was deleted" — a store refusal is `true` with an amber
     ///     bubble, exactly as a fully-clamped nudge reports `handled: true`.
+    ///     ⭐ m23-ap p2-del: the open NOTE EDITOR owns it too —
+    ///     `deleteKeyRefusedBy: "pitch-editor-open"` with `deleteKeyHandled: true`
+    ///     and `deleteKeySurface: null` is the key swallowed, the pane's hint
+    ///     requested (`debug.pitchEditor`'s `refusalText` shows the words once the
+    ///     pane has drawn), and the clip untouched. It is the ONLY refusal that
+    ///     reports `true`; every other one is still `false`.
     ///   - `{act:"nudge", direction:"left"|"right"|"up"|"down", option?, shift?,
     ///     command?, control?, repeat?}` (m23-x; ↑/↓ added by m23-aj-3) — the
     ///     ARROW key's HANDLER body including its six guards
@@ -6355,11 +7872,12 @@ final class AppModel {
                 // funnel calls (`clickClip`, the roll's R1–R8), so the seam cannot
                 // drift from the feature.
                 guard let raw = params["surface"]?.stringValue else {
-                    throw DebugError("act \"engage\" needs 'surface' — \"arrange\" or \"pianoRoll\"")
+                    throw DebugError("act \"engage\" needs 'surface' — \"arrange\", "
+                        + "\"pianoRoll\" or \"pitchEditor\"")
                 }
                 guard let surface = EditorSurface(rawValue: raw) else {
-                    throw DebugError("unknown surface \"\(raw)\" — expected \"arrange\" "
-                        + "or \"pianoRoll\"")
+                    throw DebugError("unknown surface \"\(raw)\" — expected \"arrange\", "
+                        + "\"pianoRoll\" or \"pitchEditor\"")
                 }
                 // THE POST-CONDITION IS ENFORCED, LOUDLY, following
                 // `act:"automationPoints"` (below): engaging the ROLL while no
@@ -6373,6 +7891,16 @@ final class AppModel {
                         + "roll — no MIDI clip is selected, so `openEditorClip` is nil and the "
                         + "router would resolve straight back to \"arrange\" (select a MIDI clip "
                         + "first)")
+                }
+                // m23-ap p2-b — THE SAME UNSATISFIABLE-POST-CONDITION RULE, one
+                // surface over. Engaging the pitch editor while no AUDIO clip is
+                // open in it is unsatisfiable for exactly the roll's reason:
+                // `resolve` would override it to `.arrange` on the very next read.
+                if surface == .pitchEditor, openPitchEditorClip == nil {
+                    throw DebugError("act \"engage\" surface \"pitchEditor\" needs an open pitch "
+                        + "editor — nothing has opened one, so `openPitchEditorClip` is nil and "
+                        + "the router would resolve straight back to \"arrange\" (open an audio "
+                        + "clip's note editor first)")
                 }
                 // DELIBERATELY DOES NOT FORCE `workspaceMode`, unlike "click" and
                 // "clickTrack": engagement is not a workspace-scoped gesture, and a
@@ -6718,6 +8246,29 @@ final class AppModel {
             "deleteKeyMonitorSeq": .number(Double(deleteKeyMonitorSeq)),
             "deleteKeyMonitorRefusedBy":
                 deleteKeyMonitorRefusedBy.map { .string($0.rawValue) } ?? .null,
+            // ⭐ m34-j — the ARROW monitor's tier, the two fields above's twin.
+            // Debug tier, echo fields on an existing command: ZERO new wire
+            // commands, off `allCommands`/MCP (the m34-d precedent).
+            //
+            // ⚠️ READ THESE TO NAME A REFUSAL, NEVER TO DECIDE THAT AN ARROW
+            // WORKED. `arrowNudgeMonitorSeq` counts ARRIVALS, so it climbs
+            // identically for a key the policy then declines — the same trap
+            // `deleteKeyFunnelSeq`'s doc names, and the one that cost a cycle at
+            // m23-ft. The only honest verdict for "the nudge happened" is the
+            // CLIP MOVING, which is what `m34j-arrow-nudge-delivery.mjs` asserts
+            // on every leg.
+            "arrowNudgeMonitorSeq": .number(Double(arrowNudgeMonitorSeq)),
+            "arrowNudgeMonitorRefusedBy":
+                arrowNudgeMonitorRefusedBy.map { .string($0.rawValue) } ?? .null,
+            // m34-k — Escape's monitor tier: ARRIVALS, the refusal, and which open
+            // pane the last eligible press was handed to (null = passed on). The
+            // verdict is the pane's STATE, never these (see the fields' doc).
+            "escapeKeyMonitorSeq": .number(Double(escapeKeyMonitorSeq)),
+            "escapeKeyMonitorRefusedBy":
+                escapeKeyMonitorRefusedBy.map { .string($0.rawValue) } ?? .null,
+            "escapeKeyMonitorTarget":
+                escapeKeyMonitorTarget.map { .string($0.rawValue) } ?? .null,
+            "escapeIsOwnedElsewhere": .bool(escapeIsOwnedElsewhere),
             // ⭐ m23-fi — PER-MOUNT `.onKeyPress` ENTRY COUNTERS + the three
             // `@FocusState` VALUES they hang off. See `KeyPressProbe`. This is a
             // strictly finer instrument than the two fields above: the monitor
@@ -6757,6 +8308,47 @@ final class AppModel {
             // the leg assumed — focus alone is true for any single selected MIDI
             // clip and is NOT sufficient to refuse (see `handleArrangeNudgeKey`).
             "pianoRollNoteSelection": .bool(pianoRollNoteSelection.hasSelection),
+            // ⭐⭐ m34-d — THE ⌘A REQUEST COUNTER, AND IT ANSWERS A QUESTION
+            // `pianoRollNoteSelection` ALONE CANNOT. That flag is the roll's
+            // REPORT; this is the MENU's ASK. With only the flag, "Edit ▸ Select
+            // All was never invoked" and "it was invoked and the roll did not
+            // act" are the same reading — two different bugs in two different
+            // layers. MEASURED NEED, not decoration: m34-d's gate had a leg that
+            // was red for one of those two reasons and no field in this echo
+            // could say which.
+            //
+            // ⚠️ REQUESTS, NOT SELECTIONS. It counts `requestSelectAll()` calls
+            // (the user's ⌘A route only — the m23-x staging nonce is separate and
+            // deliberately so), so it climbs for a request the roll then ignores.
+            // That is the entire point; a gate that reads it as "notes are
+            // selected" has written a leg that cannot fail.
+            //
+            // Debug tier, an ECHO FIELD on an existing command — ZERO new wire
+            // commands, off `allCommands`/MCP.
+            "pianoRollSelectAllNonce": .number(Double(pianoRollNoteSelection.selectAllNonce)),
+            // ⭐⭐ m34-d — THE ⌘A POLICY'S OWN LIVE VERDICT, NAMED. With the nonce
+            // above this makes the whole route observable in three separable
+            // layers: this says WHAT THE POLICY DECIDES, the nonce says WHETHER
+            // APPKIT ACTUALLY INVOKED IT, and `pianoRollNoteSelection` says
+            // whether the ROLL then acted. A red gate that has only the last one
+            // cannot tell those three apart, and m34-d spent a measurement
+            // learning that the hard way.
+            //
+            // `refusedBy` is carried rather than a bare `enabled:false` for
+            // `SelectAllRefusal`'s own reason: "the Mix console is up", "no clip
+            // is open", "a modal is up" and "the roll is empty" are four
+            // different fixtures, and a bare false reads identically for all of
+            // them. Debug tier, an ECHO FIELD on an existing command — ZERO new
+            // wire commands, off `allCommands`/MCP.
+            "selectAllMenuItem": .object([
+                "enabled": .bool(selectAllMenuItem.isEnabled),
+                "surface": selectAllMenuItem.surface.map { .string($0.rawValue) } ?? .null,
+                "refusedBy": selectAllMenuItem.refusedBy.map { .string($0.rawValue) } ?? .null,
+                // The policy's third input, echoed because it is the ONE term a
+                // gate cannot otherwise see: the arrange `count` beside it is
+                // CLIPS, not notes, and "the roll is empty" is a real refusal.
+                "rollNoteCount": .number(Double(openEditorClip?.notes?.count ?? 0)),
+            ]),
             // m23-ai: the SIXTH guard's live verdict, echoed on EVERY read so a
             // gate can take a baseline with the same call it asserts with.
             // Without it the refusal string is the only witness, and a gate
@@ -7575,8 +9167,11 @@ final class AppModel {
             // MEASURED FROM STAGING, and without which a "not focused" reading
             // does not transfer to the user's app:
             //
-            //   • `appActive` — staging deliberately never calls `NSApp.activate`
-            //     (it must not steal the user's system focus), so it can run
+            //   • `appActive` — no staging COMMAND calls `NSApp.activate` (none
+            //     may steal the user's system focus); the ONE call is the
+            //     launch-time `activate(ignoringOtherApps:)` in `DAWProApp`'s
+            //     `onAppear`, skipped under DAWPRO_STAGING_NO_ACTIVATE=1 — and
+            //     another app can take focus afterwards, so staging can run
             //     INACTIVE. SwiftUI grants keyboard focus only in the key window
             //     of an active app; a `false` here means a focus negative
             //     measured in staging is CONDITIONAL, not the user's state.
@@ -8010,13 +9605,16 @@ final class AppModel {
                 "ink": entry.ink.map { JSONValue.string($0) } ?? .null,
             ])
         }
-        return .object([
+        // Read ONCE: `editorOpen` and the I5-F2 ruler echo below describe the
+        // same clip (and `EditorSurfaceOwnershipSiteTests` censuses this home).
+        let rollClip = openEditorClip
+        var fields: [String: JSONValue] = [
             // The SAME gate `ContentView` puts the roll behind (`openEditorClip`,
             // which additionally requires the clip to be MIDI) — not the looser
             // `selectedClipID != nil`, which is true with an AUDIO clip selected
             // and no roll on screen. On a cycle about a field claiming more than
             // it measures, this one does not get to.
-            "editorOpen": .bool(openEditorClip != nil),
+            "editorOpen": .bool(rollClip != nil),
             "density": .string(
                 panelDensity.density(forPanel: PianoRollView.panelID) == .pro ? "pro" : "simple"),
             "roles": .object(roles),
@@ -8038,7 +9636,40 @@ final class AppModel {
                 "textFaint": .string(DAWTheme.hexString(DAWTheme.textFaint)),
                 "ai": .string(DAWTheme.hexString(DAWTheme.ai)),
             ]),
-        ])
+        ]
+        // m23-ap I5-F2 — the roll numbers the SONG's bars, so a gate compares the
+        // transport's bar.beat exactly as `TransportBar` draws it, the ruler's
+        // labelled ticks and the grid's bar lines, all in the roll's CONTENT x
+        // (x 0 = the clip's first beat). Re-derived through the SAME functions and
+        // inputs the band and the grid are handed (`PitchEditorSongRuler.ticks`,
+        // `PianoRollSongGrid.forEachLine`, the one `panelLayout.pianoRollPPB` slot
+        // that feeds the roll's `pixelsPerBeat`, and `transport.meterMap`). ⚠️ A
+        // re-derivation, not a reading of the pixels: a capture is what shows the
+        // band and the grid drew them. The I5-F1 `debug.pitchEditor` shape.
+        fields["transportReadout"] = .string(store.transport.barsBeatsDisplay)
+        fields["ruler"] = .null
+        fields["gridBarXs"] = .null
+        if let clip = rollClip {
+            let ppb = panelLayout.pianoRollPPB
+            let meterMap = store.transport.meterMap
+            let labels = PitchEditorSongRuler.ticks(
+                clipStartBeat: clip.startBeat, lengthBeats: clip.lengthBeats,
+                pixelsPerBeat: ppb, meterMap: meterMap)
+                .compactMap { tick -> JSONValue? in
+                    guard let text = tick.label else { return nil }
+                    return .object(["x": .number(Double(tick.x)), "text": .string(text),
+                                    "isBar": .bool(tick.isBar)])
+                }
+            fields["ruler"] = .object(["numbering": .string("song"), "labels": .array(labels)])
+            var barXs: [JSONValue] = []
+            PianoRollSongGrid.forEachLine(clipStartBeat: clip.startBeat, spanBeats: clip.lengthBeats,
+                                          pixelsPerBeat: ppb, step: 1, drawsDivisions: false,
+                                          meterMap: meterMap) { x, kind in
+                if kind == .bar { barXs.append(.number(Double(x))) }
+            }
+            fields["gridBarXs"] = .array(barXs)
+        }
+        return .object(fields)
     }
 
     private func liveLayersDebug(_ params: [String: JSONValue]) -> JSONValue {
@@ -8683,18 +10314,152 @@ final class AppModel {
         }
     }
 
-    /// Opens the "Convert to Voice…" sheet on an audio clip (the clip context
-    /// menu / `debug.voicePanel`). Fresh transient state each open.
-    func openVoiceConvert(clipID: UUID) {
-        voicePanel.resetConvertState()
+    /// Opens the **Convert Voice…** panel on a set of audio clips (the clip
+    /// context menu, Edit ▸ Convert, `debug.voicePanel`). Fresh transient state
+    /// each open. An empty set is a no-op rather than an empty modal — every
+    /// caller resolves its targets from `selectedAudioClipIDs` or from the
+    /// clicked clip, both of which are non-empty by construction.
+    /// - Parameter preselectedVoiceID: the voice the user DRAGGED (m24-m leg C).
+    ///   Applied AFTER `resetConvertChoice`, through the same
+    ///   `selectedConvertVoiceID` the picker's rows write, so a dragged voice
+    ///   arms the panel exactly as a click on its row would — including the
+    ///   panel's own honesty treatment for the untrained smoke target, which a
+    ///   drag must not be able to bypass. nil for the menu routes, which name no
+    ///   voice.
+    func openVoiceConvert(clipIDs: [UUID], preselectedVoiceID: String? = nil) {
+        guard !clipIDs.isEmpty else { return }
+        voicePanel.resetClipsConvertState()
+        // A fresh run never inherits the last one's voice or pitch. Done HERE
+        // and not in the view's `.task`, which re-runs on every appearance and
+        // would wipe a pick the user (or a capture) had just made.
+        voicePanel.resetConvertChoice()
+        // ⭐ AFTER the reset, never before — the reset is what makes "a fresh
+        // run" true, and the dragged voice is this run's first parameter, not
+        // the previous run's leftover. Dragging a SPECIFIC model and landing on
+        // an unarmed panel would make the choice the user just expressed
+        // meaningless.
+        if let preselectedVoiceID { voicePanel.selectedConvertVoiceID = preselectedVoiceID }
         workspaceMode = .arrange
-        voiceConvertClipID = clipID
+        voiceConvertClipIDs = clipIDs
     }
 
-    /// Closes the convert sheet and clears its transient state.
+    /// Closes the panel and clears its transient state.
+    ///
+    /// ⚠️ Does NOT abort a conversion — nothing can (leg A has no abort), which
+    /// is exactly why the panel's ✕ and scrim are inert while one runs.
     func closeVoiceConvert() {
-        voiceConvertClipID = nil
-        voicePanel.resetConvertState()
+        voiceConvertClipIDs = nil
+        voicePanel.resetClipsConvertState()
+    }
+
+    // MARK: - Convert Voice… menu routes (m24-m leg B)
+
+    /// Every AUDIO clip in the arrange selection, ordered by start beat — the
+    /// ONE producer both the menu titles and the action read.
+    ///
+    /// ⭐ **AUDIO-ONLY, AND FILTERED RATHER THAN REFUSED.** A MIDI clip has no
+    /// recording to convert, and leg A would refuse the whole call for one; a
+    /// marquee that swept a MIDI lane must not turn a legal conversion into an
+    /// error message. The count the menu shows is the count that will convert.
+    ///
+    /// **Ordered by start beat** so the panel's list, the store's per-clip
+    /// order and `ClipVoiceConversionResult.clips` all read the same way.
+    var selectedAudioClipIDs: [UUID] {
+        var found: [(id: UUID, startBeat: Double)] = []
+        for track in store.tracks {
+            // ⭐ ONE predicate, shared with the track-header drop route (leg C):
+            // `VoiceConvertMenuPolicy.isConvertible`. The conjunction used to
+            // live inline here, and a second copy on the drop path is exactly
+            // the two-rules-that-can-disagree defect this tree keeps finding.
+            for clip in track.clips
+            where arrangeSelection.contains(clip.id) && VoiceConvertMenuPolicy.isConvertible(clip) {
+                found.append((clip.id, clip.startBeat))
+            }
+        }
+        return found.sorted { $0.startBeat < $1.startBeat }.map(\.id)
+    }
+
+    /// Edit ▸ Convert … to Voice — title + enabled state, from observable state
+    /// only (the m23-cf law: a `Commands` body re-evaluates on `@Observable`
+    /// changes, not when the menu opens).
+    var voiceConvertMenuItem: VoiceConvertMenuItem {
+        VoiceConvertMenuPolicy.editMenuItem(
+            arrangeWorkspace: workspaceMode == .arrange,
+            isModalPresented: isModalPresented,
+            selectedAudioClipCount: selectedAudioClipIDs.count)
+    }
+
+    /// Edit ▸ Convert fired. RE-RESOLVED at click time from the same property
+    /// the title counted, so what the user was offered and what runs cannot
+    /// diverge.
+    @discardableResult
+    func performMenuVoiceConvert() -> Bool {
+        guard voiceConvertMenuItem.isEnabled else { return false }
+        openVoiceConvert(clipIDs: selectedAudioClipIDs)
+        return true
+    }
+
+    /// A clip's context-menu *Convert Voice…* fired. The command is passed back
+    /// in rather than recomputed, so the panel can never open on a different set
+    /// from the one the label named (the `deleteClipFromContextMenu` law).
+    ///
+    /// Deliberately does NOT touch `arrangeSelection`: right-clicking a clip the
+    /// user had not selected converts that clip alone and leaves their selection
+    /// theirs.
+    func convertClipsFromContextMenu(_ command: VoiceConvertCommand) {
+        openVoiceConvert(clipIDs: command.clipIDs)
+    }
+
+    // MARK: - Dragging a voice model onto a track header (m24-m leg C)
+
+    /// What track `trackID` would do with a dropped voice model — resolved from
+    /// the LIVE store through `VoiceConvertMenuPolicy`, never cached.
+    ///
+    /// An unknown id refuses rather than crashing: a drag can outlive the track
+    /// it started over (an agent can delete a track mid-gesture over the wire).
+    func voiceModelDropVerdict(trackID: UUID) -> VoiceConvertDropVerdict {
+        guard let track = store.tracks.first(where: { $0.id == trackID }) else {
+            return .refuses(VoiceConvertDropRefusal.busTrack)
+        }
+        return VoiceConvertMenuPolicy.trackDropVerdict(
+            trackKind: track.kind,
+            audioClipIDs: VoiceConvertMenuPolicy.convertibleAudioClipIDs(in: track))
+    }
+
+    /// A voice model entered / left a track header. `nil` = the drag left.
+    ///
+    /// Re-resolves on EVERY enter rather than trusting a stored verdict: between
+    /// two hovers the project can have gained or lost clips, and a stale "3
+    /// CLIPS" chip would promise a blast radius that no longer exists.
+    func voiceModelDropHoverChanged(trackID: UUID?) {
+        guard let trackID else {
+            voiceModelDropHover = nil
+            return
+        }
+        voiceModelDropHover = VoiceModelDropHover(
+            trackID: trackID, verdict: voiceModelDropVerdict(trackID: trackID))
+    }
+
+    /// A voice model was RELEASED on a track header. Returns whether the drop
+    /// was taken (false → SwiftUI rejects it, and nothing opens).
+    ///
+    /// ⭐⭐ **THE WHOLE LEG IS THESE FOUR LINES, and that is the design.** It
+    /// resolves the same verdict the row was showing and hands the resulting
+    /// `VoiceConvertCommand`'s ids to `openVoiceConvert` — the SAME funnel the
+    /// clip context menu and Edit ▸ Convert use, opening the SAME panel over the
+    /// SAME `ProjectStore.convertClipsToVoice` seam. There is no drag-specific
+    /// conversion path to drift out of step, because there is no drag-specific
+    /// conversion path.
+    ///
+    /// The panel then LISTS those clips before the user commits, which is what
+    /// makes a track-sized blast radius safe to offer from a one-second gesture.
+    @discardableResult
+    func performVoiceModelDrop(trackID: UUID, voiceID: String) -> Bool {
+        let verdict = voiceModelDropVerdict(trackID: trackID)
+        voiceModelDropHover = nil
+        guard let command = verdict.command else { return false }
+        openVoiceConvert(clipIDs: command.clipIDs, preselectedVoiceID: voiceID)
+        return true
     }
 
     // MARK: - Voice panel debug command (m10-p-5, capture support)
@@ -8702,13 +10467,24 @@ final class AppModel {
     /// `debug.voicePanel {open?, close?, sidecarState?, sidecarMessage?,
     /// startingForSeconds?, sidecarClear?, seedVoices?, refreshVoices?,
     /// rescan?, createVoice?, sampleVoice?+samplePath?/sampleClip?, train?,
-    /// convertSheet?, convertGo?+convertVoiceId?+convertPitch?, closeSheet?}`
-    /// — stages the Voice panel + convert sheet for captures/E2E (app-level,
-    /// debug tier — off `allCommands`/MCP, the `debug.instrumentPicker`
-    /// precedent). Async paths (`refreshVoices`/`train`/`convertGo`) kick a
-    /// Task through the SAME model methods the live UI calls and echo state —
-    /// the caller sleeps/re-reads (the `debug.sketchpadGenerate` cadence). A
-    /// bare call is READ-ONLY (echoes state, never re-opens — the m11-a law).
+    /// convertSheet?/convertClips?, convertGo?+convertVoiceId?+convertPitch?,
+    /// convertSelection?, seedProgress?+progressTotal?+progressCompleted?+
+    /// progressPhase?+progressClip?, seedResult?+resultTrackName?+
+    /// resultClips?+resultWarnings?+resultRealConversion?+resultNote?,
+    /// seedConvertError?, closeSheet?}` — stages the Voice panel + the Convert
+    /// Voice… panel for captures/E2E (app-level, debug tier — off
+    /// `allCommands`/MCP, the `debug.instrumentPicker` precedent). Async paths
+    /// (`refreshVoices`/`train`/`convertGo`) kick a Task through the SAME model
+    /// methods the live UI calls and echo state — the caller sleeps/re-reads
+    /// (the `debug.sketchpadGenerate` cadence). A bare call is READ-ONLY
+    /// (echoes state, never re-opens — the m11-a law).
+    ///
+    /// ⚠️ `convertSheet` is KEPT as the single-clip alias for the multi-clip
+    /// `convertClips` (m24-m leg B): it names one clip id and opens the panel on
+    /// exactly that clip, which is what every existing caller meant. The seed
+    /// params exist because a REAL conversion is minutes-class — a capture must
+    /// be able to photograph the converting and result faces without a sidecar
+    /// (the `setVoicesForCapture` precedent).
     private func voicePanelDebug(_ params: [String: JSONValue]) throws -> JSONValue {
         if params["open"]?.boolValue == true {
             workspaceMode = .arrange
@@ -8743,6 +10519,27 @@ final class AppModel {
                 trained: false,
                 note: "pipeline smoke target — proves conversion runs, not a real voice")])
         }
+        // A RICHER seeded list (m24-m leg B): the convert picker shows the
+        // facade's state chips, so a capture must be able to stage a voice that
+        // is READY beside one that NEEDS PREP — the whole point of reusing the
+        // Voice panel's vocabulary is lost if only one face is ever rendered.
+        if let seeded = params["seedVoiceList"]?.arrayValue {
+            var descriptors: [VoiceDescriptor] = []
+            for entry in seeded {
+                guard let object = entry.objectValue,
+                      let id = object["id"]?.stringValue else {
+                    throw DebugError("seedVoiceList entries need at least {id}")
+                }
+                descriptors.append(VoiceDescriptor(
+                    id: id,
+                    name: object["name"]?.stringValue ?? id,
+                    state: object["state"]?.stringValue ?? "ready",
+                    kind: object["kind"]?.stringValue,
+                    trained: object["trained"]?.boolValue,
+                    note: object["note"]?.stringValue))
+            }
+            voicePanel.setVoicesForCapture(descriptors)
+        }
         if params["refreshVoices"]?.boolValue == true {
             Task { await self.voicePanel.refreshVoices() }
         }
@@ -8768,28 +10565,108 @@ final class AppModel {
             Task { await self.voicePanel.train(voiceNamed: trainName) }
         }
 
-        // Convert sheet: open on a clip; convertGo drives the SAME
-        // model.convertClip the sheet's button calls (the UI path seam the
-        // live gate exercises).
+        // Convert Voice… panel: open on one clip (`convertSheet`, the kept
+        // single-clip alias), on a list (`convertClips`), or on whatever the
+        // arrange selection holds (`convertSelection`, the Edit-menu route).
         if let sheetRaw = params["convertSheet"]?.stringValue {
             guard let clipID = UUID(uuidString: sheetRaw) else {
                 throw DebugError("convertSheet is not a valid UUID: \(sheetRaw)")
             }
-            openVoiceConvert(clipID: clipID)
+            openVoiceConvert(clipIDs: [clipID])
+        }
+        if let listRaw = params["convertClips"]?.arrayValue {
+            var ids: [UUID] = []
+            for entry in listRaw {
+                guard let raw = entry.stringValue, let id = UUID(uuidString: raw) else {
+                    throw DebugError("convertClips entries must be clip UUID strings")
+                }
+                ids.append(id)
+            }
+            guard !ids.isEmpty else { throw DebugError("convertClips needs at least one clip id") }
+            openVoiceConvert(clipIDs: ids)
+        }
+        if params["convertSelection"]?.boolValue == true {
+            // The literal Edit ▸ Convert funnel, enabled-check included — the
+            // `debug.effectEditor {add}` "drive the real UI path" rule.
+            guard performMenuVoiceConvert() else {
+                throw DebugError(
+                    "debug.voicePanel convertSelection is inert: \(voiceConvertMenuItem.title)")
+            }
         }
         if params["convertGo"]?.boolValue == true {
-            guard let clipID = voiceConvertClipID else {
-                throw DebugError("debug.voicePanel convertGo needs the convert sheet open (pass convertSheet first)")
+            guard let clipIDs = voiceConvertClipIDs else {
+                throw DebugError(
+                    "debug.voicePanel convertGo needs the Convert Voice… panel open (pass convertSheet/convertClips first)")
             }
             guard let voiceID = params["convertVoiceId"]?.stringValue else {
                 throw DebugError("debug.voicePanel convertGo requires convertVoiceId")
             }
             let pitch = params["convertPitch"]?.doubleValue.map { Int($0) } ?? 0
             Task {
-                _ = await self.voicePanel.convertClip(
-                    clipID: clipID, voiceID: voiceID, pitchSemitones: pitch)
+                _ = await self.voicePanel.convertClips(
+                    clipIDs: clipIDs, voiceID: voiceID, pitchSemitones: pitch)
             }
         }
+
+        // Capture seeding for the two faces a real run would cost minutes to
+        // reach. These plant MODEL state only — no sidecar is contacted, no
+        // track is created, and the engine is never touched (the `debug.vibeSeed`
+        // rule).
+        if params["seedProgress"]?.boolValue == true {
+            let total = params["progressTotal"]?.doubleValue.map { Int($0) } ?? 3
+            let done = params["progressCompleted"]?.doubleValue.map { Int($0) } ?? 1
+            let phaseRaw = params["progressPhase"]?.stringValue ?? "converting"
+            let phase: VoiceClipsConvertProgress.Phase = switch phaseRaw {
+            case "preparing": .preparing
+            case "landing": .landing
+            case "converting": .converting
+            default: throw DebugError(
+                "debug.voicePanel progressPhase must be preparing|converting|landing")
+            }
+            let elapsed = params["progressElapsedSeconds"]?.doubleValue ?? 0
+            voicePanel.setClipsConvertProgressForCapture(VoiceClipsConvertProgress(
+                total: max(1, total), completed: max(0, min(done, max(1, total))),
+                currentClipName: params["progressClip"]?.stringValue,
+                phase: phase, startedAt: Date().addingTimeInterval(-elapsed)))
+        } else if params["clearProgress"]?.boolValue == true {
+            voicePanel.setClipsConvertProgressForCapture(nil)
+        }
+        if params["seedResult"]?.boolValue == true {
+            let trackName = params["resultTrackName"]?.stringValue ?? "Voice: base"
+            let count = params["resultClips"]?.doubleValue.map { Int($0) } ?? 2
+            let warnings = (params["resultWarnings"]?.arrayValue ?? []).compactMap(\.stringValue)
+            let reports = (0..<max(0, count)).map { index in
+                ConvertedClipReport(
+                    sourceClipId: UUID(), sourceTrackId: UUID(), clipId: UUID(),
+                    startBeat: Double(index * 8), lengthBeats: 8,
+                    extractedPath: "/tmp/DAWPro/voice-source-seed\(index).wav",
+                    file: "/tmp/DAWPro/voice-seed\(index).wav",
+                    sourceSeconds: 16, convertedSeconds: 16)
+            }
+            voicePanel.setClipsConversionForCapture(VoiceClipsConvertOutcome(
+                voiceID: params["convertVoiceId"]?.stringValue ?? "base",
+                result: ClipVoiceConversionResult(
+                    trackId: UUID(), trackName: trackName,
+                    clips: reports, warnings: warnings),
+                realConversion: params["resultRealConversion"]?.boolValue ?? false,
+                note: params["resultNote"]?.stringValue,
+                totalInferSeconds: params["resultInferSeconds"]?.doubleValue ?? 1.4))
+        } else if params["clearResult"]?.boolValue == true {
+            voicePanel.setClipsConversionForCapture(nil)
+        }
+        if let seeded = params["seedConvertError"]?.stringValue {
+            voicePanel.setClipsConvertErrorForCapture(seeded)
+        }
+        // Pick a voice / set the pitch through the model — the ARMED primary
+        // button exists only once a voice is picked, and a capture must be able
+        // to reach it (see `VoicePanelModel.selectedConvertVoiceID`).
+        if let picked = params["pickVoice"]?.stringValue {
+            voicePanel.selectedConvertVoiceID = picked.isEmpty ? nil : picked
+        }
+        if let pitch = params["convertPitch"]?.doubleValue, params["convertGo"] == nil {
+            voicePanel.convertPitchSemitones = Int(pitch)
+        }
+
         if params["closeSheet"]?.boolValue == true { closeVoiceConvert() }
 
         return voicePanelStateResponse()
@@ -8820,19 +10697,42 @@ final class AppModel {
                 ])
             }),
             "trainStates": .object(trainStates),
-            "isConverting": .bool(voicePanel.isConverting),
+            "isConverting": .bool(voicePanel.isConvertingClips),
             "datasetsRoot": .string(voicePanel.datasetsRoot.path),
         ]
-        if let clipID = voiceConvertClipID {
-            response["convertSheetClipId"] = .string(clipID.uuidString)
+        if let clipIDs = voiceConvertClipIDs {
+            response["convertClipIds"] = .array(clipIDs.map { .string($0.uuidString) })
+            // KEPT: every existing caller of this echo reads one id.
+            if let first = clipIDs.first {
+                response["convertSheetClipId"] = .string(first.uuidString)
+            }
         }
-        if let error = voicePanel.convertError { response["convertError"] = .string(error) }
+        // The Edit ▸ Convert item's live title/enabled state — what a gate reads
+        // to prove the menu route agrees with the selection (m23-cf idiom).
+        let menuItem = voiceConvertMenuItem
+        response["convertMenuTitle"] = .string(menuItem.title)
+        response["convertMenuEnabled"] = .bool(menuItem.isEnabled)
+        response["selectedAudioClips"] = .number(Double(menuItem.clipCount))
+        response["pickedVoice"] = voicePanel.selectedConvertVoiceID.map { .string($0) } ?? .null
+        response["convertPitch"] = .number(Double(voicePanel.convertPitchSemitones))
+        if let progress = voicePanel.clipsConvertProgress {
+            response["convertProgress"] = .object([
+                "total": .number(Double(progress.total)),
+                "completed": .number(Double(progress.completed)),
+                "step": .string(progress.stepText),
+                "detail": .string(progress.detailText),
+                "phase": .string(String(describing: progress.phase)),
+            ])
+        }
+        if let error = voicePanel.clipsConvertError { response["convertError"] = .string(error) }
         if let error = voicePanel.datasetError { response["datasetError"] = .string(error) }
         if let error = voicePanel.voicesError { response["voicesError"] = .string(error) }
-        if let outcome = voicePanel.lastConversion {
+        if let outcome = voicePanel.lastClipsConversion {
             response["lastConversion"] = .object([
                 "voiceId": .string(outcome.voiceID),
-                "trackName": .string(outcome.trackName),
+                "trackName": .string(outcome.result.trackName),
+                "clips": .number(Double(outcome.result.clips.count)),
+                "warnings": .array(outcome.result.warnings.map { .string($0) }),
                 "realConversion": .bool(outcome.realConversion),
                 "note": outcome.note.map { .string($0) } ?? .null,
             ])
@@ -9592,6 +11492,15 @@ final class AppModel {
             "selectedZoneId": samplerEditor.selectedZoneID.map { JSONValue.string($0.uuidString) } ?? .null,
             "oneShot": .bool(samplerEditor.oneShot),
             "values": .object(values),
+            // m34-u — READ-ONLY echo, additive, still no param setter (see the
+            // ⛔ note above). `glideEffective` is the same derived conjunction
+            // `instrument.describeSampler` publishes, so a pixel probe can
+            // stage the inert state and assert the card is IN it before it goes
+            // looking for the amber line.
+            "voiceMode": .string(samplerEditor.voiceMode.rawValue),
+            "glideTime": .number(samplerEditor.glideTime),
+            "glideEffective": .bool(samplerEditor.glideIsEffective),
+            "glideInert": .bool(samplerEditor.glideIsInert),
             "error": samplerEditor.lastErrorMessage.map { JSONValue.string($0) } ?? .null,
         ])
     }
@@ -9940,14 +11849,23 @@ final class AppModel {
     /// Imports a SoundFont/DLS via NSOpenPanel (not headless — the app view drives
     /// it), then refreshes the picker's bank list. Errors surface inline in the
     /// Sound Banks section (`model.importError`). A cancelled panel is a no-op.
+    ///
+    /// ⚠️ m31-h: `.sf3` MUST be in `allowedContentTypes`. The converter can read
+    /// it, the wire accepts it and the library converts it — but this panel is
+    /// the ONLY way a person reaches any of that, and a filter that omits the
+    /// extension greys the file out in the chooser. The capability would have
+    /// shipped working and unreachable, which is indistinguishable from absent.
     func importSoundBankViaPanel() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.allowedContentTypes =
-            [UTType(filenameExtension: "sf2"), UTType(filenameExtension: "dls")].compactMap { $0 }
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "sf2"), UTType(filenameExtension: "dls"),
+            UTType(filenameExtension: "sf3"),
+        ].compactMap { $0 }
         panel.prompt = "Add"
-        panel.message = "Choose a SoundFont (.sf2) or DLS bank file to add to your library."
+        panel.message = "Choose a SoundFont (.sf2 or .sf3) or DLS bank file to add to your "
+            + "library. A compressed .sf3 is converted as it is added."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         instrumentPicker.importBank(from: url)
     }
@@ -9995,6 +11913,141 @@ final class AppModel {
         let descriptor = store.tracks.first { $0.id == trackID }?.instrument
         instrumentPicker.updateCurrent(descriptor: descriptor,
                                        status: store.audioUnitStatus(forTrack: trackID))
+    }
+
+    /// Bounded wait for a TRACK ROW to confirm it re-rendered its voice-drop
+    /// affordance (the `awaitTrackReorderApplied` twin, m23-e echo-seam law).
+    ///
+    /// Without it a `debug.captureUI` taken straight after the echo can frame
+    /// the PREVIOUS hover — which does not merely fail a gate, it can
+    /// stale-GREEN one. Bounded twice over: it stops the instant a row reports,
+    /// and hard-stops at the deadline when no row will report at all (an `exit`
+    /// while nothing was painted, or the Mix workspace).
+    private func awaitVoiceDropRendered(after reportsBefore: Int) {
+        let deadline = Date().addingTimeInterval(0.30)
+        while voiceDropRenderSeq == reportsBefore, Date() < deadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        }
+    }
+
+    /// `debug.voiceModelDrop {act?, trackId?, voiceId?}` — the m24-m **leg C**
+    /// staging seam for dragging a voice model onto a track header. App-level,
+    /// debug tier ONLY (off `allCommands`/MCP — **ZERO wire growth**: the drop's
+    /// only effect is to open a panel over `ProjectStore.convertClipsToVoice`,
+    /// and that store method is already agent-invokable as `vc.convertClips`, so
+    /// a second agent-facing verb here would be a duplicate conversion
+    /// authority — the `debug.trackHeaderDrag` rule verbatim).
+    ///
+    /// ⚠️ **A REAL OS DRAG CANNOT BE DRIVEN OVER THE CONTROL PORT**, for the two
+    /// reasons already written up on `arrangeDropDebug`: SwiftUI's drop callbacks
+    /// arrive from an AppKit dragging session there is no public way to
+    /// construct, and the unbundled staging binary has no Accessibility grant to
+    /// synthesize one (m17-b, −1712). So this seam calls
+    /// `voiceModelDropHoverChanged` / `performVoiceModelDrop` — **the very
+    /// functions `TrackRow`'s `.dropDestination` calls**, with no branch between
+    /// them. The staged path and the real path are one function rather than two
+    /// that agree (the `applyPointerStage` precedent). What remains unproven
+    /// headlessly is the SOURCE gesture — that `.draggable` on the Voice panel's
+    /// row actually vends the payload — and that is stated rather than papered
+    /// over.
+    ///
+    ///   - `{}` — READ-ONLY (the m11-a bare-read law). Answers the VERDICT
+    ///     LADDER: every track, its kind, its convertible clip count and what it
+    ///     would say. A caller MUST build its fixture from this rather than
+    ///     assume which rows accept.
+    ///   - `{act:"enter", trackId}` — the drag arrived over that header.
+    ///   - `{act:"exit"}` — it left.
+    ///   - `{act:"drop", trackId, voiceId}` — released. On an accepting row this
+    ///     opens the Convert Voice… panel on that track's audio clips with
+    ///     `voiceId` already picked; on a refusing row it returns
+    ///     `dropAccepted:false` and opens nothing.
+    ///
+    /// ⚠️ **NO x/y** — unlike `debug.arrangeDrop`. The destination is attached to
+    /// the row that owns it, so there is no coordinate to get wrong on either
+    /// path; asking a caller for one would invent a ladder read the live gesture
+    /// does not have.
+    ///
+    /// Echoes GROUND TRUTH: `paintedTrackId`/`paintedAccepts` are reported by the
+    /// CHIP ITSELF (the `indicatorY` rule — "gone after" alone passes vacuously
+    /// against an implementation that never drew one), and `convertClipIds` /
+    /// `pickedVoice` are read off the same properties `debug.voicePanel` reads,
+    /// so the two seams cannot describe the same panel differently.
+    private func voiceModelDropDebug(_ params: [String: JSONValue]) throws -> JSONValue {
+        var dropAccepted: Bool?
+        if let act = params["act"]?.stringValue {
+            let reportsBefore = voiceDropRenderSeq
+            workspaceMode = .arrange
+            switch act {
+            case "enter", "drop":
+                guard let raw = params["trackId"]?.stringValue else {
+                    throw DebugError("act \"\(act)\" needs a 'trackId' — which header the voice is over")
+                }
+                guard let trackID = UUID(uuidString: raw) else {
+                    throw DebugError("'trackId' is not a valid UUID: \(raw)")
+                }
+                guard store.tracks.contains(where: { $0.id == trackID }) else {
+                    throw DebugError("no track with id \(raw)")
+                }
+                if act == "enter" {
+                    voiceModelDropHoverChanged(trackID: trackID)
+                } else {
+                    guard let voiceID = params["voiceId"]?.stringValue, !voiceID.isEmpty else {
+                        throw DebugError(
+                            "act \"drop\" needs a 'voiceId' — a drop with no voice is not a "
+                            + "gesture the UI can make (the payload carries the model)")
+                    }
+                    dropAccepted = performVoiceModelDrop(trackID: trackID, voiceID: voiceID)
+                }
+            case "exit":
+                voiceModelDropHoverChanged(trackID: nil)
+            default:
+                throw DebugError(
+                    "unknown act \"\(act)\" — expected \"enter\", \"exit\", or \"drop\"")
+            }
+            awaitVoiceDropRendered(after: reportsBefore)
+        } else if params["trackId"] != nil || params["voiceId"] != nil {
+            throw DebugError("debug.voiceModelDrop 'trackId'/'voiceId' need an 'act'")
+        }
+
+        let hover = voiceModelDropHover
+        var response: [String: JSONValue] = [
+            // The LADDER — the ground truth a fixture must be computed FROM.
+            "tracks": .array(store.tracks.map { track in
+                let verdict = voiceModelDropVerdict(trackID: track.id)
+                return .object([
+                    "id": .string(track.id.uuidString),
+                    "name": .string(track.name),
+                    "kind": .string(track.kind.rawValue),
+                    "audioClips": .number(Double(
+                        VoiceConvertMenuPolicy.convertibleAudioClipIDs(in: track).count)),
+                    "accepts": .bool(verdict.accepted),
+                    "reason": verdict.refusal.map { .string($0) } ?? .null,
+                    "title": verdict.command.map { .string($0.title) } ?? .null,
+                ])
+            }),
+            // The hover the MODEL holds.
+            "hoverVisible": .bool(hover != nil),
+            "hoverTrackId": hover.map { .string($0.trackID.uuidString) } ?? .null,
+            "hoverAccepts": hover.map { .bool($0.verdict.accepted) } ?? .null,
+            "hoverReason": hover?.verdict.refusal.map { .string($0) } ?? .null,
+            "hoverClipIds": .array((hover?.verdict.command?.clipIDs ?? [])
+                .map { .string($0.uuidString) }),
+            // What the ROW actually painted — the only positive proof the
+            // affordance exists.
+            "paintedTrackId": voiceDropPaintedTrackID.map { .string($0.uuidString) } ?? .null,
+            "paintedAccepts": voiceDropPaintedAccepts.map { .bool($0) } ?? .null,
+            "renderSeq": .number(Double(voiceDropRenderSeq)),
+            // The PANEL the drop is supposed to have opened — the same
+            // properties `debug.voicePanel` reads, so "the same panel, the same
+            // code path" is checkable in one round trip.
+            "convertClipIds": voiceConvertClipIDs.map { ids in
+                .array(ids.map { .string($0.uuidString) })
+            } ?? .null,
+            "pickedVoice": voicePanel.selectedConvertVoiceID.map { .string($0) } ?? .null,
+            "voicePanelOpen": .bool(showVoicePanel),
+        ]
+        if let dropAccepted { response["dropAccepted"] = .bool(dropAccepted) }
+        return .object(response)
     }
 
     /// `debug.instrumentPicker {trackId?, mode?, search?, bank?}` — stages the
@@ -10079,7 +12132,7 @@ final class AppModel {
     /// Opens the Humanize panel for a clip: seeds the model with the clip's name +
     /// kind and shows the centered card. Called by the piano-roll header chip and
     /// the arrange clip context menu (MIDI clips only — the entry is HIDDEN on an
-    /// audio clip, the "Convert to Voice…" rule, so this is never reached with one).
+    /// audio clip, the "Convert Voice…" rule, so this is never reached with one).
     ///
     /// The amounts are NOT reset here: they are sticky across opens on purpose,
     /// which is what makes ⌘Z + reopen the cheap re-roll this panel offers
@@ -10164,7 +12217,7 @@ final class AppModel {
     }
 
     /// `debug.breathPad {clipId?, open?, angleDegrees?, radius?, pattern?,
-    /// gesture?, airEnforced?, apply?, close?}` — stages the pad for a capture the wire
+    /// gesture?, airEnforced?, pressure?, apply?, close?}` — stages the pad for a capture the wire
     /// alone cannot reach (the panel is UI chrome, off `allCommands`/MCP — the
     /// `debug.quantizePanel` precedent, so the wire and MCP counts are unchanged).
     ///
@@ -10209,6 +12262,22 @@ final class AppModel {
                 radius: radius ?? breathPad.dot.radius)
         }
         if let enforced = params["airEnforced"]?.boolValue { breathPad.airEnforced = enforced }
+        // m34-f step ① — THE PRESSURE SEAM.
+        //
+        // ⛔⛔ **THIS IS THE ONLY WAY ANY GATE IN THIS TREE CAN EXERCISE THE
+        // PRESSURE AXIS, AND IT IS A SYNTHETIC PATH BY CONSTRUCTION — nothing
+        // here presses a trackpad.** It drives `pressureChanged` exactly as
+        // `PadPressureNSView.pressureChange(with:)` does, so the MAPPING and the
+        // capability latch are testable; what it can never prove is that a real
+        // `NSEventTypePressure` arrives, that `.primaryGeneric` suppressed the
+        // haptic detent, or that the AppKit coordinate flip is right. Those
+        // three are HAND checks and are recorded as such.
+        //
+        // Placed AFTER the dot params so one call can set the dot and then press
+        // on it — pressure scales whatever effort the dot is currently at.
+        if let pressure = params["pressure"]?.doubleValue {
+            breathPad.pressureChanged(pressure)
+        }
         // ⭐ THE HARDWARE SECTION'S DISCLOSURE (m28-knob-ui). Without this the
         // render probe could not photograph the expanded card at all, and the
         // one lesson this panel has already paid for is that a UI phase is not
@@ -10249,6 +12318,22 @@ final class AppModel {
             "angleDegrees": .number(EffortRing.degrees(fromRadians: breathPad.dot.angle)),
             "radius": .number(breathPad.dot.radius),
             "effort": .number(breathPad.effort),
+            // m34-f step ①/②. ⭐ `effort` is the DOT; `streamedEffort` is what
+            // actually went out. They differ only under pressure, and reporting
+            // BOTH is what lets a gate see the axis do something rather than
+            // take the model's word for it. `pressure` is null when none has
+            // been observed — the documented third state, never folded into 0.
+            "streamedEffort": .number(breathPad.streamedEffort),
+            "pressure": breathPad.pressure.map { JSONValue.number($0) } ?? .null,
+            "pressureObserved": .bool(breathPad.pressureObserved),
+            // The ENGINE's own capture verdict, read back off the seam the pad
+            // pushed through — not the pad's belief about it.
+            "capturingExpression":
+                breathPad.isCapturingExpression.map { JSONValue.bool($0) } ?? .null,
+            "capturedExpressionPoints": .number(Double(breathPad.capturedExpressionPoints)),
+            "sinkIsRecording":
+                liveExpressionSink.lastIsRecording.map { JSONValue.bool($0) } ?? .null,
+            "sinkCapturedPoints": .number(Double(liveExpressionSink.lastCapturedPoints)),
             "streaming": .bool(breathPad.gesture != nil),
             "trailPoints": .number(Double(breathPad.trail.count)),
             "previewRefusal": breathPad.previewRefusal.map { JSONValue.string($0) } ?? .null,
@@ -11636,26 +13721,28 @@ final class AppModel {
         }
 
         // Primary: snapshot the real window content (all ScrollView content).
-        if let window = mainCaptureWindow, let contentView = window.contentView,
-           contentView.bounds.width > 1, contentView.bounds.height > 1 {
-            window.displayIfNeeded()
-            contentView.layoutSubtreeIfNeeded()
-            guard let rep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
-                throw DebugError("window has no drawable backing yet — retry once it has displayed")
-            }
-            contentView.cacheDisplay(in: contentView.bounds, to: rep)
-            try writePNG(rep, to: url)
+        //
+        // ⭐ M35 — THE RASTERIZATION ITSELF NOW LIVES IN ONE PLACE. Everything
+        // between `mainCaptureWindow` and the PNG write moved to
+        // `captureMainWindowCore(to:)`, which `view.capture` (the production
+        // tier) calls too. This arm is unchanged in BEHAVIOUR and in the keys it
+        // emits — the two tiers share an implementation rather than a
+        // copy-paste, so a fix to one can never miss the other. The notes below
+        // travel with the payload and stayed here because they document THIS
+        // command's contract:
+        //
+        //   • `rect` is what was actually rasterized, in POINTS — the same
+        //     `contentView.bounds` `debug.explainFrames` reports its
+        //     `captureOrigin` against, so the two payloads agree by construction
+        //     rather than by two independent reads (m23-ag).
+        if let core = try captureMainWindowCore(to: url) {
             return .object([
-                "path": .string(url.path),
-                "width": .number(Double(rep.pixelsWide)),
-                "height": .number(Double(rep.pixelsHigh)),
-                "method": .string("window"),
-                // What was actually rasterized, in POINTS — the same
-                // `contentView.bounds` `debug.explainFrames` reports its
-                // `captureOrigin` against, so the two payloads agree by
-                // construction rather than by two independent reads (m23-ag).
-                "rect": Self.rectJSON(contentView.bounds),
-                "scale": .number(Double(window.backingScaleFactor)),
+                "path": .string(core.path),
+                "width": .number(Double(core.width)),
+                "height": .number(Double(core.height)),
+                "method": .string(core.method),
+                "rect": Self.viewRectJSON(core.rect),
+                "scale": .number(core.scale),
                 // ⭐ m23-ds — THE CAPTURE STATES ITS OWN FOCUS AMBIENT.
                 // m23-ds chased a ~94 B erratic spread in `u0-open.png` across
                 // ~13 runs and excluded three mechanisms by MAGNITUDE (density
@@ -11665,12 +13752,14 @@ final class AppModel {
                 // those runs never recorded whether the app was frontmost, so
                 // the question could not be asked BACKWARD. Recording it beside
                 // every capture is what makes the next occurrence localisable
-                // instead of forensic. ⚠️ Staging never calls `NSApp.activate`,
-                // but it is nonetheless ACTIVE by default at launch (m23r3b's
-                // F0 leg asserts exactly that) — so this is a fact that VARIES
-                // with the desktop, which is precisely why it must be recorded
-                // rather than assumed.
-                "appActive": .bool(NSApplication.shared.isActive),
+                // instead of forensic. ⚠️ No staging COMMAND calls
+                // `NSApp.activate`; the app activates ONCE at launch
+                // (`DAWProApp`'s `onAppear` — m23r3b's F0 leg asserts a staging
+                // app is ACTIVE then) unless DAWPRO_STAGING_NO_ACTIVATE=1 (C5b-4b)
+                // — so this is a fact that VARIES with the desktop and the
+                // launch, which is precisely why it must be recorded rather
+                // than assumed.
+                "appActive": .bool(core.appActive),
             ])
         }
 
@@ -11698,6 +13787,64 @@ final class AppModel {
             // path renders offscreen chrome and should be focus-independent;
             // that is a claim worth being able to CHECK rather than assert.
             "appActive": .bool(NSApplication.shared.isActive),
+        ])
+    }
+
+    /// ⭐ **THE ONE MAIN-WINDOW RASTERIZATION (M35 m35-b).** Draws the live
+    /// NSWindow's contentView with `cacheDisplay(in:to:)` — which includes the
+    /// REAL rendered pixels of every ScrollView (track rows, timeline clips,
+    /// piano-roll keyboard/grid/notes) — writes the PNG, and reports what it
+    /// actually rasterized. Pixel size follows the window's backing scale
+    /// (Retina = 2×).
+    ///
+    /// **Returns nil when there is no drawable window**, and the two callers
+    /// answer that differently ON PURPOSE — which is the whole reason this is a
+    /// nil-returning core rather than a throwing one:
+    ///
+    ///   • `debug.captureUI` falls back to an offscreen `ImageRenderer` pass
+    ///     (app tier, kept byte-for-byte — additive-only is a hard rule).
+    ///   • `view.capture` THROWS. That fallback cannot draw NSScrollView-backed
+    ///     content, so everything an agent asked to SEE rasterizes blank while
+    ///     the call reports success — this tree's characteristic failure mode,
+    ///     and the production tier refuses to ship it.
+    ///
+    /// It still THROWS for a window that exists but has no drawable backing:
+    /// that is a retryable condition, not a missing window, and conflating the
+    /// two would send `debug.captureUI` down the fallback for a real window.
+    func captureMainWindowCore(to url: URL) throws -> ViewCaptureResult? {
+        guard let window = mainCaptureWindow, let contentView = window.contentView,
+              contentView.bounds.width > 1, contentView.bounds.height > 1 else {
+            return nil
+        }
+        window.displayIfNeeded()
+        contentView.layoutSubtreeIfNeeded()
+        guard let rep = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+            throw DebugError("window has no drawable backing yet — retry once it has displayed")
+        }
+        contentView.cacheDisplay(in: contentView.bounds, to: rep)
+        try writePNG(rep, to: url)
+        return ViewCaptureResult(
+            path: url.path,
+            width: rep.pixelsWide,
+            height: rep.pixelsHigh,
+            method: "window",
+            rect: ViewRect(x: Double(contentView.bounds.origin.x),
+                           y: Double(contentView.bounds.origin.y),
+                           width: Double(contentView.bounds.width),
+                           height: Double(contentView.bounds.height)),
+            scale: Double(window.backingScaleFactor),
+            appActive: NSApplication.shared.isActive)
+    }
+
+    /// `{x,y,width,height}` in POINTS from a `ViewRect` — the `rectJSON` twin
+    /// for the shared capture core's Foundation-only geometry. Same four keys,
+    /// deliberately, so `debug.captureUI` emits exactly what it always did.
+    static func viewRectJSON(_ rect: ViewRect) -> JSONValue {
+        .object([
+            "x": .number(rect.x),
+            "y": .number(rect.y),
+            "width": .number(rect.width),
+            "height": .number(rect.height),
         ])
     }
 
@@ -11778,7 +13925,15 @@ final class AppModel {
     /// Destination URL: explicit `path` (~-expanded) or an auto-named file under
     /// NSTemporaryDirectory()/DAWPro.
     private func captureURL(_ params: [String: JSONValue]) -> URL {
-        if let raw = params["path"]?.stringValue {
+        captureDestinationURL(path: params["path"]?.stringValue)
+    }
+
+    /// The destination-URL rule itself, shared with `view.capture` (M35) so both
+    /// tiers name their auto-generated files from the SAME counter — two
+    /// counters would let a debug shot and a production shot collide on
+    /// `ui-capture-3.png` and silently overwrite each other.
+    func captureDestinationURL(path raw: String?) -> URL {
+        if let raw {
             return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
         }
         let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)

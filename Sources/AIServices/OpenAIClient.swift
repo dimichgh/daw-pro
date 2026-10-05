@@ -27,6 +27,18 @@ public struct OpenAIClient: LyricsGenerating, ImageGenerating {
         return LyricsWriteResult(lyrics: text, provider: AIProviderID.openai.rawValue)
     }
 
+    /// One chat-completions round trip, exposed (m34-g) so a non-lyrics caller
+    /// can reach this client without a second HTTP path.
+    ///
+    /// ⭐ **`AnthropicClient.complete`'s counterpart, named differently on
+    /// purpose** — `complete` is the Messages API's verb and this is Chat
+    /// Completions; one name over two different wire shapes would invite the
+    /// assumption that their options are interchangeable. Same key guard, same
+    /// `AIServiceError` vocabulary.
+    public func completeText(system: String, user: String) async throws -> String {
+        try await chat(system: system, user: user)
+    }
+
     /// One chat-completions round trip with a system + user message.
     private func chat(system: String, user: String) async throws -> String {
         guard let key = config.openAIKey else {

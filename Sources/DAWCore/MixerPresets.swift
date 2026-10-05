@@ -52,6 +52,26 @@ extension EffectDescriptor {
             gate: gate,
             chorus: chorus,
             bassEnhancer: bassEnhancer,
+            bitCrusher: bitCrusher,
+            djFilter: djFilter,
+            ringMod: ringMod,
+            flanger: flanger,
+            hallReverb: hallReverb,
+            tapeDelay: tapeDelay,
+            stereoWidth: stereoWidth,
+            phaser: phaser,
+            // ⛔⛔ THIS LINE IS COMPILER-SILENT AND SO IS EVERY LINE ABOVE IT.
+            // `EffectDescriptor.init`'s params are ALL `= nil`-defaulted, so a
+            // rebuild call site that omits a kind compiles cleanly and SILENTLY
+            // DROPS IT — a preset containing that kind would stamp onto a strip
+            // with the right kind and default values. No gate covers this file
+            // (`effect-kind-surface.mjs` does not list it as a surface);
+            // `MixerPresetsTests`' per-kind preset round trip is the only
+            // instrument, and it is driven from `Kind.allCases`.
+            transientShaper: transientShaper,
+            freqShifter: freqShifter,
+            clipper: clipper,
+            dynamicEQ: dynamicEQ,
             audioUnit: audioUnit)
     }
 }

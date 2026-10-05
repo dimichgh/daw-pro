@@ -1,0 +1,611 @@
+{
+  "set": "mod-macro",
+  "description": "MACROS \u2014 one knob, several parameters, which is the feature that makes a synth playable by an agent rather than merely configurable. A single 'Brightness' macro is routed to BOTH the filter cutoff and the resonance at different depths, so one number opens the filter and adds bite together, the way a real instrument's front-panel macro does. ONE axis: where that knob sits. The synth itself is identical in all four \u2014 cutoff 500 Hz, resonance 0.1 \u2014 and only the macro value changes.\n\nTwo things this demonstrates that nothing else here does: routing ONE source to MANY targets, and modulation of INSTRUMENT parameters (m39-b) rather than the mixer fader. A macro is also the one source that is position-INDEPENDENT \u2014 it holds its value with the transport stopped, which is exactly why it survived the anchor defect that made every LFO inert.",
+  "variants": [
+    {
+      "name": "knob-at-0",
+      "axis": "macro at 0 \u2014 the synth as configured: dark and tame",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Lead",
+            "kind": "instrument"
+          },
+          "as": "lead"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$lead",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.01,
+            "decay": 0.25,
+            "sustain": 0.7,
+            "release": 0.3,
+            "cutoffHz": 500,
+            "resonance": 0.1,
+            "gain": 0.7,
+            "unisonVoices": 4,
+            "unisonDetuneCents": 10,
+            "unisonStereoSpread": 0.5
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$lead",
+            "kind": "macro",
+            "name": "Brightness",
+            "value": 0.0
+          },
+          "as": "knob"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$lead",
+            "sourceId": "$knob",
+            "target": "instrumentParam",
+            "paramName": "cutoffHz",
+            "depth": 0.55
+          }
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$lead",
+            "sourceId": "$knob",
+            "target": "instrumentParam",
+            "paramName": "resonance",
+            "depth": 0.35
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$lead",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 1,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 1,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 3,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 41,
+                "startBeat": 4,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 53,
+                "startBeat": 4,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 5,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 5,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 7,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 7,
+                "lengthBeats": 1.5
+              }
+            ]
+          }
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "knob-at-33",
+      "axis": "macro at 0.33 \u2014 opening",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Lead",
+            "kind": "instrument"
+          },
+          "as": "lead"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$lead",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.01,
+            "decay": 0.25,
+            "sustain": 0.7,
+            "release": 0.3,
+            "cutoffHz": 500,
+            "resonance": 0.1,
+            "gain": 0.7,
+            "unisonVoices": 4,
+            "unisonDetuneCents": 10,
+            "unisonStereoSpread": 0.5
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$lead",
+            "kind": "macro",
+            "name": "Brightness",
+            "value": 0.33
+          },
+          "as": "knob"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$lead",
+            "sourceId": "$knob",
+            "target": "instrumentParam",
+            "paramName": "cutoffHz",
+            "depth": 0.55
+          }
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$lead",
+            "sourceId": "$knob",
+            "target": "instrumentParam",
+            "paramName": "resonance",
+            "depth": 0.35
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$lead",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 1,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 1,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 3,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 41,
+                "startBeat": 4,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 53,
+                "startBeat": 4,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 5,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 5,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 7,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 7,
+                "lengthBeats": 1.5
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "knob-at-66",
+      "axis": "macro at 0.66 \u2014 bright, resonance starting to sing",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Lead",
+            "kind": "instrument"
+          },
+          "as": "lead"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$lead",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.01,
+            "decay": 0.25,
+            "sustain": 0.7,
+            "release": 0.3,
+            "cutoffHz": 500,
+            "resonance": 0.1,
+            "gain": 0.7,
+            "unisonVoices": 4,
+            "unisonDetuneCents": 10,
+            "unisonStereoSpread": 0.5
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$lead",
+            "kind": "macro",
+            "name": "Brightness",
+            "value": 0.66
+          },
+          "as": "knob"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$lead",
+            "sourceId": "$knob",
+            "target": "instrumentParam",
+            "paramName": "cutoffHz",
+            "depth": 0.55
+          }
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$lead",
+            "sourceId": "$knob",
+            "target": "instrumentParam",
+            "paramName": "resonance",
+            "depth": 0.35
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$lead",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 1,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 1,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 3,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 41,
+                "startBeat": 4,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 53,
+                "startBeat": 4,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 5,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 5,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 7,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 7,
+                "lengthBeats": 1.5
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "knob-at-100",
+      "axis": "macro at 1.0 \u2014 fully open and vocal",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Lead",
+            "kind": "instrument"
+          },
+          "as": "lead"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$lead",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.01,
+            "decay": 0.25,
+            "sustain": 0.7,
+            "release": 0.3,
+            "cutoffHz": 500,
+            "resonance": 0.1,
+            "gain": 0.7,
+            "unisonVoices": 4,
+            "unisonDetuneCents": 10,
+            "unisonStereoSpread": 0.5
+          }
+        },
+        {
+          "command": "mod.addSource",
+          "params": {
+            "trackId": "$lead",
+            "kind": "macro",
+            "name": "Brightness",
+            "value": 1.0
+          },
+          "as": "knob"
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$lead",
+            "sourceId": "$knob",
+            "target": "instrumentParam",
+            "paramName": "cutoffHz",
+            "depth": 0.55
+          }
+        },
+        {
+          "command": "mod.addRoute",
+          "params": {
+            "trackId": "$lead",
+            "sourceId": "$knob",
+            "target": "instrumentParam",
+            "paramName": "resonance",
+            "depth": 0.35
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$lead",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 1,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 1,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 2,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 3,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 3,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 41,
+                "startBeat": 4,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 53,
+                "startBeat": 4,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 5,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 5,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 48,
+                "startBeat": 6,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 43,
+                "startBeat": 7,
+                "lengthBeats": 1.5
+              },
+              {
+                "pitch": 55,
+                "startBeat": 7,
+                "lengthBeats": 1.5
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

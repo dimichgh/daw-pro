@@ -90,6 +90,20 @@ extension ProjectStore {
     /// `settings.strength` toward the swing-adjusted grid target
     /// (`QuantizeTarget.nearest`); output stays canonically ordered.
     ///
+    /// ⭐ **THE GRID IS THE SONG'S (m23-ap I5-F4).** The clip's own `startBeat`
+    /// is read HERE and handed to `MIDIQuantizer.quantize(_:settings:
+    /// clipStartBeat:)`, so a clip that starts off a grid line quantizes onto
+    /// the lines the piano roll draws, not onto lines counted from its own
+    /// first beat. Reading it here rather than taking it from the caller is the
+    /// point: the quantize panel (`QuantizeModel` → `DAWProApp`) and the wire's
+    /// `clip.quantize` both converge on this method, so neither can pass a
+    /// stale start, and there is no second home for "where does this clip sit".
+    /// Swing and grooves count from the song's beat 0 too (the 2026-09-27
+    /// ruling; `clip.quantizeAudio` always did), so the notes that swing are
+    /// the song's offbeats. A clip that starts on a grid line gets exactly what
+    /// it got before when the quantize is straight, or when the line's song
+    /// slot is even (swing) and a whole number of groove cycles from beat 0.
+    ///
     /// Rejections, verbatim: an AUDIO clip → `quantizeRequiresMIDIClip`
     /// (audio quantize is the separate `clip.quantizeAudio`, M5 iii-f); a comp
     /// MEMBER → `clipInTakeGroup` via the shared `requireNotCompMember` guard
@@ -109,7 +123,8 @@ extension ProjectStore {
         guard let notes = tracks[t].clips[c].notes else {
             throw ProjectError.quantizeRequiresMIDIClip(clipId)
         }
-        let quantized = MIDIQuantizer.quantize(notes, settings: settings)
+        let quantized = MIDIQuantizer.quantize(notes, settings: settings,
+                                               clipStartBeat: tracks[t].clips[c].startBeat)
         performEdit("Quantize Notes", key: "clip.quantize:\(clipId.uuidString)") {
             tracks[t].clips[c].notes = quantized
             engine?.tracksDidChange(tracks)
@@ -166,10 +181,25 @@ extension ProjectStore {
     /// headless, and the same comp-member / MIDI / stretch rejections
     /// `applyAudioQuantize` surfaces, so an agent gets the actionable error
     /// without waiting on analysis. Returns the emitted slices.
+    ///
+    /// m32-b1: `settings.divisions` skips detection entirely — boundaries are
+    /// N equal parts of the clip's own source window — so that path needs no
+    /// engine and succeeds headless. Every other rejection is unchanged.
     @discardableResult
     public func quantizeAudioClip(trackId: UUID, clipId: UUID,
                                   settings: AudioQuantizeSettings) async throws -> [Clip] {
-        guard let engine else { throw ProjectError.engineUnavailable }
+        // m32-b1: the engine is needed ONLY to detect transients. A
+        // fixed-division chop derives its boundaries arithmetically from the
+        // clip's own window, so it works headless.
+        //
+        // ⚠️ The guard deliberately stays FIRST rather than moving below the
+        // validation block: for a detector-path caller (`divisions == nil`)
+        // the thrown-error ORDER must be byte-identical to the shipped
+        // behaviour. Moving it down would flip headless + MIDI clip from
+        // `engineUnavailable` to `quantizeRequiresAudioClip`.
+        guard settings.divisions != nil || engine != nil else {
+            throw ProjectError.engineUnavailable
+        }
         // Pre-detection validation (fast, correct errors).
         let (t, c) = try locateClip(trackId: trackId, clipId: clipId)
         try requireNotCompMember(trackIndex: t, clipIndex: c)
@@ -182,6 +212,17 @@ extension ProjectStore {
             throw ProjectError.invalidClipEdit(
                 "clip \(clipId.uuidString) has no audio file to quantize")
         }
+        // m32-b1: fixed-division chop — no detection, no PCM, no engine.
+        // `[]` says out loud that the transient argument is unused here
+        // (`AudioQuantizePlan.compute` ignores it whenever `divisions` is set).
+        if settings.divisions != nil {
+            return try applyAudioQuantize(
+                trackId: trackId, clipId: clipId,
+                transientsSourceSeconds: [], settings: settings)
+        }
+        // Unreachable when `divisions == nil` (the first guard already proved
+        // the engine is present); re-bound here only to unwrap it.
+        guard let engine else { throw ProjectError.engineUnavailable }
         let markers = try await engine.detectTransients(inFileAt: url, sensitivity: settings.sensitivity)
         // Re-locate by id (spec §8 risk 7) happens inside applyAudioQuantize.
         return try applyAudioQuantize(
@@ -201,12 +242,35 @@ extension ProjectStore {
     /// (`GrooveTemplate.extract`). Defaults: `gridBeats` 0.25 (1/16),
     /// `cycleBeats` 4 (one bar at x/4 — spec §6 ASSUMPTION, no meter model yet).
     ///
-    /// ASSUMPTION (spec §6, decided here): onsets are taken RELATIVE to the clip
-    /// start (slot 0 = clip start), so the extracted groove is independent of
-    /// where the clip sits on the timeline — the same feel wherever it's dropped.
+    /// ⚠️ SUPERSEDED (m23-ap I5-F4): spec §6 took onsets RELATIVE to the clip
+    /// start (slot 0 = clip start). A groove's slots now count from the SONG's
+    /// beat 0, as `quantizeClipNotes` applies them (the orchestrator's
+    /// 2026-09-27 ruling), so a groove taken from one clip lands on the same
+    /// song beats when it is applied to another — a push on the "and" of each
+    /// beat stays on the "and", wherever either clip starts.
+    ///
+    /// Two steps. (1) The deviations are measured from the SONG's grid lines —
+    /// the ones `quantizeClipNotes` lands notes on: an off-grid clip's onsets
+    /// are shifted by its phase before `GrooveTemplate.extract` measures them,
+    /// so a take played squarely on the drawn lines extracts as straight (from
+    /// the clip's own first beat it would read as a constant push of the phase
+    /// — a groove nobody played). (2) The measured table, whose slot 0 is the
+    /// line at or before the clip's first beat, is RELABELLED so that line
+    /// becomes its song slot: entry `j` moves to `(firstLine + j) mod count`.
+    /// A relabel, not a shift of the onsets by the clip's whole start, so no
+    /// deviation loses bits on a late clip. Extract → apply on the same clip
+    /// round-trips wherever it starts; a clip that starts on a line whose song
+    /// slot is a whole number of cycles from beat 0 extracts exactly as before.
     ///
     /// Rejections, verbatim: unknown id → `clipNotFound`; a non-positive grid or
-    /// cycle → `invalidClipEdit`; an AUDIO clip with no engine → `engineUnavailable`;
+    /// cycle → `invalidClipEdit`; a grid finer than `QuantizeLimits
+    /// .minimumGridBeats` or not finite, a cycle of more than `QuantizeLimits
+    /// .maximumGrooveSlots` slots or not finite, or an onset 2^53 or more grid
+    /// slots into the clip → `invalidClipEdit` naming the bound (m23-ap I5-F4
+    /// round 3: `GrooveTemplate.extract` converts `cycle / grid` and each
+    /// `onset / grid` to `Int`, which traps at 2^63, and a huge cycle allocates
+    /// gigabytes well before that. This store is its only caller in `Sources/`,
+    /// so these three guards keep every app path off those traps); an AUDIO clip with no engine → `engineUnavailable`;
     /// an audio clip with no file → `invalidClipEdit`. The clip is RE-LOCATED after
     /// the (audio) await (deleted mid-detect → `clipNotFound`). Appends inside
     /// `performEdit("Extract Groove")` so undo covers it. Returns the new template.
@@ -222,13 +286,26 @@ extension ProjectStore {
             throw ProjectError.invalidClipEdit(
                 "cannot extract a groove with cycleBeats \(cycleBeats) — must be > 0")
         }
+        guard gridBeats.isFinite, gridBeats >= QuantizeLimits.minimumGridBeats else {
+            throw ProjectError.invalidClipEdit(
+                "cannot extract a groove with gridBeats \(gridBeats) — the finest grid is 1/1024 beat "
+                + "(\(QuantizeLimits.minimumGridBeats))")
+        }
+        let slots = (cycleBeats / gridBeats).rounded()
+        guard cycleBeats.isFinite, slots <= Double(QuantizeLimits.maximumGrooveSlots) else {
+            throw ProjectError.invalidClipEdit(
+                "cannot extract a groove with cycleBeats \(cycleBeats) on a \(gridBeats)-beat grid — "
+                + "a groove holds at most \(QuantizeLimits.maximumGrooveSlots) slots (cycleBeats ÷ gridBeats)")
+        }
         guard let (t, c) = locateClipIndex(clipId) else {
             throw ProjectError.clipNotFound(clipId)
         }
         let onsets: [Double]
+        let clipStart: Double
         if let notes = tracks[t].clips[c].notes {
             // MIDI: note onsets are already clip-relative beats.
             onsets = notes.map(\.startBeat)
+            clipStart = tracks[t].clips[c].startBeat
         } else {
             // Audio: detect transients (async, engine), then take each onset's
             // beat RELATIVE to the clip start. detectClipTransients re-locates the
@@ -238,15 +315,60 @@ extension ProjectStore {
             guard let (t2, c2) = locateClipIndex(clipId) else {
                 throw ProjectError.clipNotFound(clipId)
             }
-            let clipStart = tracks[t2].clips[c2].startBeat
+            clipStart = tracks[t2].clips[c2].startBeat
             onsets = transients.map { $0.beat - clipStart }
         }
-        let template = GrooveTemplate.extract(
-            fromOnsetBeats: onsets, gridBeats: gridBeats, cycleBeats: cycleBeats, name: name)
+        // m23-ap I5-F4: (1) measured from the SONG's grid lines, (2) slots
+        // relabelled to count from the song's beat 0 (see the doc above). A
+        // clip on a line has phase exactly 0 and its onsets go in untouched.
+        let phase = SongGridPhase.phase(of: clipStart, step: gridBeats)
+        let measured = phase == 0 ? onsets : onsets.map { $0 + phase }
+        // m23-ap I5-F4 round 3: `GrooveTemplate.extract` converts each onset's
+        // slot, `(onset / gridBeats).rounded()`, to `Int`, which traps at 2^63:
+        // a note 2.4e18 beats into a clip at 1/16, or 9.1e15 beats in at the
+        // finest grid (`parseNotes` puts no ceiling on a note's start). Past
+        // 2^53 slots a Double cannot tell adjacent slots apart, so no deviation
+        // that far out can be measured: refuse in words, before extracting.
+        // No take comes near it (2^53 sixteenths is 2.25e15 beats), so every
+        // real extraction is untouched. A non-finite onset is refused too.
+        let slotCeiling = 9_007_199_254_740_992.0   // 2^53
+        if let far = measured.first(where: { !(($0 / gridBeats).magnitude < slotCeiling) }) {
+            throw ProjectError.invalidClipEdit(
+                "cannot extract a groove: an onset \(far) beats into the clip is too far out to measure on a "
+                + "\(gridBeats)-beat grid (at most 2^53 grid slots = \(slotCeiling * gridBeats) beats from the clip's start)")
+        }
+        let clipCounted = GrooveTemplate.extract(
+            fromOnsetBeats: measured, gridBeats: gridBeats, cycleBeats: cycleBeats, name: name)
+        let template = Self.relabelledFromSongStart(
+            clipCounted, firstLine: SongGridPhase.firstLineIndex(of: clipStart, step: gridBeats))
         performEdit("Extract Groove") {
             grooveTemplates.append(template)
         }
         return template
+    }
+
+    /// Relabels a groove measured with slot 0 at a clip's first grid line so its
+    /// slots count from the SONG's beat 0 (m23-ap I5-F4): entry `j` moves to
+    /// `(firstLine + j) mod count`, `firstLine` being that line's song slot
+    /// (`SongGridPhase.firstLineIndex`). A whole number of cycles returns the
+    /// template untouched, bit for bit. The fold is taken in `Double`, so a
+    /// huge `firstLine` (a degenerate grid) cannot trap an `Int` conversion; a
+    /// non-finite one reads as 0.
+    nonisolated static func relabelledFromSongStart(_ template: GrooveTemplate,
+                                                    firstLine: Double) -> GrooveTemplate {
+        let count = template.offsets.count
+        guard count > 1, firstLine.isFinite else { return template }
+        var fold = firstLine.truncatingRemainder(dividingBy: Double(count))
+        if fold < 0 { fold += Double(count) }
+        let rotation = Int(fold)
+        guard rotation != 0 else { return template }
+        var relabelled = template.offsets
+        for (j, offset) in template.offsets.enumerated() {
+            relabelled[(j + rotation) % count] = offset
+        }
+        return GrooveTemplate(id: template.id, name: template.name,
+                              gridBeats: template.gridBeats, cycleBeats: template.cycleBeats,
+                              offsets: relabelled)
     }
 
     /// Removes a stored groove template by id. Built-in swings aren't stored, so

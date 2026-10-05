@@ -178,6 +178,176 @@ public enum HostedAUParameterError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
+/// One preset of a hosted Audio Unit exactly as the unit publishes it
+/// (au.listPresets / au.loadPreset, m23-cw). `number` is
+/// `AUAudioUnitPreset.number`; Apple's contract (AUAudioUnit.h,
+/// `saveUserPreset:error:`) is that FACTORY preset numbers are >= 0 and USER
+/// preset numbers are < 0. Numbers are per-COMPONENT identity in the same
+/// spirit as parameter addresses — take them from a live `au.listPresets`,
+/// never guess one, never carry one across components.
+public struct HostedAUPresetInfo: Sendable, Equatable, Codable {
+    public var number: Int
+    public var name: String
+
+    public init(number: Int, name: String) {
+        self.number = number
+        self.name = name
+    }
+}
+
+/// Which list the AU's CURRENT preset was found in (m23-cw).
+///
+/// `.unlisted` is not a defect — it is the honest and COMMON answer, and two
+/// MEASURED cases produce it on this machine:
+///   1. A unit that was never put on a numbered preset reads `-1 / "Untitled"`
+///      (every preset-less Apple built-in: AUDelay, AULowpass, …). -1 is a
+///      NEGATIVE number, so Apple's "user presets are < 0" rule would call it
+///      a user preset — it is not; `userPresets` is empty.
+///   2. After a `fullStateForDocument` save/restore round trip, a unit that
+///      was on factory preset 8 "Cathedral" comes back reporting
+///      `-1 / "Cathedral"`: the parameter values are restored EXACTLY, but the
+///      unit no longer claims to be sitting on a numbered preset.
+/// So `.unlisted` means "these values came from somewhere the preset lists
+/// cannot name", which is exactly what a caller needs to know. We classify by
+/// NUMBER against the live lists and never back-match by name — Apple's header
+/// is explicit that `currentPreset` "does not reflect whether parameters may
+/// have been modified since the preset was selected", so a name match would be
+/// a guess dressed as a fact.
+public enum HostedAUPresetSource: String, Sendable, Equatable, Codable {
+    /// The number appears in the unit's `factoryPresets`.
+    case factory
+    /// The number appears in the unit's `userPresets`.
+    case user
+    /// The number is in neither list — see the cases above.
+    case unlisted
+}
+
+/// The AU's `currentPreset`, plus the classification above (m23-cw). nil ⇔ the
+/// unit reports no current preset at all.
+public struct HostedAUCurrentPreset: Sendable, Equatable, Codable {
+    public var number: Int
+    public var name: String
+    public var source: HostedAUPresetSource
+
+    public init(number: Int, name: String, source: HostedAUPresetSource) {
+        self.number = number
+        self.name = name
+        self.source = source
+    }
+}
+
+/// Everything one hosted AU can say about its own presets (m23-cw).
+///
+/// A unit with NO presets answers with empty arrays and
+/// `hasFactoryPresets: false` — SUCCESS, never an error. That mirrors
+/// `HostedAUParameterPage.hasParameterTree`: a plugin that publishes nothing
+/// is a healthy host, not a failure. MEASURED here: 15 of Apple's 23 built-in
+/// `aufx` units return a nil `factoryPresets`, so this is the majority path,
+/// not an edge case.
+public struct HostedAUPresetList: Sendable, Equatable, Codable {
+    /// false ⇔ `factoryPresets` was nil (the unit publishes no factory list at
+    /// all), as opposed to publishing an empty one. `factoryPresets` is `[]`
+    /// either way — this flag is the only place the distinction survives.
+    public var hasFactoryPresets: Bool
+    /// `AUAudioUnit.supportsUserPresets`. MEASURED: false for all 23 Apple
+    /// built-in effects (the v2 bridge implements no user-preset store), so a
+    /// `true` here means a v3 unit with its own store.
+    public var supportsUserPresets: Bool
+    /// Factory presets in the unit's own published order (numbers >= 0).
+    public var factoryPresets: [HostedAUPresetInfo]
+    /// User presets in the unit's own published order (numbers < 0).
+    public var userPresets: [HostedAUPresetInfo]
+    /// What the unit currently reports, classified — nil when it reports none.
+    public var currentPreset: HostedAUCurrentPreset?
+
+    public init(hasFactoryPresets: Bool, supportsUserPresets: Bool,
+                factoryPresets: [HostedAUPresetInfo],
+                userPresets: [HostedAUPresetInfo],
+                currentPreset: HostedAUCurrentPreset?) {
+        self.hasFactoryPresets = hasFactoryPresets
+        self.supportsUserPresets = supportsUserPresets
+        self.factoryPresets = factoryPresets
+        self.userPresets = userPresets
+        self.currentPreset = currentPreset
+    }
+}
+
+/// How `au.loadPreset` names the preset to load (m23-cw). Exactly one of the
+/// two reaches the engine; the wire rejects both-or-neither.
+public enum HostedAUPresetSelector: Sendable, Equatable {
+    /// By `AUAudioUnitPreset.number` — the canonical, unambiguous form.
+    case number(Int)
+    /// By display name. AMBIGUITY RULE: an exact, case-SENSITIVE match wins
+    /// outright (factory list searched before user list). Only if no exact
+    /// match exists is a case-INSENSITIVE pass tried. At either stage, more
+    /// than one match refuses with `.ambiguousPresetName` naming the candidate
+    /// numbers rather than silently picking one — a plugin is free to ship two
+    /// presets called "Default".
+    case name(String)
+}
+
+/// Engine-side failures of the hosted-AU preset surface (m23-cw), worded as
+/// teaching messages the wire surfaces verbatim — the
+/// `HostedAUParameterError` precedent. `noHostedAU` normally never reaches the
+/// wire: `ProjectStore` maps it to the status-naming error.
+public enum HostedAUPresetError: Error, Sendable, Equatable, LocalizedError {
+    /// No `.ready` hosted instance for the target.
+    case noHostedAU
+    /// A LOAD against a unit with no factory and no user presets. (The LIST
+    /// side answers such a unit with empty arrays and success.)
+    case noPresets
+    /// The number names no preset in either live list. Carries the numbers the
+    /// unit actually has, so the caller can retry without a second round trip.
+    case unknownPresetNumber(Int, available: [Int])
+    /// The name matched nothing, exactly or case-insensitively.
+    case unknownPresetName(String, available: [String])
+    /// The name matched more than one preset — refuse, never guess.
+    case ambiguousPresetName(String, numbers: [Int])
+    /// A user preset (number < 0) on a unit whose `supportsUserPresets` is
+    /// false. Apple: assigning one "may result in incorrect behavior".
+    case userPresetsUnsupported(Int)
+    /// THE SILENT-NO-OP GUARD. MEASURED on AUMatrixReverb: assigning a
+    /// `currentPreset` the unit does not recognise changes NOTHING and raises
+    /// NOTHING — `currentPreset` keeps its previous value and every parameter
+    /// holds. A host that trusted the setter would report a load that never
+    /// happened. So every load re-READS `currentPreset` afterwards and refuses
+    /// here when the number did not move. Compared by NUMBER only: MEASURED
+    /// that the unit REWRITES the name (assigning number 6 with the name
+    /// "JUNK NAME NOT THE REAL ONE" read back as "Medium Chamber"), which is
+    /// also why the wire echoes the read-back rather than the request.
+    case presetDidNotTake(requested: HostedAUPresetInfo, observed: String)
+
+    /// At most this many numbers/names are listed in a refusal — AUDistortion
+    /// ships 22 presets and a wall of them buries the instruction.
+    private static let maxListed = 12
+
+    private static func brief(_ items: [String]) -> String {
+        guard !items.isEmpty else { return "none" }
+        if items.count <= maxListed { return items.joined(separator: ", ") }
+        return items.prefix(maxListed).joined(separator: ", ")
+            + ", … (\(items.count) total)"
+    }
+
+    public var errorDescription: String? {
+        switch self {
+        case .noHostedAU:
+            return "no hosted Audio Unit is ready for that target"
+        case .noPresets:
+            return "this Audio Unit publishes no presets (no factory presets, no user presets) — set its parameters directly with au.describeParams/au.setParam, or open its own window with plugin.openUI"
+        case .unknownPresetNumber(let number, let available):
+            return "no preset numbered \(number) on this Audio Unit — it publishes \(Self.brief(available.map(String.init))); call au.listPresets for names"
+        case .unknownPresetName(let name, let available):
+            return "no preset named '\(name)' on this Audio Unit — it publishes \(Self.brief(available.map { "'\($0)'" })); call au.listPresets for the full list"
+        case .ambiguousPresetName(let name, let numbers):
+            return "'\(name)' names \(numbers.count) different presets on this Audio Unit (numbers \(numbers.map(String.init).joined(separator: ", "))) — pass presetNumber to choose one"
+        case .userPresetsUnsupported(let number):
+            return "preset \(number) is a user preset and this Audio Unit reports supportsUserPresets:false — loading it could corrupt the unit's state, so it is refused; its factory presets (number >= 0) still load"
+        case .presetDidNotTake(let requested, let observed):
+            return "the Audio Unit silently refused preset \(requested.number) '\(requested.name)' — it still reports \(observed), and nothing was changed"
+        }
+    }
+}
+
 /// Render state of one audio clip's offline stretch render (M5 ii-d), as the
 /// engine reports it at snapshot-build time (pull-based — never persisted).
 /// `.rendering` = the clip is scheduled as SILENCE until the render lands
@@ -190,18 +360,60 @@ public enum ClipStretchStatus: Sendable, Equatable {
     case failed(String)
 }
 
+/// p2-ren Stage B′ (`docs/design/2026-09-25-incremental-note-render.md` §11
+/// step 14): what a clip's node is ACTUALLY PLAYING right now, so an agent
+/// can tell a quick stand-in from the exact result before trusting what it
+/// hears. Pull-based, like `ClipStretchStatus` — the control snapshot queries
+/// this at build time; never persisted.
+///
+/// - `.exact`: its own committed render, or its source (an identity clip).
+/// - `.preview`: Stage B's PROVISIONAL — a spliced quick stand-in for the
+///   pending render, notice `clip-render-preview`.
+/// - `.previous`: Stage A's BRIDGE — the file the clip played a moment ago,
+///   notice `clip-render-previous`.
+/// - `.silent`: no node — the render is pending and no previous file
+///   qualified (spec §5's honest silence), notice `clip-stretch-pending`.
+public enum ClipRenderAudible: String, Sendable, Equatable, Codable {
+    case exact
+    case preview
+    case previous
+    case silent
+}
+
 /// One schedule-time degradation as the engine reports it (m15-e, audit F6):
 /// playback proceeded, but not exactly as the project describes (a fade/
-/// envelope bake failed, a stretched clip is still rendering, …). Posted from
-/// CONTROL-side schedule code only — the render thread never produces these.
-/// The store coalesces events into its `engineNotices` ring; this event type
-/// carries just the facts one occurrence knows.
+/// envelope bake failed, a stretched or tuned clip is still rendering, …).
+/// Posted from CONTROL-side code only — the render thread never produces
+/// these. The store coalesces events into its `engineNotices` ring; this
+/// event type carries just the facts one occurrence knows.
 public struct EngineNoticeEvent: Sendable, Equatable {
     /// Stable machine code (kebab-case) naming the degradation family — the
-    /// store's coalescing key. Current codes: `clip-envelope-skipped`,
-    /// `clip-fades-skipped`, `clip-stretch-pending`, `clip-unplayable`,
-    /// `engine-exception` (m16-a), `clip-file-missing` (m16-c — the
-    /// build-time open catch and the store's open/recover echo).
+    /// store's coalescing key.
+    ///
+    /// Current codes — CENSUSED 2026-09-24 (m23-ap-p2) from every
+    /// `EngineNoticeEvent(code:` construction in `Sources/`, not copied from
+    /// an earlier list (the list this replaced named 6 of the 10):
+    ///  * `clip-stretch-pending` — `PlaybackGraph`'s schedule pass: a clip
+    ///    whose stretch OR tuning render is still pending plays as silence.
+    ///    Posted only when a pass actually plays it (p2-notice), never at the
+    ///    edit that started the render.
+    ///  * `clip-fades-skipped`, `clip-envelope-skipped` — `PlaybackGraph`'s
+    ///    bake fallbacks, linear and loop-cycle (two sites each).
+    ///  * `clip-unplayable` (m16-a) — `PlaybackGraph`'s play-start wiring guard.
+    ///  * `clip-file-missing` (m16-c) — `PlaybackGraph`'s build-time open
+    ///    catch AND `ProjectStore`'s open/recover echo (one code, two sites).
+    ///  * `engine-exception` (m16-a) — `AudioEngine`'s ObjC exception barrier.
+    ///  * `instrument-unavailable` — `AudioEngine`: a hosted instrument that
+    ///    never produced a playable unit plays silence.
+    ///  * `clip-pitch-contour-unavailable` — `AudioEngine`: a tuning plays
+    ///    WITHOUT its drift/vibrato flattening (constant-offset fallback).
+    ///  * `output-device-unavailable` — `AudioEngine`: the pinned output
+    ///    device vanished, sound went to the system default.
+    ///  * `ai-generation-interrupted` — posted from DAWApp (not the engine)
+    ///    through the same `engineNoticeHandler` funnel, when the generation
+    ///    sidecar dies mid-job.
+    /// `debug.postEngineNotice` (debug tier, off the wire list) can post any
+    /// code through the same funnel for UI captures.
     public var code: String
     /// Beginner-readable description of what the listener actually got
     /// (design-language copy — no wire-speak, names the clip).
@@ -264,6 +476,50 @@ public struct TransientMarker: Sendable, Equatable, Codable {
     }
 }
 
+/// m32-b2 — slice boundaries resolved against a source file's OWN PCM.
+///
+/// ⭐ **THE POINT OF THIS TYPE IS THAT IT KEEPS THE RATE AND THE FRAMES
+/// TOGETHER.** Transients arrive in SECONDS; sampler zones want FRAMES at the
+/// FILE's own sample rate. A 48 kHz rip chopped against a hardcoded 44100
+/// lands every chop 8.8 % off — and it would still sound like music, which is
+/// why the usual "just be careful" rule is not enough. Here the ONLY way to
+/// obtain a frame number is from a value that also carries the rate those
+/// frames are in, produced by the code that actually opened the file. The unit
+/// trap is unrepresentable rather than merely forbidden, so **do not flatten
+/// this into loose parameters.**
+///
+/// All three arrays are index-aligned with the `boundarySeconds` the caller
+/// passed in, so a caller can always say which candidate a result belongs to.
+public struct SliceBoundaryGeometry: Codable, Sendable, Equatable {
+    /// The FILE's own sample rate (its `processingFormat`), never the graph's.
+    public var sampleRate: Double
+    /// The FILE's own length in frames.
+    public var frameCount: Int
+    /// The snapped boundary positions, in frames at `sampleRate`. Ascending
+    /// and STRICTLY increasing (the snapper enforces it defensively even when
+    /// a caller's snap window was wide enough to let two candidates meet).
+    public var boundaryFrames: [Int]
+    /// Signed movement applied to each boundary (`chosen − candidate`), so a
+    /// caller can reconstruct the unsnapped position exactly.
+    public var snapOffsetFrames: [Int]
+    /// `max_c |x_c[k]|` at the chosen frame, 0...1 — the residual
+    /// discontinuity. ⚠️ Reported HONESTLY rather than implied away: a stereo
+    /// file often has no simultaneous zero crossing inside the search window,
+    /// so this says whether a real crossing was found or merely the quietest
+    /// available point. That is also why the operation is called a "boundary
+    /// snap" and not a "zero-crossing snap".
+    public var residualAmplitude: [Double]
+
+    public init(sampleRate: Double, frameCount: Int, boundaryFrames: [Int],
+                snapOffsetFrames: [Int], residualAmplitude: [Double]) {
+        self.sampleRate = sampleRate
+        self.frameCount = frameCount
+        self.boundaryFrames = boundaryFrames
+        self.snapOffsetFrames = snapOffsetFrames
+        self.residualAmplitude = residualAmplitude
+    }
+}
+
 /// The MIDI side of one finished take, reported by the engine when the take
 /// finalizes. Notes are clip-relative beats, canonically ordered.
 public struct MIDIRecordingResult: Sendable, Equatable {
@@ -286,6 +542,56 @@ public struct MIDIRecordingResult: Sendable, Equatable {
         self.lengthBeats = lengthBeats
         self.droppedEvents = droppedEvents
         self.controllerLanes = controllerLanes
+    }
+}
+
+/// What the MIDI take currently being captured has accumulated SO FAR
+/// (m34-a-2) — the live half of `MIDIRecordingResult`, read from the main
+/// actor while the take is still rolling.
+///
+/// ⭐ **WHY THIS CROSSES THE ENGINE SEAM AT ALL, AND WHY THAT COSTS NOTHING
+/// REAL-TIME.** Until this existed the take was completely invisible until it
+/// stopped: `MIDICaptureSession.finish(atBeat:)` is what builds the clip, and
+/// its `lengthBeats` is `max(1, ceil(stopBeat − anchorBeats))` — a value that
+/// does not exist until the stop beat is known. So the timeline stayed blank
+/// while the user played, which is what they reported. The session is already
+/// `@MainActor` and already holds every one of these numbers privately; this
+/// type carries them out. **No ring producer is added, and nothing here is
+/// reachable from the render thread** — the same reasoning that made m23-ct's
+/// Route C safe. If a future change finds itself adding a producer to the
+/// capture ring to feed this, the design has gone wrong.
+///
+/// ⚠️ **BEATS ARE ABSOLUTE AND LINEAR**, in the take's own frozen-map domain —
+/// the same domain `MIDICaptureSession` pairs notes in, NOT the modular
+/// `transport.positionBeats` a loop take reports. `TakeRegionPreview` is where
+/// the two are reconciled (and where loop takes are refused for v1).
+public struct LiveTakeExtent: Sendable, Equatable {
+    /// The take's clock origin — `MIDICaptureSession`'s `anchorBeats`. For an
+    /// ordinary take this is the beat playback started from; for an m34-h
+    /// layer it is the beat the layer joined at. Count-in delays the HOST
+    /// anchor, never this one, so it is stable from the instant the take opens.
+    public var anchorBeat: Double
+    /// The newest ACCEPTED note edge, absolute beats — nil until the first
+    /// post-anchor note-on lands. ⚠️ Pre-anchor (count-in) note-ons are DROPPED
+    /// by the session and must never move this: a take that has captured
+    /// nothing has no extent, and pretending otherwise would draw a region for
+    /// a clip that is never going to exist.
+    public var latestEventBeat: Double?
+    /// How many notes would land if the take stopped now — closed notes plus
+    /// still-open ones (open notes clamp to the stop beat, so they land too).
+    ///
+    /// ⭐ **THIS IS THE FIELD THAT DECIDES WHETHER ANYTHING IS DRAWN**, and it
+    /// counts NOTES rather than events on purpose: `ProjectStore.finishTake`
+    /// discards a take whose `notes` are empty ("empty take discarded — no MIDI
+    /// notes received"), and it does that even when controller lanes captured
+    /// plenty. Counting events would promise a clip that the store then throws
+    /// away — a ghost region.
+    public var noteCount: Int
+
+    public init(anchorBeat: Double, latestEventBeat: Double?, noteCount: Int) {
+        self.anchorBeat = anchorBeat
+        self.latestEventBeat = latestEventBeat
+        self.noteCount = noteCount
     }
 }
 
@@ -338,6 +644,46 @@ public enum AuditionOutcome: String, Sendable, Equatable, Codable {
     public var isAudible: Bool { self == .sounded }
 }
 
+/// WHAT a clip-span audition plays (I1-F1, "hear the note WHILE editing it").
+///
+/// `.playbackFile` is I1's: the file playback plays for the clip now. The two
+/// span renders are I1-F1's: the clip's SOURCE is rendered through the ONE
+/// render loop playback's render uses (same curve, level mask, stretcher
+/// configuration, ratio and transpose), for the span only plus a short
+/// pre-roll, off the render thread, so an edit is heard without waiting for
+/// the whole recording to re-render.
+public enum ClipSpanAuditionSource: Sendable, Equatable {
+    /// The file playback plays for the clip NOW: its committed render, or its
+    /// source when it does not render. A render still in flight answers
+    /// `.inaudibleNotReady` and plays nothing.
+    case playbackFile
+    /// A span render of the clip's STORED edits: what the clip will sound
+    /// like once its whole-file render lands, without waiting for it.
+    case storedSpanRender
+    /// A span render with `draft` in place of the clip's stored edits (a drag
+    /// still in flight). Nothing is committed; the clip's own ratio,
+    /// transpose and formant setting still apply.
+    case draftSpanRender(PitchEditSet)
+}
+
+/// How one ACCEPTED clip-span audition ended (I1-F1; RT review H1).
+///
+/// `auditionClipSpan` answers synchronously, BEFORE anything is read or
+/// rendered, so its `.sounded` means "accepted: being prepared, and will play
+/// when ready". This is the real result, reported exactly once, on the main
+/// actor, for every call that answered `.sounded`, and never for any other.
+public enum ClipSpanAuditionDelivery: Sendable, Equatable {
+    /// The buffer is scheduled on the voice and sounds for `seconds`.
+    case played(seconds: Double)
+    /// Nothing plays: the audio could not be read or rendered, or the voice
+    /// could not start. `reason` is written for a person. The engine has also
+    /// written one stderr line and posted a `clip-audition-failed` notice.
+    case failed(reason: String)
+    /// A newer request, a stop, a transport start or a graph rebuild replaced
+    /// it before it played. Its work was cancelled, not only its result.
+    case dropped
+}
+
 /// The contract between the domain layer and the real-time audio engine.
 /// DAWCore (and everything above it) never sees AVFoundation types.
 @MainActor
@@ -379,6 +725,16 @@ public protocol AudioEngineControlling: AnyObject {
     /// for engines without stretch support.
     func clipStretchStatus(trackID: UUID, clipID: UUID) -> ClipStretchStatus?
 
+    /// p2-ren Stage B′: what this clip's node is ACTUALLY PLAYING right now
+    /// (`ClipRenderAudible`) — `.exact`, Stage B's `.preview` (a provisional
+    /// splice), Stage A's `.previous` (a bridge), or `.silent` (no node).
+    /// trackID is accepted for surface stability; the graph keys nodes per
+    /// clip. Pull-based like `clipStretchStatus`: the control snapshot
+    /// queries this at build time and emits the transient `renderAudible`
+    /// field. nil for engines without bridge/preview support (the snapshot
+    /// then omits the field, exactly like `clipStretchStatus`).
+    func renderAudible(trackID: UUID, clipID: UUID) -> ClipRenderAudible?
+
     /// Transient onset markers for the audio file at `url` (M5 iii-e):
     /// offline spectral-flux analysis, content-key cached on disk. Times are
     /// SOURCE-FILE seconds (geometry-free — callers map to clip windows and
@@ -386,6 +742,25 @@ public protocol AudioEngineControlling: AnyObject {
     /// onsets. Runs in async/detached context only — never touches the
     /// render thread.
     func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker]
+
+    /// m32-b2: resolve slice boundaries against a source file's own PCM.
+    ///
+    /// `boundarySeconds` are SOURCE-FILE seconds (the `detectTransients`
+    /// domain), ascending. Each is snapped to the frame within
+    /// ±`snapWindowSeconds` that minimises `max_c |x_c[k]|` — a true zero
+    /// crossing on a mono file, and on a stereo file the point of least
+    /// combined discontinuity, which is what "no click" physically means.
+    /// `snapWindowSeconds: 0` disables snapping and returns the candidates
+    /// rounded to frames, exactly.
+    ///
+    /// ⭐ The result carries the file's OWN sample rate and frame count
+    /// alongside the snapped positions IN FRAMES, so no caller ever converts
+    /// seconds to frames against a rate it guessed — see
+    /// `SliceBoundaryGeometry`.
+    ///
+    /// Runs in async/detached context only — never touches the render thread.
+    func resolveSliceBoundaries(inFileAt url: URL, boundarySeconds: [Double],
+                                snapWindowSeconds: Double) async throws -> SliceBoundaryGeometry
 
     /// Offline audio-content analysis of the file at `url` over the source
     /// window `[windowStartSeconds, +windowDurationSeconds)` (m21-e,
@@ -429,6 +804,19 @@ public protocol AudioEngineControlling: AnyObject {
     func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
                      confidenceThreshold: Double,
                      silenceFloorDbfs: Double) async throws -> PitchDetectionResult
+
+    /// ⭐ THE contour the offline pitch render uses for a clip whose SOURCE
+    /// FILE is `url` (contour-to-render, 2026-09-24): the whole file from
+    /// source second 0 at the product's detection settings, cached beside the
+    /// renders — the exact input the render shapes Hard Tune / drift / vibrato
+    /// edits against. `analysisVersion` is the clip's
+    /// `PitchEditSet.analysisVersion` (`PitchEditSet.currentAnalysisVersion`
+    /// for a clip with no edits); a mismatch answers `.analysisVersionMismatch`
+    /// and detects nothing. Build curves from the result with
+    /// `PitchRenderContour.curve(editSet:clipPitchShiftSemitones:)` — the one
+    /// the render uses. Offline, detached; never the render thread. Unlike
+    /// `detectPitch`, cached: it is the render's own input, not a diagnostic.
+    func renderPitchContour(inFileAt url: URL, analysisVersion: Int) async -> PitchRenderContour
 
     /// The project's reference SLOT changed (m22-g P2) — the
     /// `masterEffectsChanged` twin for the monitor lane: live engines cache
@@ -510,6 +898,12 @@ public protocol AudioEngineControlling: AnyObject {
     /// like the master chain.
     func masterAutomationChanged(_ lanes: [AutomationLane])
 
+    /// MASTER modulation changed (m39-e) — the `masterAutomationChanged` twin.
+    /// Push the strip to the graph and run one parameter pass, which is where
+    /// the modulation snapshot is rebuilt and published. Pushed on every master
+    /// modulation mutation AND every undo/redo/project-boundary restore.
+    func masterModulationChanged(sources: [ModulationSource], routes: [ModulationRoute])
+
     /// Bounce the given project state to a WAV file, offline (no hardware).
     /// Async so hosted Audio Unit instruments can be instantiated/prepared for
     /// the offline graph first; the render itself still stalls the main actor
@@ -555,7 +949,8 @@ public protocol AudioEngineControlling: AnyObject {
 
     /// The full-session per-strip compensation targets EXACTLY as the offline
     /// renderer's automatic plan would apply them (M5 iv-b, spec §5): a
-    /// planning pass prepares the session's AUs (hosted latency), reconciles
+    /// planning pass prepares the session's hosted INSERT effects (their
+    /// latency; a hosted instrument is never plan input, AUR-1), reconciles
     /// an offline graph, runs one parameter pass WITHOUT rendering, and reads
     /// the resulting plan — parity with a real render pass by construction.
     /// Stem export (iv-c) forces these into every per-stem subset pass so the
@@ -594,6 +989,41 @@ public protocol AudioEngineControlling: AnyObject {
     func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                        masterEffects: [EffectDescriptor],
                        masterAutomation: [AutomationLane],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo
+
+    /// `renderOffline` carrying the MASTER strip's modulation (m39-e-2) — the
+    /// sources and routes `masterModulationChanged` hands the live graph. The
+    /// offline graph is a separate graph, so without this parameter pair no
+    /// render could carry master modulation: an LFO or macro on the master
+    /// fader moved live and was missing from every export.
+    ///
+    /// The render class is `masterAutomation`'s, verbatim, again with NO
+    /// default: MASTERED renders (mixdown, bounce, measureLoudness, the stems'
+    /// mastered sibling) pass the project's master sources and routes; STEM
+    /// renders (stems, their "00 Mixdown" reference, bounce-in-place) pass `[]`
+    /// for both — a master tremolo baked into a stem or a bounced clip would
+    /// apply twice on playback (S-3′). The requirement above renders with no
+    /// master modulation; it stays for the renders that can never have any
+    /// (synthetic dry renders: AI-fix regions, voice-conversion sources,
+    /// timbre probes) and for every conformer written before m39-e-2.
+    func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       masterModulationSources: [ModulationSource],
+                       masterModulationRoutes: [ModulationRoute],
+                       fromBeat: Double, durationSeconds: Double,
+                       forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio
+
+    /// The format-aware `renderMixdown` carrying the master strip's modulation
+    /// (m39-e-2), same rule and same reason as the `renderOffline` twin above.
+    /// `render.mixdown` needs its own seam because here the ENGINE renders and
+    /// writes (the m23-m2 lesson).
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       masterModulationSources: [ModulationSource],
+                       masterModulationRoutes: [ModulationRoute],
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo
 
@@ -759,6 +1189,36 @@ public protocol AudioEngineControlling: AnyObject {
     func setHostedAUParameter(_ target: HostedAUTarget, address: String,
                               value: Double) throws -> HostedAUParameterInfo
 
+    /// Everything a hosted Audio Unit says about its own presets
+    /// (au.listPresets, m23-cw): factory list, user list, user-preset support,
+    /// and the classified `currentPreset`. nil ⇒ no `.ready` instance for the
+    /// target (the store maps that to the status-naming teaching error); a
+    /// healthy AU with NO presets is SUCCESS — empty arrays and
+    /// `hasFactoryPresets: false`, the `hasParameterTree: false` precedent.
+    /// Control-plane only — the render thread is never involved.
+    func listHostedAUPresets(_ target: HostedAUTarget) throws -> HostedAUPresetList?
+
+    /// Load one of the AU's OWN presets, live (au.loadPreset, m23-cw).
+    ///
+    /// Deliberately mutates ONLY the live `AUAudioUnit` held by the engine's
+    /// registry — it never writes `stateData` into the model. m23-bx-1's root
+    /// cause (eight cycles) was exactly that split: a hosted plug-in's live
+    /// state lives in `AUHostRegistry`, and a model write would both go stale
+    /// and change the registry's prepare identity, forcing a re-instantiate
+    /// that discards the preset it was trying to save. Save/render/bounce pick
+    /// the new state up through `ProjectStore.tracksWithLiveAudioUnitState()`'s
+    /// existing `fullStateForDocument` capture — MEASURED to change after a
+    /// load, so this composes rather than bypasses.
+    ///
+    /// Returns the preset ACTUALLY in effect afterwards (a re-read, not the
+    /// request). Throws `HostedAUPresetError` for every refusal — including
+    /// `.presetDidNotTake` when the unit accepted the assignment and did
+    /// nothing, which is MEASURED behaviour, not a theoretical guard.
+    @discardableResult
+    func loadHostedAUPreset(_ target: HostedAUTarget,
+                            selector: HostedAUPresetSelector) throws
+        -> HostedAUCurrentPreset
+
     /// Current microphone permission as the OS reports it.
     var recordPermission: RecordPermission { get }
 
@@ -830,6 +1290,57 @@ public protocol AudioEngineControlling: AnyObject {
     /// Stop capture AND playback, finalize the take file, and fire the
     /// startRecording completion. No-op when not recording.
     func stopRecording()
+
+    /// LIVE LOOPING (m34-h phase 1) — close the rolling take and deliver its
+    /// result while the transport KEEPS PLAYING. The sibling of
+    /// `stopRecording()`, not a replacement: identical capture teardown,
+    /// identical linear stop-beat, identical open-note clamp, identical
+    /// writer finalize — the ONE difference is that playback is not torn
+    /// down, so the graph, the playhead and the render callbacks continue.
+    ///
+    /// Returns `true` when a take was actually closed this way. `false` means
+    /// NOTHING WAS CLOSED — either no take was rolling, or this engine has no
+    /// such capability (the default below). ⚠️ The Bool is load-bearing and
+    /// must never be ignored: a caller that assumed success would leave
+    /// `transport.isRecording` false over a still-rolling take, and the take
+    /// would land later against a cleared pending record — i.e. silently lost
+    /// work. `ProjectStore.finishLayer()` throws on `false` for that reason.
+    func finishTakeKeepingPlayback() -> Bool
+
+    /// The take currently being captured, as far as it has got (m34-a-2) — nil
+    /// when no MIDI take is rolling. Read from the main actor at the transport
+    /// tick's cadence (~30 Hz) so the arrange can draw a PROVISIONAL region
+    /// that grows while the user plays; the real clip replaces it at `finish`.
+    ///
+    /// ⚠️ **OPTIONAL CAPABILITY WITH THE FAMILIAR VACUITY RISK** (the
+    /// `previewController` / `setLivePlayPitches` hazard, stated at both): an
+    /// engine that forgot to override this returns nil forever, every model
+    /// and control test still passes because every caller handles "no extent"
+    /// honestly, and the symptom in the product is a blank timeline during a
+    /// take — i.e. exactly the defect this exists to fix, silently restored.
+    /// `Tests/DAWEngineTests/LiveTakeExtentTests.swift` holds the REAL engine
+    /// to it.
+    func liveTakeExtent() -> LiveTakeExtent?
+
+    /// LIVE LOOPING (m34-h phase 1) — start a take that JOINS playback already
+    /// in progress, so layer N+1 can be recorded without ever stopping.
+    ///
+    /// Unlike `startTake`, this must NOT reschedule anything: the already
+    /// sounding layers keep their existing schedule and their existing anchor,
+    /// and the new capture is aligned onto that SAME running anchor. Capture
+    /// begins at `transport.positionBeats` — translated onto the host clock
+    /// through the running anchor exactly as a punch-in point is — so a caller
+    /// whose playhead read is a display-stale tick behind still gets an honest
+    /// `startOffsetSeconds` and lands its clip where capture really began.
+    ///
+    /// Refuses (throws) when the transport is NOT already playing, when a take
+    /// is already rolling, when a count-in is requested (a count-in delays the
+    /// anchor, and this take shares the running anchor), and — v1 — when a
+    /// LOOP is active: a mid-cycle layer inside a loop region is overdub
+    /// semantics, which this app does not model yet (the m15-b loop × punch
+    /// refusal is the precedent).
+    func startTakeInPlayback(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                             completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws
 
     /// MIDI input sources as CoreMIDI enumerates them (hot-plug refreshes the
     /// list). First call may lazily create the engine's MIDI client.
@@ -913,11 +1424,177 @@ public protocol AudioEngineControlling: AnyObject {
     @discardableResult
     func previewController(trackID: UUID, controller: UInt8, value: UInt8) -> AuditionOutcome
 
+    /// LIVE EXPRESSION (m34-f step ②): sends ONE controller value to `trackID`'s
+    /// instrument right now AND, when `captureIntoTake` is true and a take is
+    /// rolling, puts that value into the take's controller lane.
+    ///
+    /// ⭐⭐ **THE SEAM THE PAD WAS MISSING, AND IT IS THE WHOLE ITEM.**
+    /// `previewController` above is *"a preview, never the record"* — correct
+    /// for auditioning a shape, and a silent lie for a performance. Something
+    /// the user shapes by hand during an armed take must be IN that take, or it
+    /// sounds right while played and vanishes from the bounce. `MIDICapture-
+    /// Session` has ingested `controlChange` since m16-b3; nothing on the pad's
+    /// side ever handed it one.
+    ///
+    /// ⭐⭐ **NET: ZERO RINGS GAIN A PRODUCER — the m23-ct Route C argument,
+    /// unchanged.** ONE main-actor value fans to BOTH pipes at their MAIN-ACTOR
+    /// ends: the audible half rides the existing per-renderer audition ring
+    /// (`previewController`, untouched), and the capture half is a direct
+    /// main-actor call into the take's `MIDICaptureSession`, bypassing the
+    /// capture ring entirely. The CoreMIDI receive thread stays the sole
+    /// producer of every thru/capture ring; the main actor stays the sole
+    /// producer of every audition ring.
+    ///
+    /// ⚠️ **`captureIntoTake` IS A DOMAIN VERDICT, NOT AN ENGINE ONE.** Only
+    /// `ProjectStore` knows arm state, so it computes
+    /// `isRecording && isArmed && kind == .instrument` and hands the answer
+    /// down. The engine narrows it (is a take actually capturing MIDI, does a
+    /// session exist) but never widens it.
+    ///
+    /// Never throws; the outcome reports what was heard, how many points went
+    /// into the take, and whether a take received them at all.
+    @discardableResult
+    func setLiveExpression(trackID: UUID, controller: UInt8, value: UInt8,
+                           captureIntoTake: Bool) -> LiveExpressionOutcome
+
+    /// LIVE PLAY (m23-ct): sounds exactly `pitches` on `trackID` right now AND,
+    /// when `captureIntoTake` is true and a take is rolling, puts the note
+    /// EDGES this call implies into that take. SET semantics, diffed against
+    /// what the track already holds, exactly like `setAuditionPitches`.
+    ///
+    /// ⭐ **THE ONE THING THAT MAKES A TYPED PERFORMANCE RECORDABLE.** Route C
+    /// (spike 2026-08-29): ONE main-actor note edge fans to BOTH pipes, entering
+    /// each at its MAIN-ACTOR end — the audible half rides the existing
+    /// per-renderer audition ring (`setAuditionPitches`, unchanged), and the
+    /// capture half is a direct main-actor call into the take's
+    /// `MIDICaptureSession`, bypassing the capture ring entirely.
+    ///
+    /// ⭐⭐ **NET: ZERO RINGS GAIN A PRODUCER, which is the whole RT-safety
+    /// argument.** The CoreMIDI receive thread stays the sole producer of every
+    /// thru ring and of the capture ring; the main actor stays the sole
+    /// producer of every audition ring. `LiveEventRing.push` is a non-atomic
+    /// load(head) → write slot → store(head), so a second producer on any ring
+    /// would silently lose or duplicate events; nothing here goes near one.
+    ///
+    /// ⚠️ **`captureIntoTake` IS A DOMAIN VERDICT, NOT AN ENGINE ONE.** Only
+    /// `ProjectStore` knows arm state, so it computes
+    /// `isRecording && isArmed && kind == .instrument` and hands the answer
+    /// down. The engine narrows it further (is a take actually capturing MIDI,
+    /// does a session exist) but never widens it.
+    ///
+    /// Never throws; the outcome reports what was heard, how many edges went
+    /// into the take, and whether a take received them at all.
+    @discardableResult
+    func setLivePlayPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8,
+                            captureIntoTake: Bool) -> LivePlayOutcome
+
     /// Releases every audition voice on every track and requests an
     /// all-notes-off on each renderer that held one. Called at engine
     /// shutdown, project boundary, and app resign-active — the paths where the
     /// main actor is about to stop being able to send note-offs.
     func stopAllAudition()
+
+    /// CLIP-NOTE AUDITION (I1, design `2026-09-24-pitch-editor-interaction-batch`
+    /// §4, decision (c) "hybrid, with no live DSP"): plays the SOURCE-second span
+    /// `[startSourceSeconds, endSourceSeconds)` of ONE audio clip, once, right
+    /// now, AS IT SOUNDS NOW. Never through a live pitch shifter.
+    ///
+    /// ⭐ **THE FILE IS THE ONE PLAYBACK PLAYS.** A clip that renders through the
+    /// stretch cache (a tuning, a stretch, a transpose) is resolved through the
+    /// SAME resolver the playback graph uses, never a second key derivation, so
+    /// the audition and the next transport pass read the same bytes. A render
+    /// still in flight answers `.inaudibleNotReady` and plays nothing, exactly
+    /// as playback plays that clip as silence until the render lands. A clip
+    /// that does not render plays its source file. Seconds map to the file's
+    /// frames through the render's own output↔source mapping.
+    ///
+    /// **Level:** the clip's gain × the track's fader, then the master fader
+    /// and the master insert chain (the voice joins the main mix). A muted
+    /// track, or one an active solo leaves out, answers `.inaudibleMuted` and
+    /// plays nothing. Unknown ids, a MIDI clip or an empty span answer
+    /// `.noRenderer`.
+    ///
+    /// ⚠️ **NAMED COST: THE VOICE SKIPS THE TRACK'S OWN INSERTS**, and with them
+    /// the track's pan, sends, bus routing and volume automation. It is the
+    /// clip's audio at the fader's level, not the strip's output: an EQ, a
+    /// compressor or a reverb on the vocal track is NOT heard in the audition.
+    /// The clip's own fade-in/out and gain envelope are not applied either, so
+    /// a note inside a clip fade plays at the clip's flat gain.
+    ///
+    /// One audition at a time: a new call replaces a sounding one. It stops by
+    /// itself at the span's end, and on a transport start, a graph rebuild and
+    /// `stopAllAudition()`. WHEN to call it (press, after a commit's render,
+    /// never while the transport runs) is the caller's policy:
+    /// `ClipNoteAuditionController`.
+    ///
+    /// `.sounded` means ACCEPTED: the span is being read and will start within
+    /// a few milliseconds. It is answered before the read runs, so it cannot
+    /// promise the read succeeds; a failure writes one stderr line and posts a
+    /// `clip-audition-failed` engine notice (RT review H1), and the form with a
+    /// `completion` below reports the real result. Real-time safety: the voice
+    /// is a stock player node the graph attached when it was built; the span is
+    /// read, faded and converted off the render thread and only scheduled from
+    /// the main actor. Same as the form below with `.playbackFile` and no
+    /// completion.
+    @discardableResult
+    func auditionClipSpan(trackID: UUID, clipID: UUID,
+                          startSourceSeconds: Double, endSourceSeconds: Double) -> AuditionOutcome
+
+    /// I1-F1: `auditionClipSpan` with a choice of WHAT plays and a report of
+    /// how it ENDED.
+    ///
+    /// * `source`: the playback file (I1), or a span render of the stored or
+    ///   a draft edit set through the one render loop
+    ///   (`ClipSpanAuditionSource`). A span render never waits for the
+    ///   whole-file render and never touches it.
+    /// * `completion`: called exactly once, on the main actor, for every call
+    ///   that answered `.sounded`, and never otherwise
+    ///   (`ClipSpanAuditionDelivery`). Never called re-entrantly from inside
+    ///   this call.
+    ///
+    /// LATEST WINS. A call cancels whatever is still being read or rendered
+    /// (its completion reports `.dropped`), so a buffer that was superseded
+    /// NEVER plays. A sounding audition keeps sounding until the new one's
+    /// buffer is ready and then gives way to it, so a drag heard step by step
+    /// has no gap between steps; a REFUSED call silences it at once.
+    ///
+    /// Refuses (`.noRenderer`) while the transport plays or records: the
+    /// caller's policy refuses first, and this is the engine's own guard (RT
+    /// review H6). The rest of the contract is the four-argument form's.
+    @discardableResult
+    func auditionClipSpan(trackID: UUID, clipID: UUID,
+                          startSourceSeconds: Double, endSourceSeconds: Double,
+                          source: ClipSpanAuditionSource,
+                          completion: (@MainActor @Sendable (ClipSpanAuditionDelivery) -> Void)?)
+        -> AuditionOutcome
+
+    /// Stops a sounding clip-note audition and discards one still being read
+    /// or rendered (its work is cancelled). Idempotent.
+    func stopClipSpanAudition()
+
+    /// Sink invoked on the main actor each time one clip's stretch/tuning render
+    /// COMMITS to the cache, with that clip's id (I1). This is the render cache's
+    /// own completion signal, so a caller waiting for "that clip's render" hears
+    /// about it the moment the file exists, not at the next status poll. A
+    /// superseded or failed render reports nothing. A function rather than a
+    /// `var` for the `setEndStopHandler` reason: a protocol property requirement
+    /// cannot carry a default.
+    func setClipRenderCompleteHandler(_ handler: ((UUID) -> Void)?)
+
+    /// I1-F2 (RT re-review, the span cap): how many SOURCE seconds of a clip
+    /// that plays at stretch `ratio` an audition covers so that what is HEARD
+    /// lasts `heardSeconds`, through the engine's one output↔source mapping.
+    /// `ClipNoteAuditionPolicy.maxSpanSeconds` caps what is heard; it used to
+    /// count source seconds, so at ratio 4 an audition played 24 s. The store
+    /// asks here before it resolves a span, and the engine's own plan asks the
+    /// same function, so the span the store reports is the span that plays.
+    /// Exact at ratio 1: `heardSeconds` itself.
+    ///
+    /// `nil` when this engine has no such mapping (fakes, headless): the
+    /// caller then counts source seconds, the behaviour before I1-F2. DAWCore
+    /// never does this arithmetic itself: the model owns source seconds, and
+    /// the output↔source mapping lives in the engine (`StretchCurvePlan`).
+    func clipAuditionSourceSeconds(heardSeconds: Double, ratio: Double) -> Double?
 
     /// END-OF-CONTENT STOP BOUND (m25-d): the linear beat at which playback
     /// should stop because there is no more material past it, or `nil` for
@@ -1088,9 +1765,128 @@ extension AudioEngineControlling {
     public func previewController(trackID: UUID, controller: UInt8,
                                   value: UInt8) -> AuditionOutcome { .unsupported }
 
+    /// Live expression is optional capability (m34-f step ②).
+    ///
+    /// ⭐⭐ **THE DEFAULT FORWARDS TO `previewController` RATHER THAN RETURNING
+    /// `.unsupported`, AND THAT CHOICE IS DELIBERATE.** Every existing fake and
+    /// headless engine in this tree implements the preview and is asserted
+    /// against its push count; a default that answered `.unsupported` would
+    /// silence the pad for all of them the moment `PadPreviewController` was
+    /// pointed at this method. Forwarding keeps the AUDIBLE half exactly as it
+    /// was for every conformer, and leaves the CAPTURE half — the genuinely new
+    /// capability — as the only thing an engine has to opt into.
+    ///
+    /// ⚠️⚠️ **THAT MAKES THE VACUITY RISK SHARPER, NOT SOFTER, SO IT IS NAMED
+    /// HERE: a real engine that forgot to override this would sound perfect and
+    /// record nothing, forever, and every model-layer test would still pass.**
+    /// That is precisely the defect this item exists to prevent, so it must be
+    /// closed by a test that drives the REAL engine:
+    /// `Tests/DAWEngineTests/LiveExpressionCaptureTests.swift` rolls a take and
+    /// counts the controller points that reach `midiCaptureSessionForTesting`
+    /// — the `LivePlayCaptureTests` precedent applied to a method whose default
+    /// is a silently unrecorded performance.
+    @discardableResult
+    public func setLiveExpression(trackID: UUID, controller: UInt8, value: UInt8,
+                                  captureIntoTake: Bool) -> LiveExpressionOutcome {
+        LiveExpressionOutcome(
+            audition: previewController(trackID: trackID, controller: controller, value: value),
+            capturedPoints: 0, recording: false)
+    }
+
+    /// Live play is optional capability (m23-ct, the `setAuditionPitches`
+    /// precedent): fakes and headless engines have neither instrument renderers
+    /// nor a MIDI capture session, so the default sounds nothing and captures
+    /// nothing.
+    ///
+    /// ⚠️ **THE SAME VACUITY RISK `previewController` DOCUMENTS, and here it is
+    /// worse than silence — it is a SILENTLY UNRECORDED PERFORMANCE.** An
+    /// `AudioEngine` that forgot to override this would report
+    /// `.unsupported` / `recording:false` forever, every typed note would go
+    /// into no take, and every model-layer test would still pass because
+    /// `LivePlayController` is written to keep working against an engine that
+    /// cannot capture. `Tests/DAWEngineTests/LivePlayCaptureTests.swift` closes
+    /// that hole by driving the REAL `AudioEngine` with a rolling take and
+    /// counting the edges that reach `midiCaptureSessionForTesting`.
+    public func setLivePlayPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8,
+                                   captureIntoTake: Bool) -> LivePlayOutcome { .unsupported }
+
+    /// Closing a take without stopping playback is optional capability (m34-h,
+    /// the `setLivePlayPitches` precedent): fakes and headless engines own no
+    /// capture writer and no MIDI session, so the default closes NOTHING and
+    /// says so.
+    ///
+    /// ⚠️ **THE VACUITY RISK HERE IS THE WORST OF THE FAMILY, because the
+    /// default is not silence — it is a LOST TAKE.** An `AudioEngine` that
+    /// forgot to override this would report `false` forever; if the store
+    /// treated `false` as success it would clear `isRecording` and the pending
+    /// take while the engine kept capturing, and the performance would land
+    /// nowhere. Two things close that hole: the store THROWS on `false`
+    /// (`ProjectStore.finishLayer()`), and
+    /// `Tests/DAWEngineTests/LiveLayerCaptureTests.swift` asserts the REAL
+    /// engine returns `true` for a rolling take AND leaves playback running —
+    /// the `OutputDeviceTests` / `previewController` precedent applied to a
+    /// method whose default silently discards a recording.
+    public func finishTakeKeepingPlayback() -> Bool { false }
+
+    /// Joining running playback with a new take is optional capability (m34-h,
+    /// same precedent). The default THROWS rather than returning quietly: a
+    /// silent no-op would leave the caller believing layer 2 was rolling while
+    /// nothing captured, which is the same lost-performance failure
+    /// `finishTakeKeepingPlayback`'s Bool exists to prevent.
+    public func startTakeInPlayback(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                                    completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {
+        throw ProjectError.transportBusy(
+            "this engine cannot start a take while playback is running — stop first, then record"
+        )
+    }
+
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.
     public func stopAllAudition() {}
+
+    /// Clip-note audition is optional capability (I1, the `setAuditionPitches`
+    /// precedent): fakes and headless engines have no audition voice, so the
+    /// default reports `.unsupported` and every existing conformer compiles
+    /// unchanged.
+    ///
+    /// ⚠️ THE `previewController` VACUITY RISK: an `AudioEngine` that forgot to
+    /// override this would answer `.unsupported` forever and the editor would
+    /// be silent while every policy test passed. `AuditionEngineTests`'
+    /// `clipSpanRealEngineOverridesTheDefault` closes it against the REAL
+    /// engine, without starting any device.
+    @discardableResult
+    public func auditionClipSpan(trackID: UUID, clipID: UUID,
+                                 startSourceSeconds: Double,
+                                 endSourceSeconds: Double) -> AuditionOutcome { .unsupported }
+
+    /// An engine with no span render (fakes, headless) answers `.unsupported`
+    /// for every source and never calls `completion`, which is the contract:
+    /// completion follows `.sounded` only. `ClipNoteAuditionController` reads
+    /// `.unsupported` as "no span render here" and keeps I1's behaviour (the
+    /// release waits for the whole-file render). ⚠️ The same vacuity risk as
+    /// the four-argument form: `AuditionEngineTests`' `clipSpanRender…` tests
+    /// call this through the PROTOCOL on the real engine.
+    @discardableResult
+    public func auditionClipSpan(trackID: UUID, clipID: UUID,
+                                 startSourceSeconds: Double, endSourceSeconds: Double,
+                                 source: ClipSpanAuditionSource,
+                                 completion: (@MainActor @Sendable (ClipSpanAuditionDelivery) -> Void)?)
+        -> AuditionOutcome { .unsupported }
+
+    /// An engine with no clip-note audition has nothing to stop.
+    public func stopClipSpanAudition() {}
+
+    /// An engine that renders nothing never completes a render, so the default
+    /// discards the sink (the `setEndStopHandler` precedent).
+    public func setClipRenderCompleteHandler(_ handler: ((UUID) -> Void)?) {}
+
+    /// An engine without the output↔source mapping cannot answer; the caller
+    /// counts source seconds (I1-F2). ⚠️ The `previewController` vacuity risk
+    /// again: an `AudioEngine` that forgot to override this would keep the
+    /// old source-second cap silently. `AuditionEngineTests`'
+    /// `clipSpanCapBoundsWhatIsHeard` asks the REAL engine through the
+    /// protocol.
+    public func clipAuditionSourceSeconds(heardSeconds: Double, ratio: Double) -> Double? { nil }
 
     /// The end-of-content stop bound is optional capability (m25-d, the
     /// `stopAllAudition` precedent). An engine that ignores it simply never
@@ -1150,6 +1946,13 @@ extension AudioEngineControlling {
     /// conformers compile unchanged.
     public func masterAutomationChanged(_ lanes: [AutomationLane]) {}
 
+    /// Master modulation is optional capability (m39-e, the
+    /// `masterAutomationChanged` precedent): fakes and headless engines have no
+    /// master strip to modulate, so the default is a no-op and existing
+    /// conformers compile unchanged.
+    public func masterModulationChanged(sources: [ModulationSource],
+                                        routes: [ModulationRoute]) {}
+
     /// Engine notices are optional capability (m15-e): engines without
     /// schedule-time degradation reporting (fakes, headless) discard the
     /// installed handler, so existing conformers compile unchanged.
@@ -1162,9 +1965,30 @@ extension AudioEngineControlling {
     /// headless) report nothing pending.
     public func clipStretchStatus(trackID: UUID, clipID: UUID) -> ClipStretchStatus? { nil }
 
+    /// p2-ren Stage B′: bridge/preview reporting is optional capability —
+    /// engines without it (fakes, headless) report nothing, so the snapshot
+    /// omits `renderAudible` exactly as it omits `stretchRendering`.
+    public func renderAudible(trackID: UUID, clipID: UUID) -> ClipRenderAudible? { nil }
+
     /// Transient analysis is optional capability: engines without it (fakes,
     /// headless) report no onsets.
     public func detectTransients(inFileAt url: URL, sensitivity: Double) async throws -> [TransientMarker] { [] }
+
+    /// Slice-boundary resolution is optional capability (m32-b2) — and it
+    /// deliberately DIVERGES from its neighbour `detectTransients`, which
+    /// returns `[]`.
+    ///
+    /// ⚠️ An empty onset list is a defensible "no onsets here". A fabricated
+    /// `SliceBoundaryGeometry{sampleRate: 0, frameCount: 0, boundaryFrames: []}`
+    /// is not: it would flow into the planner and produce zones with nonsense
+    /// frame spans — **a plausible-looking valid answer from an engine that
+    /// cannot answer**, which is this tree's characteristic failure mode. So
+    /// the default THROWS, following `analyzeAudioContent`/`liveLoudness`
+    /// rather than `detectTransients`. Fakes that need the surface override it.
+    public func resolveSliceBoundaries(inFileAt url: URL, boundarySeconds: [Double],
+                                       snapWindowSeconds: Double) async throws -> SliceBoundaryGeometry {
+        throw ProjectError.engineUnavailable
+    }
 
     /// Audio-content analysis is optional capability — but unlike
     /// `detectTransients` (an empty marker list is honest data), a fabricated
@@ -1203,6 +2027,15 @@ extension AudioEngineControlling {
                             confidenceThreshold: Double,
                             silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
         throw ProjectError.engineUnavailable
+    }
+
+    /// The render contour is optional capability (contour-to-render) — and,
+    /// like `detectPitch`, a fabricated contour would be a lie, so an engine
+    /// without it answers `.unavailable`: no frames, which every reader
+    /// (render and display alike) treats as "nothing to shape against".
+    public func renderPitchContour(inFileAt url: URL,
+                                   analysisVersion: Int) async -> PitchRenderContour {
+        .unavailable(reason: "this engine cannot analyse pitch")
     }
 
     /// The reference slot push is optional capability (m22-g P2, the
@@ -1273,6 +2106,18 @@ extension AudioEngineControlling {
         throw HostedAUParameterError.noHostedAU
     }
 
+    /// The hosted-AU PRESET surface is optional capability too (m23-cw): an
+    /// engine without AU hosting reports no hosted instance, so every existing
+    /// conformer — the app's real engine aside — compiles unchanged.
+    public func listHostedAUPresets(_ target: HostedAUTarget) throws
+        -> HostedAUPresetList? { nil }
+    @discardableResult
+    public func loadHostedAUPreset(_ target: HostedAUTarget,
+                                   selector: HostedAUPresetSelector) throws
+        -> HostedAUCurrentPreset {
+        throw HostedAUPresetError.noHostedAU
+    }
+
     /// Default: audio-only engines forward audio takes to the legacy
     /// `startRecording` (midi side nil); a MIDI-only take is unsupported.
     public func startTake(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
@@ -1284,6 +2129,13 @@ extension AudioEngineControlling {
             completion(result.map { TakeResult(audio: $0, midi: nil) })
         }
     }
+
+    /// Live take extent is optional capability (m34-a-2): fakes and headless
+    /// engines run no `MIDICaptureSession`, so they have no take to describe
+    /// and every conformer compiles unchanged. See the requirement's ⚠️ for
+    /// why this default is dangerous and which suite holds the real engine to
+    /// it.
+    public func liveTakeExtent() -> LiveTakeExtent? { nil }
 
     public func availableMIDIInputs() -> [MIDIInputDevice] { [] }
     public func midiEventCount() -> Int { 0 }
@@ -1383,5 +2235,51 @@ extension AudioEngineControlling {
             tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
             masterEffects: masterEffects, masterAutomation: masterAutomation,
             fromBeat: fromBeat, durationSeconds: durationSeconds, to: url)
+    }
+
+    /// Master-modulation rendering is optional capability (m39-e-2), and this
+    /// default REFUSES rather than drops, the m23-m2 format precedent for the
+    /// same reason: the defect m39-e-2 closes IS master modulation silently
+    /// missing from a render, and a discarding default would recreate it in
+    /// every engine that implements only the requirement without it. When
+    /// nothing could change the render (no ENABLED route: an unrouted source or
+    /// a disabled route is inert, the m39-e law) it forwards unchanged, so every
+    /// existing conformer, and every project without master modulation,
+    /// renders exactly as before.
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
+        guard !masterModulationRoutes.contains(where: { $0.enabled }) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: forcedCompensationTargets)
+    }
+
+    /// The format-aware mixdown twin (m39-e-2): same refusal, and it forwards
+    /// to the FORMAT-aware requirement, so an engine that plumbs the format but
+    /// not master modulation still writes the format it was asked for.
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo {
+        guard !masterModulationRoutes.contains(where: { $0.enabled }) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderMixdown(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            to: url, format: format)
     }
 }

@@ -108,6 +108,47 @@ public enum MixerFormat {
         case .gate: return "Gate"
         case .chorus: return "Chorus"
         case .bassEnhancer: return "Bass Enhancer"
+        case .bitCrusher: return "Bit Crusher"
+        case .djFilter: return "DJ Filter"
+        case .ringMod: return "Ring Mod"
+        case .flanger: return "Flanger"
+        case .hallReverb: return "Hall Reverb"
+        case .tapeDelay: return "Tape Delay"
+        case .stereoWidth: return "Stereo Width"
+        case .phaser: return "Phaser"
+        // ⚠️ MEASURED 2026-09-20: at 10 pt medium this draws 83.907 pt against
+        // the 85 pt built-in insert-label budget — it FITS, with 1.09 pt to
+        // spare, and it is now the WIDEST built-in name, displacing "Bass
+        // Enhancer" (72.567 pt). `InsertLabelBudgetTests` pins both facts.
+        // ⭐ AND THE VIEW AGREES: a staging probe over `debug.insertLabels` read
+        // the channel row as drawn 84.000 / available 85.000 / intrinsic 84.000
+        // — no truncation — with a truncating `audioUnit` row in the same sweep
+        // as the positive control. ⚠️ The view rounds UP of this arithmetic
+        // (84.000 vs 83.907), so the real margin is 1.0 pt, not 1.09.
+        // Any future rename must be re-measured, not eyeballed.
+        case .transientShaper: return "Transient Shaper"
+        // ⛔ m39-z. "Frequency Shifter" MEASURES 88.156 pt against the 85 pt
+        // built-in budget and DOES NOT FIT - measured with
+        // `NSFont.systemFont(ofSize: 10, weight: .medium)`, the face
+        // `InsertLabel.styled` draws with. The shipped name is "Frequency
+        // Shift" at 78.153 pt, 6.847 pt spare - and since the view rounds UP of
+        // this arithmetic by only ~0.1-0.4 pt, that margin clears on the
+        // arithmetic alone. It does NOT displace "Transient Shaper" (83.907 pt)
+        // as the widest built-in name.
+        case .freqShifter: return "Frequency Shift"
+        // ⛔ m39-ac. "Clipper" MEASURES 35.677 pt against the 85 pt built-in
+        // budget — by far the widest margin in the table, and the name is the
+        // ordinary one for the thing, so there is no second candidate to weigh.
+        // Measured with `NSFont.systemFont(ofSize: 10, weight: .medium)`, the
+        // face `InsertLabel.styled` draws with, in the same probe that
+        // reproduced "Transient Shaper" at 83.907 pt and "Bass Enhancer" at
+        // 72.567 pt — i.e. the instrument was positively controlled against two
+        // numbers this tree had already recorded.
+        case .clipper: return "Clipper"
+        // ⛔ m39-af. "DynamicEQ" is what the raw value capitalises to, and it is
+        // the name the store-side `default:` arm would ship. Both display-name
+        // functions need this line; the compiler catches neither.
+        case .dynamicEQ: return "Dynamic EQ"
         case .audioUnit:
             let name = effect.audioUnit?.name ?? ""
             return name.isEmpty ? "Audio Unit" : name

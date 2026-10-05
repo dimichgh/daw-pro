@@ -79,9 +79,64 @@ public enum SamplerCardLayout {
     /// dividers, the GLOBALS section, the ZONES section's label, and the footer
     /// hint line.
     ///
-    /// **Measured: 265.5.** ⛔ THE ONE CONSTANT THAT CAN OVERFLOW THE CARD (see
-    /// the type's doc) — kept a shade above the measurement on purpose.
-    public static let chromeHeight: CGFloat = 268
+    /// **Measured: 265.5 (m26-i), then 322.5 (m34-u).** ⛔ THE ONE CONSTANT THAT
+    /// CAN OVERFLOW THE CARD (see the type's doc) — kept a shade above the
+    /// measurement on purpose.
+    ///
+    /// ⚠️⚠️ **m34-u MEASURES IT IN ITS TALLEST STATE, AND THAT IS THE WHOLE
+    /// SUBTLETY.** The GLOBALS section now carries a CONDITIONAL amber line —
+    /// the stored-but-inert glide warning — and unlike `oneShotOverrideNote`
+    /// (which lives inside the yielding inspector scroller and is absorbed
+    /// there) it sits in the FIXED chrome. So the honest constant is the chrome
+    /// with the warning SHOWING; measuring the quiet state would under-state it
+    /// by the one line, in the one direction that overflows the card.
+    ///
+    /// ⭐ **HONEST COST, RECORDED NOT HIDDEN** (the design language's own idiom
+    /// for this): the m34-u VOICE chip row plus the one-line glide warning cost
+    /// **57 pt** of chrome (265.5 → 322.5, measured by the probe both before and
+    /// after), and at the default window with the per-zone inspector open the
+    /// zone list therefore draws **6 rows where it drew 8**. It is unaffected
+    /// with no zone selected (still the 12-row cap), it is well above
+    /// `minVisibleRows`, and `zoneListSurvivesTheInspector` pins the new floor
+    /// so a further slide is a red test rather than a discovery.
+    ///
+    /// ⚠️ **THE WARNING'S SECOND LINE WAS WORTH A WHOLE ZONE ROW, MEASURED.**
+    /// The first two drafts of `SamplerEditorModel.glideInertNote` wrapped to
+    /// two lines: chrome came out 333.5 and the list drew a SLICED 5.79 rows.
+    /// Cutting the copy to one line bought back 11 pt and a clean 6. Copy length
+    /// in fixed chrome is a layout decision on this card, not a wording one.
+    ///
+    /// ⛔ **NEXT AGENT TO ADD A CONTROL HERE: RE-MEASURE, DO NOT HAND-SUM.**
+    /// `node scripts/gates/_m26i-card-height-probe.mjs` is the instrument, and
+    /// as of m34-u it stages the INERT-GLIDE state on every measurement so the
+    /// conditional warning line is SHOWING while the chrome is measured — it
+    /// throws if that staging does not take, so a silently-quiet card cannot
+    /// return a too-small number. The GLOBALS row is at **304 of 308 pt** wide
+    /// with four knobs; there is no room for a fifth, and m34-h-2 is an open
+    /// defect from exactly that kind of squeeze. m34-w's `glideMode` in
+    /// particular changes what the GLIDE readout MEANS (a total slide time vs a
+    /// rate per interval) rather than adding a value — so it wants the existing
+    /// readout to say which, not a new cell beside it.
+    ///
+    /// ⚠️⚠️ **W7-SMP (2026-09-27) ADDED A SECOND CONDITIONAL AMBER LINE, AND
+    /// THIS NUMBER IS DERIVED, NOT MEASURED.** `SamplerEditorModel.inertGlobalsNote`
+    /// ("Release does nothing: set per zone.") sits directly under the glide
+    /// warning, in the same fixed chrome, whenever every zone sets its own value
+    /// for a global the card draws. Both lines can show at once, so the tallest
+    /// state grew by one line. The +17 pt is m34-u's OWN measurement, not a font
+    /// sum: one 9 pt line drew 11 pt (the two-line glide draft measured 333.5
+    /// against 322.5) plus the GLOBALS stack's 6 pt spacing, over the measured
+    /// 322.5 → 339.5, kept a shade above as the rule for this constant says.
+    /// The line is held to ONE line in its worst case (≤ 51 characters, three
+    /// control names) so this stays one line's cost. Costs about half a zone
+    /// row at the default window with the inspector open; the ≥ 6-row pin at
+    /// 900 pt still holds (844 − 341 − 312 = 191 pt → 6 rows).
+    /// ⛔ STILL OWED: a probe re-measure with BOTH lines showing — a fixture
+    /// whose every zone sets `release`, plus a positive-control echo of the
+    /// inert globals from `debug.samplerEditor` (see the probe's `glideInert`
+    /// check). Until then this constant is an over-estimate by construction,
+    /// not by measurement.
+    public static let chromeHeight: CGFloat = 341
 
     /// The per-zone inspector's NATURAL height with a zone selected: its
     /// section label, three knob groups (PITCH / ENVELOPE / OUTPUT, each a

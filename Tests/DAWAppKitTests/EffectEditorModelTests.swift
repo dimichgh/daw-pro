@@ -65,17 +65,25 @@ struct EffectEditorModelTests {
         let track = store.addTrack(kind: .audio)
         let model = Self.makeStoreBacked(store)
         // ≥3 kinds explicitly, then the full sweep (eq = 10 legacy + 12 m22-a;
-        // compressor = 6 legacy + m23-ck's mix; limiter = 2 + m23-ch's
-        // truePeak). These counts are DELIBERATELY literal — the sweep below
-        // proves rows follow the schema, and only a literal catches a schema
-        // row that vanished.
-        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 7), (.limiter, 3)] {
+        // compressor = 6 legacy + m23-ck's mix + m39-ae's THREE de-ess params;
+        // limiter = 2 + m23-ch's truePeak). These counts are DELIBERATELY
+        // literal — the sweep below proves rows follow the schema, and only a
+        // literal catches a schema row that vanished.
+        for (kind, count) in [(EffectDescriptor.Kind.eq, 22), (.compressor, 10), (.limiter, 3)] {
             let fx = try! store.addEffect(toTrack: track.id, kind: kind)
             model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
             #expect(model.specs.count == count, "\(kind) row count")
             #expect(model.specs.map(\.name) == EffectParamSpec.specs(for: kind).map(\.name),
                     "\(kind) rows must be the fx.describe schema, in schema order")
         }
+        // ⚠️ EACH SWEEP INSERT IS REMOVED AGAIN, and that is load-bearing
+        // rather than tidy: `ProjectStore.maxEffectsPerChain` is 16, this test
+        // already spent 3 slots above, and m39-j's `.flanger` took the kind
+        // roster to 14 built-ins — 3 + 14 = 17, which threw `chainFull(16)`
+        // through a `try!` and CRASHED THE WHOLE TEST PROCESS mid-run rather
+        // than failing one test. (The run reported no totals at all, which is
+        // a worse failure than a red leg.) Holding the chain at length 4
+        // decouples this fixture from the roster size permanently.
         for kind in Self.builtInKinds {
             let fx = try! store.addEffect(toTrack: track.id, kind: kind)
             model.prepare(trackID: track.id, effectID: fx.id, targetLabel: "on Test")
@@ -85,7 +93,12 @@ struct EffectEditorModelTests {
                 #expect(model.value(for: spec) == spec.defaultValue,
                         "\(kind).\(spec.name) fresh value must be the spec default")
             }
+            try! store.removeEffect(trackID: track.id, effectID: fx.id)
         }
+        // Non-vacuity: the sweep ran over the WHOLE roster, and the chain is
+        // back to the three explicit inserts it started the sweep with.
+        #expect(Self.builtInKinds.count >= 14)
+        #expect(store.tracks[0].effects.count == 3)
     }
 
     @Test("a closed or vanished target yields no rows and no descriptor")
@@ -140,7 +153,12 @@ struct EffectEditorModelTests {
                 #expect(model.value(for: spec) == probe,
                         "\(kind).\(spec.name) did not round-trip via setEffectParam")
             }
+            // Same reason as `rowsFollowSpecs`: 14 built-ins against a
+            // 16-insert cap is two kinds from a `chainFull` crash, and the
+            // crash takes the whole process rather than one leg.
+            try! store.removeEffect(trackID: track.id, effectID: fx.id)
         }
+        #expect(store.tracks[0].effects.isEmpty)
     }
 
     @Test("every param of every kind round-trips on the MASTER chain")
@@ -156,19 +174,32 @@ struct EffectEditorModelTests {
                 #expect(model.value(for: spec) == probe,
                         "master \(kind).\(spec.name) did not round-trip via setMasterEffectParam")
             }
+            try! store.removeMasterEffect(effectID: fx.id)
         }
+        #expect(store.masterEffects.isEmpty)
     }
 
     @Test("the reader's names are exactly the fx.describe schema names, per kind")
     func readerCoversSchema() {
         for kind in Self.builtInKinds {
-            let fresh = EffectDescriptor(kind: kind)
+            // ⚠️ `newlyAdded`, not a bare `EffectDescriptor(kind:)` (m39-ac-2): a
+            // brand-new insert is what `ProjectStore.addEffect` builds, and for
+            // `.clipper` that is NOT a bare descriptor — a bare clipper is what a
+            // pre-ruling project saved, and it reads the LEGACY 4× (below).
+            let fresh = EffectDescriptor.newlyAdded(kind: kind)
             for spec in EffectParamSpec.specs(for: kind) {
                 #expect(EffectEditorModel.paramValue(spec.name, in: fresh) == spec.defaultValue,
                         "\(kind).\(spec.name) must read its default off a fresh descriptor")
             }
             #expect(EffectEditorModel.paramValue("notAParam", in: fresh) == nil)
         }
+        // m39-ac-2: the ONE deliberate gap between "fresh" and "bare". A clipper
+        // carrying no params is an untouched PRE-RULING clipper, and the card must
+        // show the 4× it is rendering at, not the new default it never had.
+        let bareClipper = EffectDescriptor(kind: .clipper)
+        #expect(EffectEditorModel.paramValue("oversampling", in: bareClipper)
+                == ClipperParams.legacyOversampling)
+        #expect(ClipperParams.legacyOversampling != ClipperParams.defaultOversampling)
         // AU descriptors are off this surface entirely (v1).
         let au = EffectDescriptor(kind: .audioUnit)
         #expect(EffectEditorModel.paramValue("gainLinear", in: au) == nil)
@@ -216,6 +247,122 @@ struct EffectEditorModelTests {
         // Fractions clamp.
         #expect(EffectEditorModel.value(forFraction: -1, spec: gain) == gain.range.lowerBound)
         #expect(EffectEditorModel.value(forFraction: 2, spec: gain) == gain.range.upperBound)
+    }
+
+    /// m39-a — the VALUE-level half of the conformance proof.
+    ///
+    /// `ParamCurveConformanceTests` (DAWCoreTests) proves every DECLARED curve
+    /// equals the one the old `unit == "Hz"` inference produced. That is the
+    /// declaration; this is the SLIDER. For every shipping param of every kind
+    /// it re-computes the pre-m39-a inline formula — the exact arithmetic that
+    /// stood at `EffectEditorModel.swift:458,470` before the lift — and
+    /// requires the delegating implementation to return bit-for-bit the same
+    /// number at eleven points of travel. If any on-screen control moved, this
+    /// reddens.
+    @Test("m39-a: every slider lands on the same value it did before the taper lift")
+    func taperLiftMovesNoSlider() {
+        // The pre-lift bodies, verbatim.
+        func legacyValue(_ f: Double, _ spec: EffectParamSpec) -> Double {
+            let lo = spec.range.lowerBound, hi = spec.range.upperBound
+            let f = f.clamped(to: 0...1)
+            if spec.unit == "Hz" && lo > 0 { return lo * pow(hi / lo, f) }
+            return lo + f * (hi - lo)
+        }
+        func legacyFraction(_ v: Double, _ spec: EffectParamSpec) -> Double {
+            let lo = spec.range.lowerBound, hi = spec.range.upperBound
+            guard hi > lo else { return 0 }
+            let v = v.clamped(to: spec.range)
+            if spec.unit == "Hz" && lo > 0 {
+                return (log(v / lo) / log(hi / lo)).clamped(to: 0...1)
+            }
+            return (v - lo) / (hi - lo)
+        }
+
+        // ⚠️ THE ORACLE ONLY BINDS PARAMS THAT EXISTED BEFORE THE LIFT. A
+        // param declared against it AFTER m39-a cannot have "moved an
+        // on-screen control", because it had none. m39-j's `flanger.depthMs`
+        // and `flanger.delayMs` are the first two: both are 0.1…10 ms — 6.6
+        // octaves — and both take `.logarithmic` deliberately, because a delay
+        // TIME is the reciprocal of the comb frequency the user actually
+        // hears. The DAWCore home for that decision, with the full reasoning,
+        // is `ParamCurveConformanceTests.deliberateExemptions`.
+        //
+        // ⭐ THE DIVERGENCE IS DERIVED AND THEN PINNED, rather than skipped by
+        // name: anything whose declared curve disagrees with the oracle is
+        // collected below and the SET is asserted. So a third divergence
+        // reddens this test instead of slipping through a hand-written skip
+        // list, and the two lists cannot drift apart silently.
+        var divergent: Set<String> = []
+        var checked = 0
+        for kind in EffectDescriptor.Kind.allCases {
+            for spec in EffectParamSpec.specs(for: kind) {
+                let oracleIsLogarithmic = spec.unit == "Hz" && spec.range.lowerBound > 0
+                if (spec.curve == .logarithmic) != oracleIsLogarithmic {
+                    divergent.insert("\(kind.rawValue).\(spec.name)")
+                    continue
+                }
+                for step in 0...10 {
+                    let f = Double(step) / 10
+                    let lifted = EffectEditorModel.value(forFraction: f, spec: spec)
+                    #expect(lifted == legacyValue(f, spec),
+                            "\(kind.rawValue).\(spec.name) at f=\(f): \(lifted) vs \(legacyValue(f, spec))")
+                    #expect(EffectEditorModel.fraction(forValue: lifted, spec: spec)
+                            == legacyFraction(lifted, spec),
+                            "\(kind.rawValue).\(spec.name) inverse at f=\(f)")
+                    checked += 1
+                }
+                // Out-of-range both sides still clamps identically.
+                #expect(EffectEditorModel.value(forFraction: -5, spec: spec) == legacyValue(-5, spec))
+                #expect(EffectEditorModel.value(forFraction: 5, spec: spec) == legacyValue(5, spec))
+                #expect(EffectEditorModel.fraction(forValue: -1e9, spec: spec)
+                        == legacyFraction(-1e9, spec))
+                #expect(EffectEditorModel.fraction(forValue: 1e9, spec: spec)
+                        == legacyFraction(1e9, spec))
+            }
+        }
+        // The recorded divergences, and ONLY those. An unexpected name here
+        // means a param was declared against the frozen oracle without the
+        // decision being written down.
+        // ⭐ m39-l ADDED FOUR, and every one has a written reason in
+        // `deliberateExemptions`: `decaySeconds` (7.6 octaves of TIME),
+        // `sizeMeters` (5.9 octaves of DISTANCE) and the two decay
+        // MULTIPLIERS (symmetric in octaves, not in units). They are the first
+        // exemptions whose unit is neither Hz nor ms, which is the finding
+        // rather than an oversight: the pre-m39-a inference keyed on
+        // `unit == "Hz"` because in 2026-08 every wide-span param happened to
+        // be a frequency.
+        // ⭐ m39-n ADDED ONE: `tapeDelay.timeMs`, 20…4000 ms — 7.6 octaves of
+        // delay time, the flanger's argument on a much wider span. ⚠️ Note
+        // that `delay.timeMs` is NOT here: it ships today and a declared curve
+        // must not MOVE an existing control, so the two kinds deliberately
+        // disagree about the same parameter name.
+        // ⭐ m39-y ADDED TWO, both TIME constants and both with a written
+        // reason: `transientShaper.attackMs` (0.1…50 ms = 8.97 octaves, the
+        // widest span of any exemption so far, with the musically useful third
+        // under 5 ms) and `transientShaper.sustainMs` (20…1000 ms = 5.64
+        // octaves). ⚠️ `compressor.attackMs` and `gate.attackMs` are NOT here
+        // and stay LINEAR: they ship today and a declared curve must not MOVE
+        // an existing control — the same deliberate cross-kind disagreement
+        // `delay.timeMs` vs `tapeDelay.timeMs` already records.
+        #expect(divergent == ["flanger.depthMs", "flanger.delayMs",
+                              "hallReverb.decaySeconds", "hallReverb.sizeMeters",
+                              "hallReverb.lowDecayMultiplier",
+                              "hallReverb.highDecayMultiplier",
+                              "tapeDelay.timeMs",
+                              "transientShaper.attackMs",
+                              "transientShaper.sustainMs"],
+                Comment(rawValue: "params declared against the pre-m39-a oracle: "
+                    + "\(divergent.sorted()) — each needs an entry in "
+                    + "ParamCurveConformanceTests.deliberateExemptions with its reason"))
+        // …and the two that ARE exempt still behave as `.logarithmic` sliders
+        // rather than silently falling back to linear.
+        let depth = EffectParamSpec.specs(for: .flanger).first { $0.name == "depthMs" }!
+        let mid = EffectEditorModel.value(forFraction: 0.5, spec: depth)
+        #expect(abs(mid - (0.1 * 10).squareRoot()) < 1e-12,
+                "half travel on flanger.depthMs is \(mid), not the geometric mean")
+        // Non-vacuity: a loop over an empty roster would also pass silently.
+        // 64 specs x 11 travel points, measured 2026-09-19; append-only.
+        #expect(checked >= 704, "only \(checked) travel points compared")
     }
 
     // MARK: - Presentation
@@ -361,7 +508,8 @@ struct EffectEditorModelTests {
                 $0.0 == $1.0 && $0.1 == $1.1
             }
         }
-        #expect(matches(layout(.gain), [("", ["gainLinear"])]))
+        // m38-a: the polarity Ø switch joins the trim on the single card.
+        #expect(matches(layout(.gain), [("", ["gainLinear", "invertPolarity"])]))
         #expect(matches(layout(.eq), [
             ("HIGH PASS", ["highPassFreq", "highPassSlopeDbPerOct", "highPassEnabled"]),
             ("LOW SHELF", ["lowShelfFreq", "lowShelfGainDb", "lowShelfQ", "lowShelfEnabled"]),
@@ -371,6 +519,11 @@ struct EffectEditorModelTests {
             ("LOW PASS", ["lowPassFreq", "lowPassSlopeDbPerOct", "lowPassEnabled"]),
         ]))
         #expect(matches(layout(.compressor), [
+            // m39-ae: DE-ESS is FIRST — signal-flow order, because the detector
+            // filter is upstream of the threshold that reads it. It is also the
+            // one section on this card a novice cannot name from the parameter
+            // names alone, which is why it gets spelled-out labels.
+            ("DE-ESS", ["detectorMode", "detectorFreqHz", "detectorQ"]),
             ("TRIGGER", ["thresholdDb", "ratio", "kneeDb"]),
             ("TIME", ["attackMs", "releaseMs"]),
             // m23-ck: the parallel dry/wet blend joins OUTPUT after makeup.
@@ -392,7 +545,11 @@ struct EffectEditorModelTests {
             ("OUTPUT", ["mix"]),
         ]))
         #expect(matches(layout(.saturator), [
+            // m39-ad: CHARACTER joins between DRIVE and OUTPUT, carrying
+            // `oversampling` under the clipper's own "Quality" label — the same
+            // control on the same primitive, so it reads the same on both cards.
             ("DRIVE", ["driveDb"]),
+            ("CHARACTER", ["oversampling"]),
             ("OUTPUT", ["mix", "outputDb"]),
         ]))
         #expect(matches(layout(.gate), [
@@ -423,7 +580,7 @@ struct EffectEditorModelTests {
 
     // MARK: - Knob fill style (unipolar sweep vs bipolar center-out)
 
-    @Test("only genuinely zero-spanning dB gains are bipolar; anchors match")
+    @Test("only genuinely zero-spanning params are bipolar; anchors match")
     func knobStyles() {
         var bipolar: Set<String> = []
         for kind in Self.builtInKinds {
@@ -439,12 +596,129 @@ struct EffectEditorModelTests {
                 }
             }
         }
-        // Exactly the ±dB gain params — a -60…0 threshold or -24…0 ceiling
-        // is unipolar (zero is an endpoint, not a detent).
+        // The ±dB gain params — a -60…0 threshold or -24…0 ceiling is
+        // unipolar (zero is an endpoint, not a detent) — PLUS m39-i's
+        // `djFilter.position`.
+        //
+        // ⭐ THAT ONE BROADENS THE RULE THIS TEST STATES, and it is worth
+        // saying so rather than just appending a name. Until m39-i every
+        // bipolar param was a dB GAIN, so "zero-spanning" and "dB gain" were
+        // the same set and the title could use either word. `position` is
+        // -1…+1 LINEAR and its zero is the most literal detent in the app: a
+        // bit-exact bypass. `knobStyle(for:)` is purely range-based
+        // (`lowerBound < 0 && upperBound > 0`), so the centre-out knob it
+        // already draws is correct with no UI change — which is the point of
+        // deriving the style from the range instead of from the unit.
+        // ⭐ m39-j ADDS THE THIRD SHAPE, and it confirms the broadening above
+        // was the right read rather than a one-off: `flanger.feedback` is
+        // -0.95…+0.95 LINEAR, it is neither a dB gain nor a filter position,
+        // and its zero is a genuine detent — feedback 0 is the plain comb, and
+        // the two sides of it are different characters rather than more and
+        // less of one. Three unrelated kinds now share the centre-out knob
+        // purely because `knobStyle(for:)` reads the RANGE, which is exactly
+        // the payoff of not deriving style from the unit.
+        // ⭐ CHECKED for m39-l: `hallReverb.earlyLateBalance` is -1…+1 and its
+        // zero IS a detent — an even blend of early reflections and late tail,
+        // with the two sides being "closer to the source" and "further into
+        // the hall" rather than more and less of one thing. A FOURTH unrelated
+        // kind earns the centre-out knob purely because `knobStyle(for:)`
+        // reads the RANGE. ⚠️ `hallReverb.width` (0…1.2) is deliberately NOT
+        // here: its neutral is 1.0, which is not the centre of its range, so a
+        // centre-out knob would put the detent in the wrong place.
+        // ⭐ CHECKED for m39-o: `phaser.feedback` is -0.95…+0.95 LINEAR, the
+        // same shape as the flanger's and for the same reason — feedback 0 is
+        // the plain phaser and the two sides are different characters (ringing
+        // resonances vs a hollower inverted pattern) rather than more and less
+        // of one thing. A FIFTH unrelated kind earns the centre-out knob purely
+        // because `knobStyle(for:)` reads the RANGE. ⚠️ `phaser.depthOctaves`
+        // (0…4) and `phaser.stages` (2…12) are deliberately NOT here: neither
+        // range crosses zero, so neither has a centre to detent to.
+        // ⭐ CHECKED for m39-y: THREE at once, and this is the first kind to
+        // contribute more than one. `transientShaper.attackDb` and
+        // `sustainDb` are −20…+20 and their zero is a genuine detent — it is
+        // the UNSHAPED position, and the two sides are "more of the hit" and
+        // "less of the hit" rather than more and less of one thing.
+        // `outputDb` is −24…+24 and its zero is unity trim, the
+        // `saturator.outputDb` shape exactly. A SIXTH unrelated kind earns the
+        // centre-out knob purely because `knobStyle(for:)` reads the RANGE.
+        // ⚠️ `transientShaper.mix` (0…1) and the two ms params are deliberately
+        // NOT here: none of their ranges crosses zero, so none has a centre to
+        // detent to.
+        // CHECKED for m39-z: FOUR at once, beating m39-y's three, and for this
+        // kind the centre detent is not a nicety - it is THE CONTROL.
+        // `shiftHz`, `fineHz` and `stereoSpreadHz` are all bipolar because THE
+        // SIGN IS THE DIRECTION (shift up vs down; which side leads), so their
+        // zero is the genuine no-effect position and a user has to be able to
+        // find it by feel while sweeping THROUGH it. `outputDb` is the
+        // `saturator.outputDb` unity-trim shape again. `freqShifter.mix` (0-1)
+        // is deliberately NOT here for the usual reason.
+        // ⭐ CHECKED for m39-ac: TWO, and the first is the interesting one.
+        // `clipper.driveDb` is −12…+36 where `saturator.driveDb` — the same name
+        // on a neighbouring kind — is 0…36 and is NOT here. That is deliberate,
+        // not drift. A saturator's drive IS the effect, so 0 means "off" and the
+        // range starts there. A clipper's ceiling is the effect and drive is how
+        // hard you push INTO it, so 0 is unity and NEGATIVE drive is a real
+        // setting: backing a hot source off a fixed ceiling, rather than moving
+        // the ceiling and changing what the number promises. So zero is a
+        // genuine detent and a user has to be able to find it while sweeping
+        // through. ⚠️ Its detent sits at 25 % of travel, not half, because the
+        // range is deliberately asymmetric — `knobStyle(for:)` reads the range
+        // and places the detent at the real zero, which is the whole point of
+        // deriving it rather than declaring it. `clipper.outputDb` is −24…+24,
+        // the `saturator.outputDb` unity-trim shape exactly. ⚠️
+        // `clipper.ceilingDb` (−24…0) is deliberately NOT here: zero is an
+        // ENDPOINT of that range, not an interior neutral, so there is no
+        // centre to detent to. `mode`, `oversampling` and `mix` do not cross
+        // zero either.
         #expect(bipolar == [
             "eq.lowShelfGainDb", "eq.peak1GainDb", "eq.peak2GainDb",
-            "eq.highShelfGainDb", "saturator.outputDb",
+            "eq.highShelfGainDb", "saturator.outputDb", "djFilter.position",
+            "flanger.feedback", "hallReverb.earlyLateBalance", "phaser.feedback",
+            "transientShaper.attackDb", "transientShaper.sustainDb",
+            "transientShaper.outputDb",
+            "freqShifter.shiftHz", "freqShifter.fineHz",
+            "freqShifter.stereoSpreadHz", "freqShifter.outputDb",
+            "clipper.driveDb", "clipper.outputDb",
+            "dynamicEQ.band1RangeDb", "dynamicEQ.band2RangeDb",
+            "dynamicEQ.band3RangeDb", "dynamicEQ.band4RangeDb",
         ])
+        // ⭐⭐ CHECKED for m39-af: FOUR at once — the largest single addition to
+        // this list — and on this kind the centre detent is THE CONTROL, more
+        // literally than on any kind before it. `bandNRangeDb`'s SIGN IS THE
+        // DIRECTION the band moves: negative turns the band down when it
+        // triggers, positive turns it up, and ZERO is a genuine no-effect
+        // position (`rangeSign` is exactly 0 there, so the render path's apply
+        // branch never fires and the band is bit-exact flat however hard it is
+        // driven). A user sweeping through that zero has to be able to feel it.
+        // ⚠️ The kind's other 28 params are deliberately NOT here and each for a
+        // structural reason, not an oversight: `bandNThresholdDb` is −60…0, so
+        // zero is an ENDPOINT rather than an interior neutral (the
+        // `clipper.ceilingDb` shape exactly); `bandNFreq` (20…20 000),
+        // `bandNQ` (0.1…18), `bandNRatio` (1…20) and both time constants have
+        // strictly positive ranges; `bandNMode` is 0…2, where 0 is an endpoint
+        // AND the value is discrete.
+        for band in 1...4 {
+            let range = EffectParamSpec.specs(for: .dynamicEQ)
+                .first { $0.name == "band\(band)RangeDb" }!
+            // −24…+24 is symmetric about zero, so the detent sits at exactly
+            // half travel — the `eq.peak1GainDb` shape, which is the range it
+            // mirrors.
+            #expect(EffectEditorModel.knobFillAnchor(for: range) == 0.5)
+        }
+        // The phaser's detent also sits at exactly half travel, because its
+        // range is symmetric about zero like the flanger's and the DJ filter's.
+        let phaserFeedback = EffectParamSpec.specs(for: .phaser)
+            .first { $0.name == "feedback" }!
+        #expect(abs(EffectEditorModel.knobFillAnchor(for: phaserFeedback) - 0.5) < 1e-12)
+        // The flanger's detent also sits at exactly half travel, because its
+        // range is symmetric about zero like the DJ filter's.
+        let feedback = EffectParamSpec.specs(for: .flanger).first { $0.name == "feedback" }!
+        #expect(abs(EffectEditorModel.knobFillAnchor(for: feedback) - 0.5) < 1e-12)
+        // The DJ filter's detent sits at exactly half travel on a symmetric
+        // -1…+1 range, so the knob's fill grows out of the centre in both
+        // directions — the club-mixer affordance, for free.
+        let position = EffectParamSpec.specs(for: .djFilter).first { $0.name == "position" }!
+        #expect(EffectEditorModel.knobFillAnchor(for: position) == 0.5)
         // The symmetric ranges put the detent at half travel.
         let eqGain = EffectParamSpec.specs(for: .eq).first { $0.name == "peak1GainDb" }!
         #expect(EffectEditorModel.knobFillAnchor(for: eqGain) == 0.5)
@@ -458,8 +732,20 @@ struct EffectEditorModelTests {
             for spec in EffectParamSpec.specs(for: kind) {
                 // m22-f adds the delay's tempo `sync` to the binary family.
                 // m23-ch adds the limiter's truePeak mode to the family.
+                // m32-e adds the bit-crusher's antiAlias/dither switches.
+                // m38-a adds the gain utility's invertPolarity (the Ø switch).
+                // ⚠️ THIS LEG RESTATES THE SOURCE'S OWN EXPRESSION and therefore
+                // proves only that the two have not drifted APART — it cannot
+                // notice a binary param that neither side knows about. That is
+                // not hypothetical: m32-e's two switches were missing from both
+                // for a while and this leg stayed green.
+                // `binaryModelParamsRenderAsToggles` below is the leg that
+                // actually checks, by DERIVING the answer from the store.
                 let expected = spec.name == "pingPong" || spec.name == "sync"
-                    || spec.name == "truePeak" || spec.name.hasSuffix("Enabled")
+                    || spec.name == "truePeak"
+                    || spec.name == "antiAlias" || spec.name == "dither"
+                    || spec.name == "invertPolarity"
+                    || spec.name.hasSuffix("Enabled")
                 #expect(EffectEditorModel.isToggleParam(spec) == expected,
                         "\(kind).\(spec.name)")
             }
@@ -488,6 +774,50 @@ struct EffectEditorModelTests {
         #expect(model.value(for: spec) == 0)
     }
 
+    /// ⭐ THE STRUCTURAL LEG, derived rather than restated. For every built-in
+    /// param whose range is 0…1, write 0.4 through a REAL store and read back
+    /// what it kept: a param the MODEL LAYER snaps to 0 or 1 is binary, and a
+    /// binary param MUST render as a toggle — otherwise the card offers a knob
+    /// over a continuum the model does not have, and its readout says a number
+    /// the sound does not use.
+    ///
+    /// The 0…1 filter is deliberate and not a shortcut around the question:
+    /// `mix`, `amount`, `roomSize`, `damping`, `feedback` and `width` all live
+    /// in that range and all keep 0.4, so the discriminator is the SNAP, not the
+    /// range. `division` is excluded by the range filter because it snaps to
+    /// note lengths in beats, not to 0/1 — it has its own picker rendering.
+    @Test("every param the STORE snaps to binary renders as a toggle (derived)")
+    func binaryModelParamsRenderAsToggles() throws {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .audio)
+        var snapping: [String] = []
+        var continuous: [String] = []
+        for kind in Self.builtInKinds {
+            let fx = try store.addEffect(toTrack: track.id, kind: kind)
+            for spec in EffectParamSpec.specs(for: kind) where spec.range == 0...1 {
+                let updated = try store.setEffectParam(
+                    trackID: track.id, effectID: fx.id, name: spec.name, value: 0.4)
+                let stored = try #require(
+                    EffectEditorModel.paramValue(spec.name, in: updated),
+                    "\(kind).\(spec.name) has no value accessor")
+                let snapped = stored == 0 || stored == 1
+                let label = "\(kind).\(spec.name)"
+                if snapped { snapping.append(label) } else { continuous.append(label) }
+                let shape = snapped ? "BINARY (needs a toggle)" : "CONTINUOUS (needs a knob)"
+                let says = EffectEditorModel.isToggleParam(spec)
+                #expect(says == snapped,
+                        "\(label): a 0.4 write was stored as \(stored), so it is \(shape), but isToggleParam says \(says)")
+            }
+            try store.removeEffect(trackID: track.id, effectID: fx.id)
+        }
+        print("[measured] binary 0...1 params: \(snapping)")
+        print("[measured] continuous 0...1 params: \(continuous)")
+        // Non-vacuity in BOTH directions: the sweep must have seen real
+        // examples of each, or "they agree" would be an empty claim.
+        #expect(snapping.count >= 8, "the sweep saw too few binary params: \(snapping)")
+        #expect(continuous.count >= 6, "the sweep saw too few continua: \(continuous)")
+    }
+
     // MARK: - Undo discipline (the store's coalescing carries the card)
 
     @Test("a slider drag (many rapid sets of one param) lands as ONE undo step")
@@ -514,12 +844,49 @@ struct EffectEditorModelTests {
 
     @Test("HP/LP slopes are two-state chip params reading 12 or 24 dB/oct")
     func slopeChips() {
+        // ⚠️⚠️ THIS LEG RESTATED THE SOURCE'S OWN EXPRESSION AND THAT COST A
+        // SHIPPED BUG (m39-ag). It read `== spec.name.hasSuffix("SlopeDbPerOct")`
+        // — the source's exact text — so it proved only that the two had not
+        // drifted apart, and it could not notice that the DJ FILTER'S slope is
+        // the bare `slopeDbPerOct` with a LOWERCASE s, which that suffix does
+        // not match. `djFilter.slopeDbPerOct` therefore rendered as a KNOB over
+        // a two-value topology switch, and this test stayed green the whole
+        // time. `EffectChoiceParamTests.everyDiscreteParamAvoidsTheKnob` is the
+        // leg that actually checks, deriving the discrete set from
+        // `EffectParamSpec.modulatable == .refused`.
+        //
+        // The expectation below is now written against the PARAM'S OWN SNAP —
+        // a param is a slope param iff `EQParams.snapSlope` is what governs it,
+        // evidenced by a real store write of 15 landing on 12 — rather than
+        // against a spelling.
+        let sweepStore = ProjectStore()
+        let sweepTrack = sweepStore.addTrack(kind: .audio)
+        var snapped: [String] = []
         for kind in Self.builtInKinds {
+            let sweepFX = try! sweepStore.addEffect(toTrack: sweepTrack.id, kind: kind)
             for spec in EffectParamSpec.specs(for: kind) {
-                #expect(EffectEditorModel.isSlopeParam(spec)
-                        == spec.name.hasSuffix("SlopeDbPerOct"), "\(kind).\(spec.name)")
+                // 15 is between the two legal slopes and inside no other param's
+                // "interesting" region; a slope param snaps it to 12.
+                let governedBySnapSlope: Bool
+                if spec.range.contains(15), spec.unit == "dB/oct" {
+                    let updated = try! sweepStore.setEffectParam(
+                        trackID: sweepTrack.id, effectID: sweepFX.id, name: spec.name, value: 15)
+                    let stored = EffectEditorModel.paramValue(spec.name, in: updated)
+                    governedBySnapSlope = stored == 12
+                } else {
+                    governedBySnapSlope = false
+                }
+                if governedBySnapSlope { snapped.append("\(kind).\(spec.name)") }
+                #expect(EffectEditorModel.isSlopeParam(spec) == governedBySnapSlope,
+                        "\(kind).\(spec.name): a 15 write snapped to 12 = \(governedBySnapSlope), but isSlopeParam says \(EffectEditorModel.isSlopeParam(spec))")
             }
+            try! sweepStore.removeEffect(trackID: sweepTrack.id, effectID: sweepFX.id)
         }
+        print("[measured] slope-snapped params: \(snapped)")
+        // Non-vacuity, and the DJ filter is named: the sweep must see all THREE
+        // — two EQ corners plus the one whose lowercase name hid it.
+        #expect(snapped.count == 3, "the slope sweep saw \(snapped)")
+        #expect(snapped.contains("djFilter.slopeDbPerOct"))
         let spec = EffectParamSpec.specs(for: .eq).first { $0.name == "highPassSlopeDbPerOct" }!
         // A slope is neither a toggle nor a percent nor a cyan level readout.
         #expect(!EffectEditorModel.isToggleParam(spec))

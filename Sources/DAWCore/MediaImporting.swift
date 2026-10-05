@@ -123,6 +123,21 @@ public enum ProjectError: Error, LocalizedError {
     case audioQuantizeNoTransients(UUID)
     // Audio quantize under a multi-segment tempo map (m12-c).
     case audioQuantizeTempoBoundaryUnsupported(UUID)
+    // Fixed-division chop (m32-b1): `divisions` parts of this clip's window
+    // would each be narrower than the minimum slice width, so every boundary
+    // is squeezed out. Deliberately its own case rather than reusing
+    // audioQuantizeNoTransients — no detector ran, so "raise sensitivity" is
+    // wrong advice, and "fewer than 2 transients" is the wrong arithmetic (the
+    // divisions path is legal with ONE boundary).
+    case audioQuantizeDivisionsTooFine(UUID, divisions: Int,
+                                       windowSeconds: Double,
+                                       minSliceSeconds: Double)
+    // Chop to sampler (m32-b2): a PITCH-SHIFTED source clip. Deliberately its
+    // own case rather than reusing audioQuantizeStretchUnsupported — the fix
+    // is different (clear the pitch shift, not the ratio) and a message
+    // telling someone to "un-stretch" a clip they never stretched is the kind
+    // of plausible-but-wrong answer this tree keeps paying for.
+    case sliceToSamplerPitchShiftUnsupported(UUID)
     // Tempo map (m12-d): transport.setTempo refuses on a multi-segment map,
     // pointing the caller at tempo.setMap (silently flattening is destructive).
     case tempoMapMultiSegment
@@ -235,6 +250,23 @@ public enum ProjectError: Error, LocalizedError {
     // while `errorDescription` can reach no store to look one up.
     case clipsWouldOverlapOnDestination(firstID: UUID, firstName: String,
                                         secondID: UUID, secondName: String)
+    // clip.addAudio (m33-j): the requested `atBeat` would land the imported
+    // file on top of an ordinary same-track resident, and the m11-d/m13-b
+    // overlap policy would TRIM or DELETE that resident to make room. Refused,
+    // for the same reason clipsWouldOverlapOnDestination is: the collision is
+    // MANUFACTURED by this call and the verb would otherwise pick which of the
+    // user's own clips dies. What makes the refusal (rather than moveClip's
+    // trim-and-report) correct HERE is that an import's footprint is not
+    // knowable to the caller — the clip's length comes from the FILE's duration
+    // converted at the current tempo, so `atBeat` alone never told the caller
+    // what it was about to cover. `overwrite: true` accepts the trim explicitly
+    // and gets trimmedClipIDs/removedClipIDs back. Carries the resident's id AND
+    // name on the clipsWouldOverlapOnDestination precedent (clip names are not
+    // unique — two prints of the same bounce are routinely both `flip-pass`),
+    // plus the beat an `atBeat`-less import would have appended at, because that
+    // is the one placement guaranteed to be free.
+    case clipImportWouldOverlap(existingID: UUID, existingName: String,
+                                appendBeat: Double)
     // audio.profileFile (m25-z): the `path` param names no file on disk.
     // Deliberately its OWN case rather than reusing `.importFailed` (whose
     // wording is import-specific, "Audio import failed: …") or
@@ -248,6 +280,17 @@ public enum ProjectError: Error, LocalizedError {
     // no backing file) has none to analyze. Same shape as
     // transcriptionRequiresAudioClip/analysisRequiresAudioClip.
     case pitchDetectionRequiresAudioClip(UUID)
+    // Embedded voice models (m24-n, vc.installEmbeddedVoice). Message built at
+    // THROW time (the `clipFixStale` shape) because the three ways this fails —
+    // the project was never saved, the project carries no such voice, the
+    // embedded copy is missing its weights — need three different sentences and
+    // all three are "here is what to do", never "something broke".
+    case embeddedVoiceUnavailable(String)
+    // A voice of this id is ALREADY in this machine's store; installing would
+    // replace it. Refused unless `overwrite` — the vc.importVoiceModel
+    // `alreadyExists` precedent, so the two paths that write the voice store
+    // refuse on the same terms.
+    case embeddedVoiceAlreadyInstalled(String)
 
     public var errorDescription: String? {
         switch self {
@@ -446,6 +489,26 @@ public enum ProjectError: Error, LocalizedError {
             // verbatim). m12-c cut: slice-and-nudge assumes one constant
             // tempo across the clip (AudioQuantizePlan.compute).
             return "clip \(id.uuidString) spans a tempo change — audio quantize needs one constant tempo across the clip; split the clip at the tempo boundary (clip.split) and quantize each part"
+        case .audioQuantizeDivisionsTooFine(let id, let divisions, let window, let minSlice):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim). m32-b1: carries the arithmetic, because "too fine"
+            // without the numbers leaves the caller guessing which knob moved.
+            let each = divisions > 0 ? window / Double(divisions) : 0
+            let most = Int((window / max(minSlice, .leastNormalMagnitude)).rounded(.down))
+            let advice = most >= 2
+                ? "ask for at most \(most) divisions, or lengthen the clip's window"
+                : "this window is shorter than two minimum slices, so it cannot be divided at all — lengthen the clip's window"
+            return "clip \(id.uuidString) cannot be cut into \(divisions) equal parts — its source window is "
+                + String(format: "%.3f", window) + " s, so each part would be "
+                + String(format: "%.4f", each) + " s, under the "
+                + String(format: "%.3f", minSlice) + " s minimum slice width; " + advice
+        case .sliceToSamplerPitchShiftUnsupported(let id):
+            // Exact wording is contract (control protocol + MCP surface it
+            // verbatim). m32-b2: sampler zones read RAW source frames, so the
+            // pads would play the UNSHIFTED record while the timeline clip
+            // plays the shifted one — a reconstruction that silently does not
+            // match what the user is hearing.
+            return "clip \(id.uuidString) has a pitch shift — chop-to-sampler reads raw source frames, so the pads would play the original pitch, not what you hear; clear the shift (clip.setStretch pitch 0) or bounce the clip first"
         case .tempoMapMultiSegment:
             // Exact wording is contract (control protocol + MCP surface it
             // verbatim). transport.setTempo is the single-tempo fast path; a
@@ -538,7 +601,7 @@ public enum ProjectError: Error, LocalizedError {
         case .masterChainBuiltInOnly:
             // Exact wording is contract (design-m13d §4; control protocol +
             // MCP surface it verbatim, gate-checked in C6).
-            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer"
+            return "the master chain hosts built-in effects only in v1 — pick one of gain|eq|compressor|limiter|reverb|delay|saturator|gate|chorus|bassEnhancer|bitCrusher|djFilter|ringMod|flanger|hallReverb|tapeDelay|stereoWidth|phaser|transientShaper|freqShifter|clipper|dynamicEQ"
         case .sidechainMasterUnsupported:
             // Exact wording is contract (design-m13d §4; surfaced verbatim over
             // the wire on `fx.setSidechain {trackId:"master"}`, gate-checked in
@@ -607,6 +670,16 @@ public enum ProjectError: Error, LocalizedError {
                 + " (\(secondID.uuidString)) would overlap on the destination track — moving several tracks'"
                 + " clips onto one track needs them at different beats (move them one at a time, or use"
                 + " clip.moveManyByTracks to keep them on separate tracks)"
+        case .clipImportWouldOverlap(let existingID, let existingName, let appendBeat):
+            // m33-j. Exact wording is contract (control protocol + MCP surface
+            // it verbatim), pinned byte-exact by ClipAddAudioOverlapCommandTests.
+            return "clip '\(existingName)' (\(existingID.uuidString)) is already on that track where"
+                + " this import would land — importing here would trim or delete it, so clip.addAudio"
+                + " refuses rather than silently overwriting your clip (an import's length comes from"
+                + " the file, so 'atBeat' alone could not tell you what it would cover). Omit 'atBeat'"
+                + " to append after everything already on the track (beat \(formatImportBeat(appendBeat))),"
+                + " choose a free beat, import onto another track, or pass 'overwrite: true' to accept"
+                + " the trim and read back trimmedClipIDs/removedClipIDs"
         case .audioFileNotFound(let path):
             // Exact wording is contract (control protocol + MCP surface it verbatim).
             return "no audio file at \(path) — check the path (audio.profileFile reads "
@@ -617,6 +690,12 @@ public enum ProjectError: Error, LocalizedError {
             // to detect.
             return "clip \(id.uuidString) is a MIDI clip — clip.detectPitch applies only to "
                 + "audio clips (MIDI notes already carry a definite pitch — read them directly)"
+        case .embeddedVoiceUnavailable(let message):
+            return message
+        case .embeddedVoiceAlreadyInstalled(let voiceId):
+            return "voice '\(voiceId)' is already in this machine's voice store — pass "
+                + "'overwrite: true' to replace it with this project's embedded copy, or "
+                + "convert with the voice you already have"
         }
     }
 
@@ -639,8 +718,25 @@ public enum ProjectError: Error, LocalizedError {
         switch self {
         case .clipInTakeGroup(_, let clipID):
             return clipID
+        case .clipImportWouldOverlap(let existingID, _, _):
+            // m33-j: the RESIDENT the import refused to overwrite — a clip that
+            // is by definition still in the project (that is the whole reason
+            // the refusal exists), so a block IS drawn for it and the amber
+            // bubble lands on the clip the user must move, free, or overwrite.
+            return existingID
         default:
             return nil
         }
     }
+}
+
+/// Formats a beat for a refusal message without a trailing `.0` on whole beats
+/// (the `StandardMIDIFileMapper.formatBeat` / `ProjectMIDIExportMapper`
+/// precedent — both keep their own file-private copy rather than sharing one,
+/// because their messages are byte-exact contract and a shared helper would put
+/// three pinned wordings behind one edit).
+private func formatImportBeat(_ beat: Double) -> String {
+    beat == beat.rounded() && abs(beat) < 1e15
+        ? String(Int(beat.rounded()))
+        : String(format: "%g", beat)
 }

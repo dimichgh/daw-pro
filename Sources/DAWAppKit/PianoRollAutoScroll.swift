@@ -62,6 +62,15 @@ import Foundation
 /// this file is still pointer-driven and unchanged. ⚠️ **DO NOT "SIMPLIFY" BY
 /// DELETING THE PARAGRAPH ABOVE — a future timer that integrates instead of
 /// recomputing reintroduces exactly the desync it names.**
+///
+/// ═══ THE BODY NOW LIVES IN `EdgeAutoScroll` (I6b-S1, 2026-09-25) ═══
+///
+/// The pitch editor needs this rule on both axes, so the arithmetic moved to
+/// `EdgeAutoScroll.nextOffset`, and this namespace FORWARDS to it. The name, the
+/// signature and both constants are unchanged, so every caller and every pinned
+/// literal is too. `EdgeAutoScrollTests` sweeps the forward against a frozen
+/// copy of the original body and checks the bits. Everything above still binds
+/// the shared file: it is the same rule.
 public enum PianoRollAutoScroll {
 
     /// How wide the hot band at each viewport edge is, in points.
@@ -72,7 +81,9 @@ public enum PianoRollAutoScroll {
     /// of a 1400 pt viewport is completely inert. It is also comfortably wider
     /// than `PianoRollMarquee.dragSlop`, so a drag can never begin already
     /// inside the band by accident of the press point.
-    public static let edgeBand: CGFloat = 48
+    ///
+    /// The value's one home is `EdgeAutoScroll.edgeBand`; this is an alias.
+    public static let edgeBand: CGFloat = EdgeAutoScroll.edgeBand
 
     /// The most one pointer tick may scroll, in points — reached only when the
     /// pointer is at the very edge of the viewport.
@@ -93,7 +104,9 @@ public enum PianoRollAutoScroll {
     /// because a guard justified by a false premise is how the next reader
     /// derives a false conclusion.** The file asserted one premise in prose and
     /// guarded its negation in a constant, and nobody had established which held.
-    public static let maxStep: CGFloat = 24
+    ///
+    /// The value's one home is `EdgeAutoScroll.maxStep`; this is an alias.
+    public static let maxStep: CGFloat = EdgeAutoScroll.maxStep
 
     /// The next horizontal content offset for a drag whose pointer is at
     /// `pointerContentX`, or **nil to leave the viewport exactly where it is**.
@@ -107,59 +120,17 @@ public enum PianoRollAutoScroll {
     ///   - viewportWidth: the visible width of a band (`bandViewportWidth`).
     ///   - contentWidth: the full drawn width (`gridDrawnWidth`).
     /// - Returns: a new offset in `0...(contentWidth - viewportWidth)`, or nil.
+    ///
+    /// A FORWARD to `EdgeAutoScroll.nextOffset`, which holds this body now
+    /// (the band, the proportional ramp, both walls, the nil). The x names stay
+    /// because every roll caller and `PianoRollEdgeRepeat` spell them.
     public static func nextOffset(
         pointerContentX: CGFloat,
         currentOffset: CGFloat,
         viewportWidth: CGFloat,
         contentWidth: CGFloat
     ) -> CGFloat? {
-        // A viewport that cannot show less than everything has nothing to
-        // scroll. Also the degenerate-geometry guard: a zero or negative
-        // viewport is what a band reports before its first layout pass, and a
-        // drag can be delivered in that window.
-        guard viewportWidth > 0, contentWidth > viewportWidth else { return nil }
-        // The band cannot be wider than half the viewport, or the two hot zones
-        // would overlap in the middle and every pointer position would be "at an
-        // edge" — with the trailing test winning, so a narrow panel would scroll
-        // right no matter which way the user dragged.
-        let band = min(edgeBand, viewportWidth / 2)
-        guard band > 0 else { return nil }
-
-        let maxOffset = contentWidth - viewportWidth
-        let offset = currentOffset.clamped(to: 0...maxOffset)
-        // The pointer's position WITHIN the visible window.
-        let local = pointerContentX - offset
-
-        let delta: CGFloat
-        if local < band {
-            // Leading edge. Depth is measured from the band's inner lip, and is
-            // allowed to exceed `band` when the pointer has been dragged past
-            // the viewport entirely — capped below, so an off-window pointer
-            // scrolls at full speed rather than wrapping to some other rate.
-            delta = -step(depth: band - local, band: band)
-        } else if local > viewportWidth - band {
-            delta = step(depth: local - (viewportWidth - band), band: band)
-        } else {
-            return nil
-        }
-
-        let next = (offset + delta).clamped(to: 0...maxOffset)
-        // Already against the wall the pointer is pushing towards: no movement,
-        // so no nonce, so no `scrollTo` storm at the ends of the clip.
-        return next == offset ? nil : next
-    }
-
-    /// Points to scroll for a pointer `depth` points into a `band`-wide zone.
-    /// Linear from 0 at the lip to `maxStep` at the edge and beyond.
-    private static func step(depth: CGFloat, band: CGFloat) -> CGFloat {
-        guard band > 0 else { return 0 }
-        let fraction = (depth / band).clamped(to: 0...1)
-        return maxStep * fraction
-    }
-}
-
-private extension CGFloat {
-    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
-        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
+        EdgeAutoScroll.nextOffset(pointer: pointerContentX, offset: currentOffset,
+                                  viewport: viewportWidth, content: contentWidth)
     }
 }

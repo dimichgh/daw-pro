@@ -85,10 +85,32 @@ struct TransportTests {
         #expect(decoded == transport)
         #expect(decoded.isMetronomeEnabled)
         #expect(decoded.countInBars == 2)
-        // Defaults: click off, no count-in.
+        // Defaults: click off, ONE bar of count-in (m23-cy — the click and the
+        // count-in are deliberately independent: count-in clicks sound even
+        // with the metronome disabled, which is why a default of "click off,
+        // count-in 1" is coherent rather than contradictory).
         let defaults = TransportState()
         #expect(!defaults.isMetronomeEnabled)
-        #expect(defaults.countInBars == 0)
+        #expect(defaults.countInBars == 1)
+    }
+
+    /// m23-cy — THE ITEM'S WHOLE SUBJECT, PINNED AT ITS ONE HOME.
+    ///
+    /// The user reported *"the first note after you hit record is dropped"*.
+    /// Count-in was already built, wired and given a transport-bar stepper; it
+    /// was simply defaulted off, so it never reached them. This test exists so
+    /// that a future edit which quietly returns the default to 0 fails BY NAME
+    /// instead of silently re-shipping the defect.
+    ///
+    /// ⚠️ It pins the DEFAULT, not the range: a user who deliberately sets 0
+    /// is respected everywhere (`setMetronome` writes it, persistence keeps it).
+    @Test("count-in defaults to one bar, and every fresh-transport path agrees")
+    func countInDefaultsToOneBar() throws {
+        #expect(TransportState().countInBars == 1)
+        // The same literal reached two other ways — the "ONE home" claim in
+        // `TransportState.init` is only true if these agree.
+        #expect(TransportDocument().countInBars == 1)
+        #expect(TransportDocument().transportState().countInBars == 1)
     }
 
     @Test("countInBars clamps to 0...4 on init")
@@ -301,9 +323,12 @@ struct ProjectStoreTests {
             }
             #expect(message == "cannot change metronome while recording — stop first")
         }
-        // A rejected call leaves the transport untouched.
+        // A rejected call leaves the transport untouched — i.e. at the project
+        // default, which m23-cy moved from 0 to 1. The assertion is "unchanged",
+        // and the literal tracks the default rather than pinning a second copy
+        // of it.
         #expect(!store.transport.isMetronomeEnabled)
-        #expect(store.transport.countInBars == 0)
+        #expect(store.transport.countInBars == TransportState().countInBars)
 
         store.stop()
         try store.setMetronome(enabled: true)  // allowed again once stopped

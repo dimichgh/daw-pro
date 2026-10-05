@@ -56,11 +56,17 @@ struct ModelAdmissionTests {
     }
 
     static func resident(
-        _ id: ModelID, name: String, hold: UInt64, evictable: Bool = true, jobs: Int = 0
+        _ id: ModelID, name: String, hold: UInt64, evictable: Bool = true, jobs: Int = 0,
+        yieldsWhenBusy: Bool = false
     ) -> ModelAdmission.Resident {
         ModelAdmission.Resident(
             id: id, displayName: name, holdBytes: hold, holdConfidence: .measured,
-            isEvictable: evictable, activeJobs: jobs, admittedAt: epoch)
+            isEvictable: evictable, activeJobs: jobs, yieldsWhenBusy: yieldsWhenBusy,
+            admittedAt: epoch)
+    }
+
+    static func soulxSinger() -> ModelDescriptor {
+        ModelRegistry.soulxSinger(baseURL: URL(string: "http://127.0.0.1:8004")!)
     }
 
     // MARK: - Unload-before-load
@@ -147,6 +153,127 @@ struct ModelAdmissionTests {
         // The honest consequence, said out loud rather than discovered later.
         #expect(message.contains("this load may fail"))
         #expect(message.contains("generation 7"))
+    }
+
+    // MARK: - item p2-sing-c: the invariance control (PIN, over the registry as it stood
+    // before SoulX-Singer's descriptor existed)
+
+    /// ⚠️⚠️ **THE PIN.** `yieldsWhenBusy` changes `resolve`'s filter (see the doc comment on
+    /// `resolve` and on `Resident.yieldsWhenBusy`) — this table proves the change is INERT for
+    /// every existing model. Every row below builds a `Resident` through the shared `resident(…)`
+    /// helper with `yieldsWhenBusy` left at its default (`false`), and asserts the exact plan
+    /// shape `resolve` gave before this field existed: idle → evicted, busy → `protectedByJobs`,
+    /// never the other way around. If this test is ever red, the defect is in the new filter
+    /// clause itself, never in `ModelRegistry.soulxSinger`.
+    @Test("BORING INVARIANCE CONTROL — every existing model resolves exactly as today, idle and busy")
+    func existingRegistryUnaffectedByYieldsWhenBusyDefault() throws {
+        struct Row {
+            let requester: ModelDescriptor
+            let otherID: ModelID
+            let otherName: String
+            let jobs: Int
+        }
+        let rows: [Row] = [
+            Row(requester: Self.aceStep(), otherID: .rvc, otherName: "RVC voice conversion", jobs: 0),
+            Row(requester: Self.aceStep(), otherID: .rvc, otherName: "RVC voice conversion", jobs: 1),
+            Row(requester: Self.rvc(), otherID: .aceStep, otherName: "ACE-Step song generation", jobs: 0),
+            Row(requester: Self.rvc(), otherID: .aceStep, otherName: "ACE-Step song generation", jobs: 1),
+        ]
+        for row in rows {
+            let other = Self.resident(row.otherID, name: row.otherName, hold: 3 * Self.gib, jobs: row.jobs)
+            #expect(other.yieldsWhenBusy == false, "the fixture must default to today's shape")
+            let plan = ModelAdmission.resolve(Self.facts(request: row.requester, resident: [other]))
+            let idle = row.jobs == 0
+            #expect(
+                plan.evicting == (idle ? [row.otherID] : []),
+                "requester \(row.requester.id) other \(row.otherID) jobs \(row.jobs)")
+            #expect(
+                plan.protectedByJobs == (idle ? [] : [row.otherID]),
+                "requester \(row.requester.id) other \(row.otherID) jobs \(row.jobs)")
+        }
+    }
+
+    // MARK: - item p2-sing-c: SoulX-Singer's yieldsWhenBusy
+
+    @Test("SoulX-Singer's registry entry: seeded ~6.05 GiB, evictable, ACE's idle timeout, yieldsWhenBusy true")
+    func soulxSingerRegistryEntry() throws {
+        let descriptor = Self.soulxSinger()
+        #expect(descriptor.id == .soulxSinger)
+        #expect(descriptor.displayName == "Singing voice")
+        #expect(descriptor.isEvictable == true)
+        #expect(descriptor.idleUnloadSeconds == ModelRegistry.aceStepIdleUnloadSeconds)
+        #expect(descriptor.yieldsWhenBusy == true)
+        #expect(descriptor.seededHoldBytes == ModelRegistry.soulxSingerSeededHoldBytes)
+        // 6.05 GiB, the spike's own unit — checked as a ratio rather than a hand-computed byte
+        // literal, so a floating-point rounding difference cannot make this test lie about itself.
+        let gib = Double(ModelRegistry.soulxSingerSeededHoldBytes) / 1_073_741_824
+        #expect(abs(gib - 6.05) < 0.001)
+        let requirement = ModelRegistry.requirement(
+            for: descriptor, observation: nil, physicalBytes: 128 * Self.gib)
+        #expect(requirement.confidence == .measured)
+        #expect(requirement.provenance.contains("SING-6"))
+    }
+
+    @Test("A busy yieldsWhenBusy resident (SoulX) lands in evicting, never protectedByJobs")
+    func busySoulXYields() throws {
+        let busy = Self.resident(
+            .soulxSinger, name: "Singing voice", hold: ModelRegistry.soulxSingerSeededHoldBytes,
+            jobs: 1, yieldsWhenBusy: true)
+        let plan = ModelAdmission.resolve(Self.facts(request: Self.aceStep(), resident: [busy]))
+        #expect(plan.isAdmitted)
+        #expect(plan.evicting == [.soulxSinger])
+        #expect(plan.protectedByJobs.isEmpty)
+    }
+
+    @Test("CONTROL — the SAME busy resident with the flag false stays protectedByJobs")
+    func busySoulXWithFlagFalseIsProtected() throws {
+        // The gate's own wording: "with the flag false, SoulX is protected." Same id, same hold,
+        // same job count as the test above — only `yieldsWhenBusy` differs.
+        let busy = Self.resident(
+            .soulxSinger, name: "Singing voice", hold: ModelRegistry.soulxSingerSeededHoldBytes,
+            jobs: 1, yieldsWhenBusy: false)
+        let plan = ModelAdmission.resolve(Self.facts(request: Self.aceStep(), resident: [busy]))
+        #expect(plan.isAdmitted)
+        #expect(plan.evicting.isEmpty)
+        #expect(plan.protectedByJobs == [.soulxSinger])
+    }
+
+    @Test("An IDLE yieldsWhenBusy resident is unloaded exactly like any other idle model")
+    func idleSoulXIsUnloadedLikeAnyOther() throws {
+        let idle = Self.resident(
+            .soulxSinger, name: "Singing voice", hold: ModelRegistry.soulxSingerSeededHoldBytes,
+            yieldsWhenBusy: true)
+        let plan = ModelAdmission.resolve(Self.facts(request: Self.aceStep(), resident: [idle]))
+        #expect(plan.evicting == [.soulxSinger])
+        #expect(plan.protectedByJobs.isEmpty)
+    }
+
+    @Test("Mixed residency: a busy SoulX (yields) and a busy RVC (protected) both resident when ACE boots")
+    func mixedResidencySoulXYieldsRVCStaysProtected() throws {
+        let busySoulX = Self.resident(
+            .soulxSinger, name: "Singing voice", hold: ModelRegistry.soulxSingerSeededHoldBytes,
+            jobs: 1, yieldsWhenBusy: true)
+        let busyRVC = Self.resident(.rvc, name: "RVC voice conversion", hold: 3 * Self.gib, jobs: 1)
+        let plan = ModelAdmission.resolve(
+            Self.facts(request: Self.aceStep(), resident: [busySoulX, busyRVC]))
+        #expect(plan.isAdmitted)
+        #expect(plan.evicting == [.soulxSinger])
+        #expect(plan.protectedByJobs == [.rvc])
+    }
+
+    @Test("SoulX booting while already resident is a no-op (already-resident short-circuits first)")
+    func soulxBootingWhileAlreadyResidentIsANoOp() throws {
+        let plan = ModelAdmission.resolve(Self.facts(
+            request: Self.soulxSinger(),
+            resident: [Self.resident(
+                .soulxSinger, name: "Singing voice", hold: ModelRegistry.soulxSingerSeededHoldBytes,
+                jobs: 1, yieldsWhenBusy: true)]))
+        guard case .alreadyResident(let id) = plan else {
+            Issue.record("expected .alreadyResident, got \(plan)")
+            return
+        }
+        #expect(id == .soulxSinger)
+        #expect(plan.evicting.isEmpty, "a model must never plan to unload itself")
     }
 
     // MARK: - Single-flight: the ONE thing that can still stop a boot

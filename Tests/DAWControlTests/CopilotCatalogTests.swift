@@ -1,3 +1,4 @@
+import DAWCore
 import Foundation
 import Testing
 @testable import DAWControl
@@ -72,7 +73,24 @@ struct CopilotCatalogTests {
         // group delete/move, and strictly better undo atomicity for a
         // capability (clip.remove/clip.move) already IN the catalog — took it
         // 69 -> 71.
-        #expect(CopilotToolCatalog.v1.count == 77)   // 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape)
+        #expect(CopilotToolCatalog.v1.count == 84)   // 84 at m39-tpl-6 (template.list/describe/apply — the m21-b2 law: a new user-facing capability must be visible to the in-app copilot, and "set up a lo-fi beat" is exactly the request the copilot could not previously serve one call at a time; template.save/remove/import/export are deliberately absent — file-system side effects, same rationale as project.save staying off this surface) <- 81 at m23-cw (au.listPresets/au.loadPreset — the m21-b2 law: a new user-facing capability must be visible to the in-app copilot, and "give me a cathedral reverb" is exactly the request the copilot could not previously serve, because starting from the right PRESET is how a plugin's sound space is actually reached). 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape) -> 78 at m31-c (clip.repeatNotes — the in-app copilot composes music too, and this is the exact "author one bar, repeat it" efficiency verb an autonomous agent wants; siblings clip.setNotes/clip.addMIDI are both already in the catalog) -> 79 at m26-a/m27-n (clip.patchNotes — the most obvious autonomous-agent framing of any verb in this file: it exists BECAUSE an agent doing "raise the velocity of 48 shaker notes out of 907" should not have to round-trip the other 859)
+        // m39-tpl-6: the three READ/APPLY template verbs are visible to the
+        // in-app copilot; save/remove/import/export are deliberately absent
+        // (file-system side effects, same rationale as project.save staying
+        // off this surface — pinned from BOTH sides, just like the
+        // reference.* curated four above).
+        for command in ["template.list", "template.describe", "template.apply"] {
+            #expect(CopilotToolCatalog.tool(command: command) != nil,
+                    "\(command) missing from the catalog — m21-b2 requires a new user-facing capability to be visible to the in-app copilot")
+        }
+        for command in ["template.save", "template.remove", "template.import", "template.export"] {
+            #expect(CopilotToolCatalog.tool(command: command) == nil,
+                    "\(command) joined the catalog — only list/describe/apply are curated in")
+        }
+        #expect(CopilotToolCatalog.tool(command: "clip.repeatNotes") != nil,
+                "clip.repeatNotes missing from the catalog — m21-b2 requires a new user-facing\n                 capability to be visible to the in-app copilot, and this verb exists\n                 specifically to save an authoring agent from generating repeated material")
+        #expect(CopilotToolCatalog.tool(command: "clip.patchNotes") != nil,
+                "clip.patchNotes missing from the catalog — m21-b2: a new user-facing capability\n                 must be visible to the in-app copilot, and this verb's whole reason to exist\n                 is an authoring agent's own workflow")
         #expect(CopilotToolCatalog.tool(command: "clip.applyBreathContour") != nil,
                 "clip.applyBreathContour missing from the catalog — the copilot is exactly\n                 the caller that should reach for a breath contour, and m21-b2 requires a\n                 new user-facing capability to be visible to it")
         #expect(CopilotToolCatalog.tool(command: "transport.setStopAtContentEnd") != nil,
@@ -124,6 +142,64 @@ struct CopilotCatalogTests {
         for command in ["clip.duplicate", "arrange.insertBars", "arrange.deleteBars"] {
             #expect(CopilotToolCatalog.tool(command: command) != nil, "\(command) missing from the catalog")
         }
+    }
+
+    /// ⭐ m39-m — THE CATALOG'S `fx.add` KIND ENUM IS A HAND-MAINTAINED LIST
+    /// AND WAS UNPINNED UNTIL NOW. Design §11.0.1 rules that "a new effect KIND
+    /// updates `CopilotCatalog.swift`", but nothing compared that list to the
+    /// enum, so a kind added to `EffectDescriptor.Kind` and forgotten here is
+    /// simply never suggested by the in-app copilot — the capability ships and
+    /// is undiscoverable, which is the exact failure `effect-kind-surface.mjs`
+    /// was built for on the OTHER four surfaces.
+    ///
+    /// Derived from `Kind.allCases`, so it cannot go stale: it fails the day a
+    /// kind is added without touching the catalog, and needs no edit when one
+    /// is added correctly. `.audioUnit` is excluded deliberately — it needs a
+    /// component triple the copilot cannot supply, which is why the catalog's
+    /// own list has never carried it.
+    @Test("m39-m: fx.add's copilot kind enum is EVERY built-in kind, derived from the enum")
+    func copilotFXKindEnumCoversEveryBuiltIn() throws {
+        let tool = try #require(CopilotToolCatalog.tool(command: "fx.add"))
+        let kindSchema = try #require(tool.schema["properties"]?["kind"])
+        let offered = try #require(kindSchema["enum"]?.arrayValue?.compactMap { $0.stringValue })
+        let builtIns = EffectDescriptor.Kind.allCases
+            .filter { $0 != .audioUnit }
+            .map { $0.rawValue }
+        #expect(offered == builtIns,
+                Comment(rawValue: "the copilot offers \(offered) but the built-in kinds are "
+                    + "\(builtIns) — a kind the copilot cannot name is a kind it will never suggest"))
+        // NON-VACUITY, both directions: the list is not empty, and `audioUnit`
+        // is genuinely absent rather than the filter above being a no-op.
+        #expect(offered.count >= 13)
+        #expect(!offered.contains("audioUnit"))
+    }
+
+    @Test("m39-dm-copilot: track.setInstrument's copilot kind enum is EVERY instrument kind, derived from the enum")
+    func copilotInstrumentKindEnumCoversEveryKind() throws {
+        let tool = try #require(CopilotToolCatalog.tool(command: "track.setInstrument"))
+        let kindSchema = try #require(tool.schema["properties"]?["kind"])
+        let offered = try #require(kindSchema["enum"]?.arrayValue?.compactMap { $0.stringValue })
+        let all = InstrumentDescriptor.Kind.allCases.map { $0.rawValue }
+        // No filter here, unlike fx.add's `audioUnit` exclusion: the copilot
+        // CAN switch to every kind, because each track carries the settings it
+        // was last given in the app across a kind switch. What it cannot do is
+        // CONFIGURE the non-polySynth kinds — that is the description's job to
+        // say, not this enum's.
+        #expect(offered == all,
+                Comment(rawValue: "the copilot offers \(offered) but the instrument kinds are "
+                    + "\(all) — a kind the copilot cannot name is a kind it will never suggest"))
+        // NON-VACUITY: guard COMPLETENESS, so a half-fix that restores only one
+        // of the kinds this test was written for cannot pass.
+        //
+        // A FLOOR, not a total. This assertion first read `== 5` and went stale
+        // within the same item that wrote it, the moment `drumSynth` became the
+        // sixth kind — an EXACT total duplicates the derived `offered == all`
+        // above and rots on every legitimate addition, while a floor plus named
+        // membership still fails a half-fix and still fails a silent REMOVAL.
+        #expect(offered.count >= 6)
+        #expect(offered.contains("sampler"))
+        #expect(offered.contains("soundBank"))
+        #expect(offered.contains("drumSynth"))
     }
 
     @Test("wire-name mapping round-trips bijectively")

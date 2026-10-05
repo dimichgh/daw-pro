@@ -1,0 +1,643 @@
+{
+  "set": "deesser-listening",
+  "description": "m39-ae, THE DE-ESSER - a LISTENING set. Four renders of the same phrase. Three differ on ONE knob, `thresholdDb`: how loud the 'sss' has to get before the de-esser reacts. Lower means it reacts to more. The fourth is the SAME compressor at the SAME threshold with the de-esser switched OFF, so that A/B turns on one setting and nothing else.\n\nWHAT A DE-ESSER IS, in plain words. A singer's 's' and 'sh' sounds carry far more energy than the rest of the voice, and a microphone makes that worse. A de-esser turns the voice down for the fraction of a second an 's' lasts, and leaves it alone the rest of the time. It is NOT an EQ - an EQ would dull the whole vocal permanently to fix a sound that happens for 80 milliseconds at a time.\n\n⛔ THERE IS NO 'deEsser' EFFECT KIND. A de-esser IS a compressor - same threshold, ratio, attack, release - with one difference: the part that DECIDES when to turn down listens to a filtered copy of the signal instead of the whole thing. So it ships as a MODE on `compressor`: set `detectorMode` to 1 and `detectorFreqHz` to where the 'sss' lives (5000-9000 Hz on most voices). If you went looking for a separate de-esser and did not find one, that is why.\n\nWHAT YOU ARE ACTUALLY HEARING, told plainly rather than sold: there is no singer here. The 'voice' is a triangle-wave synth playing a phrase, and each note ends with a short bright blip at about 5.9 kHz. That blip is this set's stand-in for an 'sss'. It is not a convincing one and it is not meant to be - it is REPEATABLE, which a recorded vocal in a fixture would not be, and it sits in the same 5-9 kHz region a real 'sss' does. MEASURED on the un-processed render: inside the detector's band (6000 Hz, Q 1.5) the blip is 33.1 dB louder than the sustained notes (-20.6 dBFS against -53.7). That gap is the entire reason a de-esser can tell the two apart - and an earlier cut of this fixture used a sawtooth voice, where the gap was only 5.5 dB. At 5.5 dB every threshold low enough to catch the blip also ducked the sustained notes, and the set demonstrated the OPPOSITE of what its own text claimed. The separation is the fixture's load-bearing number, not a detail.\n\nHOW TO LISTEN - play 'no-deess' against 'deess-medium' FIRST. They are the same compressor at the same threshold (-32 dB); the only difference between them is `detectorMode`. MEASURED gain reduction: 'no-deess' pulls the blip down 9.6 dB AND the sustained notes down 5.0 dB - it cannot tell them apart, so the whole phrase is squashed. 'deess-medium' pulls the blip down 6.8 dB and the sustained notes down 0.03 dB. That second number is the point of the entire effect. It is stronger than a tolerance: in all three de-essed variants the whole first note - 42000 samples, 0.875 s - is SAMPLE-FOR-SAMPLE IDENTICAL to a render with no compressor in the chain at all, because until a blip arrives the detector never comes near the threshold - the sustained notes measure -53.7 dBFS inside its band, some 15 dB under the lowest threshold used here (-38 dB), and further still by the time it reaches the detector - so the gain is exactly 1.0 and the output IS the input. The plain compressor diverges from that same reference after 546 samples (11 ms), which is its broadband detector catching the note's own 30 ms fade-in as it rises past -32 dB; its attack is 1 ms and had nothing to do with the timing.\n\n⛔ IT IS WIDEBAND, NOT SPLIT-BAND. When the detector fires, the WHOLE signal ducks for as long as the blip lasts - it does not carve the bright band out and leave the rest playing. On a solo voice that is inaudible because an 's' is short. On a full mix it is audible, and you should not put one there. This is also why it adds ZERO latency and cannot shift an existing project in time.\n\n⚠️ THESE ARE NOT LOUDNESS-MATCHED, and louder reads as better, so here are the MEASURED numbers instead of an adjective. Integrated loudness: no-deess -32.9 LUFS, deess-gentle -27.0, deess-medium -29.2, deess-strong -30.8. The plain compressor is the QUIETEST of the four, by about 4 dB, because it is ducking the entire phrase rather than just the blips - so a quick A/B flatters every de-essed variant for a reason that has nothing to do with sibilance. Turn 'no-deess' up about 4 dB before judging it. Among the three de-essed variants loudness does fall as the threshold drops, which is what you would expect.\n\nThe measurement half of this lives elsewhere: `scripts/demos/specs/deesser.json` plus `scripts/gates/m39ae-deesser-physics.mjs`, which prove on two sine tones that the de-esser leaves non-sibilant material SAMPLE-IDENTICAL and that it never changes the balance between two frequencies. Ears cannot check either of those.",
+  "variants": [
+    {
+      "name": "no-deess",
+      "axis": "THE BEFORE: the SAME compressor at the SAME threshold (-32 dB) as 'deess-medium', with `detectorMode` 0 - an ordinary broadband compressor. MEASURED: it pulls the bright blip down 9.6 dB and the sustained notes down 5.0 dB. It cannot tell the two apart, so the whole phrase is squashed and the voice loses its shape. This is the one to compare 'deess-medium' against: between those two, exactly one setting changes.",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "triangle",
+            "attack": 0.03,
+            "decay": 0.25,
+            "sustain": 0.7,
+            "release": 0.25,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.32,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 1.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 3.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 64,
+                "startBeat": 4,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 5.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 62,
+                "startBeat": 6,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 7.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 59,
+                "startBeat": 8,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 9.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 55,
+                "startBeat": 10,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 11.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 57,
+                "startBeat": 12,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 13.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 15.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor",
+            "params": {
+              "ratio": 6,
+              "attackMs": 1,
+              "releaseMs": 60,
+              "kneeDb": 2,
+              "makeupDb": 0,
+              "mix": 1,
+              "detectorFreqHz": 6000,
+              "detectorQ": 1.5,
+              "thresholdDb": -32,
+              "detectorMode": 0
+            }
+          },
+          "as": "comp"
+        }
+      ],
+      "role": "control"
+    },
+    {
+      "name": "deess-gentle",
+      "axis": "thresholdDb -26 - the de-esser on, set high so it only just catches the loudest part of each blip. MEASURED: 1.8 dB of ducking on the blip and 0.00 dB on the sustained notes. The brightness is still there, just less pointed.",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "triangle",
+            "attack": 0.03,
+            "decay": 0.25,
+            "sustain": 0.7,
+            "release": 0.25,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.32,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 1.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 3.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 64,
+                "startBeat": 4,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 5.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 62,
+                "startBeat": 6,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 7.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 59,
+                "startBeat": 8,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 9.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 55,
+                "startBeat": 10,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 11.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 57,
+                "startBeat": 12,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 13.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 15.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor",
+            "params": {
+              "ratio": 6,
+              "attackMs": 1,
+              "releaseMs": 60,
+              "kneeDb": 2,
+              "makeupDb": 0,
+              "mix": 1,
+              "detectorFreqHz": 6000,
+              "detectorQ": 1.5,
+              "thresholdDb": -26,
+              "detectorMode": 1
+            }
+          },
+          "as": "comp"
+        }
+      ]
+    },
+    {
+      "name": "deess-medium",
+      "axis": "thresholdDb -32 - the same de-esser set lower. MEASURED: 6.8 dB on the blip and 0.03 dB on the sustained notes. This is the direct mate of 'no-deess' (identical threshold, detector switched on) and the setting most vocals want.",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "triangle",
+            "attack": 0.03,
+            "decay": 0.25,
+            "sustain": 0.7,
+            "release": 0.25,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.32,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 1.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 3.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 64,
+                "startBeat": 4,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 5.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 62,
+                "startBeat": 6,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 7.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 59,
+                "startBeat": 8,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 9.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 55,
+                "startBeat": 10,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 11.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 57,
+                "startBeat": 12,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 13.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 15.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor",
+            "params": {
+              "ratio": 6,
+              "attackMs": 1,
+              "releaseMs": 60,
+              "kneeDb": 2,
+              "makeupDb": 0,
+              "mix": 1,
+              "detectorFreqHz": 6000,
+              "detectorQ": 1.5,
+              "thresholdDb": -32,
+              "detectorMode": 1
+            }
+          },
+          "as": "comp"
+        }
+      ]
+    },
+    {
+      "name": "deess-strong",
+      "axis": "thresholdDb -38 - too far on purpose, so you can hear what overdoing it sounds like. MEASURED: 11.8 dB on the blip and 0.12 dB on the sustained notes. The 'tss' is nearly gone; on a real vocal this is where a singer starts to sound like they have a lisp. Note what did NOT happen: the sustained notes are still untouched, so overdoing a de-esser damages the sibilants, not the body of the voice - which is exactly why it is easy to overdo without noticing.",
+      "render": {
+        "durationSeconds": 10
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "instrument"
+          },
+          "as": "voice"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$voice",
+            "kind": "polySynth",
+            "waveform": "triangle",
+            "attack": 0.03,
+            "decay": 0.25,
+            "sustain": 0.7,
+            "release": 0.25,
+            "cutoffHz": 16000,
+            "resonance": 0.08,
+            "gain": 0.32,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$voice",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 57,
+                "startBeat": 0,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 1.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 60,
+                "startBeat": 2,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 3.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 64,
+                "startBeat": 4,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 5.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 62,
+                "startBeat": 6,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 7.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 59,
+                "startBeat": 8,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 9.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 55,
+                "startBeat": 10,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 11.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 57,
+                "startBeat": 12,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 13.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              },
+              {
+                "pitch": 60,
+                "startBeat": 14,
+                "lengthBeats": 1.75,
+                "velocity": 96
+              },
+              {
+                "pitch": 114,
+                "startBeat": 15.75,
+                "lengthBeats": 0.22,
+                "velocity": 122
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$voice",
+            "kind": "compressor",
+            "params": {
+              "ratio": 6,
+              "attackMs": 1,
+              "releaseMs": 60,
+              "kneeDb": 2,
+              "makeupDb": 0,
+              "mix": 1,
+              "detectorFreqHz": 6000,
+              "detectorQ": 1.5,
+              "thresholdDb": -38,
+              "detectorMode": 1
+            }
+          },
+          "as": "comp"
+        }
+      ]
+    }
+  ]
+}

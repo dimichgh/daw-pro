@@ -447,13 +447,23 @@ struct CompressorMixTests {
         }
     }
 
-    @Test("K10 mix is discoverable through the fx.describe schema, appended last")
+    @Test("K10 mix is discoverable through the fx.describe schema, at slot 6")
     func mixIsInTheSchema() throws {
         let specs = EffectParamSpec.specs(for: .compressor)
+        // ⚠️ m39-ae APPENDED THREE MORE (the de-esser's), so `mix` is no longer
+        // LAST — but it is still at SLOT 6, which is the thing that matters and
+        // the thing this test was always really about. `specs.last` was a
+        // convenient stand-in for "slot 6" while that happened to be true; it
+        // is now read by index, because the index IS the automation slot id and
+        // an append must never move it.
         #expect(specs.map(\.name) == ["thresholdDb", "ratio", "attackMs", "releaseMs",
-                                      "kneeDb", "makeupDb", "mix"],
-                "mix must be APPENDED — the six original automation slots may never move")
-        let mix = try #require(specs.last)
+                                      "kneeDb", "makeupDb", "mix",
+                                      "detectorMode", "detectorFreqHz", "detectorQ"],
+                Comment(rawValue:
+                    "mix must stay at slot 6 — the six original automation slots may never "
+                    + "move, and neither may mix's own now that projects carry lanes on it"))
+        #expect(specs.count > 7, "the de-ess params were removed rather than appended")
+        let mix = specs[6]
         #expect(mix.name == "mix")
         #expect(mix.range == CompressorParams.mixRange)
         #expect(mix.range == 0...1)

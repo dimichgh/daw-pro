@@ -20,6 +20,14 @@ struct PianoRollView: View {
     /// The clip being edited (value input — previewable without the store).
     var clip: Clip
     var beatsPerBar: Int
+    /// m23-ap I5-F2 — the project's ONE meter map (`store.transport.meterMap`).
+    /// The roll numbers, draws and snaps in the SONG's bars through it: the scrub
+    /// ruler (`songMeter`), the note grid's lines (`PianoRollSongGrid`), the
+    /// header's "BAR n" and its +/− range (`PianoRollBarOps`) and the playhead's
+    /// placement snap. NOT defaulted: a new call site that forgot it would get a
+    /// 4/4 song with the compiler silent. `beatsPerBar` stays for what still
+    /// reads one meter per clip view (the step sequencer, the off-clip cue).
+    var meterMap: MeterMap
     /// Live transport position in PROJECT beats (the arrange timeline's source),
     /// mapped clip-local for the playhead. A plain value input so a preview can
     /// stage the line at any position.
@@ -169,14 +177,20 @@ struct PianoRollView: View {
     /// that entry disabled until an Edit ▸ Paste had already run.
     var clipboardNotes: [MIDINote]
     var onClose: () -> Void
-    /// ESCAPE reaching the roll (m25-b-1) — asks the APP whether the keystroke
-    /// leaves the MAXIMIZED editor mode, and reports whether it was consumed.
-    /// A closure, not a `layout` read, for the reason the DELETE route is one:
-    /// the decision needs app-level facts this view has no business knowing (is a
-    /// modal up, is a rename field live), and both of Escape's mounts must reach
-    /// the SAME decision. Defaulted so previews stay one-liner-simple; a preview
-    /// that never maximizes never needs it.
-    var onEscape: () -> Bool
+    /// ESCAPE reaching the roll (m25-b-1) — asks the APP's one Escape decision
+    /// and applies the answer. A closure, not a `layout` read, for the reason
+    /// the DELETE route is one: the decision needs app-level facts this view has
+    /// no business knowing (is a modal up, is a rename field live, is the mode
+    /// on), and every Escape mount must reach the SAME decision. Defaulted to
+    /// `.pass` so previews stay one-liner-simple.
+    ///
+    /// ⭐ m23-ap I4 — THE LADDER (`EditorEscapeLadder`). The roll hands its two
+    /// facts (is a gesture live, is anything selected) and gets back ONE rung.
+    /// It applies its own two (`.cancelGesture`, `.clearSelection`); the app has
+    /// already applied `.exitMaximize`. ⚠️ **A NAMED BEHAVIOUR CHANGE (design
+    /// §13):** before I4 this key went straight to exit-maximize and left a note
+    /// selection alone; with notes selected it now clears them first.
+    var onEscape: (_ gestureLive: Bool, _ hasSelection: Bool) -> EditorEscapeRung
     /// Sounds EXACTLY these pitches on the clip's track right now — SET
     /// semantics, so an empty array is "stop" (m23-d). Called on every gesture
     /// tick; the controller below diffs, so this view neither throttles nor
@@ -439,6 +453,10 @@ struct PianoRollView: View {
     /// minimap jump — follow never touches the pitch axis (`:1598-1606`).
     @State private var verticalTargetY: CGFloat = 0
     @State private var verticalNonce = 0
+    /// m35-h — the open-focus latch. `false` for exactly one view INSTANCE, and
+    /// `.id(clip.id)` gives one instance per clip OPEN, so this is what makes the
+    /// auto-centre a once-per-open event rather than a per-frame behaviour.
+    @State private var didAutoFocusPitchOnOpen = false
     @FocusState private var isFocused: Bool
 
     private static let keyboardWidth: CGFloat = 54
@@ -470,7 +488,8 @@ struct PianoRollView: View {
     private static let editorVerticalScrollSpace = "pianoRollEditorVerticalScroll"
     private static let verticalJumpMarkerID = "pianoRollVerticalJumpMarker"
 
-    init(clip: Clip, beatsPerBar: Int, positionBeats: Double, isPlaying: Bool,
+    init(clip: Clip, beatsPerBar: Int, meterMap: MeterMap,
+         positionBeats: Double, isPlaying: Bool,
          densityStore: PanelDensityStore,
          appSnap: ClipSnap = .bar,
          layout: PanelLayoutStore, follow: FollowPlayheadModel,
@@ -488,7 +507,8 @@ struct PianoRollView: View {
          onPasteNotes: @escaping ([MIDINote], Set<UUID>) -> String? = { _, _ in nil },
          clipboardNotes: [MIDINote] = [],
          onClose: @escaping () -> Void,
-         onEscape: @escaping () -> Bool = { false },
+         onEscape: @escaping (_ gestureLive: Bool, _ hasSelection: Bool) -> EditorEscapeRung
+             = { _, _ in .pass },
          onAudition: @escaping (_ pitches: [Int], _ velocity: Int) -> Void = { _, _ in },
          onFocusChange: @escaping (Bool) -> Void = { _ in },
          onEngage: @escaping () -> Void = {},
@@ -500,6 +520,7 @@ struct PianoRollView: View {
              = { _, _, _ in }) {
         self.clip = clip
         self.beatsPerBar = beatsPerBar
+        self.meterMap = meterMap
         self.positionBeats = positionBeats
         self.isPlaying = isPlaying
         self.densityStore = densityStore
@@ -528,10 +549,16 @@ struct PianoRollView: View {
         self.isDrumKit = isDrumKit
         self.noteSelection = noteSelection
         self.onBarOpsStyle = onBarOpsStyle
-        _model = State(initialValue: PianoRollModel(
+        let rollModel = PianoRollModel(
             notes: clip.notes ?? [],
             clipLengthBeats: clip.lengthBeats
-        ))
+        )
+        // m23-ap I5-F3 — the model's snaps land on the SONG's grid from the first
+        // gesture (`.onChange(of: songGridContext)` below keeps it current when
+        // the clip moves or the meter changes while the editor is open: `State`
+        // keeps the FIRST model it is handed).
+        rollModel.songGrid = PianoRollSongGrid.Context(clipStartBeat: clip.startBeat, meterMap: meterMap)
+        _model = State(initialValue: rollModel)
         _controllerModel = State(initialValue: ControllerStripModel(
             lanes: clip.controllerLanes,
             clipLengthBeats: clip.lengthBeats
@@ -552,6 +579,13 @@ struct PianoRollView: View {
     /// one place, and that place must be headless-testable.
     private var effectiveSnap: SnapResolution {
         SnapResolution.effective(appSnap: appSnap, density: mode, picked: snap)
+    }
+
+    /// m23-ap I5-F3 — where this clip sits on the SONG's grid: every UI snap in
+    /// the roll (the model's note snaps, the controller lane's points, the
+    /// playhead's placement) lands on the lines `PianoRollSongGrid` draws.
+    private var songGridContext: PianoRollSongGrid.Context {
+        PianoRollSongGrid.Context(clipStartBeat: clip.startBeat, meterMap: meterMap)
     }
 
     /// Violet whenever the clip is AI-touched, else playback cyan.
@@ -581,10 +615,14 @@ struct PianoRollView: View {
     /// The resolved grid, built from the LIVE draft — so the lanes and the
     /// columns follow an edit (or a wire-side mutation) without a second seed.
     /// ONE value feeds the drawing, the hit test and the toggle.
+    ///
+    /// m23-ap I5-F4: on the SONG's grid (`songGridContext`, the same context the
+    /// note grid's snaps read), so every column edge is a line the note grid
+    /// draws and the bar numbers are the song's.
     private var stepGeometry: StepSequencerGeometry {
         StepSequencerGeometry.make(
             isDrumKit: isDrumKit, notes: model.draft, clipLengthBeats: model.clipLengthBeats,
-            resolution: effectiveStepResolution, beatsPerBar: beatsPerBar)
+            resolution: effectiveStepResolution, songGrid: songGridContext)
     }
 
     /// TOGGLE A CELL — the sequencer's whole edit vocabulary, and the ONE
@@ -783,13 +821,28 @@ struct PianoRollView: View {
         // mount also calls; a mode that fills the window must not have exactly one
         // way out, and the header toggle is the other.
         //
-        // ⚠️ `.ignored` UNLESS THE DECISION CONSUMED IT — outside the maximized
-        // mode this view claims nothing new, so Escape propagates exactly as it
-        // did before. ⚠️ `.escape` needs no `\u{1B}` companion: unlike ⌫ (0x08 vs
-        // 0x7F, the m23-fk trap two lines up), `KeyEquivalent.escape` IS 0x1B, so
-        // the spelling and the key agree.
+        // ⚠️ `.ignored` UNLESS THE DECISION CONSUMED IT — with no gesture, no
+        // selection and no maximized mode this view claims nothing new, so Escape
+        // propagates exactly as it did before. ⚠️ `.escape` needs no `\u{1B}`
+        // companion: unlike ⌫ (0x08 vs 0x7F, the m23-fk trap two lines up),
+        // `KeyEquivalent.escape` IS 0x1B, so the spelling and the key agree.
+        //
+        // ⭐ m23-ap I4 — ONE RUNG PER PRESS, nearest thing first
+        // (`EditorEscapeLadder`): a live gesture is cancelled, else the
+        // selection is cleared, else the mode is left. ⚠️ The middle rung is new
+        // on this shipped surface (design §13) — see `onEscape`.
+        //
+        // ⚠️ m34-k: THIS MOUNT IS NOW THE SECONDARY ROUTE. It rides SwiftUI
+        // focus, and I7b measured it never delivered with the roll maximized and
+        // notes selected (7 of 7 presses landed on the workspace backstop). The
+        // app's key monitor now hands Escape to `handleEscape` below through
+        // `noteSelection.escapeNonce`, and swallows the key it hands over, so
+        // this mount only ever sees an Escape the monitor passed on — and asks
+        // the same ladder, so it cannot double-fire. The first statement is its
+        // own delivery counter, so a probe can tell the two routes apart.
         .onKeyPress(.escape) {
-            onEscape() ? .handled : .ignored
+            KeyPressProbe.pianoRollEscape += 1   // m34-k probe, first statement
+            return handleEscape()
         }
         .onAppear { isFocused = true }
         // m21-c: report key focus so the app routes ⌘+/⌘−/⌘0 to THIS editor's
@@ -885,6 +938,16 @@ struct PianoRollView: View {
             guard !model.selection.isEmpty else { return }
             model.deleteSelection()
             commit()
+        }
+        // m34-k: ESCAPE, handed over by the app's key monitor — the route that
+        // works when this view does not hold SwiftUI focus, which I7b measured
+        // to be every time (7 of 7) with the roll maximized and notes selected.
+        // The SAME body the mount above runs (`handleEscape`), so the roll asks
+        // the app's ladder with its LIVE gesture and selection; the monitor only
+        // predicted that something here would be taken down. No `onEngage()`:
+        // Escape takes things down, it states nothing about where the user works.
+        .onChange(of: noteSelection.escapeNonce) { _, _ in
+            _ = handleEscape()
         }
         // m23-ek-3: EDIT ▸ CUT / COPY / PASTE reaching the roll, and the roll's
         // own context-menu entries. Same reason as `deleteNonce` above — the menu
@@ -985,6 +1048,12 @@ struct PianoRollView: View {
             controllerModel.pixelsPerBeat = ppb
             repinZoomAnchor(oldPPB: oldPPB, newPPB: ppb)
         }
+        // m23-ap I5-F3 — ONE observer for the clip's place on the song's grid: a
+        // clip moved (or a meter changed) while the editor is open re-phases every
+        // note snap. `Context` is Equatable, so a transport tick is not a change.
+        .onChange(of: songGridContext, initial: true) { _, context in
+            model.songGrid = context
+        }
         // m25-b-4: the VERTICAL twin, and the two are deliberately SEPARATE
         // funnels rather than one. They are orthogonal by construction — a row
         // height moves no beat→x mapping and a scale moves no pitch→y mapping — so
@@ -996,6 +1065,22 @@ struct PianoRollView: View {
         .onChange(of: layout.pianoRollRowHeight, initial: true) { oldRH, rowHeight in
             model.rowHeight = rowHeight
             repinRowZoomAnchor(oldRowHeight: oldRH, newRowHeight: rowHeight)
+        }
+        // m25-b-4's THIRD writer of `verticalTargetY`, and it arrives holding the
+        // obligation `verticalJumpMarker`'s doc writes down: the y it sets is
+        // clamped into the gutter (`0 ... contentHeight − viewportHeight`) against
+        // the CURRENT row height, so it can never ask the scroller for an offset
+        // that does not exist.
+        //
+        // ⚠️ `initial:` is deliberately ABSENT. This is an event, not a dimension —
+        // firing it on appear would yank the pitch axis on every clip open,
+        // unconditionally. m35-h has since made that product decision, and it is
+        // CONDITIONAL (do nothing when the notes are already in frame), so it lives
+        // in `attemptOpenPitchFocus` off the viewport-height seam and calls
+        // `focusPitchAxis` directly. This seam stays external-drivers-only.
+        .onChange(of: layout.pianoRollFocusNonce) { _, _ in
+            guard let pitch = layout.pianoRollFocusPitch else { return }
+            focusPitchAxis(on: pitch)
         }
         // m18-i: the external-mutation seam. `.id(clip.id)` recreates this view
         // (and its seeded @State models) only on a clip IDENTITY switch; a
@@ -1130,6 +1215,92 @@ struct PianoRollView: View {
     /// The VERTICAL half cannot travel that seam — follow has no pitch axis
     /// (`:1598-1606` scopes it out on purpose) — so it rides its own target+nonce
     /// pair to the vertical scroller.
+    /// Scrolls the pitch axis so `pitch`'s row sits in the middle of the note
+    /// grid (m35 groundwork, driven by `debug.panelLayout {pianoRollCenterPitch}`).
+    ///
+    /// The scrub strip is subtracted from the viewport before centring, because
+    /// the strip is frozen OVER the top of the scroller — centring against the
+    /// full height would park the pitch that many points high, which is exactly
+    /// the plausible-looking wrong number the minimap's own doc warns about.
+    private func focusPitchAxis(on pitch: Int) {
+        // ⚠️ THE STRIP IS SUBTRACTED ONCE, NOT TWICE, AND THE SIGN IS THE WHOLE
+        // BUG THIS COMMENT EXISTS TO PREVENT. `verticalTargetY` is the content y
+        // placed at the top of the SCROLLER, whose height is
+        // `editorViewportHeight` (H); the frozen scrub strip covers its top
+        // `scrubStripHeight` (s). So the READABLE band is [Y+s, Y+H] and its
+        // centre is Y + (H+s)/2 — which means centring a row costs
+        //
+        //     Y = rowCentre − (H + s) / 2
+        //
+        // This shipped as `− (H − s) / 2`, i.e. the strip subtracted on the wrong
+        // side, which parked every focused row a full s (18 pt, about one row)
+        // ABOVE the readable centre. It looked right because it IS right to
+        // within one row, and one row is exactly the error a screenshot does not
+        // announce. Same slip in the clamp: the furthest legal offset puts the
+        // content's bottom at the SCROLLER's bottom, so it is
+        // `contentHeight − H`, not `contentHeight − (H − s)`. That one was
+        // harmless only because `scrollTo` clamps behind it.
+        let rowCentre = model.y(forPitch: pitch) + model.rowHeight / 2
+        let maxY = max(0, model.contentHeight - editorViewportHeight)
+        let centred = rowCentre - (editorViewportHeight + Self.scrubStripHeight) / 2
+        verticalTargetY = min(max(0, centred), maxY)
+        verticalNonce += 1
+    }
+
+    /// **m35-h — centre the pitch axis on the clip's own notes when the roll OPENS.**
+    ///
+    /// The defect and the policy live in `PianoRollOpenFocus` (headless-tested);
+    /// this is the seam that runs it exactly once per open, and the seam choice is
+    /// the part that could not be tested headless, so it is argued here.
+    ///
+    /// ⚠️ **WHY NOT `.onAppear`** (`:794`): appear fires before either geometry
+    /// reader has reported, so `editorViewportHeight` is still 0 and there is no
+    /// window to run the in-frame test against. Centring there would mean centring
+    /// unconditionally — it would yank a clip that was already perfectly framed,
+    /// which requirement 1 forbids.
+    ///
+    /// ⚠️ **WHY NOT `.onChange(of: clip)`** (`reseedFromExternalMutation`): that is
+    /// the m18-i EXTERNAL-MUTATION seam and it fires under the SAME clip identity —
+    /// a wire/arrange-side `clip.trim`/`move`/`split`, an undo, a redo. Auto-centring
+    /// there would re-frame the roll on every such edit, i.e. yank the view out from
+    /// under a user who had deliberately scrolled somewhere and then trimmed the
+    /// clip in the arrange. This fires on a clip IDENTITY switch only, because
+    /// `.id(clip.id)` gives a fresh `didAutoFocusPitchOnOpen` and nothing else does.
+    ///
+    /// ⚠️ **AND WHY IT IS DEFERRED ONE MAIN-ACTOR TURN.** `editorHeightReader` and
+    /// `editorVerticalScrollReader` are independent `GeometryReader`s that land in
+    /// unspecified order, and the open position comes from
+    /// `.defaultScrollAnchor(.center)` rather than from any write of ours — so on
+    /// the height reader's own tick `gridScrollY` may still read 0, which claims a
+    /// window at the TOP of the stack. That is not a harmless approximation: a LOW
+    /// clip would still be fixed (it scrolls either way), but a HIGH clip would test
+    /// as "already in frame" and the defect would survive, inverted and invisible.
+    /// The re-read on a fresh turn is the same m17-b durability idiom the vertical
+    /// jump's `scrollTo` already uses (`:2671`).
+    ///
+    /// The latch is set SYNCHRONOUSLY so a second height tick (a resize arriving in
+    /// the same frame) cannot schedule a second turn.
+    ///
+    /// ⚠️ This calls `focusPitchAxis` DIRECTLY rather than
+    /// `layout.requestPianoRollFocus`: the store's pitch+nonce pair is the seam for
+    /// EXTERNAL drivers, its `onChange` carries no `initial:`, and a nonce bumped
+    /// while this view is still mounting would simply be missed. Going direct also
+    /// keeps the writer count on `verticalTargetY` at three.
+    private func attemptOpenPitchFocus() {
+        guard !didAutoFocusPitchOnOpen, editorViewportHeight > 0 else { return }
+        didAutoFocusPitchOnOpen = true
+        Task { @MainActor in
+            guard let window = PianoRollOpenFocus.visiblePitchWindow(
+                scrollY: gridScrollY,
+                viewportHeight: editorViewportHeight,
+                topInset: Self.scrubStripHeight,
+                rowHeight: model.rowHeight) else { return }
+            guard let pitch = PianoRollOpenFocus.focusPitch(
+                notePitches: model.draft.map(\.pitch), visible: window) else { return }
+            focusPitchAxis(on: pitch)
+        }
+    }
+
     private func jumpToMinimapTarget(_ target: CGPoint) {
         follow.scrollExternally(to: target.x)
         verticalTargetY = target.y
@@ -1209,6 +1380,10 @@ struct PianoRollView: View {
             Color.clear
                 .onChange(of: geo.size.height, initial: true) { _, newValue in
                     editorViewportHeight = newValue
+                    // m35-h: and this tick is the OPEN seam — see
+                    // `attemptOpenPitchFocus` for why the auto-centre hangs off the
+                    // viewport's arrival and not off `.onAppear`.
+                    attemptOpenPitchFocus()
                 }
         }
         .allowsHitTesting(false)
@@ -1296,6 +1471,78 @@ struct PianoRollView: View {
         if stripStale {
             controllerModel.reseed(lanes: clip.controllerLanes, clipLengthBeats: clip.lengthBeats)
         }
+    }
+
+    /// Whether the roll holds a gesture Escape would CANCEL (m23-ap I4): one
+    /// that is changing notes or the selection right now — a move, a resize, a
+    /// group scale, a rubber band. A press still resolving as a click has
+    /// changed nothing yet, and a playhead scrub edits nothing (its seeks are
+    /// the transport's, not the clip's), so neither is one: Escape passes over
+    /// them to the next rung, exactly as it did before I4.
+    private var escapeGestureLive: Bool {
+        switch activeDrag {
+        case .move, .resize, .groupScale, .marquee: return true
+        case .click, .playheadDrag, .none, .cancelled: return false
+        }
+    }
+
+    /// THE ROLL'S ONE ESCAPE BODY (m34-k extracted it; I4 wrote it). Two routes
+    /// reach it: the `.onKeyPress(.escape)` mount (SwiftUI focus) and the app's
+    /// key monitor through `noteSelection.escapeNonce` (no focus needed). Both
+    /// hand the app's ONE ladder this roll's live facts and apply the rung that
+    /// is the roll's own; the app has already applied `.exitMaximize` itself.
+    private func handleEscape() -> KeyPress.Result {
+        let rung = onEscape(escapeGestureLive, !model.selection.isEmpty)
+        switch rung {
+        case .cancelGesture: cancelGestureForEscape()
+        case .clearSelection: model.clearSelection()
+        case .exitMaximize, .pass: break
+        }
+        return rung.consumesKey ? .handled : .ignored
+    }
+
+    /// Escape's `.cancelGesture` rung on the roll (m23-ap I4): the gesture is
+    /// ABANDONED with nothing committed, and the pointer still down.
+    ///
+    /// ⭐ IT PARKS THE GESTURE IN `.cancelled`, the m18-i state that already
+    /// means "swallow the rest of this drag": no apply, no commit, no restart
+    /// (`onChanged` only begins from `.none`), and the release closes it through
+    /// `endGesture`'s `.cancelled` arm — which is also where the repeat clock is
+    /// stopped. ⚠️ NO FOURTH `setEdgeRepeat(running: false)` HERE, on purpose
+    /// (`PianoRollEdgeDragSiteTests` pins three teardowns): `.cancelled` scrolls
+    /// no content, so a held clock's tick returns before doing anything
+    /// (`repeatHeldEdgeScroll` gates on `activeDragScrollsContent`), and the
+    /// next pointer tick stops it (`applyGesture` re-arms on the same gate).
+    ///
+    /// What each gesture gives back:
+    ///  • a BAND — the selection it armed with (its frozen `base`), and its
+    ///    visual, which must never outlive the gesture behind it;
+    ///  • a MOVE / RESIZE / GROUP SCALE — the draft, re-read from the clip the
+    ///    store holds (nothing was committed, so that is the pre-gesture state),
+    ///    keeping the selection (`reseed` keeps survivors, and every id survives).
+    private func cancelGestureForEscape() {
+        let outgoing = activeDrag
+        activeDrag = .cancelled
+        didMove = false
+        switch outgoing {
+        case .marquee(_, let base, _):
+            // The frozen base, applied as a band that hits nothing: the rule's
+            // own "shrink the band to nothing" answer, never a second spelling.
+            model.applyMarquee(hits: [], base: base, additive: true)
+            marqueeStageOrigin = nil
+            marqueeBand = nil
+            reportMarquee(hits: [])
+        case .move, .resize, .groupScale:
+            let notes = clip.notes ?? []
+            if model.needsReseed(notes: notes, clipLengthBeats: clip.lengthBeats) {
+                model.reseed(notes: notes, clipLengthBeats: clip.lengthBeats)
+            }
+        case .click, .playheadDrag, .none, .cancelled:
+            break
+        }
+        // A move sounds the pitches it drags (m23-d); an abandoned move must not
+        // leave them sounding until the release.
+        onAudition([], 0)
     }
 
     /// m23-al R6 — the NOTE-EDIT commit funnel.
@@ -1575,42 +1822,42 @@ struct PianoRollView: View {
 
     // MARK: - Bar ops (insert / delete a measure, beta m10-h)
 
-    /// Clip-local start beat of the target bar (under the playhead, else bar 0).
-    private var targetBarStart: Double {
-        PianoRollBarOps.targetBarStartBeat(
+    /// The SONG bar the buttons act on (m23-ap I5-F2): under the playhead, else
+    /// the bar holding the clip's first beat. Its number is the readout; its
+    /// clip-local range is what insert and delete hand the store.
+    private var targetBar: PianoRollBarOps.TargetBar {
+        PianoRollBarOps.targetBar(
             position: positionBeats, clipStartBeat: clip.startBeat,
-            lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
+            lengthBeats: clip.lengthBeats, meterMap: meterMap)
     }
 
-    /// One-based bar number the buttons act on — the SF Mono readout.
-    private var targetBarNumber: Int {
-        PianoRollBarOps.targetBarNumber(
-            position: positionBeats, clipStartBeat: clip.startBeat,
-            lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
-    }
+    /// One-based SONG bar number the buttons act on — the SF Mono readout.
+    private var targetBarNumber: Int { targetBar.number }
 
     /// The readout's DRAWN string, composed at its one home in `DAWAppKit`
     /// (m23-t) so it is reachable from `Tests/` — `DAWApp` has no test target.
     private var barReadoutText: String {
         PianoRollBarOps.barReadoutLabel(
             position: positionBeats, clipStartBeat: clip.startBeat,
-            lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
+            lengthBeats: clip.lengthBeats, meterMap: meterMap)
     }
 
-    /// Delete is off when it would collapse the clip below one bar (invalid → off).
-    private var canDeleteBar: Bool {
-        PianoRollBarOps.canDeleteBar(lengthBeats: clip.lengthBeats, beatsPerBar: beatsPerBar)
+    /// The plain-language reason the delete-bar button can't act, or nil when it
+    /// can (m23-ap I5-F3): the part fits inside one bar, or the target bar is
+    /// only partly in the part (deleting it would pull later notes off the song's
+    /// grid). ONE producer — `PianoRollBarOps.deleteRefusal` — for the enabled
+    /// state, the tooltip and the notice a press flashes.
+    private var deleteBarBlockedReason: String? {
+        PianoRollBarOps.deleteRefusal(
+            position: positionBeats, clipStartBeat: clip.startBeat,
+            lengthBeats: clip.lengthBeats, meterMap: meterMap)
     }
-
-    /// The plain-language reason the delete-bar button can't act (≤ 1 bar left).
-    private static let deleteBarBlockedReason =
-        "This part is only one bar long — add a bar before deleting one."
 
     /// A compact glass cluster in the header: the target bar readout + insert/delete
     /// buttons (v1 acts on the bar under the playhead, or the first bar when the
     /// transport is elsewhere). Shown in BOTH densities — inserting/removing a
     /// measure is a structural edit a beginner reaches for, not Pro-only chrome.
-    /// One bar = `beatsPerBar` beats (meter-aware). Dark glass + hairline, the
+    /// One bar = the SONG's bar (m23-ap I5-F2), by its own meter. Dark glass + hairline, the
     /// snap-picker idiom; the +/− glyphs are neutral chrome (Rule 3 — an accent is
     /// earned by state, not by inviting a click). The delete button never goes
     /// dead (m21-c discoverability): when it can't act it stays dim but a press
@@ -1665,14 +1912,14 @@ struct PianoRollView: View {
                 insertBar()
             }
             barOpsDivider
-            barOpButton(system: "minus", enabled: canDeleteBar,
-                        help: canDeleteBar
-                            ? "Delete bar \(targetBarNumber) and pull the rest of the part back to close the gap"
-                            : Self.deleteBarBlockedReason) {
-                if canDeleteBar {
-                    deleteBar()
+            let refusal = deleteBarBlockedReason
+            barOpButton(system: "minus", enabled: refusal == nil,
+                        help: refusal
+                            ?? "Delete bar \(targetBarNumber) and pull the rest of the part back to close the gap") {
+                if let refusal {
+                    flashBarOpsNotice(refusal)
                 } else {
-                    flashBarOpsNotice(Self.deleteBarBlockedReason)
+                    deleteBar()
                 }
             }
         }
@@ -2122,9 +2369,12 @@ struct PianoRollView: View {
 
     /// Inserts one empty bar at the target bar start, then reseeds the edit model
     /// from the updated clip (the store closed/opened the gap — the model must
-    /// re-read, not keep its stale draft).
+    /// re-read, not keep its stale draft). The bar is the SONG's (m23-ap I5-F2):
+    /// its full length by its own meter, at its start or at the clip's start when
+    /// it began before the clip.
     private func insertBar() {
-        if let updated = onInsertTimeRange(targetBarStart, Double(beatsPerBar)) {
+        let target = targetBar
+        if let updated = onInsertTimeRange(target.startBeat, target.insertLengthBeats) {
             model.load(notes: updated.notes ?? [], clipLengthBeats: updated.lengthBeats)
             // Clip-local bar edits leave controller lanes untouched (design-m16b
             // §14 A4) but change the clip length — reseed so the strip's drawn
@@ -2134,8 +2384,11 @@ struct PianoRollView: View {
     }
 
     /// Deletes the target bar and closes the gap, then reseeds the edit model.
+    /// The SONG bar's part inside the clip (m23-ap I5-F2); the store truncates a
+    /// range that runs past the clip's end.
     private func deleteBar() {
-        if let updated = onDeleteTimeRange(targetBarStart, Double(beatsPerBar)) {
+        let target = targetBar
+        if let updated = onDeleteTimeRange(target.startBeat, target.deleteLengthBeats) {
             model.load(notes: updated.notes ?? [], clipLengthBeats: updated.lengthBeats)
             controllerModel.load(lanes: updated.controllerLanes, clipLengthBeats: updated.lengthBeats)
         }
@@ -2439,11 +2692,10 @@ struct PianoRollView: View {
             // The transport line, mapped through the SAME headless playhead the
             // note grid uses — with the step grid's own beat scale (a column is
             // `stepBeats` wide), so the two editors put the playhead at the same
-            // musical position.
-            playheadX: PianoRollPlayhead.lineX(
-                position: positionBeats, clipStartBeat: clip.startBeat,
-                lengthBeats: clip.lengthBeats,
-                pixelsPerBeat: stepGeometry.stepWidth / CGFloat(stepGeometry.stepBeats)),
+            // musical position. m23-ap I5-F4: through the geometry, which also
+            // moves it right by an off-grid clip's partial column 0.
+            playheadX: stepGeometry.playheadX(position: positionBeats,
+                                              lengthBeats: clip.lengthBeats),
             viewportWidth: panelWidth,
             bridge: stepSequencer,
             onToggle: applyStepToggle)
@@ -2488,13 +2740,18 @@ struct PianoRollView: View {
                 ScrollViewReader { gridProxy in
                 ScrollView(.horizontal, showsIndicators: true) {
                     // The grid Canvas is its own struct with closure-free, tick-stable
-                    // inputs (model ref + beatsPerBar + snap + color), so a transport
-                    // tick — which re-evaluates this body — never re-invokes its draw
-                    // closure: only the playhead overlay's offset moves (the arrange
-                    // "offset a view, never a per-frame Canvas redraw" rule, enforced
-                    // here by extraction rather than trusting Canvas diffing).
-                    PianoRollGrid(model: model, beatsPerBar: beatsPerBar,
+                    // inputs (model ref + the clip's start + the song's meter map +
+                    // snap + color), so a transport tick — which re-evaluates this
+                    // body — never re-invokes its draw closure: only the playhead
+                    // overlay's offset moves (the arrange "offset a view, never a
+                    // per-frame Canvas redraw" rule, enforced here by extraction
+                    // rather than trusting Canvas diffing). m23-ap I5-F2: mounted
+                    // `.equatable()`, because `meterMap` holds an array rebuilt on
+                    // every `transport.meterMap` read — the grid's own `==` is what
+                    // keeps a tick from redrawing it.
+                    PianoRollGrid(model: model, clipStartBeat: clip.startBeat, meterMap: meterMap,
                                   snap: effectiveSnap, noteTintHex: noteTintHex)
+                        .equatable()
                         // Extended to the viewport at wide windows (m18-f): the
                         // Canvas draws the extension correctly by construction —
                         // key rows + gridlines run the full width and the
@@ -3011,8 +3268,9 @@ struct PianoRollView: View {
     /// the playhead in the note editor"* — the feature worked, and nothing on
     /// screen said it existed. A hover cursor and a `.help` tooltip only reach a
     /// pointer that is already inside the strip, which is not the state the report
-    /// came from. It now draws a ground, clip-local bar/beat numbers and a visible
-    /// cyan playhead handle (`PianoRollScrubRulerBand`). The gesture below is
+    /// came from. It now draws a ground, the SONG's bar/beat numbers (m23-ap
+    /// I5-F2; clip-local before) and a visible cyan playhead handle
+    /// (`PianoRollScrubRulerBand`). The gesture below is
     /// untouched, `onSeek` is still the scrub's ONLY side effect, and nothing
     /// about it reached the wire (the m10-c/sp-b pure-view rule).
     ///
@@ -3037,7 +3295,11 @@ struct PianoRollView: View {
                         contentWidth: gridDrawnWidth,
                         scrollX: gridScrollX,
                         positionBeats: positionBeats,
-                        clipStartBeat: clip.startBeat)
+                        clipStartBeat: clip.startBeat,
+                        // m23-ap I5-F2 — the SONG's bars, the numbers the
+                        // transport and the arrange ruler show; the grid under
+                        // it draws the same bar lines (`PianoRollSongGrid`).
+                        songMeter: meterMap)
                 }
                 .contentShape(Rectangle())
                 .hoverCursor(.resizeLeftRight)
@@ -3162,13 +3424,18 @@ struct PianoRollView: View {
     /// does not scroll with the content. Adding it here would put the playhead one
     /// viewport-width off at any scrolled position.
     ///
-    /// ⚠️ **SNAPPED ONCE, HERE, IN CLIP-LOCAL SPACE.** Snapping is a property of
-    /// the GESTURE (m23-g2), not of the click site, and `effectiveSnap` already
-    /// carries Simple's forced `.beat`. `model.snap` passes the value straight
-    /// through (floored at 0) when snapping is off — which IS the user's ruling
-    /// verbatim: *"snap it to the position of the grid when snap is on, and
-    /// anywhere in clip when it is [off]"* — so there is no second "is snapping
-    /// on?" branch anywhere in this feature.
+    /// ⚠️ **SNAPPED ONCE, HERE, ON THE SONG'S GRID (m23-ap I5-F2).** Snapping is a
+    /// property of the GESTURE (m23-g2), not of the click site, and
+    /// `effectiveSnap` already carries Simple's forced `.beat`. The snap used to
+    /// run in clip-local beats, which was right while the grid, the ruler and
+    /// "BAR n" counted from the clip's first beat; all three now count the
+    /// song's, so the snap does too — `PianoRollSongGrid.placementLocalBeat`
+    /// snaps the SONG beat (the Bar snap on the meter map's own bar lines) and
+    /// then clamps to the clip, and the clamp wins at the edges. OFF passes the
+    /// value straight through — which IS the user's ruling verbatim: *"snap it to
+    /// the position of the grid when snap is on, and anywhere in clip when it is
+    /// [off]"* — so there is no second "is snapping on?" branch anywhere in this
+    /// feature.
     ///
     /// ⭐⭐ **m25-o-2 MADE THIS THE ONE PRODUCER FOR ALL THREE PLAYHEAD GESTURES**
     /// — the ⌘-click, the new line drag, AND the 18 pt scrub strip. The strip
@@ -3190,9 +3457,12 @@ struct PianoRollView: View {
     /// both correct and free.
     private func placementLocalBeat(atContentX x: CGFloat,
                                     snapBypassed: Bool = false) -> Double {
-        let raw = model.beat(forX: x)
-        let snapped = snapBypassed ? raw : model.snap(beat: raw, resolution: effectiveSnap)
-        return min(max(0, snapped), max(0, clip.lengthBeats))
+        PianoRollSongGrid.placementLocalBeat(rawLocalBeat: model.beat(forX: x),
+                                             clipStartBeat: clip.startBeat,
+                                             lengthBeats: clip.lengthBeats,
+                                             resolution: effectiveSnap,
+                                             meterMap: meterMap,
+                                             snapBypassed: snapBypassed)
     }
 
     /// ⌥ held right now — the arrange's fine-scrub escape hatch, read the same
@@ -4092,6 +4362,7 @@ struct PianoRollView: View {
             model: controllerModel,
             accent: noteColor,
             snap: effectiveSnap,
+            songGrid: songGridContext,
             drawnWidth: controllerDrawnWidth,
             // m23-c2: the strip has no playhead of its own, but it must stay
             // horizontally aligned with the notes above it through a page turn.
@@ -4129,9 +4400,14 @@ struct PianoRollView: View {
 /// parent leaves this value equal, so SwiftUI skips it and the draw closure never
 /// re-runs on playback (only note/snap/color edits invalidate it). Redraw is
 /// still per-interaction, never per-frame (docs/DESIGN-LANGUAGE.md "Meters").
-private struct PianoRollGrid: View {
+private struct PianoRollGrid: View, Equatable {
     var model: PianoRollModel
-    var beatsPerBar: Int
+    /// m23-ap I5-F2 — the clip's start on the song timeline and the song's meter
+    /// map: the grid's lines are the SONG's beats and bars (`PianoRollSongGrid`),
+    /// placed on this clip-local canvas. They replace `beatsPerBar`, whose bar
+    /// lines counted from the clip's first beat.
+    var clipStartBeat: Double
+    var meterMap: MeterMap
     var snap: SnapResolution
     /// The note tint as its `0xRRGGBB` literal, NOT as a `Color` — the pitch
     /// labels (m25-i) need the fill's luminance, and a `Color` cannot be
@@ -4139,6 +4415,19 @@ private struct PianoRollGrid: View {
     /// derived from this, so there is one number, not two.
     var noteTintHex: UInt32
     var noteColor: Color { Color(hex: noteTintHex) }
+
+    /// Hand-written, because `PianoRollModel` is a class and not `Equatable`: the
+    /// SAME model instance is equal (its edits reach this view through
+    /// Observation, which invalidates the body directly, not through this), and
+    /// everything else compares by value. The meter map compares its changes, so
+    /// a map rebuilt with the same changes on a transport tick is equal.
+    nonisolated static func == (lhs: PianoRollGrid, rhs: PianoRollGrid) -> Bool {
+        lhs.model === rhs.model
+            && lhs.clipStartBeat == rhs.clipStartBeat
+            && lhs.meterMap == rhs.meterMap
+            && lhs.snap == rhs.snap
+            && lhs.noteTintHex == rhs.noteTintHex
+    }
 
     /// A value snapshot of everything the renderer needs, taken on the main actor
     /// before the closure runs. All fields are Sendable so the `@Sendable` Canvas
@@ -4150,7 +4439,8 @@ private struct PianoRollGrid: View {
         var clipLengthBeats: Double
         var draft: [MIDINote]
         var selectedIDs: Set<UUID>
-        var beatsPerBar: Int
+        var clipStartBeat: Double
+        var meterMap: MeterMap
         var snapStep: Double
         var noteColor: Color
         /// The SAME tint as `noteColor`, in the form the pitch-label ink policy
@@ -4192,7 +4482,8 @@ private struct PianoRollGrid: View {
             clipLengthBeats: model.clipLengthBeats,
             draft: model.draft,
             selectedIDs: model.selection,
-            beatsPerBar: beatsPerBar,
+            clipStartBeat: clipStartBeat,
+            meterMap: meterMap,
             snapStep: snap.beats ?? 1,
             noteColor: noteColor,
             noteTint: SRGBColor(hex: noteTintHex))
@@ -4227,39 +4518,33 @@ private struct PianoRollGrid: View {
     /// survey grid — while SUB-beat division hairlines fade with zoom
     /// (`PianoRollZoom.subBeatLineAlpha`) so a 1/64 or triplet grid appears
     /// only once it has room to be useful, never as visual soup (the arrange
-    /// m17-b "grid density adapts, never forks" rule). Division x positions
-    /// are exact rationals (`beat + d/divisions`), so triplet lines never
-    /// accumulate float drift; when the fade bottoms out the sub-division loop
-    /// is skipped entirely (no invisible-line work).
+    /// m17-b "grid density adapts, never forks" rule). The Bar snap draws only
+    /// its own (bar) lines — the pre-zoom behavior.
+    ///
+    /// ⭐ **m23-ap I5-F2: the lines are the SONG's.** `PianoRollSongGrid.forEachLine`
+    /// places every whole song beat, every song bar line (the project's meter
+    /// map, so a meter change inside the clip re-spaces them) and the divisions
+    /// (exact rationals from each song beat, so triplets never drift) on this
+    /// clip-local canvas. It used to count bars from the clip's first beat, so a
+    /// clip starting off a bar line drew bar lines the ruler, the header and the
+    /// transport all placed elsewhere. When the fade bottoms out the divisions
+    /// are skipped entirely (no invisible-line work).
     private nonisolated static func drawGridLines(_ context: inout GraphicsContext, size: CGSize, s: GridSnapshot) {
-        let beatsShown = Int((size.width / s.pixelsPerBeat).rounded(.up))
-        let step = s.snapStep
-        let barStride = max(1, s.beatsPerBar)
-        // Coarser-than-beat snaps (Bar) keep drawing only their own lines —
-        // the pre-zoom behavior.
-        if step >= 1 {
-            let stride = max(1, Int(step.rounded()))
-            var b = 0
-            while b <= beatsShown {
-                let x = CGFloat(b) * s.pixelsPerBeat
-                let color = b % barStride == 0 ? DAWTheme.gridEmphasis : DAWTheme.hairline
-                context.fill(Path(CGRect(x: x, y: 0, width: 1, height: size.height)), with: .color(color))
-                b += stride
-            }
-            return
-        }
-        let divisions = PianoRollZoom.divisionsPerBeat(step: step)
-        let alpha = PianoRollZoom.subBeatLineAlpha(step: step, pixelsPerBeat: s.pixelsPerBeat)
+        guard s.pixelsPerBeat > 0 else { return }
+        let alpha = s.snapStep < 1
+            ? PianoRollZoom.subBeatLineAlpha(step: s.snapStep, pixelsPerBeat: s.pixelsPerBeat) : 0
         let subColor = DAWTheme.hairline.opacity(0.5 * alpha)
-        for b in 0...beatsShown {
-            let x = CGFloat(b) * s.pixelsPerBeat
-            let color = b % barStride == 0 ? DAWTheme.gridEmphasis : DAWTheme.hairline
-            context.fill(Path(CGRect(x: x, y: 0, width: 1, height: size.height)), with: .color(color))
-            guard alpha > 0, b < beatsShown, divisions > 1 else { continue }
-            for d in 1..<divisions {
-                let dx = (CGFloat(b) + CGFloat(d) / CGFloat(divisions)) * s.pixelsPerBeat
-                context.fill(Path(CGRect(x: dx, y: 0, width: 1, height: size.height)), with: .color(subColor))
+        PianoRollSongGrid.forEachLine(clipStartBeat: s.clipStartBeat,
+                                      spanBeats: Double(size.width / s.pixelsPerBeat),
+                                      pixelsPerBeat: s.pixelsPerBeat, step: s.snapStep,
+                                      drawsDivisions: alpha > 0, meterMap: s.meterMap) { x, kind in
+            let color: Color
+            switch kind {
+            case .bar: color = DAWTheme.gridEmphasis
+            case .beat: color = DAWTheme.hairline
+            case .division: color = subColor
             }
+            context.fill(Path(CGRect(x: x, y: 0, width: 1, height: size.height)), with: .color(color))
         }
     }
 

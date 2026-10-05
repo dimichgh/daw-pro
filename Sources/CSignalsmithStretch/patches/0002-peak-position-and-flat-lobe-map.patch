@@ -1,0 +1,118 @@
+DAW Pro local patch 0002 against signalsmith-stretch v1.3.2 (57b93f4e9206a089a45387eaa39bdc9f310d3308) + patch 0001
+
+Transposer peak position and flat main-lobe map (two halves; both needed).
+
+(a) findPeaks: the peak position was an energy centroid over the region's bins,
+biased toward bin centres by up to 0.076 bins (0.6 Hz at 48 kHz). On a NEW
+spectrum the `rot` pass has already turned prevInput by each bin's centre
+advance, so input*conj(prevInput) at bin k has phase theta*(peak - k) for a
+steady partial: the patch reads the position from that phase around the
+region's max bin (3 bins, all channels summed), gated by coherence
+(|sum| > 0.5 * sum|terms|) and kept inside the region (+-0.5 bin), else the
+centroid stands. Exact to < 1e-4 bins on steady partials.
+
+(b) updateOutputMap: the smoothstep between a real peak and its neighbour
+(a window sidelobe pseudo-peak ~53 bins away for a pure sine, or the next
+harmonic) bent the offset INSIDE the peak's main lobe, so the lobe's bins
+advanced at different rates (up to -12 c at -12 st). Each peak's offset is now
+held flat for 0.5*N/H bins either side (upstream's smoothingBins/2; 97 % of
+the analysis window's first null at presetDefault, where the lobe is -40 dB;
+86 % / -21 dB at presetCheaper), capped at a quarter of BOTH the output and
+the input gap, so the transition between two peaks keeps at least half of the
+input bins and a non-negative energy gradient up to +12 st.
+
+Measured (architect harness, product schedule): isolated and harmonic
+partials land within 0.01 c at +-5..+-24 st, 44.1/48/96 kHz, ratios 0.5-1.5,
+stereo, formant-preserve and formant shift. 0 st is byte-identical
+(findPeaks/updateOutputMap run only when frequencies are mapped).
+Known costs: +7 % on a transposed render; inter-harmonic noise is
+redistributed toward the harmonics at large up-shifts (energy conserved);
+a vibrato mean-pitch residual intrinsic to shifting a moving partial is no
+longer masked. See VENDORED.md.
+
+MUST ship with patch 0003: without it, the phase-derived position is taken
+over an H+-1-sample interval but divided by the H turn, and near-unity ratios
+regress (17/104 measured rows worse than 0001 alone).
+
+Apply (from Sources/CSignalsmithStretch), after 0001:
+    patch -p1 < patches/0002-peak-position-and-flat-lobe-map.patch
+
+--- a/vendor/signalsmith-stretch/signalsmith-stretch.h	2026-09-25 20:42:45
++++ b/vendor/signalsmith-stretch/signalsmith-stretch.h	2026-09-25 20:42:45
+@@ -872,6 +872,14 @@
+ 	// Identifies spectral peaks using energy across all channels
+ 	void findPeaks() {
+ 		peaks.resize(0);
++		// DAW PRO LOCAL PATCH 0002 (peak position) -- see VENDORED.md.
++		// After the `rot` pass, input*conj(prevInput) at bin k has phase theta*(peak - k) for a steady partial
++		// (theta = the rot pass's per-bin turn): the partial's exact position. The energy centroid below is
++		// biased toward bin centres by up to 0.076 bins. Only on a NEW spectrum: on a repeated block `prevInput`
++		// is the previous `.input`, unrotated, and its phase difference carries no position.
++		const bool phasePeaks = blockProcess.newSpectrum;
++		const Sample peakTheta = (bandToFreq(1) - bandToFreq(0))*Sample(stft.defaultInterval())*Sample(2*M_PI);
++		const Complex peakTurnUp = std::polar(Sample(1), peakTheta), peakTurnDown = std::conj(peakTurnUp);
+ 		
+ 		int start = 0;
+ 		while (start < bands) {
+@@ -884,6 +892,30 @@
+ 					++end;
+ 				}
+ 				Sample avgBand = bandSum/energySum;
++				if (phasePeaks) {
++					int maxB = start;
++					for (int b = start + 1; b < end; ++b) {
++						if (energy[size_t(b)] > energy[size_t(maxB)]) maxB = b;
++					}
++					// Channel-summed: each term's phase is a hop ADVANCE, independent of the channel's own phase.
++					Complex z = 0;
++					Sample zSum = 0;
++					for (int c = 0; c < channels; ++c) {
++						Band *channelBins = bandsForChannel(c);
++						for (int k = std::max(0, maxB - 1); k <= std::min(bands - 1, maxB + 1); ++k) {
++							Complex zk = _impl::mul<true>(channelBins[k].input, channelBins[k].prevInput);
++							zSum += std::abs(zk);
++							if (k < maxB) zk = _impl::mul(zk, peakTurnDown);
++							if (k > maxB) zk = _impl::mul(zk, peakTurnUp);
++							z += zk;
++						}
++					}
++					if (std::abs(z) > Sample(0.5)*zSum && zSum > noiseFloor) { // coherent: a steady partial, not a transient
++						Sample phaseBand = Sample(maxB) + std::arg(z)/peakTheta;
++						// stay inside this region's bins (+-0.5), so neighbouring peaks keep a gap of more than one bin
++						if (phaseBand > Sample(start) - Sample(0.5) && phaseBand < Sample(end) - Sample(0.5)) avgBand = phaseBand;
++					}
++				}
+ 				Sample avgFreq = bandToFreq(avgBand);
+ 				peaks.emplace_back(Peak{avgBand, freqToBand(mapFreq(avgFreq))});
+ 
+@@ -905,16 +937,28 @@
+ 			outputMap[b] = {b + bottomOffset, 1};
+ 		}
+ 		// Interpolate between points
++		// DAW PRO LOCAL PATCH 0002 (flat peak neighbourhood) -- see VENDORED.md.
++		// Every output bin of a peak's main lobe must share that peak's offset, or the lobe's bins advance at
++		// different rates and pull the partial off pitch (the smoothstep's curvature near a peak, set by the
++		// NEXT peak, was the dominant large-shift error). Hold each peak's offset flat for the analysis window's
++		// main-lobe half-width either side of it, and smoothstep only in between.
++		// The width is upstream's smoothingBins/2 = 0.5*N/H: 97% of the window's first null at presetDefault
++		// (the lobe is already -40 dB there). At presetCheaper it is 86% (-21 dB): re-derive before changing preset.
++		// Capped at a quarter of the gap on BOTH sides of the map, so the flat zones never take more than half of
++		// the input bins between two peaks and the transition's energy gradient stays >= 0 up to +12 st.
++		const Sample peakFlatBins = Sample(0.5)*Sample(stft.fftSamples())/Sample(stft.defaultInterval());
+ 		for (size_t p = 1; p < peaks.size(); ++p) {
+ 			const Peak &prev = peaks[p - 1], &next = peaks[p];
+-			Sample rangeScale = 1/(next.output - prev.output);
++			Sample flat = std::min(peakFlatBins, std::min(next.output - prev.output, next.input - prev.input)*Sample(0.25));
++			Sample rangeStart = prev.output + flat;
++			Sample rangeScale = 1/(next.output - prev.output - 2*flat);
+ 			Sample outOffset = prev.input - prev.output;
+ 			Sample outScale = next.input - next.output - prev.input + prev.output;
+ 			Sample gradScale = outScale*rangeScale;
+ 			int startBin = std::max(0, static_cast<int>(std::ceil(prev.output)));
+ 			int endBin = std::min(bands, static_cast<int>(std::ceil(next.output)));
+ 			for (int b = startBin; b < endBin; ++b) {
+-				Sample r = (b - prev.output)*rangeScale;
++				Sample r = std::min(std::max((Sample(b) - rangeStart)*rangeScale, Sample(0)), Sample(1));
+ 				Sample h = r*r*(3 - 2*r);
+ 				Sample outB = b + outOffset + h*outScale;
+ 				

@@ -262,4 +262,283 @@ struct ProjectStoreClipStretchTests {
         #expect(store.tracks[0].clips[0].lengthBeats == 4)
         #expect(store.tracks[0].clips[0].stretchRatio == 1)
     }
+
+    // MARK: - C2-0 (F13): split and trims advance the offset in SOURCE seconds
+    //
+    // C2-0 (design 2026-09-24, finding F13). `Clip.startOffsetSeconds` is
+    // SOURCE seconds: the engine reads a stretched clip's render at frame
+    // `startOffsetSeconds × stretchRatio × fileRate` (`PlaybackGraph`, both the
+    // linear and the cycle schedule). A split or a leading-edge trim moves the
+    // clip's window by a TIMELINE span, so the offset must advance by that
+    // span DIVIDED BY THE RATIO — the rule `CompFlattener` already applies
+    // (`Takes.swift`, "the splitClip math, generalized for stretch").
+    //
+    // Every case cuts a clip 8 beats = 4 s of timeline in (120 BPM):
+    //  - ratio 2: 4 s of timeline is 2 s of source, so the offset advances
+    //    +2 s. The undivided math advances +4 s and SKIPS 4 s of stretched audio.
+    //  - ratio 0.5: 4 s of timeline is 8 s of source, so the offset advances
+    //    +8 s. The undivided math advances +4 s: the error FLIPS SIGN and the
+    //    listener hears 2 s of stretched audio TWICE.
+    //
+    // The public-path tests pin the survivor sets too, so they prove the
+    // offset fix changed no decision about which clips survive an overlap
+    // (m33-j).
+    //
+    // In THIS suite, not a new one, on purpose: tests 12 and 13 above are the
+    // split/trim stretch tests F13 found checking everything but the offset,
+    // so this is their home. It also keeps the `@MainActor` suite count (the
+    // review cadence, `MainActorOccupancySiteTests` Leg C) where it was.
+
+    private static let bpm = 120.0          // 1 beat = 0.5 s
+    private static let clipStart = 4.0      // beats
+    private static let clipLength = 16.0    // beats = 8 s of timeline
+    private static let startOffset = 1.0    // SOURCE seconds
+    private static let cutBeat = 12.0       // clipStart + 8 beats = 4 s of timeline in
+    private static let cutTimelineSeconds = 4.0
+
+    /// The oracle: the left edge's source second plus the cut's timeline span
+    /// ÷ the ratio. Deliberately NOT computed through any store helper.
+    private static func expectedOffset(ratio: Double) -> Double {
+        startOffset + cutTimelineSeconds / ratio
+    }
+
+    private static func stretchedClip(ratio: Double) -> Clip {
+        Clip(name: "Vox", startBeat: clipStart, lengthBeats: clipLength,
+             audioFileURL: URL(fileURLWithPath: "/tmp/c2-0-vox.wav"),
+             startOffsetSeconds: startOffset, stretchRatio: ratio)
+    }
+
+    /// A 120 BPM store with one audio track holding exactly `clips` — built
+    /// directly (`tracks` is internal(set)) so no OTHER edit site, trim or
+    /// stretch, runs while the fixture is made.
+    private static func store(with clips: [Clip]) throws -> (store: ProjectStore, trackID: UUID) {
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        try store.setTempo(bpm)
+        let track = store.addTrack(kind: .audio)
+        let index = try #require(store.tracks.firstIndex { $0.id == track.id })
+        store.tracks[index].clips = clips
+        return (store, track.id)
+    }
+
+    /// The source second a clip's window ENDS on — invariant under a
+    /// leading-edge trim, because the content stays fixed on the timeline.
+    private static func sourceEnd(_ clip: Clip, _ map: TempoMap) -> Double {
+        clip.startOffsetSeconds + clip.sourceWindowSeconds(tempoMap: map)
+    }
+
+    // MARK: Site 1 — splitClip
+
+    @Test("splitClip: the right half starts where the left half's SOURCE window ends",
+          arguments: [2.0, 0.5])
+    func splitAdvancesBySourceSeconds(ratio: Double) throws {
+        let clip = Self.stretchedClip(ratio: ratio)
+        let (store, trackID) = try Self.store(with: [clip])
+        let map = store.transport.tempoMap
+
+        let (first, second) = try store.splitClip(trackId: trackID, clipId: clip.id,
+                                                  atBeat: Self.cutBeat)
+        let expected = Self.expectedOffset(ratio: ratio)
+        let seamGap = second.startOffsetSeconds - Self.sourceEnd(first, map)
+        print("[measured] C2-0 split ratio \(ratio): right offset \(second.startOffsetSeconds) s "
+              + "(expected \(expected) s), source gap at the seam \(seamGap) s")
+        #expect(first.startOffsetSeconds == Self.startOffset)
+        #expect(abs(second.startOffsetSeconds - expected) < 1e-12,
+                "ratio \(ratio): right half offset \(second.startOffsetSeconds) s, expected \(expected) s")
+        #expect(abs(seamGap) < 1e-12,
+                "ratio \(ratio): the right half must start on the left half's last source second")
+        #expect(store.tracks[0].clips.map(\.startOffsetSeconds)
+                == [first.startOffsetSeconds, second.startOffsetSeconds])
+    }
+
+    // MARK: Site 2 — applyTrimWindow (reached by trimClip)
+
+    @Test("trimClip: a leading edge moved 4 s in advances the offset by 4 s ÷ ratio",
+          arguments: [2.0, 0.5])
+    func trimAdvancesBySourceSeconds(ratio: Double) throws {
+        let clip = Self.stretchedClip(ratio: ratio)
+        let (store, trackID) = try Self.store(with: [clip])
+        let map = store.transport.tempoMap
+
+        let trimmed = try store.trimClip(trackId: trackID, clipId: clip.id,
+                                         newStartBeat: Self.cutBeat,
+                                         newLengthBeats: Self.clipLength - 8)
+        let expected = Self.expectedOffset(ratio: ratio)
+        let endDrift = Self.sourceEnd(trimmed, map) - Self.sourceEnd(clip, map)
+        print("[measured] C2-0 trim ratio \(ratio): offset \(trimmed.startOffsetSeconds) s "
+              + "(expected \(expected) s), window-end drift \(endDrift) s")
+        #expect(abs(trimmed.startOffsetSeconds - expected) < 1e-12,
+                "ratio \(ratio): trimmed offset \(trimmed.startOffsetSeconds) s, expected \(expected) s")
+        #expect(abs(endDrift) < 1e-12,
+                "ratio \(ratio): a leading-edge trim must not move the clip's last source second")
+    }
+
+    @Test("trimClip: revealing 2 s of head moves the offset BACK by 2 s ÷ ratio",
+          arguments: [2.0, 0.5])
+    func trimRevealRetreatsBySourceSeconds(ratio: Double) throws {
+        // Offset 5 s of source leaves room to reveal without touching the
+        // max(0, …) clamp at either ratio.
+        let clip = Clip(name: "Vox", startBeat: Self.clipStart, lengthBeats: Self.clipLength,
+                        audioFileURL: URL(fileURLWithPath: "/tmp/c2-0-vox.wav"),
+                        startOffsetSeconds: 5, stretchRatio: ratio)
+        let (store, trackID) = try Self.store(with: [clip])
+        let map = store.transport.tempoMap
+
+        // Leading edge 4 beats = 2 s of timeline to the LEFT.
+        let revealed = try store.trimClip(trackId: trackID, clipId: clip.id,
+                                          newStartBeat: 0, newLengthBeats: Self.clipLength + 4)
+        let expected = 5 - 2 / ratio
+        let endDrift = Self.sourceEnd(revealed, map) - Self.sourceEnd(clip, map)
+        print("[measured] C2-0 reveal ratio \(ratio): offset \(revealed.startOffsetSeconds) s "
+              + "(expected \(expected) s), window-end drift \(endDrift) s")
+        #expect(abs(revealed.startOffsetSeconds - expected) < 1e-12,
+                "ratio \(ratio): revealed offset \(revealed.startOffsetSeconds) s, expected \(expected) s")
+        #expect(abs(endDrift) < 1e-12)
+    }
+
+    // MARK: Site 3 — clipTrimmedToWindow (static, and every public path to it)
+
+    @Test("clipTrimmedToWindow (static): a window 4 s in advances the offset by 4 s ÷ ratio",
+          arguments: [2.0, 0.5])
+    func staticWindowTrimAdvancesBySourceSeconds(ratio: Double) throws {
+        let clip = Self.stretchedClip(ratio: ratio)
+        let map = TempoMap(constantBPM: Self.bpm)
+        let trimmed = try #require(ProjectStore.clipTrimmedToWindow(
+            clip, newStart: Self.cutBeat, newLength: Self.clipLength - 8, tempoMap: map))
+        let expected = Self.expectedOffset(ratio: ratio)
+        print("[measured] C2-0 clipTrimmedToWindow ratio \(ratio): offset "
+              + "\(trimmed.startOffsetSeconds) s (expected \(expected) s)")
+        #expect(abs(trimmed.startOffsetSeconds - expected) < 1e-12,
+                "ratio \(ratio): windowed offset \(trimmed.startOffsetSeconds) s, expected \(expected) s")
+        #expect(abs(Self.sourceEnd(trimmed, map) - Self.sourceEnd(clip, map)) < 1e-12)
+    }
+
+    @Test("moveClip over a stretched clip's head: the survivor advances by 4 s ÷ ratio",
+          arguments: [2.0, 0.5])
+    func overlapHeadTrimThroughMove(ratio: Double) throws {
+        let stationary = Self.stretchedClip(ratio: ratio)                 // [4, 20)
+        let mover = Clip(name: "Drop", startBeat: 40, lengthBeats: 8,     // ratio 1, clear
+                         audioFileURL: URL(fileURLWithPath: "/tmp/c2-0-drop.wav"))
+        let (store, trackID) = try Self.store(with: [stationary, mover])
+
+        // Land the mover on [4, 12): it covers the stationary clip's first
+        // 8 beats (4 s), so the overlap choke point trims that clip's head.
+        let result = try store.moveClip(trackId: trackID, clipId: mover.id, toStartBeat: 4)
+        // Survival is unchanged by C2-0: one trimmed, none removed.
+        #expect(result.trimmedClipIDs == [stationary.id])
+        #expect(result.removedClipIDs.isEmpty)
+        let survivor = try #require(store.tracks[0].clips.first { $0.id == stationary.id })
+        #expect(survivor.startBeat == Self.cutBeat)
+        #expect(survivor.lengthBeats == Self.clipLength - 8)
+        let expected = Self.expectedOffset(ratio: ratio)
+        print("[measured] C2-0 move-overlap ratio \(ratio): survivor offset "
+              + "\(survivor.startOffsetSeconds) s (expected \(expected) s)")
+        #expect(abs(survivor.startOffsetSeconds - expected) < 1e-12,
+                "ratio \(ratio): survivor offset \(survivor.startOffsetSeconds) s, expected \(expected) s")
+    }
+
+    @Test("importAudio(overwrite:) over a stretched clip's head: the survivor advances by 4 s ÷ ratio",
+          arguments: [2.0, 0.5])
+    func overlapHeadTrimThroughImport(ratio: Double) throws {
+        let stationary = Self.stretchedClip(ratio: ratio)                 // [4, 20)
+        let (store, trackID) = try Self.store(with: [stationary])
+        // A 4 s file at 120 BPM is 8 beats: landing at beat 4 covers [4, 12).
+        store.media = FakeMedia(info: AudioFileInfo(durationSeconds: 4, sampleRate: 48_000,
+                                                    channelCount: 2))
+        let result = try store.importAudio(url: URL(fileURLWithPath: "/tmp/c2-0-import.wav"),
+                                           toTrack: trackID, atBeat: 4, overwrite: true)
+        #expect(result.trimmedClipIDs == [stationary.id])
+        #expect(result.removedClipIDs.isEmpty)
+        let survivor = try #require(store.tracks[0].clips.first { $0.id == stationary.id })
+        #expect(survivor.startBeat == Self.cutBeat)
+        let expected = Self.expectedOffset(ratio: ratio)
+        print("[measured] C2-0 import-overlap ratio \(ratio): survivor offset "
+              + "\(survivor.startOffsetSeconds) s (expected \(expected) s)")
+        #expect(abs(survivor.startOffsetSeconds - expected) < 1e-12,
+                "ratio \(ratio): survivor offset \(survivor.startOffsetSeconds) s, expected \(expected) s")
+    }
+
+    @Test("insertBars through a stretched clip: the pushed-right tail continues the head's audio",
+          arguments: [2.0, 0.5])
+    func insertBarsTailAdvancesBySourceSeconds(ratio: Double) throws {
+        let clip = Self.stretchedClip(ratio: ratio)                       // [4, 20)
+        let (store, _) = try Self.store(with: [clip])
+        let map = store.transport.tempoMap
+
+        // 4/4: bar 4 starts at beat 12 — 8 beats = 4 s into the clip.
+        let result = try store.insertBars(atBar: 4, count: 1)
+        #expect(result.atBeat == Self.cutBeat)
+        let pieces = store.tracks[0].clips.sorted { $0.startBeat < $1.startBeat }
+        try #require(pieces.count == 2)
+        let (head, tail) = (pieces[0], pieces[1])
+        #expect(head.id == clip.id)
+        #expect(head.startOffsetSeconds == Self.startOffset)
+        #expect(tail.startBeat == Self.cutBeat + result.insertedBeats)
+        let expected = Self.expectedOffset(ratio: ratio)
+        print("[measured] C2-0 insertBars ratio \(ratio): tail offset \(tail.startOffsetSeconds) s "
+              + "(expected \(expected) s), head ends on source second \(Self.sourceEnd(head, map))")
+        #expect(abs(tail.startOffsetSeconds - expected) < 1e-12,
+                "ratio \(ratio): tail offset \(tail.startOffsetSeconds) s, expected \(expected) s")
+    }
+
+    @Test("deleteBars over a stretched clip's head: the pulled-left remainder advances by 4 s ÷ ratio",
+          arguments: [2.0, 0.5])
+    func deleteBarsRemainderAdvancesBySourceSeconds(ratio: Double) throws {
+        let clip = Self.stretchedClip(ratio: ratio)                       // [4, 20)
+        let (store, _) = try Self.store(with: [clip])
+
+        // 4/4: bars 2–3 are beats [4, 12) — the clip's first 8 beats (4 s).
+        let result = try store.deleteBars(fromBar: 2, count: 2)
+        #expect(result.removedClipIDs.isEmpty)
+        let pieces = store.tracks[0].clips
+        try #require(pieces.count == 1)
+        let remainder = pieces[0]
+        #expect(remainder.id == clip.id)
+        #expect(remainder.startBeat == Self.clipStart)
+        #expect(remainder.lengthBeats == Self.clipLength - 8)
+        let expected = Self.expectedOffset(ratio: ratio)
+        print("[measured] C2-0 deleteBars ratio \(ratio): remainder offset "
+              + "\(remainder.startOffsetSeconds) s (expected \(expected) s)")
+        #expect(abs(remainder.startOffsetSeconds - expected) < 1e-12,
+                "ratio \(ratio): remainder offset \(remainder.startOffsetSeconds) s, expected \(expected) s")
+    }
+
+    // MARK: Ratio 1 — bit-identical to the undivided formula at every site
+
+    @Test("ratio 1: split, trim and window-trim offsets are BIT-identical to the undivided formula")
+    func ratioOneIsBitIdentical() throws {
+        // Deliberately unround numbers, so a divide that is not an exact
+        // identity (or any other reshaping of the sum) shows in the last bit.
+        let bpm = 97.0
+        let clip = Clip(name: "Plain", startBeat: 2.25, lengthBeats: 13.5,
+                        audioFileURL: URL(fileURLWithPath: "/tmp/c2-0-plain.wav"),
+                        startOffsetSeconds: 0.123)
+        #expect(clip.stretchRatio == 1)
+        let cut = 2.25 + 5.37
+
+        func freshStore() throws -> (ProjectStore, UUID) {
+            let store = ProjectStore()
+            try store.setTempo(bpm)
+            let track = store.addTrack(kind: .audio)
+            store.tracks[0].clips = [clip]
+            return (store, track.id)
+        }
+
+        let (splitStore, splitTrack) = try freshStore()
+        let map = splitStore.transport.tempoMap
+        let legacy = clip.startOffsetSeconds + map.seconds(from: clip.startBeat, to: cut)
+        let (_, right) = try splitStore.splitClip(trackId: splitTrack, clipId: clip.id, atBeat: cut)
+        #expect(right.startOffsetSeconds.bitPattern == legacy.bitPattern)
+
+        let (trimStore, trimTrack) = try freshStore()
+        let trimmed = try trimStore.trimClip(trackId: trimTrack, clipId: clip.id,
+                                             newStartBeat: cut, newLengthBeats: 13.5 - 5.37)
+        #expect(trimmed.startOffsetSeconds.bitPattern == legacy.bitPattern)
+
+        let windowed = try #require(ProjectStore.clipTrimmedToWindow(
+            clip, newStart: cut, newLength: 13.5 - 5.37, tempoMap: map))
+        #expect(windowed.startOffsetSeconds.bitPattern == legacy.bitPattern)
+        print("[measured] C2-0 ratio-1 legacy offset \(legacy) s: split \(right.startOffsetSeconds), "
+              + "trim \(trimmed.startOffsetSeconds), window \(windowed.startOffsetSeconds)")
+    }
 }

@@ -22,7 +22,7 @@ The one number in the raw data that reads like a failure is disposed of in §5.2
 
 **Two findings the kill criterion does not cover, neither of them fatal, both of which Phase 1 must carry:**
 1. **A level dip through the transition**, scaling with jump size: −0.22 dB at 10 cents, −5.11 dB at 2 semitones (§5.3). It is a beat between frames carrying two pitches, it is 10.7 ms wide at −1 dB, and spreading the same 2-semitone move over three hops cuts it to −1.20 dB.
-2. **The constant shift we already ship is +5.45 cents sharp at +2 st and +3.95 cents sharp at −2 st**, while 0 st is exact to −0.019 cents (§7). A corrector that trusts the setter inherits that bias. This is a property of the *existing* path, not of the curve.
+2. **The constant shift we already ship is +5.45 cents sharp at +2 st and +3.95 cents sharp at −2 st**, while 0 st is exact to −0.019 cents (§7; fixed 2026-09-25, see the §7 erratum). A corrector that trusts the setter inherits that bias. This is a property of the *existing* path, not of the curve.
 
 **Confidence and its limits.** This is a synthetic-signal result: one pure sine, one amplitude, one sample rate, mono. It establishes that the mechanism is sound and quantifies its artefacts. It says nothing about formant wobble, warble or consonant smear on a real voice — that is E2, it is untouched, and it remains the milestone's largest unknown exactly as §11.4 said.
 
@@ -253,6 +253,12 @@ Reported, not diagnosed — no mechanism was isolated, and Phase 0 is not the pl
 - It is a property of `OfflineStretcher.stretch(…)` **as shipped today**, not of the curve path.
 - `OfflineStretcherTests` checks pitch by zero-crossing rate within ±3 % (≈±52 cents) and **cannot see a 5-cent bias**. `constantShiftPitchAccuracy` now measures it in cents and holds it inside ±25.
 - **A pitch corrector that trusts the setter inherits this.** Correcting to ±5 cents while the transposer is itself 5 cents off is a closed loop that will not close. Phase 1 either calibrates the setter or measures the render and iterates.
+
+**Erratum (2026-09-25, p2-acc): the mechanism was FOUND AND FIXED.** The vendored signalsmith-stretch mixed two neighbouring `prevInput` values that had each already been rotated by their own bin's centre advance.
+- **The error** is periodic in the shift's bin fraction, up to ~1.4 Hz: +9.69 c at +100 c on 220 Hz, and +42 c at 55 Hz. The ±2 st readings above are two points on that curve.
+- **The fix** is a local patch, `Sources/CSignalsmithStretch/patches/0001-fractional-prevInput-rotation.patch` (see `VENDORED.md`).
+- **Re-measured with this leg's own meter:** +2 st −0.27 c, −2 st +0.24 c, and 0 st −0.02 c (byte-identical). `constantShiftPitchAccuracy` now holds ±0.5 c.
+- **Closed 2026-09-25 (p2-acc-3):** the separate residual of up to 0.64 Hz at shifts of 5 st or more was the peak position (an energy centroid) plus a lobe-bending map. Vendored patches 0002 + 0003 take steady partials to ≤ 0.01 c up to ±24 st, and `constantShiftPitchAccuracy` now reads −0.003 / −0.021 / −0.019 c at +2 / −2 / 0 st (`Sources/CSignalsmithStretch/VENDORED.md`).
 
 ---
 

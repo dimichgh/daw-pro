@@ -134,17 +134,25 @@ struct BreathPadView: View {
     /// inner one a trap for the wheel. ⚠️ That is a claim about BOUNDS, which is
     /// all a capture can see; wheel ROUTING is not observable here.
     ///
-    /// ⚠️⚠️ **UNVERIFIED, AND SAID SO RATHER THAN ASSUMED: the dial's
-    /// `DragGesture` now has a `ScrollView` ancestor in this branch, and nothing
-    /// in this tree has ever exercised that combination.** A structural sweep of
+    /// ⚠️⚠️ **UNVERIFIED, AND SAID SO RATHER THAN ASSUMED: the dial's pointer
+    /// handling now has a `ScrollView` ancestor in this branch, and nothing in
+    /// this tree has ever exercised that combination.** A structural sweep of
     /// `Sources/DAWApp` (positive-controlled — it finds the four `ScrollView`s
-    /// that do contain a `Canvas`) returns **zero** places where a `DragGesture`
-    /// ships inside a `ScrollView`, so there is no precedent to lean on. Every
-    /// gesture this round exercised went through `debug.breathPad`, which drives
-    /// the model directly and never touches the real pointer path — there is no
-    /// pointer seam for the pad, and a human press is the only instrument. The
-    /// branch only engages below a ~657 pt window; if dragging the dot there
-    /// misbehaves, THIS is the line to suspect first.
+    /// that do contain a `Canvas`) returned **zero** places where a
+    /// `DragGesture` shipped inside a `ScrollView`, so there was no precedent to
+    /// lean on. Every gesture the P7 round exercised went through
+    /// `debug.breathPad`, which drives the model directly and never touches the
+    /// real pointer path. The branch only engages below a ~657 pt window; if
+    /// dragging the dot there misbehaves, THIS is the line to suspect first.
+    ///
+    /// ⚠️ **THE CLAIM ABOVE IS NARROWED, NOT DELETED, BY m34-f step ①: the dial
+    /// no longer uses a `DragGesture` at all.** It is an `NSView`
+    /// (`PadPressureSurface`) that owns the mouse, because
+    /// `pressureConfiguration` is read from the view receiving the `mouseDown`.
+    /// Whether an AppKit mouse handler nested in a SwiftUI `ScrollView` behaves
+    /// better, worse or identically HAS NOT BEEN MEASURED — it is a different
+    /// combination with the same absence of precedent, and pretending the old
+    /// warning either transfers or expires would both be guesses.
     private func card(available: CGFloat) -> some View {
         let hasWarnings = !model.warnings.isEmpty
         let hasRecoveryNote = model.gauge.recoveryNote != nil
@@ -338,6 +346,49 @@ struct BreathPadView: View {
                 onCommit: { _ = model.knobReleased() })
             readout("EFFORT", model.effortReadout)
                 .padding(.top, 2)
+            // m34-f step ① — THE PRESSURE ROW EXISTS ONLY WHEN PRESSURE DOES.
+            //
+            // ⛔ **NO ROW, NO DASH, NO ZERO on a machine without a Force Touch
+            // trackpad.** There is no public API that answers "does this Mac
+            // have one" from inside a running app, so the model reports OBSERVED
+            // capability — a real `NSEventTypePressure` actually arrived — and
+            // the UI shows the axis only then. A `0.00` sitting there on a mouse
+            // would be a constant dressed as a measurement, and the user would
+            // have no way to tell that from a control that is simply broken.
+            if let pressure = model.pressureReadout {
+                readout("PRESSURE", pressure)
+                    .padding(.top, 2)
+            }
+            // The honesty light: is what the hand is shaping being KEPT? Amber
+            // is this system's record semantic, and it is lit from the ENGINE's
+            // own answer rather than from the app's prediction.
+            if model.isCapturingExpression == true {
+                // ⚠️ THE SAME LABEL-OVER-VALUE SHAPE AS `readout`, deliberately —
+                // captured by `debug.captureUI` and LOOKED AT: floated at label
+                // height it read as a chip that had lost its label, while every
+                // neighbour in the row was a stacked pair. It is the amber
+                // RECORD hue rather than the cyan playback hue because that is
+                // this system's semantic for "being kept", and the lit dot is
+                // the earned glow — state shown by light, not by a word.
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(DAWTheme.record)
+                            .frame(width: 5, height: 5)
+                            .shadow(color: DAWTheme.record.opacity(0.7), radius: 3)
+                        Text("INTO TAKE")
+                            .font(.system(size: 9, weight: .semibold))
+                            .tracking(1.4)
+                            .foregroundStyle(DAWTheme.record)
+                    }
+                    Text("\(model.capturedExpressionPoints)")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(DAWTheme.record)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                .padding(.top, 2)
+            }
             Spacer(minLength: 0)
         }
     }
@@ -610,21 +661,20 @@ private struct BreathPadDial: View {
             }
         }
         .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    if model.gesture == nil {
-                        model.beginDrag(at: value.location, geometry: geo)
-                    } else {
-                        model.drag(to: value.location, geometry: geo)
-                    }
-                }
-                // The COMMIT lives here and only here: once, on release, gated
-                // on the dot having actually moved. A plain click is a complete
-                // drag with zero translation, so an ungated release would spend
-                // an undo step and pay an engine rebuild for a stray press.
-                .onEnded { _ in _ = model.endDrag() }
-        )
+        // m34-f step ① — THE MOUSE IS OWNED BY AN `NSView`, NOT BY A
+        // `DragGesture`, AND THE SWAP IS THE WHOLE REASON PRESSURE WORKS.
+        // SwiftUI has no pressure API at all, and `pressureConfiguration` is
+        // read from the view that receives the `mouseDown` — so the
+        // configuration and the mouse handling cannot live in different objects
+        // (`PadPressureSurface` carries the full argument).
+        //
+        // ⛔ THE OLD `DragGesture` IS REPLACED, NOT SUPPLEMENTED. Two input
+        // paths onto one model would double every `beginDrag`, and the pad's
+        // commit is gated on "the dot moved" — so a doubled gesture would spend
+        // TWO undo steps on one click. The three calls below are the SAME three
+        // the gesture made (`beginDrag` / `drag` / `endDrag`), in the same
+        // order, against the same `BreathPadGeometry`.
+        .overlay(PadPressureSurface(model: model, side: side))
         .accessibilityLabel("Breath pad")
         .accessibilityValue("\(model.blendReadout), depth \(model.radiusReadout)")
     }

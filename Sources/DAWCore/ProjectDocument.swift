@@ -62,6 +62,14 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
     /// Codable IS the disk shape). v1 invariants (volume target only, one lane)
     /// are SANITIZED on load, not trusted from disk.
     public var masterAutomation: [AutomationLane]?
+    /// MASTER modulation (m39-e; persisted since W7-MODP, 2026-10-04) — the `masterAutomation` twin, and the
+    /// strip an agent reaches with `trackId: "master"`. Additive and optional, nil when the master strip has
+    /// none (the key is omitted on encode — the `masterEffects` omit-when-empty rule, so a project without
+    /// master modulation stays byte-identical, no schemaVersion bump). Reuses the model types directly (no
+    /// media: their Codable IS the disk shape). Restored through `runtimeMasterModulation`, which clamps the
+    /// counts to `ModulationLimits` (the render side preallocates to those caps).
+    public var masterModulationSources: [ModulationSource]? = nil
+    public var masterModulationRoutes: [ModulationRoute]? = nil
     /// Persisted copilot conversations (chat-persist design, 2026-07-19).
     /// Additive and optional; nil when there are none (omit-when-empty — the
     /// `grooveTemplates` rule, no schemaVersion bump). Decoded LOSSILY: a
@@ -90,6 +98,7 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         case tempoMap, meterChanges, tempoMapRevision
         case masterEffects
         case masterAutomation
+        case masterModulationSources, masterModulationRoutes
         case copilotChats
         case reference
     }
@@ -110,7 +119,9 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         masterEffects: [EffectDescriptor] = [],
         masterAutomation: [AutomationLane] = [],
         copilotChats: [CopilotChatDocument] = [],
-        reference: ReferenceSlot? = nil
+        reference: ReferenceSlot? = nil,
+        masterModulationSources: [ModulationSource] = [],
+        masterModulationRoutes: [ModulationRoute] = []
     ) {
         self.schemaVersion = ProjectBundle.currentSchemaVersion
         self.savedAt = Date()
@@ -144,6 +155,10 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // synthesized `encodeIfPresent` omits the key and pre-m15-c saves stay
         // byte-identical (the masterEffects rule).
         self.masterAutomation = masterAutomation.isEmpty ? nil : masterAutomation
+        // Master modulation (m39-e, W7-MODP): empty persists as nil → the key is omitted (the masterAutomation
+        // rule).
+        self.masterModulationSources = masterModulationSources.isEmpty ? nil : masterModulationSources
+        self.masterModulationRoutes = masterModulationRoutes.isEmpty ? nil : masterModulationRoutes
         // Copilot chats (chat-persist design): empty persists as nil → the
         // key is omitted and a pre-chat project stays byte-identical (the
         // grooveTemplates rule, no schemaVersion bump).
@@ -187,6 +202,11 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // (canonical point order, clamped beats); v1 invariants sanitize in
         // `runtimeState`.
         masterAutomation = try c.decodeIfPresent([AutomationLane].self, forKey: .masterAutomation)
+        // Additive optional (m39-e, W7-MODP): a project saved without master modulation has neither key.
+        masterModulationSources = try c.decodeIfPresent([ModulationSource].self,
+                                                        forKey: .masterModulationSources)
+        masterModulationRoutes = try c.decodeIfPresent([ModulationRoute].self,
+                                                       forKey: .masterModulationRoutes)
         // Additive optional (chat-persist design): a pre-chat project has no
         // key → nil. Decoded LOSSILY — a corrupt chat ELEMENT is skipped and
         // counted (one corrupt chat never fails a whole project open); the
@@ -258,7 +278,16 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                     controllerLanes: cd.controllerLanes ?? [],
                     // Take-group marker (M5 iii-a): restores comp members as
                     // store-managed clips; nil for ordinary clips.
-                    takeGroupID: cd.takeGroupId
+                    takeGroupID: cd.takeGroupId,
+                    // Pitch edits (m23-ap): absent reads as no edits; the
+                    // segments re-heal (sorted, non-overlapping, values
+                    // re-clamped) through `PitchEditSet.init`, and an empty set
+                    // normalises back to nil in `Clip.init`.
+                    pitchEdits: cd.pitchEdits,
+                    // Lyrics (p2-sing-d1b): absent reads as none; blank text
+                    // and an audio clip's stray key normalise to nil in
+                    // `Clip.init`.
+                    lyrics: cd.lyrics
                 )
             }
             let instrument = td.instrument.map { instDoc in
@@ -324,7 +353,19 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                 // dropped effect/send is inert — harmless, and healed by the
                 // store's live cascades on the next edit).
                 automation: td.automation ?? [],
-                takeGroups: takeGroups
+                takeGroups: takeGroups,
+                // m24-n: a fact about the past, restored verbatim. It is NOT
+                // validated against the voice store on load — a voice that is
+                // gone is a normal state, and blanking the record here would
+                // destroy the only thing that can still say what the audio was
+                // made from.
+                voiceProvenance: td.voiceProvenance,
+                // p2-sing-d2: the same fact-not-binding rule, verbatim.
+                sungVocalProvenance: td.sungVocalProvenance,
+                // m39-e (W7-MODP): restored verbatim; `Track.init` clamps the counts to `ModulationLimits`.
+                // A route whose target no longer resolves is inert — the automation-lane rule above.
+                modulationSources: td.modulationSources ?? [],
+                modulationRoutes: td.modulationRoutes ?? []
             )
         }
         // Attach the non-trivial tempo/meter maps (m12-d) onto the runtime
@@ -413,6 +454,16 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                 runtimeMasterAutomation, runtimeReference, warnings)
     }
 
+    /// The master strip's modulation as the store restores it on open and on crash recovery (m39-e,
+    /// W7-MODP): EMPTY when the file carries none — which is what replaces, rather than keeps, whatever the
+    /// previous session's master strip held. Counts are clamped to `ModulationLimits`, exactly as `Track.init`
+    /// clamps a track's (the render side preallocates to those caps); routes otherwise round-trip verbatim (an
+    /// orphaned route is inert, the automation-lane rule).
+    public var runtimeMasterModulation: (sources: [ModulationSource], routes: [ModulationRoute]) {
+        (Array((masterModulationSources ?? []).prefix(ModulationLimits.maxSources)),
+         Array((masterModulationRoutes ?? []).prefix(ModulationLimits.maxRoutes)))
+    }
+
     /// Resolves one persisted media reference to a runtime URL. Returns the URL
     /// (or nil when the item should be silent) and an optional warning. `label`
     /// is the noun phrase used in warnings (e.g. "clip 'Vox'" or "sampler zone")
@@ -493,6 +544,29 @@ public struct TransportDocument: Codable, Sendable, Equatable {
         punchInBeat = try c.decodeIfPresent(Double.self, forKey: .punchInBeat) ?? d.punchInBeat
         punchOutBeat = try c.decodeIfPresent(Double.self, forKey: .punchOutBeat) ?? d.punchOutBeat
         isMetronomeEnabled = try c.decodeIfPresent(Bool.self, forKey: .isMetronomeEnabled) ?? d.isMetronomeEnabled
+        // ⭐⭐ m23-cy — THE DEFAULT CHANGE'S ONE INTERESTING EDGE, DECIDED AND
+        // WRITTEN DOWN RATHER THAN INHERITED BY ACCIDENT.
+        //
+        // `d` is a fresh `TransportState()`, so the count-in default now
+        // resolves to 1 here as well as for a new project. That means:
+        //
+        //   • A project file WITH the key keeps its stored value, always —
+        //     including a stored 0. A user who set 0 on purpose is not
+        //     overridden, and neither is one who merely saved under the old
+        //     default. Both are indistinguishable from here and both are left
+        //     alone; this is the conservative half and it is the important one.
+        //   • A project file WITHOUT the key — only possible for a file saved
+        //     before `countInBars` existed, since every save since writes every
+        //     CodingKey — decodes to the NEW default, 1.
+        //
+        // The second case is deliberate, not an oversight. An absent key is the
+        // one state that means "this user never had the setting to choose", and
+        // giving them the current default is exactly what `decodeIfPresent ??
+        // default` is for; the alternative (pinning a literal 0 here so old
+        // files stay at the old default forever) would freeze a migration
+        // decision into the decoder and quietly disagree with `newProject()`.
+        // `CountInDefaultMigrationTests` (Tests/DAWCoreTests/PersistenceTests.swift)
+        // pins BOTH cases.
         countInBars = try c.decodeIfPresent(Int.self, forKey: .countInBars) ?? d.countInBars
     }
 
@@ -562,10 +636,41 @@ public struct TrackDocument: Codable, Sendable, Equatable {
     /// Lane payloads persist as `TakeLaneDocument` so their media rides as a
     /// bundle-relative `media/…` ref (the clip/sampler-zone precedent).
     public var takeGroups: [TakeGroupDocument]?
+    /// Voice-conversion provenance (m24-n). Additive and optional; nil (key
+    /// omitted on encode) on every track that was not made by a conversion, so
+    /// a pre-provenance project stays byte-identical — the `sends` rule.
+    ///
+    /// `VoiceProvenance` is reused directly rather than mirrored into a
+    /// `…Document` type (the `automation` / `ClipDocument.notes` precedent): it
+    /// carries no URLs and no media, so its `Codable` IS the disk shape. The
+    /// voice FILES it implies are not referenced from here at all — they are
+    /// found by id under the bundle's `voices/` folder, deliberately DERIVED
+    /// rather than recorded, so no manifest can disagree with the directory.
+    public var voiceProvenance: VoiceProvenance?
+    /// Sung-vocal provenance (p2-sing-d2). Additive and optional, the
+    /// `voiceProvenance` rule exactly: nil (key omitted) on every track no
+    /// sing job made, and `SungVocalProvenance`'s Codable IS the disk shape.
+    public var sungVocalProvenance: SungVocalProvenance?
+    /// Modulation sources and routes on this strip (m39-e). Additive and optional, the `sends`/`automation`
+    /// rule: an EMPTY array is stored as nil, so the key is omitted on encode and a project without modulation
+    /// stays byte-identical (no schemaVersion bump). `ModulationSource`/`ModulationRoute` persist directly (the
+    /// `automation` precedent: no media, no URLs, so their Codable IS the disk shape), under `Track`'s own key
+    /// names, so the wire, the snapshot and the file agree.
+    ///
+    /// ⛔ m39-e shipped WITHOUT these two fields (W7-MODP, 2026-10-04; design §16). `Track` carried the arrays
+    /// and encoded them in its OWN Codable, every §7.6 test exercised that Codable, and this DTO — the actual
+    /// save format — never mentioned them, so every save dropped every LFO, step sequencer, follower and macro.
+    /// `ProjectDocumentFidelityTests` now classifies every stored property of `Track` by `Mirror`, so the next
+    /// field added to `Track` and not threaded here fails BY NAME instead of vanishing on save.
+    public var modulationSources: [ModulationSource]? = nil
+    public var modulationRoutes: [ModulationRoute]? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind, volume, pan, isMuted, isSoloed, isArmed, isAIGenerated, clips, instrument
         case outputBusId, sends, effects, automation, takeGroups
+        case voiceProvenance
+        case sungVocalProvenance
+        case modulationSources, modulationRoutes
     }
 
     init(from track: Track, mediaRefs: [UUID: String?]) {
@@ -597,6 +702,14 @@ public struct TrackDocument: Codable, Sendable, Equatable {
         takeGroups = track.takeGroups.isEmpty
             ? nil
             : track.takeGroups.map { TakeGroupDocument(from: $0, mediaRefs: mediaRefs) }
+        // m24-n: rides verbatim; nil on a track no conversion produced, so the
+        // synthesized encodeIfPresent omits the key entirely.
+        voiceProvenance = track.voiceProvenance
+        sungVocalProvenance = track.sungVocalProvenance
+        // m39-e (W7-MODP): empty persists as nil (the `sends` rule) → the synthesized `encodeIfPresent` omits
+        // the key, keeping a project without modulation byte-identical.
+        modulationSources = track.modulationSources.isEmpty ? nil : track.modulationSources
+        modulationRoutes = track.modulationRoutes.isEmpty ? nil : track.modulationRoutes
     }
 
     public init(from decoder: any Decoder) throws {
@@ -622,6 +735,13 @@ public struct TrackDocument: Codable, Sendable, Equatable {
         automation = try c.decodeIfPresent([AutomationLane].self, forKey: .automation)
         // Additive optional (M5 iii-a): a pre-take track has no key.
         takeGroups = try c.decodeIfPresent([TakeGroupDocument].self, forKey: .takeGroups)
+        // Additive optional (m24-n): a pre-provenance track has no key.
+        voiceProvenance = try c.decodeIfPresent(VoiceProvenance.self, forKey: .voiceProvenance)
+        // Additive optional (p2-sing-d2): a pre-sing track has no key.
+        sungVocalProvenance = try c.decodeIfPresent(SungVocalProvenance.self, forKey: .sungVocalProvenance)
+        // Additive optional (m39-e, W7-MODP): a track saved without modulation has neither key.
+        modulationSources = try c.decodeIfPresent([ModulationSource].self, forKey: .modulationSources)
+        modulationRoutes = try c.decodeIfPresent([ModulationRoute].self, forKey: .modulationRoutes)
     }
 }
 
@@ -671,6 +791,51 @@ public struct EffectDocument: Codable, Sendable, Equatable {
     public var gate: GateParams?
     public var chorus: ChorusParams?
     public var bassEnhancer: BassEnhancerParams?
+    public var bitCrusher: BitCrusherParams?
+    /// m39-i. ⚠️ THIS MIRROR IS HAND-MAINTAINED AND THE COMPILER DOES NOT
+    /// FORCE IT: a new params optional added to `EffectDescriptor` but not to
+    /// every one of the five sites below (field, CodingKeys, `init(from
+    /// effect:)`, decode, encode, `effectDescriptor()`) renders and edits
+    /// perfectly and is SILENTLY DROPPED on save. Pinned by a round-trip test.
+    public var djFilter: DJFilterParams?
+    /// m39-m — the same five sites, the same hazard.
+    public var ringMod: RingModParams?
+    /// m39-j — the same SIX sites, the same hazard. ✅ THE EXHAUSTIVE PIN
+    /// LANDED AT m39-o: `EffectDocumentMirrorTests` round-trips a NON-DEFAULT
+    /// descriptor for every kind, driven by `Kind.allCases`.
+    /// `FlangerPersistenceTests` still covers this one by hand, by field.
+    public var flanger: FlangerParams?
+    /// m39-l — the same SIX sites, the same hazard, and this kind has FOURTEEN
+    /// params riding on them: property, `CodingKeys`, `init(from effect:)`,
+    /// `decodeIfPresent`, `encodeIfPresent`, `effectDescriptor()`. Miss one and
+    /// the project saves, reports success, and reopens with the hall reset to
+    /// defaults. ✅ THE EXHAUSTIVE PIN LANDED AT m39-o
+    /// (`EffectDocumentMirrorTests`); `HallReverbPersistenceTests` still covers
+    /// this one by hand, by field.
+    public var hallReverb: HallReverbParams?
+    /// m39-n — the same SIX sites, the same hazard. ✅ THE EXHAUSTIVE PIN
+    /// LANDED AT m39-o (`EffectDocumentMirrorTests`, which adopted this
+    /// comment's own rule: its fixtures are non-default IN EVERY FIELD, and a
+    /// control asserts that mechanically). `TapeDelayPersistenceTests` still
+    /// covers this one by hand, by field.
+    public var tapeDelay: TapeDelayParams?
+    /// m23-dj — the same SIX sites, the same hazard. ✅ THE EXHAUSTIVE PIN
+    /// LANDED AT m39-o (`EffectDocumentMirrorTests`);
+    /// `StereoWidthPersistenceTests` still covers this one by hand, by field.
+    public var stereoWidth: StereoWidthParams?
+    /// m39-o — the same SIX sites, the same hazard, and ⭐ THE ITEM THAT
+    /// LANDED THE EXHAUSTIVE PIN THE FOUR COMMENTS ABOVE KEPT DEFERRING TO IT.
+    /// `EffectDocumentMirrorTests` round-trips a NON-DEFAULT descriptor for
+    /// EVERY `EffectDescriptor.Kind`, driven by `allCases`, so a kind added
+    /// without all six sites now fails there instead of waiting for someone to
+    /// hand-write a per-kind test — and it carries a plant control that STRIPS
+    /// a params key and proves the comparison reddens. The per-kind tests stay:
+    /// they name individual fields and go through the real save/open path.
+    public var phaser: PhaserParams?
+    public var transientShaper: TransientShaperParams?
+    public var freqShifter: FreqShifterParams?
+    public var clipper: ClipperParams?
+    public var dynamicEQ: DynamicEQParams?
     /// Hosted Audio Unit selection + inlined state (stateData rides as base64
     /// through Codable's Data default) — the InstrumentDocument.audioUnit
     /// mirror. Additive optional: pre-M4 (v) files have no key and stay
@@ -682,7 +847,13 @@ public struct EffectDocument: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, bypassed, gain, eq, compressor, limiter
-        case reverb, delay, saturator, gate, chorus, bassEnhancer, audioUnit
+        case reverb, delay, saturator, gate, chorus, bassEnhancer, bitCrusher
+        case djFilter, ringMod, flanger, hallReverb, tapeDelay, stereoWidth, phaser
+        case transientShaper
+        case freqShifter
+        case clipper
+        case dynamicEQ
+        case audioUnit
         case sidechainSourceTrackID
     }
 
@@ -703,6 +874,18 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         gate = effect.gate
         chorus = effect.chorus
         bassEnhancer = effect.bassEnhancer
+        bitCrusher = effect.bitCrusher
+        djFilter = effect.djFilter
+        ringMod = effect.ringMod
+        flanger = effect.flanger
+        hallReverb = effect.hallReverb
+        tapeDelay = effect.tapeDelay
+        stereoWidth = effect.stereoWidth
+        phaser = effect.phaser
+        transientShaper = effect.transientShaper
+        freqShifter = effect.freqShifter
+        clipper = effect.clipper
+        dynamicEQ = effect.dynamicEQ
         audioUnit = effect.audioUnit
         sidechainSourceTrackID = effect.sidechainSourceTrackID
     }
@@ -722,6 +905,19 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         gate = try c.decodeIfPresent(GateParams.self, forKey: .gate)
         chorus = try c.decodeIfPresent(ChorusParams.self, forKey: .chorus)
         bassEnhancer = try c.decodeIfPresent(BassEnhancerParams.self, forKey: .bassEnhancer)
+        bitCrusher = try c.decodeIfPresent(BitCrusherParams.self, forKey: .bitCrusher)
+        djFilter = try c.decodeIfPresent(DJFilterParams.self, forKey: .djFilter)
+        ringMod = try c.decodeIfPresent(RingModParams.self, forKey: .ringMod)
+        flanger = try c.decodeIfPresent(FlangerParams.self, forKey: .flanger)
+        hallReverb = try c.decodeIfPresent(HallReverbParams.self, forKey: .hallReverb)
+        tapeDelay = try c.decodeIfPresent(TapeDelayParams.self, forKey: .tapeDelay)
+        stereoWidth = try c.decodeIfPresent(StereoWidthParams.self, forKey: .stereoWidth)
+        phaser = try c.decodeIfPresent(PhaserParams.self, forKey: .phaser)
+        transientShaper = try c.decodeIfPresent(
+            TransientShaperParams.self, forKey: .transientShaper)
+        freqShifter = try c.decodeIfPresent(FreqShifterParams.self, forKey: .freqShifter)
+        clipper = try c.decodeIfPresent(ClipperParams.self, forKey: .clipper)
+        dynamicEQ = try c.decodeIfPresent(DynamicEQParams.self, forKey: .dynamicEQ)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
         sidechainSourceTrackID = try c.decodeIfPresent(UUID.self, forKey: .sidechainSourceTrackID)
     }
@@ -744,6 +940,18 @@ public struct EffectDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(gate, forKey: .gate)
         try c.encodeIfPresent(chorus, forKey: .chorus)
         try c.encodeIfPresent(bassEnhancer, forKey: .bassEnhancer)
+        try c.encodeIfPresent(bitCrusher, forKey: .bitCrusher)
+        try c.encodeIfPresent(djFilter, forKey: .djFilter)
+        try c.encodeIfPresent(ringMod, forKey: .ringMod)
+        try c.encodeIfPresent(flanger, forKey: .flanger)
+        try c.encodeIfPresent(hallReverb, forKey: .hallReverb)
+        try c.encodeIfPresent(tapeDelay, forKey: .tapeDelay)
+        try c.encodeIfPresent(stereoWidth, forKey: .stereoWidth)
+        try c.encodeIfPresent(phaser, forKey: .phaser)
+        try c.encodeIfPresent(transientShaper, forKey: .transientShaper)
+        try c.encodeIfPresent(freqShifter, forKey: .freqShifter)
+        try c.encodeIfPresent(clipper, forKey: .clipper)
+        try c.encodeIfPresent(dynamicEQ, forKey: .dynamicEQ)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
         try c.encodeIfPresent(sidechainSourceTrackID, forKey: .sidechainSourceTrackID)
     }
@@ -758,6 +966,18 @@ public struct EffectDocument: Codable, Sendable, Equatable {
                                 eq: eq, compressor: compressor, limiter: limiter,
                                 reverb: reverb, delay: delay, saturator: saturator,
                                 gate: gate, chorus: chorus, bassEnhancer: bassEnhancer,
+                                bitCrusher: bitCrusher,
+                                djFilter: djFilter,
+                                ringMod: ringMod,
+                                flanger: flanger,
+                                hallReverb: hallReverb,
+                                tapeDelay: tapeDelay,
+                                stereoWidth: stereoWidth,
+                                phaser: phaser,
+                                transientShaper: transientShaper,
+                                freqShifter: freqShifter,
+                                clipper: clipper,
+                                dynamicEQ: dynamicEQ,
                                 audioUnit: audioUnit,
                                 sidechainSourceTrackID: sidechainSourceTrackID)
     }
@@ -782,8 +1002,27 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
     /// rule): its source is the `"gm"` sentinel or an absolute path — bank
     /// files are deliberately NOT bundle media (design §4.2).
     public var soundBank: SoundBankConfig?
+    /// Drum kit (m39-dm). Additive optional — a pre-drumSynth project has no
+    /// key and stays byte-identical across a round trip.
+    ///
+    /// ⭐ It persists DIRECTLY as `DrumKitParams` rather than through a
+    /// `DrumKitDocument` mirror, following `SoundBankConfig`/`AutomationLane`
+    /// rather than `SamplerDocument`. The mirror exists for the sampler because
+    /// a zone holds a live `URL` that must become a bundle-relative `media/…`
+    /// ref; a drum kit is 75 numbers and eight optional ints with no file
+    /// reference anywhere, so a mirror would be a second hand-maintained list
+    /// of 75 names whose only function is to drift from the first.
+    public var drumKit: DrumKitParams?
 
-    private enum CodingKeys: String, CodingKey { case kind, polySynth, sampler, audioUnit, soundBank }
+    // ⛔⛔ m39-dm — A KEY MISSING FROM THIS ENUM IS THE QUIETEST DEFECT IN THE
+    // WHOLE PERSISTENCE PATH. `CodingKeys` is hand-written; omitting `drumKit`
+    // produces NO compile error, NO runtime error and NO warning — the kit is
+    // simply never written and never read, and every in-memory test passes.
+    // `DrumKitPersistenceTests` round-trips all 75 names through a real bundle
+    // for exactly this reason, and plant P12 deletes this key to prove it.
+    private enum CodingKeys: String, CodingKey {
+        case kind, polySynth, sampler, audioUnit, soundBank, drumKit
+    }
 
     init(from d: InstrumentDescriptor, mediaRefs: [UUID: String?]) {
         kind = d.kind
@@ -793,6 +1032,7 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         sampler = d.sampler.map { SamplerDocument(from: $0, mediaRefs: mediaRefs) }
         audioUnit = d.audioUnit
         soundBank = d.soundBank
+        drumKit = d.drumKit
     }
 
     public init(from decoder: any Decoder) throws {
@@ -803,6 +1043,10 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         sampler = try c.decodeIfPresent(SamplerDocument.self, forKey: .sampler)
         audioUnit = try c.decodeIfPresent(AudioUnitConfig.self, forKey: .audioUnit)
         soundBank = try c.decodeIfPresent(SoundBankConfig.self, forKey: .soundBank)
+        // Absent (every pre-m39-dm project) → nil → `resolvedDrumKit` gives the
+        // factory kit, which is exactly what a project that never carried the
+        // key means.
+        drumKit = try c.decodeIfPresent(DrumKitParams.self, forKey: .drumKit)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -815,6 +1059,9 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(sampler, forKey: .sampler)
         try c.encodeIfPresent(audioUnit, forKey: .audioUnit)
         try c.encodeIfPresent(soundBank, forKey: .soundBank)
+        // Omitted when absent, so a project that never touched the drum machine
+        // stays byte-identical to a pre-m39-dm save.
+        try c.encodeIfPresent(drumKit, forKey: .drumKit)
     }
 
     /// Rebuilds a runtime `InstrumentDescriptor`, resolving each zone's media
@@ -845,7 +1092,11 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                     loopStart: zd.loopStart, loopEnd: zd.loopEnd,
                     // m27 leg B: absent (every pre-m27 project) -> nil ->
                     // hard layer switching, exactly as before.
-                    crossfade: zd.crossfade)
+                    crossfade: zd.crossfade,
+                    // m32-d: absent (every pre-m32-d project) -> nil -> forward.
+                    reverse: zd.reverse,
+                    // m32-f: absent -> nil -> no choke.
+                    chokeGroup: zd.chokeGroup)
             }
             return SamplerParams(zones: zones, oneShot: s.oneShot,
                                  attack: s.attack, release: s.release, gain: s.gain,
@@ -858,7 +1109,42 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                                  // depth 0 → the pre-m27 amplitude law exactly.
                                  expressionModDepth: s.expressionModDepth,
                                  expressionFilterDepth: s.expressionFilterDepth,
-                                 expressionFilterCC: s.expressionFilterCC)
+                                 expressionFilterCC: s.expressionFilterCC,
+                                 // m34-s: absent (every pre-m34-s project) →
+                                 // nil → the GM default 2.0, exactly what a
+                                 // project that never carried the key means.
+                                 bendRangeSemitones: s.bendRangeSemitones,
+                                 // m34-s: tolerant decode — an unknown
+                                 // voiceMode rawValue resolves to nil (poly)
+                                 // rather than failing the open, the same rule
+                                 // loopMode follows a few lines above.
+                                 voiceMode: s.voiceMode
+                                     .flatMap(SamplerVoiceMode.init(rawValue:)),
+                                 // m34-s: absent → nil → the legacy pair
+                                 // (decay 0, sustain 1), i.e. hold at peak.
+                                 decay: s.decay, sustain: s.sustain,
+                                 // m34-q: absent (every pre-m34-q project) →
+                                 // nil → unlimited, the pre-m34-q behaviour.
+                                 pedalHoldLimit: s.pedalHoldLimit,
+                                 // m34-t: absent (every pre-m34-t project) →
+                                 // nil → 0 → the pitch STEPS, exactly what a
+                                 // project that never carried the key did.
+                                 glideTime: s.glideTime,
+                                 // m34-w: absent (every pre-m34-w project) →
+                                 // nil → .constantTime → glideTime is a flat
+                                 // duration, exactly what a project that never
+                                 // carried the key meant. TOLERANT DECODE, the
+                                 // voiceMode precedent four lines up: an
+                                 // unknown rawValue written by a FUTURE build
+                                 // resolves to nil rather than failing the
+                                 // open, so a project round-trips through an
+                                 // older build with a wrong SOUND rather than
+                                 // an unopenable file.
+                                 glideMode: s.glideMode
+                                     .flatMap(SamplerGlideMode.init(rawValue:)),
+                                 // PK-F2: absent (every un-chopped sampler, every
+                                 // pre-PK-F2 project) → nil → not a slice kit.
+                                 sliceKit: s.sliceKit)
         }
         // The AU config round-trips intact even when the component isn't
         // installed on this machine — the engine reports `.missing` and
@@ -866,9 +1152,14 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
         // The sound-bank config likewise: a bank missing on THIS machine
         // surfaces as a `.failed` status at prepare time (LAW L5), never as a
         // dropped selection.
+        // ⚠️ This is an EXPLICIT initialiser call with all-defaulted arguments,
+        // so a payload omitted here does NOT inherit anything — it takes
+        // `InstrumentDescriptor`'s own nil default and the user's setting is
+        // dropped on every project open, with no error. The `setInstrument`
+        // rebuild carries the same warning for the same reason.
         return InstrumentDescriptor(kind: kind, polySynth: polySynth,
                                     sampler: params, audioUnit: audioUnit,
-                                    soundBank: soundBank)
+                                    soundBank: soundBank, drumKit: drumKit)
     }
 }
 
@@ -899,10 +1190,94 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
     public var expressionModDepth: Double?
     public var expressionFilterDepth: Double?
     public var expressionFilterCC: Int?
+    /// m34-s — THE FOUR GLOBALS A SAVE USED TO THROW AWAY. `bendRangeSemitones`
+    /// and `voiceMode` (the sax team's bend work) and `decay`/`sustain` (m34-o's
+    /// global envelope) all shipped as settable, readable, engine-honoured
+    /// fields on `SamplerParams` — and none of them was in these CodingKeys, so
+    /// each was silently reset the next time the project opened.
+    ///
+    /// ⭐ THE USER-FACING COST, because it was worse than a missing field: nil
+    /// `decay`/`sustain` resolve to the legacy pair (0, 1) — hold at peak
+    /// forever — so losing them on save brought back the exact defect m34-o
+    /// closed ("the note keeps playing") after any save and reopen.
+    ///
+    /// Same additive-optional contract as every field above: nil never encodes
+    /// (the synthesized encoder's `encodeIfPresent`), so a sampler that set none
+    /// of them keeps a document shape byte-identical to pre-m34-s, and every
+    /// pre-m34-s project decodes all four as nil = the behaviour it has today.
+    public var bendRangeSemitones: Double?
+    /// ⛔ THE RAW STRING, NOT THE ENUM, RESOLVED WITH `flatMap(init(rawValue:))`
+    /// — following `SamplerZoneDocument.loopMode` (m20-g) rather than the
+    /// `pedalHoldLimit` precedent, because an enum is the one case where they
+    /// differ. A strict `decodeIfPresent(SamplerVoiceMode.self)` THROWS on an
+    /// unknown rawValue, and this decoder sits inside the project open: a third
+    /// voice mode added by a later build would make every project that used it
+    /// UNOPENABLE in this one — the whole document, not just the field.
+    public var voiceMode: String?
+    /// m34-o's instrument-wide envelope halves. Each inherits INDEPENDENTLY at
+    /// the zone level, so they persist as two separate optionals rather than a
+    /// pair — a document that carries one and not the other is meaningful.
+    public var decay: Double?
+    public var sustain: Double?
+
+    /// m34-q pedal hold limit — nil never encodes (the optional
+    /// encodeIfPresent rule above), so a sampler that never set a cap keeps a
+    /// document shape byte-identical to pre-m34-q, and every pre-m34-q project
+    /// decodes it as nil = unlimited.
+    ///
+    /// ⚠️ IT IS HERE BECAUSE A SETTING THAT DOES NOT SURVIVE A SAVE IS NOT A
+    /// SETTING. `SamplerParams` does NOT persist through its own `Codable`:
+    /// this document is the save format, and a global that is absent from these
+    /// CodingKeys is silently reset the next time the project opens.
+    public var pedalHoldLimit: Int?
+
+    /// m34-t glide/portamento time in seconds — nil never encodes (the optional
+    /// encodeIfPresent rule above), so a sampler that never set a glide keeps a
+    /// document shape byte-identical to pre-m34-t, and every pre-m34-t project
+    /// decodes it as nil = 0 = the pitch steps, which is what it did.
+    ///
+    /// ⚠️ IT IS HERE FOR THE m34-s REASON, restated because that item cost four
+    /// silently-dropped globals: a setting that does not survive a save is not
+    /// a setting. `SamplerParams` does NOT persist through its own `Codable` —
+    /// this document is the save format.
+    ///
+    /// ⭐ `voiceMode` needed NOTHING for m34-t's new `.legato` case: it already
+    /// persists as its RAW STRING and resolves with
+    /// `flatMap(SamplerVoiceMode.init(rawValue:))`, so a third case rides the
+    /// existing key, and an OLDER build opening a legato project resolves the
+    /// unknown string to nil = poly rather than failing the open. That is the
+    /// safe direction, and it is the whole reason the raw-string shape was
+    /// chosen over `decodeIfPresent(SamplerVoiceMode.self)`.
+    public var glideTime: Double?
+
+    /// m34-w. The enum's RAW STRING, per the `voiceMode`/`loopMode` precedent
+    /// directly above — that shape is what lets an older build open a project
+    /// written by a newer one (unknown string → nil → `.constantTime`) instead
+    /// of throwing. nil never encodes, so a sampler that never chose a mode
+    /// keeps a document shape byte-identical to pre-m34-w.
+    public var glideMode: String?
+
+    /// PK-F2. `SamplerParams.sliceKit`, verbatim. nil never encodes (the
+    /// synthesized encoder's `encodeIfPresent`), so an un-chopped sampler keeps
+    /// a document shape byte-identical to pre-PK-F2. A kit saved by an OLDER
+    /// build has no key and opens as "not a kit": a key change moves it, which
+    /// is what that build did.
+    public var sliceKit: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case zones, oneShot, attack, release, gain, sourcePath, displayName
         case expressionModDepth, expressionFilterDepth, expressionFilterCC
+        case pedalHoldLimit
+        // m34-s — four globals that shipped BEFORE pedalHoldLimit and were
+        // never added here. Order is cosmetic (the encoder sorts keys); the
+        // grouping records which item each arrived with.
+        case bendRangeSemitones, voiceMode, decay, sustain
+        // m34-t.
+        case glideTime
+        // m34-w.
+        case glideMode
+        // PK-F2.
+        case sliceKit
     }
 
     init(from s: SamplerParams, mediaRefs: [UUID: String?]) {
@@ -916,6 +1291,16 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         expressionModDepth = s.expressionModDepth
         expressionFilterDepth = s.expressionFilterDepth
         expressionFilterCC = s.expressionFilterCC
+        pedalHoldLimit = s.pedalHoldLimit
+        bendRangeSemitones = s.bendRangeSemitones
+        // The enum's rawValue, per the loopMode precedent above.
+        voiceMode = s.voiceMode?.rawValue
+        decay = s.decay
+        sustain = s.sustain
+        glideTime = s.glideTime
+        // The enum's rawValue, per the voiceMode precedent above.
+        glideMode = s.glideMode?.rawValue
+        sliceKit = s.sliceKit
     }
 
     public init(from decoder: any Decoder) throws {
@@ -931,6 +1316,14 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         expressionModDepth = try c.decodeIfPresent(Double.self, forKey: .expressionModDepth)
         expressionFilterDepth = try c.decodeIfPresent(Double.self, forKey: .expressionFilterDepth)
         expressionFilterCC = try c.decodeIfPresent(Int.self, forKey: .expressionFilterCC)
+        pedalHoldLimit = try c.decodeIfPresent(Int.self, forKey: .pedalHoldLimit)
+        bendRangeSemitones = try c.decodeIfPresent(Double.self, forKey: .bendRangeSemitones)
+        voiceMode = try c.decodeIfPresent(String.self, forKey: .voiceMode)
+        decay = try c.decodeIfPresent(Double.self, forKey: .decay)
+        sustain = try c.decodeIfPresent(Double.self, forKey: .sustain)
+        glideTime = try c.decodeIfPresent(Double.self, forKey: .glideTime)
+        glideMode = try c.decodeIfPresent(String.self, forKey: .glideMode)
+        sliceKit = try c.decodeIfPresent(Bool.self, forKey: .sliceKit)
     }
 }
 
@@ -977,7 +1370,18 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
     public var loopEnd: Int?
     // m27 leg B dynamic-layer crossfade -- nil never encodes.
     public var crossfade: SamplerCrossfade?
+    // m32-d reverse playback -- nil never encodes.
+    public var reverse: Bool?
+    // m32-f per-zone choke group -- nil never encodes.
+    public var chokeGroup: Int?
 
+    /// ⚠️ EVERY field of this struct is enumerated by hand THREE more times
+    /// below — in `CodingKeys`, in `init(from decoder:)` and in `encode(to:)` —
+    /// and once again in `instrumentDescriptor`'s converter. There is no
+    /// synthesis to save you: a new field added to the struct and forgotten in
+    /// this list PARSES, PLAYS, and then VANISHES on the next save/load, with
+    /// nothing failing anywhere. That is why every new zone field ships with a
+    /// full `zones` → save → open → describe round-trip test.
     private enum CodingKeys: String, CodingKey {
         case id, media, rootPitch, minPitch, maxPitch, gain
         case minVelocity, maxVelocity, group, seqLength, seqPosition, randMin, randMax
@@ -985,6 +1389,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         case attack, decay, sustain, release
         case loopMode, loopStart, loopEnd
         case crossfade
+        case reverse
+        case chokeGroup
     }
 
     init(from z: SamplerZone, media: String?) {
@@ -1015,6 +1421,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         loopStart = z.loopStart
         loopEnd = z.loopEnd
         crossfade = z.crossfade
+        reverse = z.reverse
+        chokeGroup = z.chokeGroup
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1046,6 +1454,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         loopStart = try c.decodeIfPresent(Int.self, forKey: .loopStart)
         loopEnd = try c.decodeIfPresent(Int.self, forKey: .loopEnd)
         crossfade = try c.decodeIfPresent(SamplerCrossfade.self, forKey: .crossfade)
+        reverse = try c.decodeIfPresent(Bool.self, forKey: .reverse)
+        chokeGroup = try c.decodeIfPresent(Int.self, forKey: .chokeGroup)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -1079,6 +1489,8 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(loopStart, forKey: .loopStart)
         try c.encodeIfPresent(loopEnd, forKey: .loopEnd)
         try c.encodeIfPresent(crossfade, forKey: .crossfade)
+        try c.encodeIfPresent(reverse, forKey: .reverse)
+        try c.encodeIfPresent(chokeGroup, forKey: .chokeGroup)
     }
 }
 
@@ -1128,6 +1540,29 @@ public struct ClipDocument: Codable, Sendable, Equatable {
     /// field must be threaded through `init(from clip:)`, encode, decode, AND
     /// `runtimeState`, or every controller lane silently vanishes on reopen.
     public var controllerLanes: [MIDIControllerLane]?
+    /// Note-level pitch correction (m23-ap, design §7.3) — additive optional,
+    /// same omit-when-empty rule as `gainEnvelope`/`controllerLanes`: stored
+    /// ONLY when the clip carries a non-empty edit set, so a pre-m23-ap project
+    /// stays byte-identical across a round trip. `nil`/absent reads as no edits
+    /// on load. A project WITH edits opened by an older build has the key
+    /// ignored and the clip plays uncorrected — lossy but non-destructive,
+    /// exactly how `gainEnvelope` and `controllerLanes` already behave.
+    ///
+    /// ⚠️⚠️ Same m12-f mirror-DTO lesson, and design §7.3 calls it the trap of
+    /// its section: this field must be threaded through `init(from clip:)`,
+    /// encode, decode, AND **BOTH** `ClipDocument`→`Clip` reconstructions —
+    /// `ProjectDocument.runtimeState` for timeline clips and
+    /// `TakeGroupDocument.takeGroup` for take lanes. §7.5 calls take lanes
+    /// "free"; they are free in the DTO and NOT free in the reconstruction,
+    /// which is precisely how `gainEnvelope` silently vanished from take lanes
+    /// for three milestones until m16-b3 found it.
+    public var pitchEdits: PitchEditSet?
+    /// Typed lyrics (p2-sing-d1b) — additive optional, the omit-when-nil rule:
+    /// stored ONLY when the clip has lyrics, so a project without any stays
+    /// byte-identical across a round trip; absent reads as none. Same m12-f
+    /// mirror-DTO lesson as `pitchEdits`: threaded through `init(from clip:)`,
+    /// encode, decode AND both `ClipDocument`→`Clip` reconstructions.
+    public var lyrics: ClipLyrics?
     /// Take-group marker (M5 iii-a) — additive optional, same omit-when-nil rule.
     /// Set only on comp member clips; a pre-take clip has no key and stays
     /// byte-identical across a round trip.
@@ -1137,6 +1572,8 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         case id, name, startBeat, lengthBeats, media, notes, isAIGenerated
         case startOffsetSeconds, gainDb, fadeInBeats, fadeOutBeats, fadeInCurve, fadeOutCurve
         case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupId
+        case pitchEdits
+        case lyrics
     }
 
     init(from clip: Clip, media: String?) {
@@ -1160,6 +1597,12 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         formantPreserve = clip.formantPreserve ? true : nil
         gainEnvelope = clip.gainEnvelope.isEmpty ? nil : clip.gainEnvelope
         controllerLanes = clip.controllerLanes.isEmpty ? nil : clip.controllerLanes
+        // Pitch edits (m23-ap): `Clip.init` already normalised an empty set to
+        // nil, so an unedited clip carries no key here either.
+        pitchEdits = clip.pitchEdits
+        // Lyrics (p2-sing-d1b): `Clip.init` already normalised blank text to
+        // nil, so a clip without lyrics carries no key here either.
+        lyrics = clip.lyrics
         takeGroupId = clip.takeGroupID
     }
 
@@ -1183,6 +1626,8 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         formantPreserve = try c.decodeIfPresent(Bool.self, forKey: .formantPreserve)
         gainEnvelope = try c.decodeIfPresent([ClipGainPoint].self, forKey: .gainEnvelope)
         controllerLanes = try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes)
+        pitchEdits = try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits)
+        lyrics = try c.decodeIfPresent(ClipLyrics.self, forKey: .lyrics)
         takeGroupId = try c.decodeIfPresent(UUID.self, forKey: .takeGroupId)
     }
 
@@ -1217,6 +1662,12 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         // Controller lanes (m16-b): omitted when nil/absent (the clip had none),
         // so a pre-m16-b clip never grows a key.
         try c.encodeIfPresent(controllerLanes, forKey: .controllerLanes)
+        // Pitch edits (m23-ap): omitted when nil/absent (the clip had none), so a
+        // pre-m23-ap clip never grows a key.
+        try c.encodeIfPresent(pitchEdits, forKey: .pitchEdits)
+        // Lyrics (p2-sing-d1b): omitted when nil, so a clip without lyrics
+        // never grows a key.
+        try c.encodeIfPresent(lyrics, forKey: .lyrics)
         try c.encodeIfPresent(takeGroupId, forKey: .takeGroupId)
     }
 }
@@ -1279,7 +1730,17 @@ public struct TakeGroupDocument: Codable, Sendable, Equatable {
                 // inherited the same gap. The main `tracks` path (:196/:200)
                 // always threaded both; take lanes now match it.
                 gainEnvelope: cd.gainEnvelope ?? [],
-                controllerLanes: cd.controllerLanes ?? [])
+                controllerLanes: cd.controllerLanes ?? [],
+                // m23-ap: threaded HERE TOO. Design §7.5 calls take lanes
+                // "free" because `TakeLaneDocument.clip` is a `ClipDocument` —
+                // true of the DTO, FALSE of this reconstruction, which is a
+                // second hand-maintained field list. That is exactly how
+                // `gainEnvelope` went missing from take lanes from m13-e until
+                // m16-b3 found it.
+                pitchEdits: cd.pitchEdits,
+                // p2-sing-d1b: the same second field list, so lyrics are
+                // threaded here too.
+                lyrics: cd.lyrics)
             // TakeLane.init strips any stray takeGroupID (payloads never nest).
             return TakeLane(id: ld.id, name: ld.name, clip: clip)
         }

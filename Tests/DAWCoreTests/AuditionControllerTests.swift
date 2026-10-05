@@ -315,6 +315,450 @@ struct AuditionControllerTests {
         #expect(perWindow >= 4)
         #expect(AuditionController.maxHoldSeconds > AuditionController.watchdogSeconds)
     }
+
+    // MARK: - I1: hear the note while editing it (clip-note audition policy)
+    //
+    // Design `2026-09-24-pitch-editor-interaction-batch.md` §4, decision (c).
+    // These live in this EXISTING `@MainActor` suite on purpose: the controller
+    // and the store are `@MainActor`, and a new suite would move the
+    // MainActorOccupancy Leg C count (393 of 394).
+
+    private func clipSpan(_ clip: UUID = UUID(), start: Double = 1.0,
+                          end: Double = 1.5) -> ClipNoteAuditionSpan {
+        ClipNoteAuditionSpan(trackID: UUID(), clipID: clip, startSeconds: start, endSeconds: end)
+    }
+
+    @Test("I1 press plays the notes as they sound NOW, once, and never waits")
+    func clipNotePressPlaysNow() {
+        let controller = ClipNoteAuditionController()
+        let engine = ClipSpanSpyEngine()
+        let span = clipSpan()
+
+        let status = controller.press(span, enabled: true, transportRunning: false, engine: engine)
+
+        #expect(status == .attempted(.sounded))
+        #expect(engine.calls == [ClipSpanSpyEngine.Call(span)])
+        #expect(!controller.isWaitingForRender)
+        // A render in flight at press time plays nothing and waits for nothing:
+        // silence is what playback plays there too.
+        engine.answers = [.inaudibleNotReady]
+        #expect(controller.press(span, enabled: true, transportRunning: false, engine: engine)
+            == .attempted(.inaudibleNotReady))
+        #expect(!controller.isWaitingForRender)
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 2, "a press must never turn into a delayed play")
+    }
+
+    @Test("I1 a sound-changing commit waits, then plays ONCE when THAT clip's render completes")
+    func clipNoteCommitPlaysOnceAfterMatchingRender() {
+        let controller = ClipNoteAuditionController()
+        let engine = ClipSpanSpyEngine()
+        engine.answers = [.inaudibleNotReady, .sounded]
+        let span = clipSpan()
+
+        let status = controller.commitDidChange(.pitch, span: span, enabled: true,
+                                                transportRunning: false, engine: engine)
+        #expect(status == .waitingForRender)
+        #expect(controller.isWaitingForRender)
+        #expect(engine.calls.count == 1)   // the immediate attempt, answered not-ready
+
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 2)
+        #expect(engine.calls.last == ClipSpanSpyEngine.Call(span))
+        #expect(controller.lastRenderCompleteOutcome == .sounded)
+        #expect(!controller.isWaitingForRender)
+
+        // ONCE: a second render-complete for the same clip plays nothing.
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 2)
+    }
+
+    @Test("I1 another clip's render does not trigger the waiting audition")
+    func clipNoteOtherClipsRenderDoesNotTrigger() {
+        let controller = ClipNoteAuditionController()
+        let engine = ClipSpanSpyEngine()
+        engine.answers = [.inaudibleNotReady, .sounded]
+        let span = clipSpan()
+
+        controller.commitDidChange(.level, span: span, enabled: true, transportRunning: false,
+                                   engine: engine)
+        controller.renderDidComplete(clipID: UUID(), transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 1, "a different clip's render played this clip's notes")
+        #expect(controller.isWaitingForRender)
+        #expect(controller.pending == span)
+
+        // Control: the matching render still plays, so the refusal above was
+        // about the clip, not a controller that never plays.
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 2)
+    }
+
+    @Test("I1 a second commit cancels the first: the latest request wins")
+    func clipNoteSecondCommitCancelsTheFirst() {
+        let controller = ClipNoteAuditionController()
+        let engine = ClipSpanSpyEngine()
+        engine.answers = [.inaudibleNotReady, .inaudibleNotReady, .sounded]
+        let first = clipSpan()
+        let second = clipSpan(start: 2.0, end: 2.4)
+
+        controller.commitDidChange(.pitch, span: first, enabled: true, transportRunning: false,
+                                   engine: engine)
+        controller.commitDidChange(.pitch, span: second, enabled: true, transportRunning: false,
+                                   engine: engine)
+        #expect(controller.pending == second)
+
+        controller.renderDidComplete(clipID: first.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 2, "the superseded commit still played")
+        controller.renderDidComplete(clipID: second.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 3)
+        #expect(engine.calls.last == ClipSpanSpyEngine.Call(second))
+
+        // A press also supersedes a waiting commit.
+        engine.answers = [.inaudibleNotReady, .sounded]
+        controller.commitDidChange(.pitch, span: first, enabled: true, transportRunning: false,
+                                   engine: engine)
+        controller.press(second, enabled: true, transportRunning: false, engine: engine)
+        #expect(controller.pending == nil)
+        let before = engine.calls.count
+        controller.renderDidComplete(clipID: first.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == before)
+    }
+
+    @Test("I1 nothing plays while the transport runs or records, and a transport start stops the voice and drops the wait")
+    func clipNoteTransportRefusesAndStops() {
+        let controller = ClipNoteAuditionController()
+        let engine = ClipSpanSpyEngine()
+        let span = clipSpan()
+
+        #expect(controller.press(span, enabled: true, transportRunning: true, engine: engine)
+            == .refusedTransportRunning)
+        #expect(controller.commitDidChange(.pitch, span: span, enabled: true,
+                                           transportRunning: true, engine: engine)
+            == .refusedTransportRunning)
+        #expect(engine.calls.isEmpty)
+
+        // Waiting, then the transport starts: the wait is dropped and the voice
+        // is told to stop, so a render landing mid-playback plays nothing.
+        engine.answers = [.inaudibleNotReady, .sounded]
+        controller.commitDidChange(.pitch, span: span, enabled: true, transportRunning: false,
+                                   engine: engine)
+        controller.transportDidStart(engine: engine)
+        #expect(engine.stopCount == 1)
+        #expect(!controller.isWaitingForRender)
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 1)
+
+        // A render that lands while the transport runs drops the wait too.
+        engine.answers = [.inaudibleNotReady, .sounded]
+        controller.commitDidChange(.pitch, span: span, enabled: true, transportRunning: false,
+                                   engine: engine)
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: true, engine: engine)
+        #expect(engine.calls.count == 2)
+        #expect(controller.pending == nil)
+    }
+
+    @Test("I1 a wait longer than 8 s is dropped: a late render plays nothing")
+    func clipNoteRenderWaitExpires() {
+        let controller = ClipNoteAuditionController()
+        let engine = ClipSpanSpyEngine()
+        var now = ContinuousClock.now
+        controller.clock = { now }
+        let span = clipSpan()
+
+        // Control first: a render at 7.9 s still plays.
+        engine.answers = [.inaudibleNotReady, .sounded]
+        controller.commitDidChange(.pitch, span: span, enabled: true, transportRunning: false,
+                                   engine: engine)
+        now = now.advanced(by: .seconds(7.9))
+        #expect(controller.isWaitingForRender)
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 2)
+
+        // Past 8 s: nothing plays, and the wait is gone.
+        engine.answers = [.inaudibleNotReady, .sounded]
+        controller.commitDidChange(.pitch, span: span, enabled: true, transportRunning: false,
+                                   engine: engine)
+        now = now.advanced(by: .seconds(8.001))
+        #expect(!controller.isWaitingForRender)
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 3, "a render landing after the 8 s wait still played")
+        #expect(controller.pending == nil)
+    }
+
+    @Test("I1 a split triggers nothing and does not cancel an audition already waiting")
+    func clipNoteSplitTriggersNothing() {
+        let controller = ClipNoteAuditionController()
+        let engine = ClipSpanSpyEngine()
+        engine.answers = [.inaudibleNotReady, .sounded]
+        let span = clipSpan()
+
+        controller.commitDidChange(.pitch, span: span, enabled: true, transportRunning: false,
+                                   engine: engine)
+        #expect(controller.commitDidChange(.split, span: clipSpan(start: 3, end: 3.5),
+                                           enabled: true, transportRunning: false,
+                                           engine: engine) == .unchanged)
+        #expect(engine.calls.count == 1, "a split reached the engine")
+        #expect(engine.stopCount == 0)
+        #expect(controller.pending == span, "a split cancelled the waiting audition")
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(engine.calls.count == 2)
+    }
+
+    @Test("I1 the audition switch is an INPUT: off, the editor's doors play nothing; a notReady answer after a render keeps waiting")
+    func clipNoteSwitchIsAnInput() {
+        let controller = ClipNoteAuditionController()
+        let engine = ClipSpanSpyEngine()
+        let span = clipSpan()
+
+        #expect(controller.press(span, enabled: false, transportRunning: false, engine: engine)
+            == .disabled)
+        #expect(controller.commitDidChange(.clear, span: span, enabled: false,
+                                           transportRunning: false, engine: engine) == .disabled)
+        #expect(engine.calls.isEmpty)
+
+        // A render for the clip that still resolves not-ready (it re-keyed again
+        // in between) keeps the wait alive instead of consuming it.
+        engine.answers = [.inaudibleNotReady, .inaudibleNotReady, .sounded]
+        controller.commitDidChange(.pitch, span: span, enabled: true, transportRunning: false,
+                                   engine: engine)
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(controller.isWaitingForRender)
+        controller.renderDidComplete(clipID: span.clipID, transportRunning: false, engine: engine)
+        #expect(!controller.isWaitingForRender)
+        #expect(engine.calls.count == 3)
+    }
+
+    // MARK: I1 store doors
+
+    /// An audio clip whose STORED table holds two detected notes, bound to a
+    /// spy engine. The file is never opened by the store.
+    private func noteClipStore() -> (ProjectStore, ClipSpanSpyEngine, Track, NoteSegment, NoteSegment) {
+        let a = NoteSegment(startSeconds: 0.5, endSeconds: 1.0, detectedHz: 220,
+                            detectedConfidence: 0.9)
+        let b = NoteSegment(startSeconds: 2.0, endSeconds: 2.6, detectedHz: 247,
+                            detectedConfidence: 0.9)
+        let clip = Clip(name: "Vox", startBeat: 0, lengthBeats: 8,
+                        audioFileURL: URL(fileURLWithPath: "/nonexistent/i1-vox.wav"),
+                        pitchEdits: PitchEditSet(segments: [a, b]))
+        let track = Track(name: "Vox", kind: .audio, clips: [clip])
+        let store = ProjectStore(tracks: [track])
+        let engine = ClipSpanSpyEngine()
+        store.engine = engine
+        return (store, engine, track, a, b)
+    }
+
+    @Test("I1 store: auditionClipNotes resolves the span from the STORED table and plays it through the engine")
+    func clipNoteStorePressResolvesFromTheStoredTable() throws {
+        let (store, engine, track, a, b) = noteClipStore()
+        let clipID = try #require(track.clips.first?.id)
+
+        let result = try store.auditionClipNotes(clipId: clipID, segmentIds: [a.id])
+        #expect(result.outcome == .sounded && result.isAudible && result.reason == nil)
+        // Detected-only notes bend nothing: the clip plays its SOURCE.
+        #expect(result.source == .source)
+        #expect(abs(result.startSeconds - 0.44) < 1e-9)
+        #expect(abs(result.endSeconds - 1.06) < 1e-9)
+        let call = try #require(engine.calls.first)
+        #expect(call.trackID == track.id && call.clipID == clipID)
+        #expect(abs(call.start - 0.44) < 1e-9 && abs(call.end - 1.06) < 1e-9)
+
+        // A group spans earliest start to latest end; a custom context is honoured.
+        let group = try store.auditionClipNotes(clipId: clipID, segmentIds: [b.id, a.id],
+                                                contextSeconds: 0.1)
+        #expect(abs(group.startSeconds - 0.4) < 1e-9 && abs(group.endSeconds - 2.7) < 1e-9)
+
+        // A tuned clip reads its RENDER.
+        try store.setClipNotePitchOffset(clipId: clipID, segmentId: a.id, offsetCents: 200)
+        #expect(try store.auditionClipNotes(clipId: clipID, segmentIds: [a.id]).source == .render)
+    }
+
+    @Test("I1 store: the transport refuses with transport-running before the engine; play() stops the voice")
+    func clipNoteStoreRefusesWhileTransportRuns() throws {
+        let (store, engine, track, a, _) = noteClipStore()
+        let clipID = try #require(track.clips.first?.id)
+
+        store.play()
+        #expect(engine.stopCount >= 1, "a transport start did not stop the clip-note voice")
+        let result = try store.auditionClipNotes(clipId: clipID, segmentIds: [a.id])
+        #expect(result.reason == .transportRunning)
+        #expect(result.outcome == nil && !result.isAudible)
+        #expect(engine.calls.isEmpty)
+        store.stop()
+
+        // Control: stopped again, the same request plays.
+        #expect(try store.auditionClipNotes(clipId: clipID, segmentIds: [a.id]).isAudible)
+        #expect(engine.calls.count == 1)
+
+        // stopAllAudition (shutdown, project boundary) stops it too.
+        let stopsBefore = engine.stopCount
+        store.stopAllAudition()
+        #expect(engine.stopCount > stopsBefore)
+    }
+
+    @Test("I1 store: caller mistakes throw and reach nothing — unknown clip, MIDI clip, no table, no ids, unknown id, bad context")
+    func clipNoteStoreRefusalsTeach() throws {
+        let (store, engine, track, a, _) = noteClipStore()
+        let clipID = try #require(track.clips.first?.id)
+        let bare = Clip(name: "Bare", startBeat: 8, lengthBeats: 4,
+                        audioFileURL: URL(fileURLWithPath: "/nonexistent/bare.wav"))
+        let midi = Clip(name: "Keys", startBeat: 0, lengthBeats: 4,
+                        notes: [MIDINote(pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 1)])
+        store.tracks[0].clips.append(bare)
+        store.tracks.append(Track(name: "Keys", kind: .instrument, clips: [midi]))
+
+        #expect(throws: ProjectError.self) {
+            try store.auditionClipNotes(clipId: UUID(), segmentIds: [a.id])
+        }
+        #expect(throws: ProjectError.self) {
+            try store.auditionClipNotes(clipId: midi.id, segmentIds: [a.id])
+        }
+        #expect(throws: ProjectError.self) {
+            try store.auditionClipNotes(clipId: bare.id, segmentIds: [a.id])
+        }
+        #expect(throws: ProjectError.self) {
+            try store.auditionClipNotes(clipId: clipID, segmentIds: [])
+        }
+        #expect(throws: ProjectError.self) {
+            try store.auditionClipNotes(clipId: clipID, segmentIds: [UUID()])
+        }
+        #expect(throws: ProjectError.self) {
+            try store.auditionClipNotes(clipId: clipID, segmentIds: [a.id], contextSeconds: -0.1)
+        }
+        #expect(throws: ProjectError.self) {
+            try store.auditionClipNotes(clipId: clipID, segmentIds: [a.id], contextSeconds: 2.5)
+        }
+        #expect(throws: ProjectError.self) {
+            try store.auditionClipNotes(clipId: clipID, segmentIds: [a.id], contextSeconds: .nan)
+        }
+        #expect(engine.calls.isEmpty, "a refused request reached the engine")
+    }
+
+    @Test("I1 store: after a commit the audition waits for THAT clip's render signal from the engine, then plays once")
+    func clipNoteStoreCommitWaitsForTheEngineSignal() throws {
+        let (store, engine, track, a, _) = noteClipStore()
+        let clipID = try #require(track.clips.first?.id)
+        #expect(engine.renderCompleteHandler != nil,
+                "binding the engine did not install the render-complete sink")
+
+        try store.setClipNotePitchOffset(clipId: clipID, segmentId: a.id, offsetCents: 200)
+        engine.answers = [.inaudibleNotReady, .sounded]
+        let result = try store.auditionClipNotesAfterEdit(.pitch, clipId: clipID,
+                                                          segmentIds: [a.id], enabled: true)
+        #expect(result.reason == .waitingForRender)
+        #expect(result.outcome == .inaudibleNotReady)
+        #expect(result.source == .render)
+        #expect(engine.calls.count == 1)
+
+        engine.fireRenderComplete(UUID())
+        #expect(engine.calls.count == 1, "another clip's render played this clip's notes")
+        engine.fireRenderComplete(clipID)
+        #expect(engine.calls.count == 2)
+        engine.fireRenderComplete(clipID)
+        #expect(engine.calls.count == 2, "the edited notes played more than once")
+    }
+
+    @Test("I1 store: a clear is heard with 0.3 s of context, a split plays nothing, the switch off plays nothing")
+    func clipNoteStoreClearContextSplitAndSwitch() throws {
+        let (store, engine, track, a, _) = noteClipStore()
+        let clipID = try #require(track.clips.first?.id)
+
+        let cleared = try store.auditionClipNotesAfterEdit(.clear, clipId: clipID,
+                                                           segmentIds: [a.id], enabled: true)
+        #expect(abs(cleared.startSeconds - 0.2) < 1e-9 && abs(cleared.endSeconds - 1.3) < 1e-9)
+        #expect(engine.calls.count == 1)
+
+        let split = try store.auditionClipNotesAfterEdit(.split, clipId: clipID,
+                                                         segmentIds: [a.id], enabled: true)
+        #expect(split.reason == .unchanged && split.outcome == nil)
+        #expect(engine.calls.count == 1)
+
+        let off = try store.auditionClipNotesAfterEdit(.level, clipId: clipID,
+                                                       segmentIds: [a.id], enabled: false)
+        #expect(off.reason == .auditionOff && off.outcome == nil)
+        #expect(engine.calls.count == 1)
+        // The wire's press door ignores the switch by design: it has no switch.
+        #expect(try store.auditionClipNotes(clipId: clipID, segmentIds: [a.id]).isAudible)
+    }
+}
+
+/// I1 spy: records every clip-span audition and stop, answers from a script,
+/// and exposes the render-complete sink the store installs, so a test can play
+/// the engine's side of the handshake.
+@MainActor
+private final class ClipSpanSpyEngine: AudioEngineControlling {
+    struct Call: Equatable {
+        let trackID: UUID
+        let clipID: UUID
+        let start: Double
+        let end: Double
+
+        init(trackID: UUID, clipID: UUID, start: Double, end: Double) {
+            self.trackID = trackID
+            self.clipID = clipID
+            self.start = start
+            self.end = end
+        }
+
+        init(_ span: ClipNoteAuditionSpan) {
+            self.init(trackID: span.trackID, clipID: span.clipID,
+                      start: span.startSeconds, end: span.endSeconds)
+        }
+    }
+
+    var meteringHandler: ((MeterFrame) -> Void)?
+    var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
+    var playheadHandler: ((Double) -> Void)?
+    var isRunning = false
+    private(set) var calls: [Call] = []
+    private(set) var stopCount = 0
+    /// Answers in order; the last one repeats.
+    var answers: [AuditionOutcome] = [.sounded]
+    private(set) var renderCompleteHandler: ((UUID) -> Void)?
+
+    func auditionClipSpan(trackID: UUID, clipID: UUID, startSourceSeconds: Double,
+                          endSourceSeconds: Double) -> AuditionOutcome {
+        calls.append(Call(trackID: trackID, clipID: clipID, start: startSourceSeconds,
+                          end: endSourceSeconds))
+        return answers.count > 1 ? answers.removeFirst() : (answers.first ?? .sounded)
+    }
+
+    func stopClipSpanAudition() { stopCount += 1 }
+
+    func setClipRenderCompleteHandler(_ handler: ((UUID) -> Void)?) {
+        renderCompleteHandler = handler
+    }
+
+    func fireRenderComplete(_ clipID: UUID) { renderCompleteHandler?(clipID) }
+
+    func prepare() throws { isRunning = true }
+    func shutdown() { isRunning = false }
+    func tracksDidChange(_ tracks: [Track]) {}
+    func startPlayback(_ transport: TransportState) {}
+    func stopPlayback() {}
+    func seek(_ transport: TransportState) {}
+    func setTempo(_ transport: TransportState) {}
+    func loopChanged(_ transport: TransportState) {}
+    func masterVolumeChanged(_ volume: Double) {}
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL) async throws -> AudioFileInfo {
+        throw ProjectError.engineUnavailable
+    }
+    var recordPermission: RecordPermission { .granted }
+    func requestRecordPermission(_ completion: @escaping @MainActor (Bool) -> Void) {
+        completion(true)
+    }
+    func availableInputDevices() -> [AudioInputDevice] { [] }
+    func setInputDevice(uid: String?) throws {}
+    func startRecording(_ transport: TransportState, to url: URL,
+                        completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {
+        throw ProjectError.engineUnavailable
+    }
+    func startTake(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
+                   completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {}
+    func stopRecording() {}
 }
 
 /// Minimal conformer that ALSO accepts a MIDI take (the `BareEngine` shape) —

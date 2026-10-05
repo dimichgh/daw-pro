@@ -1,0 +1,875 @@
+{
+  "set": "sixteen-levels",
+  "description": "Your voice, one slice of it, played as an instrument. The control is the chop as it works today \u2014 eight different slices in a row. The other three play a SINGLE slice through the Sixteen Levels spread, and the axis is how far up the grid the part reaches: unison, a riff inside a fifth, then an octave. Same rhythm throughout.",
+  "variants": [
+    {
+      "name": "chop-today",
+      "axis": "The chop as it is now \u2014 eight DIFFERENT slices, one per pad. Walking up the pads walks through the recording, not up in pitch.",
+      "role": "control",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "audio"
+          },
+          "as": "src"
+        },
+        {
+          "command": "clip.addAudio",
+          "params": {
+            "trackId": "$src",
+            "path": "/private/tmp/claude-501/-Users-dsemenov-Views-daw-pro/cc1b3823-79f0-4b80-950f-ca6f315857d1/scratchpad/vocal/voice-norm.wav",
+            "atBeat": 0
+          },
+          "as": "clip"
+        },
+        {
+          "command": "clip.sliceToSampler",
+          "params": {
+            "clipId": "$clip",
+            "mode": "divisions",
+            "divisions": 16,
+            "baseNote": 36,
+            "generateMIDI": false,
+            "muteSourceTrack": true
+          },
+          "as": "pads"
+        },
+        {
+          "command": "instrument.setSamplerParam",
+          "params": {
+            "trackId": "$pads",
+            "oneShot": true
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pads",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 37,
+                "startBeat": 0.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 38,
+                "startBeat": 1.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 39,
+                "startBeat": 1.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 41,
+                "startBeat": 2.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 42,
+                "startBeat": 3.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 43,
+                "startBeat": 3.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 36,
+                "startBeat": 4.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 37,
+                "startBeat": 4.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 38,
+                "startBeat": 5.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 39,
+                "startBeat": 5.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 40,
+                "startBeat": 6.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 41,
+                "startBeat": 6.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 42,
+                "startBeat": 7.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 43,
+                "startBeat": 7.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 36,
+                "startBeat": 8.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 37,
+                "startBeat": 8.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 38,
+                "startBeat": 9.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 39,
+                "startBeat": 9.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 40,
+                "startBeat": 10.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 41,
+                "startBeat": 10.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 42,
+                "startBeat": 11.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 43,
+                "startBeat": 11.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 36,
+                "startBeat": 12.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 37,
+                "startBeat": 12.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 38,
+                "startBeat": 13.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 39,
+                "startBeat": 13.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 41,
+                "startBeat": 14.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 42,
+                "startBeat": 15.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 43,
+                "startBeat": 15.5,
+                "lengthBeats": 0.45
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "levels-unison",
+      "axis": "Sixteen Levels, every note on pad 1 \u2014 ONE slice, unshifted, eight times. The reference the other two are heard against.",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "audio"
+          },
+          "as": "src"
+        },
+        {
+          "command": "clip.addAudio",
+          "params": {
+            "trackId": "$src",
+            "path": "/private/tmp/claude-501/-Users-dsemenov-Views-daw-pro/cc1b3823-79f0-4b80-950f-ca6f315857d1/scratchpad/vocal/voice-norm.wav",
+            "atBeat": 0
+          },
+          "as": "clip"
+        },
+        {
+          "command": "clip.sliceToSampler",
+          "params": {
+            "clipId": "$clip",
+            "mode": "divisions",
+            "divisions": 16,
+            "baseNote": 36,
+            "generateMIDI": false,
+            "muteSourceTrack": true
+          },
+          "as": "pads"
+        },
+        {
+          "command": "instrument.spreadSlice",
+          "params": {
+            "trackId": "$pads",
+            "sliceIndex": 4,
+            "base": 20
+          }
+        },
+        {
+          "command": "instrument.setSamplerParam",
+          "params": {
+            "trackId": "$pads",
+            "oneShot": true
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pads",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 20,
+                "startBeat": 0.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 0.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 1.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 1.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 2.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 2.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 3.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 3.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 4.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 4.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 5.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 5.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 6.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 6.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 7.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 7.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 8.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 8.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 9.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 9.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 10.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 10.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 11.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 11.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 12.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 12.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 13.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 13.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 14.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 14.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 15.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 15.5,
+                "lengthBeats": 0.45
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "levels-riff",
+      "axis": "The same slice as a riff inside a fifth \u2014 pads 1/4/6/8 (0, +3, +5, +7 semitones).",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "audio"
+          },
+          "as": "src"
+        },
+        {
+          "command": "clip.addAudio",
+          "params": {
+            "trackId": "$src",
+            "path": "/private/tmp/claude-501/-Users-dsemenov-Views-daw-pro/cc1b3823-79f0-4b80-950f-ca6f315857d1/scratchpad/vocal/voice-norm.wav",
+            "atBeat": 0
+          },
+          "as": "clip"
+        },
+        {
+          "command": "clip.sliceToSampler",
+          "params": {
+            "clipId": "$clip",
+            "mode": "divisions",
+            "divisions": 16,
+            "baseNote": 36,
+            "generateMIDI": false,
+            "muteSourceTrack": true
+          },
+          "as": "pads"
+        },
+        {
+          "command": "instrument.spreadSlice",
+          "params": {
+            "trackId": "$pads",
+            "sliceIndex": 4,
+            "base": 20
+          }
+        },
+        {
+          "command": "instrument.setSamplerParam",
+          "params": {
+            "trackId": "$pads",
+            "oneShot": true
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pads",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 20,
+                "startBeat": 0.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 0.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 1.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 27,
+                "startBeat": 1.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 2.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 2.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 3.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 27,
+                "startBeat": 3.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 4.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 4.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 5.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 27,
+                "startBeat": 5.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 6.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 6.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 7.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 27,
+                "startBeat": 7.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 8.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 8.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 9.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 27,
+                "startBeat": 9.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 10.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 10.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 11.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 27,
+                "startBeat": 11.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 12.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 12.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 13.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 27,
+                "startBeat": 13.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 14.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 14.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 15.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 27,
+                "startBeat": 15.5,
+                "lengthBeats": 0.45
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "levels-octave",
+      "axis": "The same riff reaching pad 13 (+12) \u2014 a full octave of one slice, the top of what a single grid spans.",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Voice",
+            "kind": "audio"
+          },
+          "as": "src"
+        },
+        {
+          "command": "clip.addAudio",
+          "params": {
+            "trackId": "$src",
+            "path": "/private/tmp/claude-501/-Users-dsemenov-Views-daw-pro/cc1b3823-79f0-4b80-950f-ca6f315857d1/scratchpad/vocal/voice-norm.wav",
+            "atBeat": 0
+          },
+          "as": "clip"
+        },
+        {
+          "command": "clip.sliceToSampler",
+          "params": {
+            "clipId": "$clip",
+            "mode": "divisions",
+            "divisions": 16,
+            "baseNote": 36,
+            "generateMIDI": false,
+            "muteSourceTrack": true
+          },
+          "as": "pads"
+        },
+        {
+          "command": "instrument.spreadSlice",
+          "params": {
+            "trackId": "$pads",
+            "sliceIndex": 4,
+            "base": 20
+          }
+        },
+        {
+          "command": "instrument.setSamplerParam",
+          "params": {
+            "trackId": "$pads",
+            "oneShot": true
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pads",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 20,
+                "startBeat": 0.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 0.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 1.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 32,
+                "startBeat": 1.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 2.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 2.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 3.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 32,
+                "startBeat": 3.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 4.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 4.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 5.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 32,
+                "startBeat": 5.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 6.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 6.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 7.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 32,
+                "startBeat": 7.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 8.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 8.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 9.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 32,
+                "startBeat": 9.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 10.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 10.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 11.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 32,
+                "startBeat": 11.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 12.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 12.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 13.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 32,
+                "startBeat": 13.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 25,
+                "startBeat": 14.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 23,
+                "startBeat": 14.5,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 20,
+                "startBeat": 15.0,
+                "lengthBeats": 0.45
+              },
+              {
+                "pitch": 32,
+                "startBeat": 15.5,
+                "lengthBeats": 0.45
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

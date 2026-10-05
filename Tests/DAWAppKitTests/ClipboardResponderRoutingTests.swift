@@ -98,7 +98,8 @@ struct ClipboardResponderRoutingTests {
     func livePresentationDropsTheCount() {
         let item = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 3)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, arrangeClipCount: 3)
         // The policy's own answer still counts — this is the negative control
         // that keeps the assertion below from passing vacuously.
         #expect(item.title == "Copy 3 Clips")
@@ -114,7 +115,8 @@ struct ClipboardResponderRoutingTests {
     func refusedPresentationIsThePlainWord() {
         let item = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 0)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, arrangeClipCount: 0)
         let presentation = ClipboardResponderRouting.presentation(for: item)
         #expect(item.refusedBy == .emptySelection)
         #expect(presentation.title == "Copy")
@@ -160,12 +162,14 @@ struct ClipboardResponderRoutingTests {
     func refusalsDisableTheNativeItem() {
         let behindModal = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: true, isModalPresented: true,
-            pianoRollHasNoteSelection: true, automationPointCount: 0, arrangeClipCount: 3)
+            pianoRollHasNoteSelection: true, automationPointCount: 0,
+            pitchEditorOpen: false, arrangeClipCount: 3)
         #expect(!ClipboardResponderRouting.presentation(for: behindModal).isEnabled)
 
         let inMixer = ClipboardMenuPolicy.copyMenuItem(
             verb: .copy, arrangeWorkspace: false, isModalPresented: false,
-            pianoRollHasNoteSelection: true, automationPointCount: 0, arrangeClipCount: 3)
+            pianoRollHasNoteSelection: true, automationPointCount: 0,
+            pitchEditorOpen: false, arrangeClipCount: 3)
         #expect(!ClipboardResponderRouting.presentation(for: inMixer).isEnabled)
     }
 

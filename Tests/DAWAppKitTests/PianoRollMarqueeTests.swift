@@ -248,6 +248,27 @@ struct PianoRollMarqueeTests {
         #expect(m.selection.isEmpty)
     }
 
+    /// m23-ap I4 — the band rule was HOISTED into
+    /// `PianoRollMarquee.selection(base:hits:additive:)` so the pitch editor's
+    /// band shares it. The roll must answer exactly what the rule answers, for
+    /// both chords — its behaviour is unchanged by construction, and this is
+    /// the construction checked (the pure rule's own table is
+    /// `EditorEscapeLadderTests.bandSelectionRule`).
+    @Test("I4: the roll's applyMarquee answers exactly what the hoisted rule answers")
+    func rollAppliesTheHoistedRule() {
+        let a = UUID(), b = UUID()
+        let model = PianoRollModel()
+        for additive in [true, false] {
+            for base in [Set<UUID>(), [a], [a, b]] {
+                for hits in [Set<UUID>(), [b]] {
+                    model.applyMarquee(hits: hits, base: base, additive: additive)
+                    #expect(model.selection == PianoRollMarquee.selection(
+                        base: base, hits: hits, additive: additive))
+                }
+            }
+        }
+    }
+
     // MARK: - The two travel thresholds are DIFFERENT decisions
 
     @Test("dragSlop and moveCommitSlop are separate constants, and dragSlop matches the arrange")

@@ -176,6 +176,12 @@ public enum CompFlattener {
         let sortedComp = group.comp.sorted { $0.startBeat < $1.startBeat }
 
         var members: [Member] = []
+        // Lyrics (p2-sing-d1b): a lane's words are placed once, and each member
+        // carries the words that start inside its own window
+        // (`ClipLyrics.WordPlacement`), so two members of one lane never sing
+        // the same word. The lane keeps its whole text while the group exists.
+        var placements: [UUID: ClipLyrics.WordPlacement] = [:]
+        var lanesWithAMember = Set<UUID>()
         for (idx, seg) in sortedComp.enumerated() {
             guard let lane = laneByID[seg.laneID] else { continue }
             let source = lane.clip
@@ -187,6 +193,12 @@ public enum CompFlattener {
             // material — that part is honest silence).
             guard memberEnd > memberStart else { continue }
             let memberLength = memberEnd - memberStart
+            let isFirstWindow = lanesWithAMember.insert(lane.id).inserted
+            if placements[lane.id] == nil, let placement = ClipLyrics.WordPlacement(clip: source, tempoMap: tempoMap) {
+                placements[lane.id] = placement
+            }
+            let memberLyrics = placements[lane.id]?.window((memberStart - laneStart)..<(memberEnd - laneStart),
+                                                           isFirstWindow: isFirstWindow)
             let ratio = source.stretchRatio > 0 ? source.stretchRatio : 1
             // Windowing = the splitClip math, generalized for stretch (spec §2):
             // the source-domain offset advances by the timeline span
@@ -234,7 +246,30 @@ public enum CompFlattener {
                 controllerLanes: Clip.windowedControllerLanes(
                     source.controllerLanes,
                     delta: memberStart - laneStart,
-                    newLength: memberLength)
+                    newLength: memberLength),
+                // Pitch edits (m23-q): the lane's set carried VERBATIM — the ONE
+                // field here that is deliberately NOT windowed alongside the two
+                // above. Those are clip-relative beats; `NoteSegment` times are
+                // source-file-absolute seconds, which `memberOffset` already
+                // accounts for.
+                //
+                // ⚠️ DESIGN §7.5 CALLS THIS "A FILTER, NOT A TRANSFORM". The
+                // "not a transform" half is what matters and is honoured. The
+                // FILTER half is deliberately NOT implemented, and this is the
+                // measured reason: `applyCrossfades` runs AFTER this
+                // initialiser and WIDENS members — the left grows `lengthBeats`,
+                // the right moves `startBeat` back and REDUCES
+                // `startOffsetSeconds`. Any window filter computed here is
+                // computed against pre-crossfade geometry, so it would drop
+                // segments the member then goes on to PLAY through its fade:
+                // one side of a comp join tuned, the other not, summed together.
+                // An unfiltered carry has no such failure mode — a segment
+                // outside the window a member plays is simply never evaluated.
+                //
+                // Lossless either way at the model layer: the lane keeps its own
+                // clip with the full set, and flatten is re-runnable from it.
+                pitchEdits: source.pitchEdits,
+                lyrics: memberLyrics
             )
             member.takeGroupID = group.id
 

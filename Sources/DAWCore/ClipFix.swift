@@ -178,6 +178,12 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
     public var mapRevision: UInt64
     public var regionBPM: Double
     public var submittedAt: Date
+    /// PK-F3 (lane W7-PK): a take-group target's lanes' pitch shifts at
+    /// submit, by lane id. The bounce bakes them in, so import refuses the fix
+    /// as stale when any of them changed since (a key change moves them all).
+    /// Empty for a plain-clip target: its fingerprint already carries the
+    /// clip's shift.
+    public var frozenLanePitch: [UUID: Double]
 
     public init(
         jobID: String,
@@ -189,7 +195,8 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
         regionEndBeat: Double,
         mapRevision: UInt64,
         regionBPM: Double,
-        submittedAt: Date
+        submittedAt: Date,
+        frozenLanePitch: [UUID: Double] = [:]
     ) {
         self.jobID = jobID
         self.trackID = trackID
@@ -201,6 +208,7 @@ public struct PendingClipFix: Sendable, Equatable, Identifiable {
         self.mapRevision = mapRevision
         self.regionBPM = regionBPM
         self.submittedAt = submittedAt
+        self.frozenLanePitch = frozenLanePitch
     }
 }
 

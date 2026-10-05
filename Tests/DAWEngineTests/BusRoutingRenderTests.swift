@@ -199,6 +199,66 @@ struct BusRoutingRenderTests {
         }
     }
 
+    // m39-e: the coordinator's question — the `.volume` MODULATION takeover
+    // moves the fader inside the chainHost render block rather than on the
+    // strip mixer node (`PlaybackGraph.swift`'s `if modulatesVolume { gain = 1 }`).
+    // chainHost is UPSTREAM of the mixer that fans out to the send gain nodes,
+    // so post-fader send semantics must survive the takeover unchanged. If the
+    // takeover had landed downstream of the fan-out, this test reads the
+    // control's value instead — which is why the control is here.
+    @Test("sends stay post-fader UNDER modulation: a -6 dB volume macro attenuates the send return")
+    func postFaderSendFollowsModulatedVolume() throws {
+        let fixtures = try TestSignals.fixtures()
+        let busA = UUID()  // direct-path sink at volume 0
+        let busB = UUID()  // unity send return
+        // depth × volumeFullScaleDb = -0.125 × 48 = exactly -6 dB.
+        let macro = ModulationSource(kind: .macro, name: "Gate",
+                                     params: .macro(MacroSourceParams(value: 1)))
+        let route = ModulationRoute(sourceID: macro.id, target: .volume, depth: -0.125)
+        func project(withRoute: Bool, volume: Double = 1) -> [Track] {
+            [Track(name: "SRC", kind: .audio, volume: volume,
+                   clips: [Clip(name: "clip", startBeat: 0, lengthBeats: 4,
+                                audioFileURL: fixtures.cos1k48)],
+                   outputBusID: busA,
+                   sends: [Send(destinationBusID: busB, level: 1)],
+                   modulationSources: [macro],
+                   modulationRoutes: withRoute ? [route] : []),
+             bus(busA, name: "Kill", volume: 0),
+             bus(busB, name: "Return")]
+        }
+        let modulated = try OfflineRenderer().render(
+            tracks: project(withRoute: true),
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0)
+        // CONTROL: the identical project with the route removed. The source is
+        // still present, so this isolates the ROUTE, not the source.
+        let control = try OfflineRenderer().render(
+            tracks: project(withRoute: false),
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0)
+        let expected = Self.baselineRMS * Float(pow(10.0, -6.0 / 20.0))
+        for (channel, reference) in zip(modulated.channelData, control.channelData) {
+            let rms = TestSignals.rms(channel, in: Self.window)
+            let controlRMS = TestSignals.rms(reference, in: Self.window)
+            print("[measured] m39-e modulated post-fader send RMS: \(rms) "
+                  + "(expected \(expected) ± 2%), control (no route) \(controlRMS) "
+                  + "(expected \(Self.baselineRMS))")
+            #expect(abs(rms - expected) < 0.02 * expected)
+            #expect(abs(controlRMS - Self.baselineRMS) < 0.02 * Self.baselineRMS)
+        }
+        // The takeover carries base × modulation, not modulation alone: at
+        // base 1.0 a hardcoded base would be indistinguishable, so measure a
+        // SECOND base. Expected = baseline × 0.5 × -6 dB.
+        let halfFader = try OfflineRenderer().render(
+            tracks: project(withRoute: true, volume: 0.5),
+            tempoMap: TempoMap(constantBPM: 120), fromBeat: 0, durationSeconds: 1.0)
+        let halfExpected = expected / 2
+        for channel in halfFader.channelData {
+            let rms = TestSignals.rms(channel, in: Self.window)
+            print("[measured] m39-e modulated send at fader 0.5: \(rms) "
+                  + "(expected \(halfExpected) ± 2%)")
+            #expect(abs(rms - halfExpected) < 0.02 * halfExpected)
+        }
+    }
+
     @Test("a muted track is silent on its sends and on the bus meter")
     func mutedTrackIsSilentOnItsSends() async throws {
         let fixtures = try TestSignals.fixtures()

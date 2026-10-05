@@ -1,0 +1,245 @@
+{
+  "set": "stereowidth",
+  "description": "m23-dj, the .stereoWidth insert: a stereo widener that cannot fall apart when your music gets played in mono. Every variant plays the IDENTICAL eight-second synth pad (two slow chords, A minor then F, at 120 BPM). Variant 1 has no effect at all. The other three differ in ONE number, `spread`, which runs 0.25 -> 0.45 -> 0.65. Nothing else changes anywhere.\n\n⚠️⚠️ USE HEADPHONES, OR TWO SPEAKERS WITH YOU SITTING BETWEEN THEM. On a laptop speaker, a phone, or a single speaker these four files are close to IDENTICAL, and that is not a flaw in the demo - it is the entire point of the effect, and it is true BY CONSTRUCTION rather than by luck. If you only have one speaker, skip the listening and read the measured numbers at the bottom instead; they say the same thing in a form one speaker cannot hide.\n\nWHAT THIS EFFECT IS, because the name undersells it. The pad you are hearing is MONO: one single sound, sitting dead in the middle of your head, identical in both ears. There is nothing to make wider, because there is no left-versus-right difference to stretch. So this effect does not stretch anything - it MANUFACTURES a left-versus-right difference out of the centre, by sending the sound through a short chain of filters that change WHEN each pitch in it arrives without changing HOW LOUD any of them are, and then adding that result to one ear while subtracting it from the other. The sound stops being a point and becomes a space.\n\nWHY THAT IS HARDER THAN IT SOUNDS, and why it is the whole item. The cheap way to fake width is to delay one side by a few thousandths of a second. It works beautifully on headphones and then it BETRAYS YOU: the moment your track is played somewhere that adds the two sides together - a club PA, a phone speaker, a supermarket ceiling, a car with one blown door speaker, most Bluetooth speakers - the delayed copy cancels against the original and chunks of your sound disappear. People find this out on someone else's system, which is the worst possible time. This effect is built so that cannot happen: everything it does happens to the DIFFERENCE between the two ears, and the AVERAGE of the two ears is passed through completely untouched. Add the two sides together and you get back exactly what you put in. Not approximately. Exactly.\n\nWHAT TO LISTEN FOR. Play variant 1 first so you know the starting point: a pad in a straight line between your ears, with a clear single centre. Then go through 2, 3, 4. What should change is not the tone, the loudness or the notes - it is the SIZE. In 'spread-gentle' the pad stops being a line and becomes a band, still obviously in front of you. In 'spread-medium' it opens out past your ears; this is the setting most mixes would actually use. In 'spread-maximum' it is all around you and starts to feel a little hollow in the middle, as though the centre had been scooped slightly. That hollowness is real and it is the price - see below. The question is which of the three you want, and there is no wrong answer: some music wants the pad out of the way at the edges, some wants it present in the middle.\n\nTHE PRICE, STATED PLAINLY, BECAUSE IT IS ARITHMETIC AND NOT A BUG. You cannot have all three of: a mono-safe result, a wide result, and each ear individually untouched. Pick two. This effect always picks mono-safe, so what it gives up is the third one: each ear ON ITS OWN gets a gentle ripple across the range of pitches - some slightly louder, some slightly quieter - and the two ears' ripples are mirror images. That mirroring is exactly what your brain reads as width, and it is exactly why the two cancel back to nothing when they are added together. The ripple is +1.9/-2.5 dB at spread 0.25, +3.2/-5.2 dB at 0.45 and +4.3/-9.1 dB at 0.65, which is why variant 4 is the one where you can hear it as hollowness. Every `fx.add` and `fx.setParam` result reports these two numbers as `channelPeakDb` and `channelNotchDb`.\n\nMEASURED ON THESE EXACT FILES, so 'it stays mono-safe' is not a claim you have to take on trust. Stereo width (0 = a single point, higher = wider; the same figure the app's stereo scope shows): no-widener 0.0000, spread-gentle 0.0449, spread-medium 0.1321, spread-maximum 0.2411. Left/right correlation (1.0000 = the two ears are identical): 1.0000 -> 0.9199 -> 0.7571 -> 0.5425. ⭐ AND NOW THE ONE THAT MATTERS: fold each file down to mono and subtract the un-widened original, and what is left measures -158.6 dB, -156.1 dB and -154.3 dB. Those are numbers roughly a hundred million times quieter than the music - they are the rounding error of the arithmetic itself, not a residue of the effect. The mono level moved by 0.000 dB in all three. For contrast, the same measurement shape applied to a Haas-style fake widener (one side delayed 15 ms) in `DAWEngineTests/StereoWidthTests` loses up to 10.3 dB at individual pitches and leaves a mono residual of +4.3 dB - LOUDER than the music it was supposed to leave alone - rather than -158; this effect loses nothing, at any pitch. The figures for these four files are in manifest.json.\n\nLOUDNESS, STATED SO IT IS NOT MISTAKEN FOR THE AXIS (EBU R128 integrated, measured on these renders): -19.0, -18.8, -18.4 and -17.8 LUFS. The median is -18.6, so the widest offset is 0.8 LU - inside the 1.0 LU rule, and no level compensation was applied to any variant. The small rise as spread goes up is not a mixing decision, it is arithmetic: adding a decorrelated copy to each ear adds its energy, exactly 10*log10(1 + spread^2) dB of it. It is small enough here not to be what you are choosing between, but do not pick variant 4 because it is fractionally louder.",
+  "measurement": {
+    "type": "monoCompatibility",
+    "compareToRole": "control"
+  },
+  "variants": [
+    {
+      "name": "no-widener",
+      "axis": "no stereo widener at all - the bare mono pad, so you know what is being added",
+      "role": "control",
+      "render": { "durationSeconds": 10 },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": { "name": "Pad", "kind": "instrument" },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.5,
+            "decay": 0.4,
+            "sustain": 0.8,
+            "release": 1.1,
+            "cutoffHz": 3200,
+            "resonance": 0.15,
+            "gain": 0.3,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              { "pitch": 45, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 57, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 60, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 64, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 69, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 41, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 53, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 60, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 65, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 69, "startBeat": 8, "lengthBeats": 8 }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "spread-gentle",
+      "axis": "spread 0.25: the pad steps off the centre line. Per-channel ripple +1.9 / -2.5 dB.",
+      "render": { "durationSeconds": 10 },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": { "name": "Pad", "kind": "instrument" },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.5,
+            "decay": 0.4,
+            "sustain": 0.8,
+            "release": 1.1,
+            "cutoffHz": 3200,
+            "resonance": 0.15,
+            "gain": 0.3,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              { "pitch": 45, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 57, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 60, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 64, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 69, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 41, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 53, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 60, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 65, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 69, "startBeat": 8, "lengthBeats": 8 }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "stereoWidth",
+            "params": {
+              "width": 1,
+              "spread": 0.25,
+              "bassMonoHz": 120,
+              "bassMonoAmount": 1
+            }
+          },
+          "as": "widener"
+        }
+      ]
+    },
+    {
+      "name": "spread-medium",
+      "axis": "spread 0.45: a clearly wide pad, the setting most mixes would use. Per-channel ripple +3.2 / -5.2 dB.",
+      "render": { "durationSeconds": 10 },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": { "name": "Pad", "kind": "instrument" },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.5,
+            "decay": 0.4,
+            "sustain": 0.8,
+            "release": 1.1,
+            "cutoffHz": 3200,
+            "resonance": 0.15,
+            "gain": 0.3,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              { "pitch": 45, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 57, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 60, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 64, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 69, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 41, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 53, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 60, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 65, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 69, "startBeat": 8, "lengthBeats": 8 }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "stereoWidth",
+            "params": {
+              "width": 1,
+              "spread": 0.45,
+              "bassMonoHz": 120,
+              "bassMonoAmount": 1
+            }
+          },
+          "as": "widener"
+        }
+      ]
+    },
+    {
+      "name": "spread-maximum",
+      "axis": "spread 0.65: as wide as this set goes, and you can start to hear the cost as a hollowness. Per-channel ripple +4.3 / -9.1 dB.",
+      "render": { "durationSeconds": 10 },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": { "name": "Pad", "kind": "instrument" },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.5,
+            "decay": 0.4,
+            "sustain": 0.8,
+            "release": 1.1,
+            "cutoffHz": 3200,
+            "resonance": 0.15,
+            "gain": 0.3,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              { "pitch": 45, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 57, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 60, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 64, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 69, "startBeat": 0, "lengthBeats": 8 },
+              { "pitch": 41, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 53, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 60, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 65, "startBeat": 8, "lengthBeats": 8 },
+              { "pitch": 69, "startBeat": 8, "lengthBeats": 8 }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "stereoWidth",
+            "params": {
+              "width": 1,
+              "spread": 0.65,
+              "bassMonoHz": 120,
+              "bassMonoAmount": 1
+            }
+          },
+          "as": "widener"
+        }
+      ]
+    }
+  ]
+}

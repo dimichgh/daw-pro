@@ -166,6 +166,18 @@ struct VoicePanel: View {
                         voiceRow(descriptor)
                     }
                 }
+                // ⭐ THE DISCOVERABILITY LINE (m24-m leg C). The gesture above is
+                // the only Convert Voice… route that exists in SIMPLE density —
+                // the clip context menu is Pro-only (sp-c) and Edit ▸ Convert
+                // needs a selection the user must already know to make — so it
+                // is the beginner's route, and a beginner's route that nobody
+                // can see is not one (Rule 6). Neutral chrome, no accent and no
+                // glow: it is instructional furniture, not state (the
+                // empty-lane-hint register).
+                Text("Drag a voice onto a track header to convert that track's clips.")
+                    .font(.system(size: 9))
+                    .foregroundStyle(DAWTheme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -184,10 +196,10 @@ struct VoicePanel: View {
                 if smoke {
                     // The reserved "base" entry, labeled for what it is: the
                     // pipeline smoke target, never a real voice.
-                    tag("PIPELINE TEST", color: DAWTheme.textDim)
+                    VoiceTag(text: "PIPELINE TEST", color: DAWTheme.textDim)
                 }
                 Spacer()
-                stateChip(descriptor.state)
+                VoiceStateChip(state: descriptor.state)
             }
             if smoke, let note = descriptor.note {
                 Text(note)   // the facade's own honesty note, verbatim
@@ -200,25 +212,28 @@ struct VoicePanel: View {
         .background(DAWTheme.panelRaised)
         .clipShape(RoundedRectangle(cornerRadius: 7))
         .overlay(RoundedRectangle(cornerRadius: 7).stroke(DAWTheme.hairline, lineWidth: 1))
+        // ⭐ THE DRAG SOURCE (m24-m leg C) — drop it on a track header and the
+        // Convert Voice… panel opens on that track's audio clips with THIS voice
+        // already picked.
+        //
+        // ⚠️ EVERY voice is draggable, READY or not, and that is deliberate: the
+        // eligibility question ("can this voice convert?") already has one home
+        // — the picker row's own state chip and the panel's armed primary — and
+        // refusing the drag at the source would be a second copy of it that can
+        // disagree. The drop's refusals are about the TRACK, which is the only
+        // thing the drop knows more about than the panel does.
+        //
+        // ⚠️ NOT ON `VoiceChoiceRow`: the modal picker's rows share this row's
+        // chips but not this gesture. A drag inside a modal that is already open
+        // on a fixed set of clips has nowhere to go.
+        .draggable(VoiceModelDragPayload(voiceID: descriptor.id, voiceName: descriptor.name))
+        .help("Drag onto a track header to convert that track's audio clips to this voice")
     }
 
-    private func stateChip(_ state: String) -> some View {
-        let (label, color): (String, Color) = switch state {
-        case "ready": ("READY", DAWTheme.signal)
-        case "needsConversion": ("NEEDS PREP", DAWTheme.record)
-        default: ("INCOMPLETE", DAWTheme.textDim)
-        }
-        return tag(label, color: color)
-    }
-
-    private func tag(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 8, weight: .bold, design: .monospaced))
-            .tracking(0.6)
-            .foregroundStyle(color)
-            .padding(.horizontal, 5).padding(.vertical, 2)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(color.opacity(0.5), lineWidth: 1))
-    }
+    // ⭐ The state chip and the micro-tag moved to `Components/VoiceChoiceRow`
+    // at m24-m leg B and are SHARED with the Convert Voice… picker: READY /
+    // NEEDS PREP / INCOMPLETE is one fact and must read the same word wherever
+    // a voice is shown. Do not re-privatise them here.
 
     // MARK: - Local datasets
 

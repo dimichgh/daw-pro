@@ -7,7 +7,7 @@ import Testing
 /// sliver, when Escape exits. It cannot prove the rule is WIRED — that
 /// `ContentView` actually multiplies by `effectiveFraction`, that the arrange row
 /// is actually pinned, that the splitter actually leaves the mode, that the toggle
-/// actually writes the store, or that Escape has exactly the two mounts the design
+/// actually writes the store, or that Escape has exactly the mounts the design
 /// argument depends on. All of that lives in `DAWApp`, which has **no test
 /// target**, so a perfect rule could sit beside a view that never calls it and
 /// every suite would stay green. This file is that gap's substitute — the
@@ -71,6 +71,15 @@ struct EditorMaximizeSiteTests {
     private static let contentViewPath = "DAWApp/ContentView.swift"
     private static let rollPath = "DAWApp/PianoRoll/PianoRollView.swift"
     private static let appPath = "DAWApp/DAWProApp.swift"
+    /// m23-ap interaction batch I6a — the note editor (pitch) pane, the second
+    /// bottom pane the mode sizes, which gained its own toggle and Escape mount.
+    private static let pitchPanePath = "DAWApp/PitchEditor/PitchEditorView.swift"
+
+    /// Whitespace collapsed to single spaces, so an ORDER assertion reads the
+    /// code's sequence of tokens rather than its indentation.
+    private static func squeezed(_ content: String) -> String {
+        content.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
 
     /// ⭐ THE CONTROL FOR EVERY ABSENCE ASSERTED BELOW. A grep that never looked
     /// and a grep that looked and found nothing produce the same output, so this
@@ -121,37 +130,108 @@ struct EditorMaximizeSiteTests {
 
     // MARK: - The three exits
 
-    /// ⭐⭐ TWO MOUNTS, ONE DECISION — the m23-cf lesson. Focus arbitration in this
-    /// tree was MEASURED to be a coin flip, so a key whose meaning depends on who
-    /// holds focus is a defect waiting to be reported. Both Escape mounts must ask
-    /// the SAME app-side question; if either one grows its own rule, this fails.
-    @Test("Escape has exactly TWO mounts and both route to the one app decision")
-    func escapeHasTwoMountsOneDecision() {
+    /// ⭐⭐ THREE MOUNTS, ONE DECISION — the m23-cf lesson. Focus arbitration in
+    /// this tree was MEASURED to be a coin flip, so a key whose meaning depends on
+    /// who holds focus is a defect waiting to be reported. Every Escape mount must
+    /// ask the SAME app-side question; if any one grows its own rule, this fails.
+    ///
+    /// ⚠️ RENAMED FROM "Escape has exactly TWO mounts and both route to the one app
+    /// decision" (`escapeHasTwoMountsOneDecision`) at m23-ap interaction batch I6a,
+    /// ON PURPOSE: the note editor pane gained the third mount the design asked
+    /// for (§9), wired exactly as the roll's. Only one bottom pane is ever open,
+    /// so one press still meets at most two mounts — the pane's and the backstop.
+    ///
+    /// ⚠️ **REWRITTEN AT m23-ap I4, ON PURPOSE** — it was "Escape has exactly
+    /// THREE mounts and all route to the one app decision"
+    /// (`escapeHasThreeMountsOneDecision`), which pinned the roll's mount as
+    /// `onEscape() ? .handled : .ignored`: straight to exit-maximize, a note
+    /// selection left alone. The mounts and the one decision are unchanged in
+    /// NUMBER; what each editor hands the decision, and what it does with the
+    /// answer, is the ladder (`EditorEscapeLadder`) — and the roll's Escape now
+    /// CLEARS A SELECTION BEFORE LEAVING THE MODE (design §13, a named change to
+    /// a shipped surface).
+    @Test("Escape has exactly THREE mounts, all asking the app's ONE ladder — the roll clears a selection before it leaves the mode (I4)")
+    func escapeHasThreeMountsOneLadder() {
         let contentView = Self.codeOnly(Self.text(Self.contentViewPath))
         let roll = Self.codeOnly(Self.text(Self.rollPath))
+        let pane = Self.codeOnly(Self.text(Self.pitchPanePath))
+        // The reader control for the file this test added, so an absence below
+        // can never be "the pane's file never loaded".
+        #expect(pane.count > 5_000, "\(Self.pitchPanePath) came back suspiciously short: \(pane.count) chars")
 
-        // Mount 1: the roll's own, through its `onEscape` value input.
+        // Mount 1: the roll's own, through its `onEscape` value input — handing
+        // the ladder the roll's two facts and applying the roll's two rungs.
         #expect(roll.contains(".onKeyPress(.escape)"),
                 "the piano roll no longer claims Escape — the maximized mode loses its primary exit.")
-        let note5 = "the roll's Escape no longer reports handled/ignored from the app decision; " + "an unconditional .handled would swallow Escape outside the mode."
-        #expect(roll.contains("onEscape() ? .handled : .ignored"), "\(note5)")
+        let rollAsks = "the roll's Escape no longer hands the app's ladder its OWN two facts (a gesture "
+            + "live, a selection held) — the ladder then cannot put the selection rung before the mode."
+        #expect(roll.contains("let rung = onEscape(escapeGestureLive, !model.selection.isEmpty)"), "\(rollAsks)")
+        let rollClears = "the roll no longer CLEARS its selection on the ladder's `.clearSelection` rung — "
+            + "Escape would then consume the key and do nothing the user can see."
+        #expect(roll.contains("case .clearSelection: model.clearSelection()"), "\(rollClears)")
+        #expect(roll.contains("case .cancelGesture: cancelGestureForEscape()"),
+                "the roll no longer cancels a live gesture on the ladder's first rung.")
+        let note5 = "the roll's Escape no longer reports handled/ignored from the rung; an unconditional "
+            + ".handled would swallow Escape outside every rung."
+        #expect(roll.contains("return rung.consumesKey ? .handled : .ignored"), "\(note5)")
+        // ⚠️ THE OLD SHAPE IS GONE — a roll that still asked the bare decision
+        // would skip the selection rung, which is the behaviour I4 changed.
+        #expect(!roll.contains("onEscape() ? .handled : .ignored"),
+                "the roll still asks the pre-I4 bare decision — its Escape would leave the mode over a selection.")
 
-        // Mount 2: the arrange workspace's key scope (the ArrangeDeleteKey modifier).
-        let note6 = "the arrange workspace's backstop Escape mount is gone — Escape then only works " + "when the roll itself holds focus, which this tree measured to be unreliable."
+        // Mount 2 (I6a): the note editor pane's own, through its `onEscape` value
+        // input AND its model's I4 seam — the pane decides nothing itself.
+        #expect(pane.contains(".onKeyPress(.escape)"),
+                "the note editor pane no longer claims Escape — its maximized mode loses its primary exit.")
+        let paneNote = "the note editor pane's Escape mount no longer asks the app's decision through "
+            + "the model's I4 seam, or no longer reports handled/ignored from its answer — a mount that "
+            + "calls nothing strands the user in a window-filling mode; an unconditional .handled "
+            + "swallows Escape outside it."
+        #expect(pane.contains("model.handleEscapeKey(appDecision: onEscape) ? .handled : .ignored"),
+                "\(paneNote)")
+        // …and it can fire at all: `.onKeyPress` reaches only a focused view.
+        let focusNote = "the note editor pane is no longer focusable / never takes focus — its Escape "
+            + "mount would then never run, and Escape would depend on the backstop alone."
+        #expect(pane.contains(".focusable()"), "\(focusNote)")
+        #expect(pane.contains(".focused($isFocused)"), "\(focusNote)")
+        #expect(pane.contains("isFocused = true"), "\(focusNote)")
+
+        // Mount 3: the arrange workspace's key scope (the ArrangeDeleteKey modifier).
+        let note6 = "the arrange workspace's backstop Escape mount is gone — Escape then only works "
+            + "when the roll itself holds focus, which this tree measured to be unreliable."
         #expect(contentView.contains(".onKeyPress(.escape)"), "\(note6)")
 
-        // ONE decision, asked by both. Two call sites of `handleEditorEscape`:
-        // the roll's `onEscape:` wiring and the workspace mount, both in ContentView.
-        let calls = Self.occurrences(of: "model.handleEditorEscape()", in: contentView)
-        let note7 = "expected exactly 2 `model.handleEditorEscape()` call sites in ContentView (the " + "roll's onEscape wiring and the arrange workspace's backstop mount), found " + "\(calls). More means a third claimant; fewer means a mount grew its own rule."
-        #expect(calls == 2, "\(note7)")
+        // ONE decision, asked by all three, all in ContentView: the two editors
+        // hand their facts; the backstop, which has none, asks bare.
+        let editorAsk = "model.handleEditorEscape(gestureLive: live, hasSelection: selected)"
+        let wirings = Self.occurrences(of: editorAsk, in: contentView)
+        #expect(wirings == 2, "expected the roll AND the note editor pane to be wired to `\(editorAsk)`, found \(wirings).")
+        let backstops = Self.occurrences(of: "model.handleEditorEscape()", in: contentView)
+        #expect(backstops == 1, "expected exactly ONE bare `model.handleEditorEscape()` (the workspace backstop), found \(backstops).")
+        let calls = Self.occurrences(of: "model.handleEditorEscape(", in: contentView)
+        let note7 = "expected exactly 3 `model.handleEditorEscape(` call sites in ContentView (the roll's "
+            + "and the pane's onEscape wirings and the arrange workspace's backstop mount), found "
+            + "\(calls). More means a fourth claimant; fewer means a mount grew its own rule."
+        #expect(calls == 3, "\(note7)")
 
-        // The decision itself must consult the headless rule, not re-spell it.
+        // The decision itself must consult the headless ladder, not re-spell it,
+        // and the backstop must be that same decision asked with no facts.
         let app = Self.codeOnly(Self.text(Self.appPath))
-        let note8 = "handleEditorEscape no longer asks EditorMaximize — the modal / rename-field " + "refusals are then unpinned by any test."
-        #expect(app.contains("EditorMaximize.escapeExits("), "\(note8)")
+        let note8 = "handleEditorEscape no longer asks EditorEscapeLadder — the rung order and the "
+            + "modal / rename-field refusals are then unpinned by any test."
+        #expect(app.contains("EditorEscapeLadder.resolve("), "\(note8)")
+        // m34-k: the `blocked` term moved into ONE home both Escape routes ask
+        // (the mounts here, the key monitor in `EscapeKeyMonitorSiteTests`), and
+        // gained the explain mode, whose exit is a key equivalent.
+        #expect(app.contains("blocked: escapeIsOwnedElsewhere)"),
+                "the ladder no longer hears that a modal or a rename field owns the key.")
+        #expect(app.contains("isModalPresented || isArrangeTextEditingFocused || explain.isActive"),
+                "`escapeIsOwnedElsewhere` lost a modal, a rename field or the explain mode.")
+        #expect(app.contains("handleEditorEscape(gestureLive: false, hasSelection: false).consumesKey"),
+                "the backstop grew its own rule instead of asking the one ladder with no editor facts.")
         // SET, never toggle: a double-delivered press must not re-maximize.
-        let note9 = "the Escape route no longer SETS the mode off; a toggle here makes correctness " + "depend on SwiftUI delivering the press exactly once."
+        let note9 = "the Escape route no longer SETS the mode off; a toggle here makes correctness "
+            + "depend on SwiftUI delivering the press exactly once."
         #expect(app.contains("panelLayout.setEditorMaximized(false)"), "\(note9)")
     }
 
@@ -167,6 +247,38 @@ struct EditorMaximizeSiteTests {
                 "the toggle no longer writes the shared PanelLayoutStore slot.")
         let note10 = "the toggle no longer takes its two faces from the tested rule, so 'you can tell " + "at a glance which state you are in' is no longer pinned by anything."
         #expect(roll.contains("EditorMaximize.toggleSymbol("), "\(note10)")
+    }
+
+    /// m23-ap interaction batch I6a — the note editor pane's own door into the
+    /// SAME mode. The mode already sized that pane (`ContentView`'s
+    /// `editorPaneFraction` carries no pane term); only the door was missing, so a
+    /// user in the note editor could maximize it only from the wire.
+    ///
+    /// ⚠️ **A SOURCE PIN, AND IT SAYS SO.** It proves the pane's button is spelled
+    /// to write the shared slot with the tested faces, not that a press reaches
+    /// it — `DAWApp` has no test target, so no Swift Testing leg can press a real
+    /// SwiftUI button. A press can only be measured in a host that renders the
+    /// pane (an offscreen harness, or staging's `debug.pitchEditor`, which echoes
+    /// the store's `maximized` beside the toggle's drawn face);
+    /// `EditorMaximizeTests` owns what the slot itself does.
+    @Test("the note editor pane carries the MAXIMIZE toggle beside its close control, writing the shared store with the tested faces")
+    func paneToggleExists() {
+        let pane = Self.codeOnly(Self.text(Self.pitchPanePath))
+        #expect(pane.count > 5_000, "\(Self.pitchPanePath) came back suspiciously short: \(pane.count) chars")
+        let write = "the note editor pane's toggle no longer writes the shared PanelLayoutStore slot "
+            + "the way the roll's does — the pane would have a button that does nothing."
+        #expect(pane.contains("layout.setEditorMaximized(!maximized)"), "\(write)")
+        for face in ["EditorMaximize.toggleSymbol(maximized: maximized)",
+                     "EditorMaximize.toggleHelp(maximized: maximized)",
+                     "EditorMaximize.toggleAccessibilityLabel(maximized: maximized)"] {
+            #expect(pane.contains(face),
+                    "the pane's toggle no longer takes `\(face)` from the tested rule — its two faces are unpinned.")
+        }
+        // Beside close and BEFORE it, as in the roll: one family of pane action.
+        let order = "the pane's MAXIMIZE toggle is no longer drawn between the zoom cluster and the "
+            + "close control."
+        #expect(Self.squeezed(pane).contains("zoomCluster maximizeToggle Button(action: onClose)"),
+                "\(order)")
     }
 
     /// The third exit, the one a user reaches for by reflex. Dragging the splitter
@@ -209,19 +321,62 @@ struct EditorMaximizeSiteTests {
         }
     }
 
-    /// The wire decision, asserted rather than remembered. Layout is a documented
-    /// non-invokable window preference (docs/DESIGN-LANGUAGE.md); the mode rides
-    /// `debug.panelLayout` and must never appear on `allCommands` or MCP, where it
-    /// would break the wire-count pins to buy an agent control over how tall a
-    /// pane is drawn.
-    @Test("the maximize mode stays OFF the wire — debug tier only")
-    func staysOffTheWire() {
+    /// The wire decision, asserted rather than remembered.
+    ///
+    /// ⚠️⚠️ **THIS TEST WAS INVERTED AT M35, AND THE INVERSION IS THE RECORD OF A
+    /// RULING, NOT A RELAXATION.** It used to assert `editorMaximized` NEVER
+    /// reaches DAWControl. `docs/DESIGN-LANGUAGE.md` still records adjustable
+    /// layout as a non-invokable window preference, and every other slot still
+    /// obeys it — but M35 narrowed that rule to TWO NAMED EXCEPTIONS, because
+    /// M35 also shipped `view.capture`: the workspace mode and the editor
+    /// maximize are the two controls that decide WHAT A CAPTURE CAN SEE, so an
+    /// agent that can photograph the app and cannot frame it has half a
+    /// capability. m25-b-1's "no project byte, no sound" argument was not
+    /// overturned; a different question reached the same control.
+    ///
+    /// So the assertion flips shape rather than disappearing: the mode must be
+    /// on the wire through `view.panelLayout` and NOWHERE ELSE, and the debug
+    /// seam must still stage it. An absence-test that simply deleted itself here
+    /// would leave the FENCE — the thing actually worth protecting — unguarded.
+    @Test("the maximize mode is on the wire through view.panelLayout ONLY (M35 narrowed the rule)")
+    func onlyReachableThroughViewPanelLayout() {
         let control = Self.text("DAWControl/Commands.swift")
-        let note14 = "`editorMaximized` reached DAWControl — layout is a non-invokable window " + "preference (DESIGN-LANGUAGE.md), and an allCommands entry breaks the " + "wire-count pins."
-        #expect(!control.contains("editorMaximized"), "\(note14)")
-        // Positive control: the reader really is reading a populated Commands.swift.
+        // Positive control FIRST: the reader really is reading a populated
+        // Commands.swift, so an absence below cannot be "the file never loaded".
         #expect(control.count > 10_000, "Commands.swift came back short: \(control.count) chars")
-        // And it IS reachable through the debug seam, so a capture can stage it.
+        #expect(control.contains("\"view.panelLayout\""),
+                "view.panelLayout is gone from DAWControl — the M35 exception vanished.")
+        #expect(control.contains("editorMaximized"),
+                "`editorMaximized` no longer reaches DAWControl; view.panelLayout cannot expose it.")
+
+        // ⛔ THE FENCE. Every OTHER PanelLayoutStore slot must stay debug-tier.
+        // A key listed here reaching Commands.swift's CODE means the narrowed
+        // rule got widened by accident — which is exactly how a "two named
+        // exceptions" rule rots into "layout is invokable".
+        //
+        // ⚠️ COMMENTS ARE STRIPPED FIRST, and that is not a convenience: the
+        // `view.panelLayout` arm NAMES every one of these keys in prose, to say
+        // it refuses them. A raw `contains` would read that refusal as a
+        // violation and redden on the very text that documents the fence.
+        let controlCode = Self.codeOnly(control)
+        for banned in ["sidebarWidth", "pianoRollPPB", "pianoRollRowHeight",
+                       "pianoRollMinimap", "pianoRollCenterPitch", "mixerInsertsCollapsed",
+                       "waveformNormalize", "waveformVerticalZoom", "auditionEnabled"] {
+            let note14 = "`\(banned)` reached DAWControl — M35 narrowed the non-invokable-layout rule "
+                + "to workspace + editorMaximized ONLY (DESIGN-LANGUAGE.md); everything else is "
+                + "debug-tier chrome and belongs to debug.panelLayout."
+            #expect(!controlCode.contains(banned), "\(note14)")
+        }
+        // `editorFraction` is the one key NOT in that list, and its absence from
+        // it is deliberate: it IS in DAWControl, as a READ-ONLY echo beside
+        // `editorMaximized` (the m25-b-1 restore contract — the two are
+        // independent, so one round trip proves it). It must never become
+        // SETTABLE, which is a claim about the accepted-key array, not about the
+        // file.
+        let note15 = "view.panelLayout's accepted-key array changed shape — re-check that " + "editorFraction did not become settable."
+        #expect(controlCode.contains("[\"workspace\", \"editorMaximized\"]"), "\(note15)")
+
+        // And it IS still reachable through the debug seam, so a capture can stage it.
         let app = Self.codeOnly(Self.text(Self.appPath))
         #expect(app.contains("params[\"editorMaximized\"]"),
                 "the debug.panelLayout seam no longer stages the mode, so no capture can drive it.")

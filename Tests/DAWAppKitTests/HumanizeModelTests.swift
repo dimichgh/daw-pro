@@ -429,6 +429,10 @@ import DAWCore
         var applyCount = 0
         /// Set to make the preview closure throw — the refusal path.
         var previewThrows: ProjectError?
+        /// m34-f step ②: what the seam hands back. `nil` by default (a recorder
+        /// has no engine and therefore no capture verdict); set it to stand in
+        /// for an engine that IS capturing.
+        var previewResult: PadPreviewResult?
 
         init(noteCount: Int = 8, noteLengthBeats: Double = 4) throws {
             let track = store.addTrack(kind: .instrument)
@@ -454,6 +458,11 @@ import DAWCore
                 preview: { [self] trackID, effort, phase in
                     if let previewThrows { throw previewThrows }
                     previews.append((trackID, effort, phase))
+                    // m34-f step ②: `nil` = "this closure has no answer", the
+                    // documented third state beside true/false. A recorder with
+                    // no engine cannot know whether anything was captured, and
+                    // saying `false` would be inventing an answer.
+                    return previewResult
                 })
         }
 
@@ -900,5 +909,136 @@ import DAWCore
         #expect(!model.gauge.hasReport)
         #expect(model.lastApplication == nil)
         #expect(model.warnings.isEmpty)
+    }
+
+    // MARK: - m34-f step ① — PRESSURE, the third axis
+    //
+    // ⚠️ **EVERY LEG BELOW IS SYNTHETIC.** They drive `pressureChanged` exactly
+    // as `PadPressureNSView.pressureChange(with:)` does, which is the only seam
+    // any gate in this tree has. What they CANNOT prove: that a real
+    // `NSEventTypePressure` arrives at all, that `.primaryGeneric` suppressed
+    // the Force Click detent, and that the AppKit y-flip is right. Those three
+    // are hand checks and are named as such rather than implied to be covered.
+
+    @Test func aPadThatHasSeenNoPressureStreamsExactlyWhatItAlwaysDid() throws {
+        // ⛔ THE DEGRADATION GUARD, at the model. Most Macs this ships to have no
+        // Force Touch trackpad; on those, nothing about the pad may change.
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        model.setDot(angle: 1.0, radius: 0.8)
+
+        #expect(model.pressure == nil)
+        #expect(!model.pressureObserved)
+        #expect(model.streamedEffort == model.effort)
+        #expect(model.pressureReadout == nil, "no row may be drawn for an axis that does not exist")
+
+        model.beginGesture()
+        model.setDot(angle: 1.2, radius: 0.9)
+        _ = model.endDrag()
+        // The recorded stream is the DOT's effort throughout — no scaling anywhere.
+        #expect(harness.previews.allSatisfy { $0.phase == .end || $0.effort > 0 })
+        #expect(harness.previews.contains { abs($0.effort - model.effort) < 1e-9 } == true
+                || harness.previews.count >= 2)
+    }
+
+    @Test func aPressureEventScalesWhatGoesOutWithoutMovingTheDot() throws {
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        model.setDot(angle: 0.4, radius: 1.0)
+        let dotEffort = model.effort
+        model.beginGesture()
+        harness.previews.removeAll()
+
+        model.pressureChanged(0.5)
+
+        #expect(abs(model.effort - dotEffort) < 1e-12, "pressure must not move the dot")
+        #expect(abs(model.streamedEffort - dotEffort * 0.5) < 1e-12)
+        let streamed = try #require(harness.previews.last)
+        #expect(streamed.phase == .move)
+        #expect(abs(streamed.effort - dotEffort * 0.5) < 1e-12,
+                "the SEAM must receive the scaled value, not the dot's")
+    }
+
+    @Test func theCapabilityLatchIsObservedAndSurvivesTheGestureThatSetIt() throws {
+        // ⭐ TWO DIFFERENT LIFETIMES, and conflating them is the bug this pins.
+        // `pressure` is PER-GESTURE (a lifted finger applies no force);
+        // `pressureObserved` is PER-SESSION (hardware does not stop being Force
+        // Touch between gestures). If `pressureObserved` reset with the gesture,
+        // the readout row would flicker in and out on every click.
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        model.beginGesture()
+        model.pressureChanged(0.7)
+        #expect(model.pressure == 0.7)
+        #expect(model.pressureObserved)
+
+        _ = model.endDrag()
+        #expect(model.pressure == nil, "a lifted finger presses nothing")
+        #expect(model.pressureObserved, "the machine still has a Force Touch trackpad")
+
+        model.beginGesture()
+        #expect(model.pressure == nil, "the next gesture opens with no force applied")
+        #expect(model.streamedEffort == model.effort)
+    }
+
+    @Test func pressureOutsideAGestureIsIgnoredButStillCountsAsCapability() throws {
+        // ⛔ The pad NEVER streams while the transport merely rolls. A pressure
+        // event with no gesture open is a press this surface cannot receive, and
+        // acting on it would break the rule the whole gesture machine exists for
+        // — but it IS still evidence about the hardware.
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        harness.previews.removeAll()
+
+        model.pressureChanged(0.9)
+
+        #expect(harness.previews.isEmpty, "nothing may be streamed outside a gesture")
+        #expect(model.pressure == nil)
+        #expect(model.pressureObserved, "the event still proves the hardware can do this")
+    }
+
+    @Test func theEffortReadoutShowsWHATGOESOUT() throws {
+        // A readout that showed the dot's unscaled effort while pressure
+        // attenuated the sound would be a number that disagrees with what is
+        // heard — the worst kind of readout to ship.
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+        model.setDot(angle: 0.4, radius: 1.0)
+        model.beginGesture()
+        let unpressed = model.effortReadout
+        model.pressureChanged(0.25)
+
+        #expect(model.effortReadout != unpressed)
+        #expect(model.effortReadout.contains(
+            String(format: "%.2f", model.effort * 0.25)))
+        #expect(model.pressureReadout == "0.25")
+    }
+
+    @Test func theCaptureLightIsTheSEAMSAnswerAndNotTheModelsGuess() throws {
+        // ⭐ THE HONESTY LIGHT IS READ BACK. The model has no opinion about
+        // whether a take received anything — it reports what the seam handed
+        // back, and `nil` when the seam had no answer (a recorder, no engine).
+        let harness = try PadHarness()
+        let model = harness.preparedModel()
+
+        model.beginGesture()
+        #expect(model.isCapturingExpression == nil, "no answer is not the same as 'not recording'")
+        #expect(model.capturedExpressionPoints == 0)
+        _ = model.endDrag()
+
+        harness.previewResult = PadPreviewResult(
+            trackID: harness.trackID, phase: .move, controller: 11, controllerValue: 64,
+            effort: 0.5, streaming: true, delivered: true, outcome: .sounded,
+            capturedPoints: 1, recording: true)
+        model.beginGesture()
+        model.setDot(angle: 1.1, radius: 0.7)
+
+        #expect(model.isCapturingExpression == true)
+        #expect(model.capturedExpressionPoints >= 2, "begin + move both landed in the take")
+
+        // A NEW gesture resets the running count — it describes THIS gesture.
+        _ = model.endDrag()
+        model.beginGesture()
+        #expect(model.capturedExpressionPoints == 1, "the begin of the new gesture, and only it")
     }
 }

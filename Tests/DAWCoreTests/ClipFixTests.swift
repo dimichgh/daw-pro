@@ -214,6 +214,70 @@ struct ClipFixPlannerTests {
         let out = ClipFixPlanner.splice(comp, regionStart: 1e-12, regionEnd: 10, laneID: fix)
         #expect(out.count == 1 && out[0].laneID == fix)
     }
+
+    // MARK: Lane pitch drift (round 2, PK-F3) — pure
+
+    private func lane(_ name: String, shift: Double, id: UUID = UUID()) -> TakeLane {
+        TakeLane(id: id, name: name, clip: Clip(name: name, startBeat: 0, lengthBeats: 8,
+                                                audioFileURL: URL(fileURLWithPath: "/\(name).wav"),
+                                                pitchShiftSemitones: shift))
+    }
+
+    private func moved(_ lane: TakeLane, by semitones: Double) -> TakeLane {
+        var lane = lane
+        lane.clip.pitchShiftSemitones += semitones
+        return lane
+    }
+
+    @Test("PK-F3 drift: unchanged lanes are not stale; a uniform move is named as a key change, in words")
+    func lanePitchDriftKeyChange() {
+        let a = lane("Take 1", shift: 0), b = lane("Take 2", shift: -1)
+        let frozen = ProjectStore.lanePitch(of: TakeGroup(name: "Vox", lanes: [a, b]))
+        #expect(frozen == [a.id: 0, b.id: -1])
+        #expect(ProjectStore.lanePitchDrift(frozen: frozen, lanes: [a, b]) == nil)
+
+        let up = ProjectStore.lanePitchDrift(frozen: frozen, lanes: [moved(a, by: 3), moved(b, by: 3)])
+        #expect(up?.contains("(every take moved up 3 semitones, as a key change does)") == true)
+        #expect(up?.contains("would sound out of tune against the takes around it") == true)
+        #expect(up?.hasSuffix("submit again with ai.fixClipRegion") == true)
+        let down = ProjectStore.lanePitchDrift(frozen: frozen, lanes: [moved(a, by: -1), moved(b, by: -1)])
+        #expect(down?.contains("(every take moved down 1 semitone, as a key change does)") == true)
+        let half = ProjectStore.lanePitchDrift(frozen: frozen, lanes: [moved(a, by: 0.5), moved(b, by: 0.5)])
+        #expect(half?.contains("(every take moved up 0.5 semitones, as a key change does)") == true)
+    }
+
+    @Test("PK-F3 drift: lanes that moved apart are each named, was → now, and never called a key change")
+    func lanePitchDriftNamesLanes() {
+        let a = lane("Take 1", shift: 0), b = lane("Take 2", shift: -1)
+        let frozen = ProjectStore.lanePitch(of: TakeGroup(name: "Vox", lanes: [a, b]))
+        let one = ProjectStore.lanePitchDrift(frozen: frozen, lanes: [a, moved(b, by: 3)])
+        #expect(one?.contains("('Take 2' -1 → 2 semitones)") == true)
+        #expect(one?.contains("every take") == false)
+        let apart = ProjectStore.lanePitchDrift(frozen: frozen, lanes: [moved(a, by: 3), moved(b, by: 2)])
+        #expect(apart?.contains("('Take 1' 0 → 3, 'Take 2' -1 → 1 semitones)") == true)
+        #expect(apart?.contains("every take") == false)
+    }
+
+    @Test("PK-F3 drift: only lanes frozen at submit count; a float round trip is no change; duplicate ids never trap")
+    func lanePitchDriftEdges() {
+        let a = lane("Take 1", shift: 0.1), b = lane("Take 2", shift: 0)
+        let frozen = ProjectStore.lanePitch(of: TakeGroup(name: "Vox", lanes: [a, b]))
+        // A lane added since (another fix) is not compared; a removed lane is
+        // the range check's business.
+        #expect(ProjectStore.lanePitchDrift(frozen: frozen, lanes: [a, b, lane("AI Fix 1", shift: 7)]) == nil)
+        #expect(ProjectStore.lanePitchDrift(frozen: frozen, lanes: [a]) == nil)
+        // Up 3 and back down is float addition, not a change...
+        let trip = moved(moved(a, by: 3), by: -3)
+        #expect(trip.clip.pitchShiftSemitones != a.clip.pitchShiftSemitones)  // control: it IS inexact
+        #expect(ProjectStore.lanePitchDrift(frozen: frozen, lanes: [trip, b]) == nil)
+        // ...while a real 0.01-semitone change is stale (the tolerance is not a blindfold).
+        #expect(ProjectStore.lanePitchDrift(frozen: frozen, lanes: [a, moved(b, by: 0.01)]) != nil)
+        // Nothing frozen (a plain-clip fix) compares nothing.
+        #expect(ProjectStore.lanePitchDrift(frozen: [:], lanes: [a, moved(b, by: 0.01)]) == nil)
+        // A duplicate lane id must not trap a submit: the first lane wins.
+        let dup = TakeLane(id: a.id, name: "Copy", clip: b.clip)
+        #expect(ProjectStore.lanePitch(of: TakeGroup(name: "Vox", lanes: [a, dup])) == [a.id: 0.1])
+    }
 }
 
 // MARK: - Store: submit + import
@@ -724,5 +788,90 @@ struct ClipFixStoreTests {
         try store.newProject(discardChanges: true)
         #expect(store.pendingClipFixes.isEmpty)
         withExtendedLifetime(engine) {}  // engine is weak on the store — pin it through both submits
+    }
+
+    // MARK: Import — 13 (round 2, PK-F3: a key change while a fix is in flight)
+
+    /// A take group whose two lanes are comped, a fix submitted on a member.
+    private func submittedTakeGroupFix(wav: URL) async throws
+        -> (ProjectStore, FakeRenderEngine, TakeGroup, String) {
+        let a = audioClip("A", start: 0, length: 8, file: "/a.wav")
+        let b = audioClip("B", start: 0, length: 8, file: "/b.wav")
+        let track = Track(name: "Vox", kind: .audio, clips: [a, b])
+        let source = FakeClipFixSource()
+        let engine = FakeRenderEngine()
+        let store = makeStore(source: source, engine: engine, tracks: [track])
+        let group = try store.groupTakes(trackId: track.id, clipIds: [a.id, b.id])
+        let memberID = try #require(store.tracks[0].clips.first?.id)
+        let submission = try await store.fixClipRegion(
+            trackId: track.id, clipId: memberID, startBeat: 1, endBeat: 3)
+        await source.setFetchResult(.success(GeneratedSongResult(state: "succeeded", audioPath: wav.path)))
+        return (store, engine, group, submission.jobID)
+    }
+
+    @Test("PK-F3: a key change while a take-group fix is in flight refuses the fix in words and keeps it pending")
+    func keyChangeMidTakeGroupFixIsRefused() async throws {
+        let wav = try writeTinyWAV()
+        let (store, engine, group, jobID) = try await submittedTakeGroupFix(wav: wav)
+        _ = try store.transposeProject(semitones: 3)
+        // The key change reached every take (else there is nothing to refuse).
+        let lanes = try #require(store.tracks[0].takeGroups.first { $0.id == group.id }?.lanes)
+        #expect(lanes.map(\.clip.pitchShiftSemitones) == [3, 3])
+
+        let outcome: Result<ClipFixImportResult, any Error>
+        do { outcome = .success(try await store.importClipFix(jobID: jobID)) } catch { outcome = .failure(error) }
+        withExtendedLifetime(engine) {}  // engine is weak on the store — pin it through submit + import
+        switch outcome {
+        case .success(let landed):
+            let fix = store.tracks[0].takeGroups.first { $0.id == landed.groupID }?
+                .lanes.first { $0.id == landed.laneID }
+            Issue.record("the fix landed at pitch shift \(fix?.clip.pitchShiftSemitones ?? .nan) between takes moved to +3: it plays in the old key")
+        case .failure(let error):
+            guard case ProjectError.clipFixStale(let why) = error else {
+                Issue.record("expected clipFixStale, got \(error)")
+                return
+            }
+            #expect(why.contains("(every take moved up 3 semitones, as a key change does)"))
+            #expect(store.pendingClipFixes[jobID] != nil)  // kept, like every refusal
+        }
+    }
+
+    @Test("PK-F3 control: a transpose undone before import lands the take-group fix (the refusal is about pitch, not the edit)")
+    func keyChangeUndoneLandsTakeGroupFix() async throws {
+        let wav = try writeTinyWAV()
+        let (store, engine, group, jobID) = try await submittedTakeGroupFix(wav: wav)
+        _ = try store.transposeProject(semitones: 3)
+        try store.undo()
+        #expect(store.tracks[0].takeGroups.first { $0.id == group.id }?
+            .lanes.map(\.clip.pitchShiftSemitones) == [0, 0])
+        let landed = try await store.importClipFix(jobID: jobID)
+        withExtendedLifetime(engine) {}
+        #expect(landed.groupID == group.id)
+        #expect(store.pendingClipFixes[jobID] == nil)
+    }
+
+    @Test("PK-F3 control: a plain-clip fix is already refused after a key change, naming the pitch shift")
+    func keyChangeMidPlainClipFixIsRefused() async throws {
+        let wav = try writeTinyWAV()
+        let clip = audioClip("Vox", start: 0, length: 100)
+        let track = Track(name: "Vox", kind: .audio, clips: [clip])
+        let source = FakeClipFixSource()
+        let engine = FakeRenderEngine()
+        let store = makeStore(source: source, engine: engine, tracks: [track])
+        let sub = try await store.fixClipRegion(trackId: track.id, clipId: clip.id, startBeat: 40, endBeat: 50)
+        withExtendedLifetime(engine) {}  // engine is weak on the store — pin it through the submit
+        await source.setFetchResult(.success(GeneratedSongResult(state: "succeeded", audioPath: wav.path)))
+
+        _ = try store.transposeProject(semitones: 3)
+        #expect(store.tracks[0].clips[0].pitchShiftSemitones == 3)
+        let error = await #expect(throws: ProjectError.self) {
+            _ = try await store.importClipFix(jobID: sub.jobID)
+        }
+        guard case .clipFixStale(let why)? = error else {
+            Issue.record("expected clipFixStale, got \(String(describing: error))")
+            return
+        }
+        #expect(why.contains("pitch shift (0.0 → 3.0 semitones)"))
+        #expect(store.pendingClipFixes[sub.jobID] != nil)
     }
 }

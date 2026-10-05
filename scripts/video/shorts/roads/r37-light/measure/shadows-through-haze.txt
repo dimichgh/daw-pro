@@ -1,0 +1,5 @@
+SHADOWS: the same frame with every RISER deleted, minus the frame with them.
+A shadow that exists as a real VOLUME shows up as a loss of brightness in
+pixels that contain only HAZE (no surface). Split the frame into the two.
+  cycles  haze-only rows: mean loss +2.640  max  41.33   floor rows: mean loss +4.748  max 198.00
+  eevee   haze-only rows: mean loss +0.000  max   0.67   floor rows: mean loss +2.200  max 180.00

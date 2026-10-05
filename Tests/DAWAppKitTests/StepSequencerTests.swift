@@ -471,4 +471,305 @@ struct StepSequencerTests {
         bridge.reportNoGrid(from: incoming)
         #expect(bridge.reportedMode == .notes)
     }
+
+    // MARK: - m23-ap I5-F4: the columns are the SONG's grid cells
+
+    /// The I5-F2 fixture's meter: 4/4 until beat 8, 3/4 after. Song bars: 1 at
+    /// 0, 2 at 4, 3 at 8, 4 at 11, 5 at 14, 6 at 17.
+    static let songMeter: MeterMap = {
+        // A literal map the initialiser accepts (8 is a 4/4 bar line), so `try!`
+        // cannot fire; a typo here fails every test loudly, never quietly.
+        try! MeterMap(changes: [.init(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
+                                .init(startBeat: 8, beatsPerBar: 3, beatUnit: 4)])
+    }()
+    static let fourFour = MeterMap(constant: TimeSignature())
+
+    /// A drum clip's geometry on the song's grid, starting at song beat `start`.
+    private func songGeometry(start: Double, notes: [MIDINote] = [], lengthBeats: Double = 4,
+                              resolution: SnapResolution = .sixteenth,
+                              meter: MeterMap = StepSequencerTests.fourFour) -> StepSequencerGeometry {
+        StepSequencerGeometry.make(
+            isDrumKit: true, notes: notes, clipLengthBeats: lengthBeats, resolution: resolution,
+            songGrid: PianoRollSongGrid.Context(clipStartBeat: start, meterMap: meter))
+    }
+
+    /// True when a SONG beat sits on a line of `grid` counted from song beat 0.
+    private func onLine(_ songBeat: Double, _ grid: Double) -> Bool {
+        let r = songBeat.truncatingRemainder(dividingBy: grid)
+        return r < 1e-9 || grid - r < 1e-9
+    }
+
+    @Test("I5-F4 INVARIANCE — a clip that starts ON a line of its step grid counts, draws, hits, fills, toggles and places the playhead BIT-IDENTICALLY to the pre-I5-F4 clip-local grid (starts on odd steps, a triplet's 16, a large 1024; every pickable step but Bar)")
+    func onGridColumnsAreBitIdentical() throws {
+        let notes = [
+            MIDINote(pitch: Self.kick, startBeat: 0, lengthBeats: 0.25),
+            MIDINote(pitch: Self.snare, startBeat: 1.0 / 3.0, lengthBeats: 0.25),
+            MIDINote(pitch: Self.kick, startBeat: 0.74, lengthBeats: 0.25),
+            MIDINote(pitch: Self.snare, startBeat: 2.0 / 3.0, lengthBeats: 0.25),
+            MIDINote(pitch: 42, startBeat: 3.99, lengthBeats: 0.25),
+            MIDINote(pitch: 42, startBeat: 5, lengthBeats: 0.25),      // past the end: latent
+        ]
+        var failures: [String] = []
+        var cases = 0
+        for resolution in StepSequencerGeometry.pickableResolutions where resolution != .bar {
+            let step = StepSequencerGeometry.stepBeats(for: resolution)
+            let old = geometry(notes: notes, resolution: resolution)   // pre-I5-F4 signature: clip at 0, 4/4
+            for start in [0, step, 3 * step, 5 * step, 4, 16, 1024] {
+                let new = songGeometry(start: start, notes: notes, resolution: resolution)
+                try #require(new.phaseBeats == 0, "fixture \(start) is off the \(resolution) grid")
+                cases += 1
+                let tag = "\(resolution)@\(start)"
+                if new.stepCount != old.stepCount || new.stepBeats != old.stepBeats {
+                    failures.append("\(tag) stepCount/stepBeats")
+                }
+                if new.clipEndX.native.bitPattern != old.clipEndX.native.bitPattern {
+                    failures.append("\(tag) clipEndX")
+                }
+                if new.clipStartX != 0 { failures.append("\(tag) clipStartX") }
+                for k in 0...old.stepCount
+                    where new.beat(forStep: k).bitPattern != old.beat(forStep: k).bitPattern {
+                    failures.append("\(tag) beat(forStep: \(k))")
+                }
+                for b in stride(from: 0.0, through: 6, by: 0.01)
+                    where new.stepIndex(forBeat: b) != old.stepIndex(forBeat: b) {
+                    failures.append("\(tag) stepIndex(\(b))")
+                }
+                if StepSequencerEdit.fills(notes: notes, geometry: new)
+                    != StepSequencerEdit.fills(notes: notes, geometry: old) {
+                    failures.append("\(tag) fills")
+                }
+                for k in [0, 1, 5, old.stepCount - 1] {
+                    let cell = StepCell(step: k, pitch: 44)
+                    let a = StepSequencerEdit.toggle(notes: notes, cell: cell, geometry: new).added
+                    let b = StepSequencerEdit.toggle(notes: notes, cell: cell, geometry: old).added
+                    if a?.startBeat.bitPattern != b?.startBeat.bitPattern
+                        || a?.lengthBeats.bitPattern != b?.lengthBeats.bitPattern {
+                        failures.append("\(tag) toggle \(k)")
+                    }
+                }
+                // The view's pre-I5-F4 playhead: `lineX` on the step scale, unshifted.
+                let was = PianoRollPlayhead.lineX(position: start + 1.5, clipStartBeat: start,
+                                                  lengthBeats: 4,
+                                                  pixelsPerBeat: old.stepWidth / CGFloat(old.stepBeats))
+                let now = new.playheadX(position: start + 1.5, lengthBeats: 4)
+                if now?.native.bitPattern != was?.native.bitPattern { failures.append("\(tag) playhead") }
+            }
+        }
+        #expect(cases == (StepSequencerGeometry.pickableResolutions.count - 1) * 7)
+        #expect(failures.isEmpty, "\(failures.count) differ, e.g. \(failures.prefix(6))")
+    }
+
+    @Test("I5-F4 INVARIANCE — on a BAR-aligned clip (bar 3 in 4/4) the bar and beat emphasis is the clip-local grid's, column for column; the bar NUMBERS are the song's (3, 4, … where the old grid read 1, 2, …)")
+    func barAlignedEmphasisIsUnchangedAndNumbersAreTheSongs() {
+        var failures: [String] = []
+        for resolution in [SnapResolution.sixteenth, .eighth, .eighthTriplet, .beat, .bar] {
+            let old = geometry(lengthBeats: 12, resolution: resolution)
+            let new = songGeometry(start: 8, lengthBeats: 12, resolution: resolution)
+            if new.stepCount != old.stepCount { failures.append("\(resolution) stepCount") }
+            for k in 0..<old.stepCount {
+                if new.isBarStart(step: k) != old.isBarStart(step: k) { failures.append("\(resolution) bar \(k)") }
+                if new.isBeatStart(step: k) != old.isBeatStart(step: k) { failures.append("\(resolution) beat \(k)") }
+                if new.barNumber(forStep: k) != old.barNumber(forStep: k) + 2 {
+                    failures.append("\(resolution) number \(k)")
+                }
+            }
+        }
+        #expect(failures.isEmpty, "\(failures.prefix(6))")
+    }
+
+    @Test("I5-F4 — an OFF-GRID clip's columns are the SONG's cells: at 2.1 under 1/16, column 0 opens on song 2.0 (0.1 beat of it before the clip, shaded) and every column edge is a drawn line; the clip-counted edges were all 0.1 off")
+    func offGridColumnEdgesAreSongLines() {
+        let g = songGeometry(start: 2.1)                        // a 4-beat clip: song 2.1 … 6.1
+        #expect(abs(g.phaseBeats - 0.1) < 1e-12)
+        #expect(g.firstStepSongBeat == 2.0)
+        #expect(g.stepCount == 17)                              // (4 + 0.1) / 0.25 = 16.4 → 17
+        #expect(abs(g.clipStartX - 12) < 1e-9)                  // 0.1 beat at 120 pt per beat
+        #expect(abs(g.clipEndX - 492) < 1e-9)                   // (4 + 0.1) · 120
+        let edges = (0...g.stepCount).map { 2.1 + g.beat(forStep: $0) }
+        #expect(edges.allSatisfy { onLine($0, 0.25) }, "\(edges)")
+        // CONTROL — the clip-counted grid's edges sit 0.1 beat off every line.
+        let old = geometry()
+        #expect((0...old.stepCount).map { 2.1 + old.beat(forStep: $0) }.allSatisfy { !onLine($0, 0.25) })
+    }
+
+    @Test("I5-F4 — on an off-grid clip a note sits in the column its song line opens, a box writes its note ON that line, and column 0's box writes on the clip's first beat (notes clamp at 0) — both round-trip")
+    func offGridTogglesWriteOnSongLines() throws {
+        let g = songGeometry(start: 2.1)
+        #expect(g.stepIndex(forBeat: 0) == 0)           // song 2.1, inside [2.0, 2.25)
+        #expect(g.stepIndex(forBeat: 0.14) == 0)        // song 2.24
+        #expect(g.stepIndex(forBeat: 0.15) == 1)        // song 2.25 opens column 1
+        #expect(g.stepIndex(forBeat: 0.9) == 4)         // song 3.0
+        let three = StepSequencerEdit.toggle(notes: [], cell: StepCell(step: 3, pitch: Self.kick), geometry: g)
+        let written = try #require(three.added)
+        #expect(abs(2.1 + written.startBeat - 2.75) < 1e-9, "\(2.1 + written.startBeat)")
+        #expect(StepSequencerEdit.filledCells(notes: three.notes, geometry: g)
+                == [StepCell(step: 3, pitch: Self.kick)])
+        let zero = StepSequencerEdit.toggle(notes: [], cell: StepCell(step: 0, pitch: Self.snare), geometry: g)
+        #expect(zero.added?.startBeat == 0)
+        #expect(StepSequencerEdit.filledCells(notes: zero.notes, geometry: g)
+                == [StepCell(step: 0, pitch: Self.snare)])
+        let off = StepSequencerEdit.toggle(notes: zero.notes, cell: StepCell(step: 0, pitch: Self.snare), geometry: g)
+        #expect(off.notes.isEmpty)
+        // CONTROL — the clip-counted grid wrote column 3's note at song 2.85.
+        let old = StepSequencerEdit.toggle(notes: [], cell: StepCell(step: 3, pitch: Self.kick), geometry: geometry())
+        #expect(!onLine(2.1 + (old.added?.startBeat ?? 0), 0.25))
+    }
+
+    @Test("I5-F4 — bar lines and bar numbers are the SONG's through a meter change (clip at 2.5, 4/4 → 3/4 at 8): the columns over song 4, 8, 11, 14, 17 read bars 2…6 on a 1/16 grid AND on a triplet grid; the clip-counted stride put a bar every 16 columns from the clip's start")
+    func barLinesAndNumbersAreTheSongs() {
+        let sixteenths = songGeometry(start: 2.5, lengthBeats: 16, meter: Self.songMeter)
+        #expect(sixteenths.phaseBeats == 0)
+        #expect(sixteenths.barMarks == [StepBarMark(step: 6, bar: 2), StepBarMark(step: 22, bar: 3),
+                                        StepBarMark(step: 34, bar: 4), StepBarMark(step: 46, bar: 5),
+                                        StepBarMark(step: 58, bar: 6)], "\(sixteenths.barMarks)")
+        // Beat emphasis on whole SONG beats: 2.5 + k/4 is whole for k = 2, 6, 10.
+        #expect((0..<12).filter { sixteenths.isBeatStart(step: $0) } == [2, 6, 10])
+        // Triplets: column 0 opens on song 7/3 (phase 1/6); the bars are song
+        // steps 12, 24, 33, 42, 51 — found by integer arithmetic, where a float
+        // song beat would read 3.9999999999999996 and miss bar 2.
+        let triplets = songGeometry(start: 2.5, lengthBeats: 16, resolution: .eighthTriplet,
+                                    meter: Self.songMeter)
+        #expect(abs(triplets.phaseBeats - 1.0 / 6.0) < 1e-12)
+        #expect(triplets.barMarks.map(\.step) == [5, 17, 26, 35, 44], "\(triplets.barMarks)")
+        #expect(triplets.barMarks.map(\.bar) == [2, 3, 4, 5, 6])
+        // CONTROL — the clip-counted stride.
+        let old = geometry(lengthBeats: 16)
+        #expect((0..<old.stepCount).filter { old.isBarStart(step: $0) } == [0, 16, 32, 48])
+    }
+
+    @Test("I5-F4 — a BAR column is one bar of the meter the clip starts in (3 beats in 3/4; 4 in 4/4, unchanged), measured from the song's bar line")
+    func barColumnsAreMeterAware() {
+        let threeFour = MeterMap(constant: TimeSignature(beatsPerBar: 3))
+        let onBar = songGeometry(start: 3, lengthBeats: 9, resolution: .bar, meter: threeFour)
+        #expect(onBar.stepBeats == 3)
+        #expect(onBar.phaseBeats == 0)
+        #expect(onBar.stepCount == 3)
+        #expect((0..<3).map { onBar.barNumber(forStep: $0) } == [2, 3, 4])
+        let offBar = songGeometry(start: 4, lengthBeats: 9, resolution: .bar, meter: threeFour)
+        #expect(offBar.phaseBeats == 1)
+        #expect(offBar.firstStepSongBeat == 3)
+        #expect(songGeometry(start: 0, lengthBeats: 8, resolution: .bar).stepBeats == 4)
+        // Across a meter change a column stays one bar of the STARTING meter —
+        // uniform columns cannot re-space (documented on `columnPlacement`).
+        #expect(songGeometry(start: 4, lengthBeats: 12, resolution: .bar,
+                             meter: Self.songMeter).stepBeats == 4)
+    }
+
+    @Test("I5-F4 — the step grid's playhead moves right by the partial column 0, so it crosses the column holding its beat; nil outside the clip, as before")
+    func playheadShiftsByTheLeadingColumn() throws {
+        let g = songGeometry(start: 2.1)                        // 120 pt per beat
+        let atClipStart = try #require(g.playheadX(position: 2.1, lengthBeats: 4))
+        #expect(abs(atClipStart - 12) < 1e-9)
+        let atLine = try #require(g.playheadX(position: 2.25, lengthBeats: 4))
+        #expect(abs(atLine - g.x(forStep: 1)) < 1e-9)           // song 2.25 is column 1's edge
+        #expect(g.playheadX(position: 1.0, lengthBeats: 4) == nil)
+        #expect(g.playheadX(position: 7.0, lengthBeats: 4) == nil)
+    }
+
+    @Test("I5-F4 — the pre-I5-F4 `make(…beatsPerBar:)` IS the song-grid geometry of a clip at song beat 0 in one meter")
+    func oldSignatureForwardsToTheSongGrid() {
+        for resolution in StepSequencerGeometry.pickableResolutions {
+            for bpb in [3, 4, 7] {
+                let old = StepSequencerGeometry.make(isDrumKit: false, notes: [], clipLengthBeats: 8,
+                                                     resolution: resolution, beatsPerBar: bpb)
+                let new = StepSequencerGeometry.make(
+                    isDrumKit: false, notes: [], clipLengthBeats: 8, resolution: resolution,
+                    songGrid: .init(clipStartBeat: 0,
+                                    meterMap: MeterMap(constant: TimeSignature(beatsPerBar: bpb))))
+                #expect(old == new, "\(resolution) \(bpb)")
+            }
+        }
+    }
+
+    @MainActor
+    @Test("I5-F4 — the bridge carries the grid's song placement (phase, column 0's song beat, the bar marks) and a teardown clears it")
+    func bridgeEchoesTheSongPlacement() {
+        let bridge = StepSequencerBridge()
+        let g = songGeometry(start: 2.1, lengthBeats: 8)
+        let token = UUID()
+        bridge.report(token: token, lanes: g.lanes, stepCount: g.stepCount, stepBeats: g.stepBeats,
+                      fills: [], rowHeight: g.rowHeight, stepWidth: g.stepWidth,
+                      phaseBeats: g.phaseBeats, firstStepSongBeat: g.firstStepSongBeat,
+                      barMarks: g.barMarks)
+        #expect(abs(bridge.reportedPhaseBeats - 0.1) < 1e-12)
+        #expect(bridge.reportedFirstStepSongBeat == 2.0)
+        #expect(bridge.reportedBarMarks == [StepBarMark(step: 8, bar: 2), StepBarMark(step: 24, bar: 3)])
+        bridge.reportNoGrid(from: token)
+        #expect(bridge.reportedPhaseBeats == 0)
+        #expect(bridge.reportedFirstStepSongBeat == 0)
+        #expect(bridge.reportedBarMarks.isEmpty)
+    }
+
+    @Test("I5-F4 round 3 — a clip far out (2.4e18 beats up to the largest Double) builds its step geometry without trapping: past 2^53 song steps the lattice is dropped (no song emphasis, no meter lookups) and columns still count and hit; below it the lattice is kept")
+    func farOutClipsKeepTheGeometryTotal() {
+        let notes = [MIDINote(pitch: Self.kick, startBeat: 0, lengthBeats: 0.25),
+                     MIDINote(pitch: Self.snare, startBeat: 1, lengthBeats: 0.25)]
+        for resolution in [SnapResolution.sixteenth, .thirtySecond, .sixteenthTriplet, .beat] {
+            for start in [2.4e18, 1e19, 1e300, Double.greatestFiniteMagnitude] {
+                let g = songGeometry(start: start, notes: notes, resolution: resolution)
+                #expect(g.stepsPerWholeBeat == nil, "\(resolution) at \(start)")
+                #expect(g.firstStepIndex == 0)
+                #expect(g.stepCount > 0 && g.phaseBeats.isFinite)
+                #expect(g.barMarks.isEmpty)
+                #expect((0..<g.stepCount).allSatisfy { !g.isBarStart(step: $0) })
+                #expect((0..<g.stepCount).map { g.isBeatStart(step: $0) }.count == g.stepCount)
+                #expect(g.stepIndex(forBeat: 1) >= 0)
+            }
+        }
+        // CONTROL: below 2^53 the lattice is kept, so the drop above is the guard's.
+        let kept = songGeometry(start: 1024, notes: notes, resolution: .sixteenth)
+        #expect(kept.stepsPerWholeBeat == 4)
+        #expect(!kept.barMarks.isEmpty)
+    }
+
+    @Test("I5-F4 round 4 — a note or a clip end out past any grid (a note 2.4e18 beats in at 1/16, 1e300, the largest Double, an infinite clip) builds a grid of at most maximumStepCount (2^20) columns without trapping, and stepIndex answers such a beat with a step no column has; nothing past the grid fills a cell")
+    func farNotesKeepTheStepGridTotal() {
+        #expect(StepSequencerGeometry.maximumStepCount == 1 << 20)
+        for resolution in [SnapResolution.sixteenth, .sixtyFourth, .sixteenthTriplet, .bar] {
+            for far in [2.4e18, 1e300, Double.greatestFiniteMagnitude] {
+                let notes = [MIDINote(pitch: Self.kick, startBeat: 0, lengthBeats: 0.25),
+                             MIDINote(pitch: Self.snare, startBeat: far, lengthBeats: 0.25)]
+                let g = geometry(notes: notes, resolution: resolution)
+                #expect(g.stepCount == StepSequencerGeometry.maximumStepCount, "\(resolution) \(far)")
+                let step = g.stepIndex(forBeat: far)
+                #expect(step >= g.stepCount, "\(resolution) \(far): \(step)")
+                let cells = StepSequencerEdit.fills(notes: notes, geometry: g).map { $0.cell }
+                #expect(cells == [StepCell(step: 0, pitch: Self.kick)])
+            }
+            let endless = geometry(lengthBeats: .infinity, resolution: resolution)
+            #expect(endless.stepCount == StepSequencerGeometry.maximumStepCount)
+            let g = geometry(resolution: resolution)
+            #expect(g.stepIndex(forBeat: .infinity) == Int.max)
+            #expect(g.stepIndex(forBeat: 1e300) == Int.max)
+            #expect(g.stepIndex(forBeat: -1e300) == Int.min)
+            #expect(g.stepIndex(forBeat: -.infinity) == Int.min)
+            #expect(g.stepIndex(forBeat: .nan) == Int.min)
+        }
+    }
+
+    @Test("I5-F4 round 4 — every grid below the cap keeps the count it had: exactly 2^20 columns (the cap itself) and one fewer are unchanged, one more is held at the cap, and stepIndex answers every finite beat below 2^63 steps as the plain formula does")
+    func stepGridBelowTheCapIsUnchanged() {
+        // 1/16 steps are 0.25 beat: 2^20 columns span exactly 262144 beats.
+        let atCap = geometry(lengthBeats: 0.25 * 1_048_576)
+        #expect(atCap.stepCount == 1_048_576)
+        #expect(geometry(lengthBeats: 0.25 * 1_048_575).stepCount == 1_048_575)
+        #expect(geometry(lengthBeats: 0.25 * 1_048_577).stepCount == 1_048_576)   // the one change
+        for lengthBeats in [0.0, 0.1, 1, 4, 4.1, 16, 1000.3, 65_536] {
+            for resolution in StepSequencerGeometry.pickableResolutions {
+                let g = geometry(lengthBeats: lengthBeats, resolution: resolution)
+                let plain = max(1, Int(((max(lengthBeats, g.stepBeats) + g.phaseBeats) / g.stepBeats
+                                        - 1e-9).rounded(.up)))
+                if plain <= StepSequencerGeometry.maximumStepCount {
+                    #expect(g.stepCount == plain, "\(lengthBeats) \(resolution)")
+                }
+            }
+        }
+        let g = geometry(resolution: .sixteenth)
+        for beat in [0.0, 0.2, 0.25, 0.26, 3.99, 1e6 + 0.1, 1e15, 2e18, -0.3, -2e18] {
+            let scaled = (beat + g.phaseBeats) / g.stepBeats
+            let nearest = scaled.rounded()
+            let plain = abs(scaled - nearest) < 1e-6 ? Int(nearest) : Int(scaled.rounded(.down))
+            #expect(g.stepIndex(forBeat: beat) == plain, "\(beat)")
+        }
+    }
 }

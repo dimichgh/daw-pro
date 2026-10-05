@@ -34,7 +34,7 @@ import DAWCore
 ///
 /// MIDI ONLY, matching the store method: an audio clip has no notes to feel-
 /// shift, so the arrange menu entry does not exist there at all (hidden, never
-/// offered-then-errored — the "Convert to Voice…" rule in TimelineLanesView) and
+/// offered-then-errored — the "Convert Voice…" rule in TimelineLanesView) and
 /// `canApply` refuses regardless, so the guard does not depend on the view.
 ///
 /// **KIND HIDES, STATE EXPLAINS (m25-c-2).** Audio-vs-MIDI is the clip's KIND —

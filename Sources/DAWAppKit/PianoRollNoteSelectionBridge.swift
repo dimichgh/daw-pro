@@ -93,6 +93,16 @@ public final class PianoRollNoteSelectionBridge {
     /// its own name to avoid, only with the user's notes at stake.
     public private(set) var deleteNonce = 0
 
+    /// ASKED OF THE ROLL by the app's key monitor (m34-k): run your Escape path
+    /// — the roll's own mount body, the I4 ladder with the roll's LIVE facts —
+    /// without a SwiftUI key delivery. `PitchEditorInteractionBridge.escapeNonce`
+    /// is the pane's twin. It carries no rung: the roll re-asks the app's one
+    /// ladder with its own gesture and selection, so the monitor's prediction
+    /// can never apply a rung the roll disagrees with.
+    ///
+    /// A THIRD NONCE, for `deleteNonce`'s reason: one number, one meaning.
+    public private(set) var escapeNonce = 0
+
     public init() {}
 
     /// The roll's report. Idempotent — the view calls it with `initial: true`.
@@ -112,6 +122,11 @@ public final class PianoRollNoteSelectionBridge {
     /// the view's guard is what makes a stale menu impossible to act on rather
     /// than merely unlikely.
     public func requestDelete() { deleteNonce += 1 }
+
+    /// THE KEY MONITOR HANDED THE ROLL AN ESCAPE (m34-k). Inert with no roll
+    /// mounted — the view watches without `initial:`, so a roll that appears
+    /// later never replays it.
+    public func requestEscape() { escapeNonce &+= 1 }
 
     /// Stage a note selection into whatever roll is on screen.
     public func stage(selectAll: Bool) {
@@ -431,8 +446,28 @@ public final class PianoRollNoteSelectionBridge {
     ///
     /// INERT WITH NO ROLL MOUNTED (`.onChange` without `initial: true` — every
     /// other nonce's behaviour), and that is correct rather than merely
-    /// tolerable: `SelectAllMenuPolicy` refuses unless the roll is the ACTIVE
-    /// surface, which already implies a mounted roll.
+    /// tolerable: `SelectAllMenuPolicy` refuses unless the roll is OPEN, which
+    /// IS "a roll is mounted" — that is what the term means.
+    ///
+    /// ⭐ **RE-CHECKED AT m34-d AND IT GOT STRONGER, NOT WEAKER.** The sentence
+    /// above used to read "unless the roll is the ACTIVE surface, which already
+    /// implies a mounted roll" — a correct but INDIRECT argument that leaned on
+    /// engagement implying mount. The user's ruling (*"Make it work whenever the
+    /// editor is open."*) replaced that first guard with
+    /// `EditorSurfaceRouter.openSurface`, so the policy's condition and the
+    /// roll's mount condition are now THE SAME FACT rather than one implying the
+    /// other. The widening therefore cannot have opened a window in which a
+    /// request is dropped: every state that is newly LIVE is a state in which a
+    /// `PianoRollView` is on screen.
+    ///
+    /// ⚠️ **"MOUNTED" IS NOT THE SAME INSTANT AS "OBSERVING", AND THAT GAP IS
+    /// REAL — MEASURED at m34-d.** `.onChange` fires only for changes that happen
+    /// while the view is subscribed, so a request that arrives during a remount
+    /// (e.g. straight after leaving the Mix console) is LOST, not queued. No user
+    /// can hit that window by hand — it is sub-frame — but a GATE can, and one
+    /// did: `m34d-select-all-editor-open.mjs`'s K8a leg exists to arm the fixture
+    /// past it, because `{act:"pianoRollNotes", select:false}` succeeds trivially
+    /// against a roll that is not observing and would hide it.
     public private(set) var selectAllNonce = 0
 
     /// Ask the roll to SELECT ALL of its notes.

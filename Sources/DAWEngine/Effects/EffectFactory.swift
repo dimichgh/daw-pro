@@ -43,6 +43,30 @@ enum EffectFactory {
             return ChorusEffect(params: descriptor.resolvedChorus)
         case .bassEnhancer:
             return BassEnhancerEffect(params: descriptor.resolvedBassEnhancer)
+        case .bitCrusher:
+            return BitCrusherEffect(params: descriptor.resolvedBitCrusher)
+        case .djFilter:
+            return DJFilterEffect(params: descriptor.resolvedDJFilter)
+        case .ringMod:
+            return RingModEffect(params: descriptor.resolvedRingMod)
+        case .flanger:
+            return FlangerEffect(params: descriptor.resolvedFlanger)
+        case .hallReverb:
+            return HallReverbEffect(params: descriptor.resolvedHallReverb)
+        case .tapeDelay:
+            return TapeDelayEffect(params: descriptor.resolvedTapeDelay)
+        case .stereoWidth:
+            return StereoWidthEffect(params: descriptor.resolvedStereoWidth)
+        case .phaser:
+            return PhaserEffect(params: descriptor.resolvedPhaser)
+        case .transientShaper:
+            return TransientShaperEffect(params: descriptor.resolvedTransientShaper)
+        case .freqShifter:
+            return FreqShifterEffect(params: descriptor.resolvedFreqShifter)
+        case .clipper:
+            return ClipperEffect(params: descriptor.resolvedClipper)
+        case .dynamicEQ:
+            return DynamicEQEffect(params: descriptor.resolvedDynamicEQ)
         case .audioUnit:
             // Reached only when the registry has no prepared instance yet
             // (the chain state consults its provider first): bit-exact
@@ -75,6 +99,31 @@ enum EffectFactory {
             (instance as? ChorusEffect)?.apply(params: descriptor.resolvedChorus)
         case .bassEnhancer:
             (instance as? BassEnhancerEffect)?.apply(params: descriptor.resolvedBassEnhancer)
+        case .bitCrusher:
+            (instance as? BitCrusherEffect)?.apply(params: descriptor.resolvedBitCrusher)
+        case .djFilter:
+            (instance as? DJFilterEffect)?.apply(params: descriptor.resolvedDJFilter)
+        case .ringMod:
+            (instance as? RingModEffect)?.apply(params: descriptor.resolvedRingMod)
+        case .flanger:
+            (instance as? FlangerEffect)?.apply(params: descriptor.resolvedFlanger)
+        case .hallReverb:
+            (instance as? HallReverbEffect)?.apply(params: descriptor.resolvedHallReverb)
+        case .tapeDelay:
+            (instance as? TapeDelayEffect)?.apply(params: descriptor.resolvedTapeDelay)
+        case .stereoWidth:
+            (instance as? StereoWidthEffect)?.apply(params: descriptor.resolvedStereoWidth)
+        case .phaser:
+            (instance as? PhaserEffect)?.apply(params: descriptor.resolvedPhaser)
+        case .transientShaper:
+            (instance as? TransientShaperEffect)?
+                .apply(params: descriptor.resolvedTransientShaper)
+        case .freqShifter:
+            (instance as? FreqShifterEffect)?.apply(params: descriptor.resolvedFreqShifter)
+        case .clipper:
+            (instance as? ClipperEffect)?.apply(params: descriptor.resolvedClipper)
+        case .dynamicEQ:
+            (instance as? DynamicEQEffect)?.apply(params: descriptor.resolvedDynamicEQ)
         case .audioUnit:
             // AU params are not on the generic surface in v0 — no-op.
             break

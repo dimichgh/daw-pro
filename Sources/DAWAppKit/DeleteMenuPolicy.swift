@@ -67,6 +67,67 @@ public enum DeleteMenuPolicy {
     /// teach: the operation is here, and it wants a selection.
     public static let inertTitle = "Delete Selection"
 
+    /// What the NOTE EDITOR says when it swallows a DELETE keystroke
+    /// (m23-ap p2-del) — drawn on the pane's own refusal line
+    /// (`PitchEditorModel.refuseDeleteKey`), never composed at the call site.
+    ///
+    /// ⭐ **"note editor" IS THE PANE'S NAME AS THE APP SHOWS IT** — the clip
+    /// menu opens it with "Open Note Editor…" and its close control's help reads
+    /// "Close the note editor". "Pitch editor" is the code's name; a novice never
+    /// sees it. `DeleteKeySiteTests` pins that the close control still carries
+    /// the words this sentence tells the user to use.
+    ///
+    /// ⚠️ **"WHILE THE NOTE EDITOR IS OPEN", NOT "WHILE YOU EDIT ITS NOTES".**
+    /// The predicate is OPENNESS (`DeleteMenuRefusal.pitchEditorOpen`), so the
+    /// sentence claims exactly that and nothing about selection or focus.
+    ///
+    /// ⚠️ **THE WAY OUT IT NAMES IS TRUE IN SOURCE.** `AppModel.closePitchEditor`
+    /// leaves the clip selected, so after closing, ⌫ routes to `.arrangeClips`
+    /// and deletes it, and ⌘X cuts it. The clip's own right-click Delete and
+    /// Cut also still work (`clipContextCommand` and `clipboardClipFromContextMenu`
+    /// do not read this refusal). They are the escape hatch, left out of the
+    /// sentence only to keep it short.
+    ///
+    /// ⭐ **IT NAMES CUT TOO (m23-ap p2-del-2), AND THAT IS TRUE IN SOURCE.** The
+    /// same openness verdict greys Edit ▸ Cut
+    /// (`ClipboardMenuRefusal.pitchEditorOpen`), and a greyed item's ⌘X runs no
+    /// action. ⌘X DOES NOT RAISE THIS LINE ITSELF: no Cut code runs for a
+    /// greyed item, and the key-down monitor leaves ⌘ chords to the menu
+    /// (`ClipboardMenuPolicy.copyMenuItem`'s banner has the measurement and the
+    /// reason). So the one sentence ⌫ shows covers both doors.
+    public static let pitchEditorOpenHint =
+        "Delete and Cut won't remove the clip while the note editor is open. "
+        + "Close the note editor first."
+
+    /// What Edit ▸ Delete (and the debug seam's `deleteKeyTitle`) says while the
+    /// open NOTE EDITOR holds a note selection (m23-ap I7b): the live Clear
+    /// that ⌫, this item and the pane's right-click Clear all run.
+    ///
+    /// ⭐ **"CLEAR", NEVER "DELETE".** A cleared note is silenced IN PLACE — it
+    /// stays drawn (hollow, dashed, labelled "cleared") and Restore brings it
+    /// back — so a title promising to delete it would describe a different
+    /// operation. The word is the pane's menu's word (`PitchEditorNoteMenu`).
+    ///
+    /// ⚠️ **NO COUNT, ON PURPOSE** — the roll's "Delete Selected Notes" rule.
+    /// The pane's bridge publishes a BOOL (`hasNoteSelection`, transition-
+    /// reported so a band's pointer ticks never invalidate this item); a
+    /// "Clear 3 Notes" from a number this layer does not have would be the
+    /// honesty violation the design language forbids. The pane's own
+    /// right-click menu can see the selection, and it carries the count.
+    ///
+    /// ⚠️ **ONE ROW WHERE IT IS LIVE AND CHANGES NOTHING, STATED.** When every
+    /// selected note is already cleared, the item is still live (the Bool
+    /// cannot see the flags) and the pane answers with one line —
+    /// `PitchEditorNoteMenu.alreadyClearedLine` — pointing at Restore, and
+    /// commits nothing. Every other row changes something.
+    ///
+    /// UE-2 — THE NOUN FOLLOWS THE SELECTION: this is the title for a selection
+    /// of NOTES; sounds read "Clear Selected Sounds" and a mix "Clear Selected"
+    /// (`PitchEditorNoteMenu.selectionClearTitle`, the right-click menu's own
+    /// nouns). Still no count, for the reason above: the bridge publishes the
+    /// selection's KINDS, not its size.
+    public static let pitchEditorClearTitle = PitchEditorNoteMenu.selectionClearTitle(kinds: [.note])
+
     // MARK: - Edit ▸ Delete
 
     /// Resolves the Edit-menu Delete item: which surface it targets, what it
@@ -90,7 +151,14 @@ public enum DeleteMenuPolicy {
     ///   4. AN AUTOMATION LANE WOULD HAVE CONSUMED IT — some mounted lane editor
     ///      holds a live breakpoint selection. `handleArrangeNudgeKey`'s sixth
     ///      guard, mirroring `AutomationLaneEditor.liveSelectionIndex`.
-    ///   5. Otherwise the ARRANGE owns it, if anything is selected.
+    ///   5. THE NOTE EDITOR IS OPEN AND HOLDS A NOTE SELECTION (m23-ap I4,
+    ///      made LIVE at I7b) — the `.pitchEditorNotes` SURFACE: ⌫ and this
+    ///      item CLEAR the selected notes. Directly in front of (6), so it only
+    ///      ever narrows (6).
+    ///   6. THE NOTE EDITOR IS OPEN (m23-ap p2-del) — REFUSED BY NAME
+    ///      (`.pitchEditorOpen`), so a DELETE never reaches the vocal clip the
+    ///      pane is showing. See the guard's own comment for its placement.
+    ///   7. Otherwise the ARRANGE owns it, if anything is selected.
     ///
     /// ⚠️ FOCUS IS NOT A TERM, DELIBERATELY, AND THAT IS THE WHOLE POINT OF
     /// ROUTING THE MENU THIS WAY. On the KEY path the arbitration between (3),
@@ -146,12 +214,37 @@ public enum DeleteMenuPolicy {
     ///     breakpoint (`automationPointSelection.lanesWithSelection.count`). Each
     ///     editor holds at most ONE selected index, so the lane count IS the
     ///     point count.
+    ///   - pitchEditorOpen: the NOTE EDITOR (the pitch editor pane) is open —
+    ///     `AppModel.pitchEditorPaneOpen`, i.e. `openEditorSurface.reason ==
+    ///     .pitchEditorOpen`: the SAME openness verdict ⌘A's `.pitchEditorOpen`
+    ///     arm reads (the m34-d ruling). ⚠️ **NEVER ENGAGEMENT, NEVER FOCUS**
+    ///     (design P6: keys route through app policies, never raw handlers) — a
+    ///     pane the user has not clicked into yet is exactly as able to lose its
+    ///     clip to a ⌫. **NO DEFAULT VALUE, deliberately:** a defaulted guard is
+    ///     a silent omission at every call site that forgets it.
+    ///   - pitchEditorHasNoteSelection: the note editor is open AND its
+    ///     interaction bridge reports a note selection —
+    ///     `AppModel.pitchEditorWouldConsumeKey`, the `pianoRollWouldConsumeKey`
+    ///     shape (m23-ap I4). Never engagement or focus, and NO DEFAULT, for
+    ///     `pitchEditorOpen`'s two reasons. The arm below ALSO requires
+    ///     `pitchEditorOpen`, so a stale bridge bit handed in with the pane shut
+    ///     cannot claim the key (or clear anything).
+    ///   - pitchEditorSelectionKinds: UE-2 — what KINDS that selection holds
+    ///     (`AppModel.pitchEditorSelectionKinds`, the pane's bridge report): the
+    ///     Clear title's NOUN only ("Clear Selected Sounds"). ⚠️ **DEFAULTED,
+    ///     AND THAT IS NOT `pitchEditorOpen`'s CASE:** it decides no route and
+    ///     no enabled state — a call site that forgets it can only print "Notes"
+    ///     over a sound, never claim or refuse a key. The two app call sites
+    ///     are pinned to pass it by `PitchEditorInteractionSiteTests`.
     ///   - arrangeClipCount: `arrangeSelection.count`.
     public static func editMenuItem(
         arrangeWorkspace: Bool,
         isModalPresented: Bool,
         pianoRollHasNoteSelection: Bool,
         automationPointCount: Int,
+        pitchEditorOpen: Bool,
+        pitchEditorHasNoteSelection: Bool,
+        pitchEditorSelectionKinds: Set<PitchEditorNoteMenu.Kind> = [.note],
         arrangeClipCount: Int
     ) -> DeleteMenuItem {
         guard arrangeWorkspace else { return DeleteMenuItem(refusedBy: .workspace) }
@@ -172,6 +265,59 @@ public enum DeleteMenuPolicy {
                 title: countedTitle(automationPointCount, "Automation Point", "Automation Points"),
                 surface: .automationPoints)
         }
+        // ⛔ m23-ap p2-del — THE NOTE EDITOR IS OPEN: A DELETE NEVER REACHES THE
+        // CLIP IT SHOWS. The pane opens only on the arrange FOCUS clip
+        // (`openPitchEditorClip` requires `id == selectedClipID`), so without
+        // this guard the arm below resolves `.arrangeClips` and ⌫ deletes the
+        // whole vocal while the user is editing its notes (design
+        // 2026-09-24-pitch-editor-interaction-batch §2 F13, measured red at the
+        // routing level by `DeleteKeyRoutingTests.noteEditorOpenNeverRoutesToTheClip`).
+        //
+        // REFUSED BY NAME, NOT ROUTED — `SelectAllMenuPolicy`'s `.pitchEditorOpen`
+        // shape. The pane has no note selection yet (F3), so there is nothing in
+        // it to route a delete TO. I4 (§7) extends this rather than replacing it:
+        // a `pitchEditorNotes` arm for "open AND notes selected" lands in front
+        // of this line (landed at I4 as a refusal, made a LIVE surface at I7b,
+        // see below), and this refusal keeps the rest.
+        //
+        // ⚠️ PLACEMENT IS A JUDGMENT, STATED: AFTER both editor arms and BEFORE
+        // the arrange's.
+        //  • After the ROLL: the two panes are mutually exclusive in the app
+        //    (both resolve `selectedClipID`; the roll needs `isMIDI`, this pane
+        //    `!isMIDI`), so "roll notes AND pitch pane open" is unreachable — and
+        //    the roll wins it, `EditorSurfaceRouter.openSurface`'s own tie-break.
+        //  • After the AUTOMATION arm: the hazard is the CLIP, not a breakpoint.
+        //    A lane holding a breakpoint the user just clicked still takes the
+        //    key, exactly as it does with the pane shut.
+        //  • Before the EMPTY-SELECTION guard: an open pane always has its clip
+        //    selected, so that row is unreachable too; answering it here keeps
+        //    the rule one sentence — while the pane is open the arrange never
+        //    owns a DELETE.
+        //
+        // ⚠️ THE MENU GREYS HERE TOO, AND THAT IS THE BRIEF, NOT A SIDE EFFECT:
+        // Edit ▸ Delete is a door to the same clip. The clip's own right-click
+        // Delete does NOT read this (`clipContextCommand`) — it is the escape
+        // hatch that names its blast radius on the item.
+        //
+        // ⭐ m23-ap I4 → I7b — NOTES SELECTED IN THE OPEN PANE: the arm the
+        // comment above promised, IN FRONT of the openness refusal so it only
+        // narrows it (every other open-pane case still reads `.pitchEditorOpen`).
+        //
+        // I4 landed it as a REFUSAL on purpose — a live Edit ▸ Delete whose only
+        // effect was a refusal line would have been a control that lies — and
+        // I7b ships the action it was waiting for: ⌫ and this item CLEAR the
+        // selected notes (the user's `delete-clears = yes`), one undo step, and
+        // the pane draws them hollow and dashed. So it is a SURFACE now,
+        // dispatched to the pane's bridge like the roll's notes, and the clip is
+        // still never the target. `DeleteKeyRoutingTests
+        // .noteEditorSelectionClearsTheNotes` measured this fixture resolving
+        // I4's refusal before the change.
+        if pitchEditorOpen && pitchEditorHasNoteSelection {
+            return DeleteMenuItem(
+                title: PitchEditorNoteMenu.selectionClearTitle(kinds: pitchEditorSelectionKinds),
+                surface: .pitchEditorNotes)
+        }
+        if pitchEditorOpen { return DeleteMenuItem(refusedBy: .pitchEditorOpen) }
         guard arrangeClipCount > 0 else { return DeleteMenuItem(refusedBy: .emptySelection) }
         return DeleteMenuItem(title: countedTitle(arrangeClipCount, "Clip", "Clips"),
                               surface: .arrangeClips)
@@ -248,8 +394,21 @@ public enum DeleteMenuPolicy {
     /// as "a surface owns this keystroke".
     ///
     /// ⚠️⚠️ WHAT THE CALLER MUST ANSWER `.handled` FROM — READ THIS BEFORE WIRING
-    /// A HANDLER. `.handled` iff `surface != nil`, NEVER "iff something was
-    /// actually deleted". They are different questions (`ArrangeNudgeOutcome`
+    /// A HANDLER. `.handled` iff `DeleteMenuItem.consumesKeystroke`, NEVER "iff
+    /// something was actually deleted". ⭐ **AMENDED AT m23-ap p2-del:** this
+    /// used to read "iff `surface != nil`", and for every refusal but one it
+    /// still does. The exception is `.pitchEditorOpen` — the open note editor
+    /// OWNS the keystroke and answers it with a hint line, so it is swallowed
+    /// while nothing is deleted. (I4 added a second such refusal for a note
+    /// selection; I7b made that one a live surface, so this is the one again.) Were it answered `.ignored`, the monitor would
+    /// hand the event back, a `.onKeyPress` delete mount (live for 0x7F since
+    /// m23-fk) would run the funnel a second time for the same press, and the
+    /// key would end unclaimed at AppKit (INFERRED: the system beep — not
+    /// measured, because no staging run was possible for this item).
+    /// `ArrangeNudgeOutcome` is the house precedent: `.pianoRollNoteEdit` is a
+    /// named refusal that still reports `handled: true`.
+    ///
+    /// "Handled" and "deleted" are different questions (`ArrangeNudgeOutcome`
     /// makes the same distinction, and a fully-clamped nudge at the beat-0 wall
     /// reports `handled: true` for it). A handler that answered `.ignored`
     /// because `deleteArrangeSelection()` was REFUSED by the store — a take-comp
@@ -269,6 +428,9 @@ public enum DeleteMenuPolicy {
         isTextEditingFocused: Bool,
         pianoRollHasNoteSelection: Bool,
         automationPointCount: Int,
+        pitchEditorOpen: Bool,
+        pitchEditorHasNoteSelection: Bool,
+        pitchEditorSelectionKinds: Set<PitchEditorNoteMenu.Kind> = [.note],
         arrangeClipCount: Int
     ) -> DeleteMenuItem {
         guard !isTextEditingFocused else { return DeleteMenuItem(refusedBy: .textEditing) }
@@ -277,6 +439,9 @@ public enum DeleteMenuPolicy {
             isModalPresented: isModalPresented,
             pianoRollHasNoteSelection: pianoRollHasNoteSelection,
             automationPointCount: automationPointCount,
+            pitchEditorOpen: pitchEditorOpen,
+            pitchEditorHasNoteSelection: pitchEditorHasNoteSelection,
+            pitchEditorSelectionKinds: pitchEditorSelectionKinds,
             arrangeClipCount: arrangeClipCount)
     }
 
@@ -357,12 +522,22 @@ public enum DeleteMenuPolicy {
 }
 
 /// Which surface a DELETE acts on. Enumerated as a sum type so the compiler
-/// forces every consumer to answer for all three — a fourth deletable surface
+/// forces every consumer to answer for all of them — a new deletable surface
 /// must be routed, not silently defaulted to the arrange.
 public enum DeleteSurface: String, Sendable, CaseIterable, Equatable {
     case pianoRollNotes = "piano-roll-notes"
     case automationPoints = "automation-points"
     case arrangeClips = "arrange-clips"
+    /// The open NOTE EDITOR's selected notes (m23-ap I7b) — CLEARED, not
+    /// deleted: silenced in place, still drawn, restorable. Handed to the pane
+    /// through `PitchEditorInteractionBridge.requestDelete()`, where the pane's
+    /// model runs the one Clear action (`PitchEditorModel.performNoteAction`).
+    ///
+    /// ⭐ THE SAME RAW VALUE AS I4's RETIRED REFUSAL (`pitch-editor-notes`), ON
+    /// PURPOSE: a gate that read `deleteKeyRefusedBy == "pitch-editor-notes"`
+    /// now reads `deleteKeySurface == "pitch-editor-notes"` — one name for one
+    /// fact, which moved from "refused" to "owned".
+    case pitchEditorNotes = "pitch-editor-notes"
 }
 
 /// WHY the Edit-menu Delete item is inert, named for the guard that refused.
@@ -383,10 +558,41 @@ public enum DeleteMenuRefusal: String, Sendable, Equatable {
     /// not apply it (an item with no key equivalent has no delivery ambiguity;
     /// and a responder read is unobservable, so it would make the item's enabled
     /// state stale). Spelled as a shared case rather than a second refusal
-    /// vocabulary because the other three ARE shared, and two enums that agree
-    /// about three cases out of four are two things to keep in step.
+    /// vocabulary because the others ARE shared, and two enums that agree
+    /// about all but one case are two things to keep in step.
     case textEditing = "text-editing"
     case emptySelection = "empty-selection"
+    /// The **note editor** (the pitch editor pane) is open (m23-ap p2-del), so a
+    /// DELETE must not reach the vocal clip it is showing — see the guard in
+    /// `editMenuItem` for the placement argument.
+    ///
+    /// ⭐ **THE SAME SPELLING AS `ClipboardMenuRefusal.pitchEditorOpen` (Cut,
+    /// m23-ap p2-del-2), ON PURPOSE** — and as ⌘A's `SelectAllRefusal
+    /// .pitchEditorOpen` used, until m23-ap I4 made ⌘A live in the pane and
+    /// retired it. Refusals by name off the one openness verdict (m34-d), so a
+    /// red gate reading `pitch-editor-open` from either echo reads one fact.
+    ///
+    /// ⚠️ **THE ONE REFUSAL THAT SWALLOWS THE KEY** (`consumesKeystroke`).
+    /// The menu still greys on it like every other refusal; the key does not
+    /// propagate, because the pane owns it and says why nothing happened.
+    /// (I4 added a second — `pitchEditorNotes`, a note selection in the pane —
+    /// and I7b retired it into `DeleteSurface.pitchEditorNotes`, a live Clear.)
+    case pitchEditorOpen = "pitch-editor-open"
+
+    /// Whether a DELETE **keystroke** that this refusal answered is SWALLOWED
+    /// (true) or keeps propagating to AppKit (false).
+    ///
+    /// ⚠️ **A `switch`, NOT `self == .pitchEditorOpen`, SO A NEW CASE MUST
+    /// ANSWER THE QUESTION** rather than inherit `false` in silence — the sum-type
+    /// discipline `DeleteSurface`'s own doc asks for. Every refusal but the note
+    /// editor's is "nobody owns this key", and those must keep propagating so
+    /// unrelated handlers (and a rename field's own editor) still see it.
+    public var consumesKeystroke: Bool {
+        switch self {
+        case .pitchEditorOpen: return true
+        case .workspace, .modal, .textEditing, .emptySelection: return false
+        }
+    }
 }
 
 /// The resolved Edit ▸ Delete item.
@@ -402,6 +608,18 @@ public struct DeleteMenuItem: Equatable, Sendable {
     /// DERIVED, never stored: "there is a surface to act on" and "the item is
     /// clickable" are the same fact, and a stored twin could drift from it.
     public var isEnabled: Bool { surface != nil }
+
+    /// Whether a DELETE **keystroke** resolved to this item is swallowed — the
+    /// ONE thing a key handler answers `.handled` from (m23-ap p2-del).
+    ///
+    /// DERIVED, `isEnabled`'s rule: a surface owns it, OR the refusal is one the
+    /// open note editor answers itself (`DeleteMenuRefusal.consumesKeystroke`).
+    /// It differs from `isEnabled` in exactly that one refusal, which is why it
+    /// is its own property rather than a re-reading of `isEnabled` at the call
+    /// site — the menu must grey there, and the key must not beep there.
+    public var consumesKeystroke: Bool {
+        surface != nil || (refusedBy?.consumesKeystroke ?? false)
+    }
 
     public init(title: String = DeleteMenuPolicy.inertTitle,
                 surface: DeleteSurface? = nil,

@@ -1,0 +1,1396 @@
+{
+  "set": "kick-duck-reverb",
+  "description": "Tests whether today's primitives already produce sidechain-ducked ('pumping') reverb with ZERO new code: a kick + a sustained pad feeding a reverb bus, with a compressor AFTER the reverb on that bus, keyed off the kick. Axis across variants: the sidechain key and the ducking compressor's release/depth. Variant 'control' is the positive control \u2014 same compressor, no key \u2014 everything else must be measured against it, not assumed.",
+  "measurement": {
+    "type": "periodicDucking",
+    "periodSeconds": 0.5,
+    "cycleStartSeconds": 0.0,
+    "cycleCount": 32,
+    "skipEdgeCycles": 2,
+    "_comment": "Measured on the ISOLATED reverb-bus stem (measureStem below), not the full mixdown -- the kick's own direct sound is identical across every variant and would otherwise swamp a trough window taken while the kick is audible. The bus stem contains only the pad's wet send through reverb+compressor, with the REAL live sidechain-affected output (render.stems preserves the sidechain graph).",
+    "troughOffsetSeconds": 0.02,
+    "troughWindowSeconds": 0.15,
+    "peakOffsetSeconds": 0.35,
+    "peakWindowSeconds": 0.13,
+    "compareToRole": "control"
+  },
+  "variants": [
+    {
+      "name": "control",
+      "role": "control",
+      "axis": "sidechain OFF \u2014 the positive control: the reverb-bus compressor is present with the SAME settings as 'duck-fast', just never keyed, so it reacts only to its own (roughly constant) bus level, not the kick",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Kick",
+            "kind": "instrument"
+          },
+          "as": "kick"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$kick",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.001,
+            "decay": 0.12,
+            "sustain": 0.0,
+            "release": 0.05,
+            "cutoffHz": 300,
+            "resonance": 0.1,
+            "gain": 0.95
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$kick",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 1,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 3,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 4,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 5,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 7,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 8,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 9,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 10,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 11,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 12,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 13,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 14,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 15,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 16,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 17,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 18,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 19,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 20,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 21,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 22,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 23,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 24,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 25,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 26,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 27,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 28,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 29,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 30,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 31,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.6,
+            "decay": 0.3,
+            "sustain": 0.85,
+            "release": 1.5,
+            "cutoffHz": 2200,
+            "resonance": 0.1,
+            "gain": 0.5
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "lengthBeats": 32,
+            "notes": [
+              {
+                "pitch": 45,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Reverb Bus",
+            "kind": "bus"
+          },
+          "as": "bus"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "reverb",
+            "params": {
+              "roomSize": 0.85,
+              "damping": 0.3,
+              "mix": 1.0,
+              "preDelayMs": 15,
+              "width": 1.0
+            }
+          },
+          "as": "reverbFx"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 10,
+              "attackMs": 5,
+              "releaseMs": 80,
+              "kneeDb": 0,
+              "makeupDb": 0,
+              "mix": 1
+            }
+          },
+          "as": "duckComp"
+        },
+        {
+          "command": "track.addSend",
+          "params": {
+            "trackId": "$pad",
+            "busId": "$bus",
+            "level": 0.9
+          }
+        }
+      ],
+      "measureStem": {
+        "trackId": "$bus"
+      }
+    },
+    {
+      "name": "duck-fast",
+      "axis": "sidechain ON, keyed off the kick, FAST release (80 ms) \u2014 the tail should duck hard on every hit and mostly recover before the next one",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Kick",
+            "kind": "instrument"
+          },
+          "as": "kick"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$kick",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.001,
+            "decay": 0.12,
+            "sustain": 0.0,
+            "release": 0.05,
+            "cutoffHz": 300,
+            "resonance": 0.1,
+            "gain": 0.95
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$kick",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 1,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 3,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 4,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 5,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 7,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 8,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 9,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 10,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 11,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 12,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 13,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 14,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 15,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 16,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 17,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 18,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 19,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 20,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 21,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 22,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 23,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 24,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 25,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 26,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 27,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 28,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 29,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 30,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 31,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.6,
+            "decay": 0.3,
+            "sustain": 0.85,
+            "release": 1.5,
+            "cutoffHz": 2200,
+            "resonance": 0.1,
+            "gain": 0.5
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "lengthBeats": 32,
+            "notes": [
+              {
+                "pitch": 45,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Reverb Bus",
+            "kind": "bus"
+          },
+          "as": "bus"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "reverb",
+            "params": {
+              "roomSize": 0.85,
+              "damping": 0.3,
+              "mix": 1.0,
+              "preDelayMs": 15,
+              "width": 1.0
+            }
+          },
+          "as": "reverbFx"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 10,
+              "attackMs": 5,
+              "releaseMs": 80,
+              "kneeDb": 0,
+              "makeupDb": 0,
+              "mix": 1
+            }
+          },
+          "as": "duckComp"
+        },
+        {
+          "command": "track.addSend",
+          "params": {
+            "trackId": "$pad",
+            "busId": "$bus",
+            "level": 0.9
+          }
+        },
+        {
+          "command": "fx.setSidechain",
+          "params": {
+            "trackId": "$bus",
+            "effectId": "$duckComp",
+            "sourceTrackId": "$kick"
+          }
+        }
+      ],
+      "measureStem": {
+        "trackId": "$bus"
+      }
+    },
+    {
+      "name": "duck-slow",
+      "axis": "same as duck-fast, ONE axis changed: SLOW release (700 ms instead of 80 ms) \u2014 the duck should barely recover before the next kick, a longer pumping swell",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Kick",
+            "kind": "instrument"
+          },
+          "as": "kick"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$kick",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.001,
+            "decay": 0.12,
+            "sustain": 0.0,
+            "release": 0.05,
+            "cutoffHz": 300,
+            "resonance": 0.1,
+            "gain": 0.95
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$kick",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 1,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 3,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 4,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 5,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 7,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 8,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 9,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 10,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 11,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 12,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 13,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 14,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 15,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 16,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 17,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 18,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 19,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 20,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 21,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 22,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 23,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 24,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 25,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 26,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 27,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 28,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 29,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 30,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 31,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.6,
+            "decay": 0.3,
+            "sustain": 0.85,
+            "release": 1.5,
+            "cutoffHz": 2200,
+            "resonance": 0.1,
+            "gain": 0.5
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "lengthBeats": 32,
+            "notes": [
+              {
+                "pitch": 45,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Reverb Bus",
+            "kind": "bus"
+          },
+          "as": "bus"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "reverb",
+            "params": {
+              "roomSize": 0.85,
+              "damping": 0.3,
+              "mix": 1.0,
+              "preDelayMs": 15,
+              "width": 1.0
+            }
+          },
+          "as": "reverbFx"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -24,
+              "ratio": 10,
+              "attackMs": 5,
+              "releaseMs": 700,
+              "kneeDb": 0,
+              "makeupDb": 0,
+              "mix": 1
+            }
+          },
+          "as": "duckComp"
+        },
+        {
+          "command": "track.addSend",
+          "params": {
+            "trackId": "$pad",
+            "busId": "$bus",
+            "level": 0.9
+          }
+        },
+        {
+          "command": "fx.setSidechain",
+          "params": {
+            "trackId": "$bus",
+            "effectId": "$duckComp",
+            "sourceTrackId": "$kick"
+          }
+        }
+      ],
+      "measureStem": {
+        "trackId": "$bus"
+      }
+    },
+    {
+      "name": "duck-deep",
+      "axis": "same as duck-fast, ONE axis changed: EXTREME depth (threshold -40 dB, ratio 20:1 instead of -24 dB / 10:1) \u2014 a much deeper gain reduction on every hit, same fast 80 ms recovery",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Kick",
+            "kind": "instrument"
+          },
+          "as": "kick"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$kick",
+            "kind": "polySynth",
+            "waveform": "sine",
+            "attack": 0.001,
+            "decay": 0.12,
+            "sustain": 0.0,
+            "release": 0.05,
+            "cutoffHz": 300,
+            "resonance": 0.1,
+            "gain": 0.95
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$kick",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 36,
+                "startBeat": 0,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 1,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 2,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 3,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 4,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 5,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 6,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 7,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 8,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 9,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 10,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 11,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 12,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 13,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 14,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 15,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 16,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 17,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 18,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 19,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 20,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 21,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 22,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 23,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 24,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 25,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 26,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 27,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 28,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 29,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 30,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              },
+              {
+                "pitch": 36,
+                "startBeat": 31,
+                "velocity": 110,
+                "lengthBeats": 0.12
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.6,
+            "decay": 0.3,
+            "sustain": 0.85,
+            "release": 1.5,
+            "cutoffHz": 2200,
+            "resonance": 0.1,
+            "gain": 0.5
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "lengthBeats": 32,
+            "notes": [
+              {
+                "pitch": 45,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 48,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              },
+              {
+                "pitch": 55,
+                "startBeat": 0,
+                "velocity": 90,
+                "lengthBeats": 32
+              }
+            ]
+          }
+        },
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Reverb Bus",
+            "kind": "bus"
+          },
+          "as": "bus"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "reverb",
+            "params": {
+              "roomSize": 0.85,
+              "damping": 0.3,
+              "mix": 1.0,
+              "preDelayMs": 15,
+              "width": 1.0
+            }
+          },
+          "as": "reverbFx"
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$bus",
+            "kind": "compressor",
+            "params": {
+              "thresholdDb": -40,
+              "ratio": 20,
+              "attackMs": 5,
+              "releaseMs": 80,
+              "kneeDb": 0,
+              "makeupDb": 0,
+              "mix": 1
+            }
+          },
+          "as": "duckComp"
+        },
+        {
+          "command": "track.addSend",
+          "params": {
+            "trackId": "$pad",
+            "busId": "$bus",
+            "level": 0.9
+          }
+        },
+        {
+          "command": "fx.setSidechain",
+          "params": {
+            "trackId": "$bus",
+            "effectId": "$duckComp",
+            "sourceTrackId": "$kick"
+          }
+        }
+      ],
+      "measureStem": {
+        "trackId": "$bus"
+      }
+    }
+  ]
+}

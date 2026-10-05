@@ -300,6 +300,8 @@ extension ProjectStore {
         case .sendLevel(let sendID): return "sendLevel:\(sendID.uuidString)"
         case .effectParam(let effectID, let paramName):
             return "effectParam:\(effectID.uuidString):\(paramName)"
+        // m39-b: no id — a track has at most one instrument.
+        case .instrumentParam(let paramName): return "instrumentParam:\(paramName)"
         }
     }
 

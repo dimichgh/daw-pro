@@ -1,0 +1,35 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "soul-blues",
+  "name": "Soul & Blues Band",
+  "summary": "A soul and blues band whose rhythm guitar opens up its tone the harder you play, like a wah pedal.",
+  "songForm": "blues",
+  "genres": ["blues", "funk"],
+  "tracks": [
+    { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 1.76, "mixerPreset": "drum-room",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 0, "bankMSB": 120, "bankLSB": 0 } } },
+    { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.03, "mixerPreset": "bass-round",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 33 } } },
+    { "key": "rhythm-guitar", "name": "Rhythm Guitar", "kind": "instrument", "volume": 2.0, "pan": -0.4,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 27 } },
+      "inserts": [ { "key": "wah", "kind": "djFilter", "params": { "position": -0.5, "resonance": 0.5 } } ],
+      "modulation": {
+        "sources": [ { "key": "touch", "kind": "envelopeFollower",
+                       "params": { "attackMs": 5, "releaseMs": 120 } } ],
+        "routes": [ { "source": "touch", "depth": 0.25,
+                      "target": { "type": "effectParam", "insert": "wah", "param": "position" } } ] } },
+    { "key": "lead-guitar", "name": "Lead Guitar", "kind": "instrument", "volume": 0.59, "pan": 0.4, "mixerPreset": "guitar-crunch",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 29 } },
+      "sends": [ { "bus": "room", "level": 0.25 } ] },
+    { "key": "organ", "name": "Organ", "kind": "instrument", "volume": 0.41,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 16 } },
+      "sends": [ { "bus": "room", "level": 0.2 } ] },
+    { "key": "horns", "name": "Horns", "kind": "instrument", "volume": 0.84, "mixerPreset": "horn-section",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 61 } },
+      "sends": [ { "bus": "room", "level": 0.25 } ] },
+    { "key": "room", "name": "Room", "kind": "bus",
+      "inserts": [ { "kind": "reverb", "params": { "mix": 1, "roomSize": 0.5 } } ] }
+  ]
+}

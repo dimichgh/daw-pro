@@ -64,8 +64,17 @@ struct KeyboardSidebar: View {
     /// Pitch classes that are black keys (C#, D#, F#, G#, A#). `nonisolated` so it
     /// can be called from `@Sendable` Canvas renderers (m16-a; also used by the
     /// piano-roll grid renderer).
+    ///
+    /// ⭐ **A FORWARDER SINCE m23-ct — THE TABLE MOVED, THE SYMBOL DID NOT.** The
+    /// five-element pitch-class table now lives once, in
+    /// `DAWAppKit.MusicalKeyboardGeometry.isBlackKey`, because the on-screen
+    /// Musical Typing keyboard needs the same answer and `DAWApp` has no test
+    /// target — so here the table had never been under test in its life. This
+    /// stays rather than being deleted so the three existing call sites (this
+    /// view and two in `PianoRollView`) keep reading the name they always have;
+    /// deleting it would have been churn in a file whose comments are load-bearing.
     nonisolated static func isBlackKey(_ pitch: Int) -> Bool {
-        [1, 3, 6, 8, 10].contains(((pitch % 12) + 12) % 12)
+        MusicalKeyboardGeometry.isBlackKey(pitch)
     }
 
     /// EVERY key is named (m25-i), not just the C's — `Fundamental.noteName`,

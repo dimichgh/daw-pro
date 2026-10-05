@@ -1,6 +1,7 @@
 import Testing
 import CoreGraphics
 import Foundation
+import DAWCore
 @testable import DAWAppKit
 
 /// m25-f-5 — the note editor's scrub ruler.
@@ -123,19 +124,29 @@ struct PianoRollScrubRulerTests {
     /// The ruler and the header's "BAR n" readout must name the same bar for the
     /// same spot — they are two readouts of one number in one view. Checked
     /// against `PianoRollBarOps`, the OTHER home for this arithmetic.
-    @Test("Bar numbering agrees with the header's BAR n readout")
+    ///
+    /// ⭐ **RESTATED BY m23-ap I5-F2: both readouts are now the SONG's bars.** The
+    /// roll's ruler is `PitchEditorSongRuler.ticks` (the band's `songMeter`) and
+    /// the header's bar is `MeterMap.barBeat`'s, so this walks the song ruler's
+    /// own bar ticks — not a clip-local bar formula, which is what this leg used
+    /// to share with the header and would now name a different bar.
+    @Test("Bar numbering agrees with the header's BAR n readout (I5-F2: both in the song's bars)")
     func agreesWithBarOpsReadout() {
         let start = 6.5     // deliberately NOT bar-aligned
         let length = 32.0
         for bpb in [3, 4] {
-            for localBar in 0..<6 {
-                let localBeat = Double(localBar * bpb)
-                let ruler = PianoRollScrubRuler.label(localBeat: localBeat, beatsPerBar: bpb)
+            let meter = MeterMap(constant: TimeSignature(beatsPerBar: bpb, beatUnit: 4))
+            let bars = PitchEditorSongRuler.ticks(clipStartBeat: start, lengthBeats: length,
+                                                  pixelsPerBeat: 32, meterMap: meter)
+                .filter { $0.isBar && $0.label != nil }
+            #expect(bars.count >= 6, "the sweep checked too few bars to mean anything")
+            for tick in bars {
+                let ruler = tick.label ?? "-"
                 let header = PianoRollBarOps.barReadoutLabel(
-                    position: start + localBeat, clipStartBeat: start,
-                    lengthBeats: length, beatsPerBar: bpb)
+                    position: start + tick.localBeat, clipStartBeat: start,
+                    lengthBeats: length, meterMap: meter)
                 #expect("BAR \(ruler)" == header,
-                        "ruler said \(ruler), header said \(header) at local beat \(localBeat)")
+                        "ruler said \(ruler), header said \(header) at local beat \(tick.localBeat)")
             }
         }
     }
@@ -198,18 +209,29 @@ struct PianoRollScrubRulerTests {
     // MARK: - ⚠️ The two agreement properties
 
     /// **THE RULER MUST AGREE WITH THE GRID UNDER IT.** `PianoRollGrid.drawGridLines`
-    /// emphasises a bar line at `beat % beatsPerBar == 0` counting from CLIP-LOCAL
-    /// beat 0. This replicates that predicate and asserts fail-set identity with
-    /// `Tick.isBar` — so a bar number can never land on a line the grid draws as
-    /// an ordinary beat.
-    @Test("Bar ticks land exactly on the grid's emphasised lines")
+    /// emphasises the lines `PianoRollSongGrid.forEachLine` calls `.bar`.
+    ///
+    /// ⭐ **RESTATED BY m23-ap I5-F2.** This used to replicate the grid's
+    /// clip-local predicate (`beat % beatsPerBar == 0` from the clip's first beat)
+    /// against `PianoRollScrubRuler.ticks`; both sides now read the song's bars,
+    /// so it asserts the ruler's bar ticks and the grid's bar lines are the SAME
+    /// set of x — for clips on and off a bar line, in three meters — so a bar
+    /// number can never land on a line the grid draws as an ordinary beat.
+    @Test("Bar ticks land exactly on the grid's emphasised lines (I5-F2: the song's bars, clips on and off a bar line)")
     func barTicksMatchTheGridsBarPredicate() {
         for bpb in [3, 4, 6] {
-            let ticks = PianoRollScrubRuler.ticks(lengthBeats: 48, pixelsPerBeat: 32, beatsPerBar: bpb)
-            for tick in ticks {
-                let gridSaysBar = Int(tick.localBeat) % bpb == 0      // drawGridLines' predicate
-                #expect(tick.isBar == gridSaysBar,
-                        "beat \(tick.localBeat) in \(bpb)/4: ruler \(tick.isBar), grid \(gridSaysBar)")
+            let meter = MeterMap(constant: TimeSignature(beatsPerBar: bpb, beatUnit: 4))
+            for start in [0.0, 2.5, 7.0] {
+                let ticks = PitchEditorSongRuler.ticks(clipStartBeat: start, lengthBeats: 48,
+                                                       pixelsPerBeat: 32, meterMap: meter)
+                var gridBars: [CGFloat] = []
+                PianoRollSongGrid.forEachLine(clipStartBeat: start, spanBeats: 48, pixelsPerBeat: 32,
+                                              step: 1, drawsDivisions: false, meterMap: meter) { x, kind in
+                    if kind == .bar { gridBars.append(x) }
+                }
+                #expect(ticks.filter(\.isBar).map(\.x) == gridBars,
+                        "\(bpb)/4 from \(start): ruler \(ticks.filter(\.isBar).map(\.x)) grid \(gridBars)")
+                #expect(!gridBars.isEmpty)
             }
         }
     }
@@ -219,23 +241,36 @@ struct PianoRollScrubRulerTests {
     /// literally, through the SHIPPING scrub map, for a clip that does NOT start
     /// on a bar — the case where a project-space ruler would be wrong.
     ///
-    /// Note what the two sides are: the ruler's axis is clip-local, and
+    /// Note what the two sides are: the ruler's pixel axis is clip-local, and
     /// `scrubProjectBeat` returns a PROJECT beat, so the expected value carries
-    /// `clipStartBeat`. That asymmetry IS the bridge, and pinning it here is what
-    /// stops someone "fixing" the ruler into project space later.
-    @Test("A tick's x scrubs to the beat its label names")
+    /// `clipStartBeat`. That asymmetry IS the bridge.
+    ///
+    /// ⭐ **RESTATED BY m23-ap I5-F2: the LABELS are now the song's** (the axis is
+    /// still clip-local). So the leg walks the song ruler the roll draws, and
+    /// asserts the stronger thing: the project beat a tick scrubs to is a label
+    /// that `PitchEditorSongRuler.label(atProjectBeat:)` spells exactly as the tick
+    /// does — the number under the pointer is the song position the drag lands on.
+    @Test("A tick's x scrubs to the beat its label names (I5-F2: the song's label)")
     func tickXScrubsToItsOwnBeat() {
+        let meter = MeterMap(constant: TimeSignature())
+        var labelled = 0
         for clipStart in [0.0, 6.5, 17.25] {
             let length = 24.0
-            let ppb: CGFloat = 32
-            for tick in PianoRollScrubRuler.ticks(lengthBeats: length, pixelsPerBeat: ppb, beatsPerBar: 4) {
+            let ppb: CGFloat = 64      // beats labelled too (64 ≥ 44)
+            for tick in PitchEditorSongRuler.ticks(clipStartBeat: clipStart, lengthBeats: length,
+                                                   pixelsPerBeat: ppb, meterMap: meter) {
                 let landed = PianoRollPlayhead.scrubProjectBeat(
                     localX: tick.x, clipStartBeat: clipStart,
                     lengthBeats: length, pixelsPerBeat: ppb)
                 #expect(abs(landed - (clipStart + tick.localBeat)) < 1e-9,
                         "tick \(tick.localBeat) at x \(tick.x) scrubbed to \(landed)")
+                guard let label = tick.label else { continue }
+                labelled += 1
+                #expect(PitchEditorSongRuler.label(atProjectBeat: landed.rounded(), meterMap: meter) == label,
+                        "tick labelled \(label) scrubbed to song beat \(landed)")
             }
         }
+        #expect(labelled > 60, "the sweep checked too few labels to mean anything (\(labelled))")
     }
 
     // MARK: - The playhead handle

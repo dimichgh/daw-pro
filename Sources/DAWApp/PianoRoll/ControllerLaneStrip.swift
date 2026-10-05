@@ -17,6 +17,11 @@ struct ControllerLaneStrip: View {
     var accent: Color
     /// Grid snap for pencil ticks (shares the piano roll's resolution).
     var snap: SnapResolution
+    /// m23-ap I5-F3 — the clip's place on the SONG's grid, so a point lands on
+    /// the lines the note grid above draws (`PianoRollSongGrid.snapLocalBeat`,
+    /// the roll's one snap). Defaulted to the clip-local grid so a preview stays
+    /// a one-liner; the roll always passes its clip's context.
+    var songGrid: PianoRollSongGrid.Context = .clipLocal
     /// Drawn canvas width — the model's content width, extended to the editor
     /// viewport at wide windows (m18-f, DESIGN-LANGUAGE "Wide windows"). The
     /// parent computes it via the shared `PianoRollModel.drawnWidth` rule so all
@@ -357,9 +362,11 @@ struct ControllerLaneStrip: View {
             }
     }
 
+    /// m23-ap I5-F3 — the roll's ONE snap, not a second copy of the grid
+    /// arithmetic: on the song's grid, floored at the clip's start. Bit-identical
+    /// to the old clip-local expression for a clip that starts on a grid line.
     private func snapped(_ beat: Double) -> Double {
-        guard let grid = snap.beats, grid > 0 else { return max(0, beat) }
-        return max(0, (beat / grid).rounded() * grid)
+        PianoRollSongGrid.snapLocalBeat(beat, context: songGrid, resolution: snap)
     }
 }
 

@@ -322,7 +322,7 @@ struct CommandRouterTests {
     }
 
     @Test("mixer.setMasterVolume sets and returns the clamped gain")
-    func setMasterVolume() async {
+    func setMasterVolume() async throws {
         let (router, store) = makeRouter()
 
         let response = await router.handle(ControlRequest(
@@ -331,14 +331,30 @@ struct CommandRouterTests {
         #expect(response.ok)
         #expect(response.result?["masterVolume"]?.doubleValue == 0.5)
         #expect(store.masterVolume == 0.5)
+        // In range: nothing was clamped, so nothing is announced.
+        #expect(response.result?["warnings"] == nil)
 
         // Out-of-range values clamp; the response reports the applied gain.
+        //
+        // ⭐ m27-c, MEASURED WHILE VERIFYING THAT ITEM'S PREMISE: the item
+        // asserts this verb REJECTS above 2.0 while the gain insert clamps.
+        // It does NOT — this line is the proof, and it predates m27-c. The
+        // asymmetry is real but lives one layer up, in
+        // `mixer_set_master_volume`'s zod `.min(0).max(2)`: the MCP tool
+        // refuses, the control command clamps. So a WIRE caller could send
+        // 3.0 and be told `{masterVolume: 2}` with nothing saying why.
         let clamped = await router.handle(ControlRequest(
             id: "2", command: "mixer.setMasterVolume", params: ["volume": .number(3)]
         ))
         #expect(clamped.ok)
         #expect(clamped.result?["masterVolume"]?.doubleValue == 2)
         #expect(store.masterVolume == 2)
+        // m27-c: it now says why, in the same `warnings` shape fx.setParam
+        // uses — and points at the cure that actually reaches the level.
+        let sentence = try #require(clamped.result?["warnings"]?.arrayValue?.first?.stringValue)
+        #expect(sentence.hasPrefix("volume was clamped to its maximum 2 — you asked for 3, "
+                                   + "and this control accepts 0 to 2."))
+        #expect(sentence.contains("gainLinear reaches 16 (+24.08 dB)"))
     }
 
     @Test("mixer.setMasterVolume without volume reports the missing param")
@@ -526,8 +542,12 @@ struct CommandRouterTests {
         ))
         #expect(!badKind.ok)
         // soundBank joined the list in m10-n-1 (wire-valid via Kind.allCases;
-        // the bank param itself is the m10-n-2 wire delta).
-        #expect(badKind.error == "kind must be one of testTone|polySynth|sampler|audioUnit|soundBank")
+        // the bank param itself is the m10-n-2 wire delta). drumSynth joined at
+        // m39-dm the same way — the message is DERIVED from Kind.allCases, so
+        // this literal is the pin that proves the derivation still reaches the
+        // wire, and it moves once per new kind by design.
+        #expect(badKind.error
+                == "kind must be one of testTone|polySynth|sampler|audioUnit|soundBank|drumSynth")
 
         let badWave = await router.handle(ControlRequest(
             id: "2", command: "track.setInstrument",
@@ -716,7 +736,12 @@ struct CommandRouterTests {
         // A non-object sampler.
         let notObject = await router.handle(ControlRequest(id: "y", command: "track.setInstrument",
             params: ["trackId": .string(instID), "sampler": .string("nope")]))
-        #expect(notObject.error == "sampler must be an object {zones, oneShot?, attack?, release?, gain?}")
+        // m34-o: `decay?` and `sustain?` joined the accepted-key list when the
+        // sampler gained instrument-level envelope globals. The message is a
+        // KEY LIST, so omitting the two new keys would tell a caller they are
+        // not accepted — which is now false, and worse than saying nothing.
+        #expect(notObject.error
+                == "sampler must be an object {zones, oneShot?, attack?, decay?, sustain?, release?, gain?}")
 
         // A mistyped pitch field.
         let badPitch = await set(.object(["zones": .array([
@@ -1515,7 +1540,166 @@ struct CommandRouterTests {
         let removableMarkerID = store.addMarker(name: "Rm", beat: 0).id.uuidString
         let renamableMarkerID = store.addMarker(name: "Rn", beat: 4).id.uuidString
         let movableMarkerID = store.addMarker(name: "Mv", beat: 8).id.uuidString
+        // m39-e: the seven strip-scoped `mod.*` verbs are DRIVEN, not excluded —
+        // every one of them has an honest headless form. allCommands order is
+        // describeKinds, addSource, setSource, removeSource, addRoute,
+        // setRouteDepth, removeRoute, setMacro, describe, so each mutation gets
+        // its OWN pre-made subject: removeSource deletes one source and CASCADES
+        // its routes, which would silently disarm the route verbs if they shared
+        // one. `mod.describe`/`mod.describeKinds` need no params at all (describe
+        // defaults to the master strip) and are covered by the bare call.
+        let editableSourceID = try store.addModulationSource(
+            on: .track(track.id), kind: .lfo, name: "Edit").source.id.uuidString
+        let removableSourceID = try store.addModulationSource(
+            on: .track(track.id), kind: .lfo, name: "Rm").source.id.uuidString
+        let routeSource = try store.addModulationSource(
+            on: .track(track.id), kind: .macro, name: "Macro").source
+        let routeSourceID = routeSource.id.uuidString
+        let editableRouteID = try store.addModulationRoute(
+            on: .track(track.id), sourceID: routeSource.id, target: .volume,
+            depth: 0.1).route.id.uuidString
+        let removableRouteID = try store.addModulationRoute(
+            on: .track(track.id), sourceID: routeSource.id, target: .pan,
+            depth: 0.1).route.id.uuidString
+        // m39-levels-2 wire: instrument.spreadSlice/setSpreadDirection are
+        // DRIVEN, not excluded — the mod.* precedent above, not the
+        // instrument.describeSampler exclusion below: THAT verb is excluded
+        // because instTrackID's own sampler is never configured (this loop's
+        // track.setInstrument entry for instTrackID only sets a waveform).
+        // These two get their OWN dedicated sampler-equipped tracks instead
+        // of fighting over instTrackID. Each gets its own subject: spreadSlice
+        // gets a fresh one-key "chop" zone; setSpreadDirection gets a zone
+        // that is ALREADY spread, minted HERE via spreadSlice's own wire call
+        // — NOT by relying on allCommands iteration order reaching
+        // instrument.spreadSlice before instrument.setSpreadDirection in the
+        // loop below, which is incidental placement, not a contract.
+        func makeOneKeySamplerTrack() async throws -> (trackID: String, zoneID: String) {
+            let sample = BundledSamples.catalog[0]
+            let newTrackID = store.addTrack(kind: .instrument).id.uuidString
+            let setup = await router.handle(ControlRequest(
+                id: "levels-setup-\(newTrackID)", command: "track.setInstrument",
+                params: [
+                    "trackId": .string(newTrackID),
+                    "kind": .string("sampler"),
+                    "sampler": .object([
+                        "zones": .array([
+                            .object([
+                                "path": .string(sample.wireName),
+                                "rootPitch": .number(Double(sample.rootPitch)),
+                                // Explicit, not omitted — an omitted minPitch/
+                                // maxPitch defaults to the full 0...127 span,
+                                // which leaves no free sixteen-key window
+                                // anywhere. One key wide is the chopper's own
+                                // shape (SliceToSampler.swift), by hand here.
+                                "minPitch": .number(Double(sample.rootPitch)),
+                                "maxPitch": .number(Double(sample.rootPitch)),
+                            ]),
+                        ]),
+                    ]),
+                ]))
+            let newZoneID = try #require(setup.result?["sampler"]?["zones"]?
+                .arrayValue?.first?["id"]?.stringValue)
+            return (newTrackID, newZoneID)
+        }
+        let (spreadSliceTrackID, spreadSliceZoneID) = try await makeOneKeySamplerTrack()
+        let (setSpreadTrackID, setSpreadSourceZoneID) = try await makeOneKeySamplerTrack()
+        let preSpread = await router.handle(ControlRequest(
+            id: "levels-setup-prespread", command: "instrument.spreadSlice",
+            params: ["trackId": .string(setSpreadTrackID), "zoneId": .string(setSpreadSourceZoneID)]))
+        let preSpreadZoneID = try #require(preSpread.result?["id"]?.stringValue)
+        // clip.getPlayedPitch (m23-ap C-0c) is DRIVEN, not excluded — unlike
+        // clip.detectPitch/clip.autoCorrectPitch/clip.clearPitchEdits/
+        // clip.getPitchEdits/clip.setNotePitch/clip.splitNote below (all six
+        // excluded because minting their real-clip prerequisite needs a
+        // clip.addAudio WIRE call whose id this static paramsByCommand
+        // dictionary has no way to capture and reuse). This one is
+        // reachable a different way: `clip.addAudio` here, in SETUP, ahead
+        // of the loop — its returned clipId IS capturable, because this
+        // code runs before paramsByCommand is even built — then
+        // `store.setClipNotePitchOffset(..., seedIfAbsent:)` OFF THE WIRE,
+        // the C1 seeding rule's own in-process shortcut, mints a one-segment
+        // stored note table with no real pitch detector involved. That
+        // satisfies clip.getPlayedPitch's own two checks (a real AUDIO clip,
+        // a non-empty stored table) without needing FakePitchDetectionEngine
+        // machinery this suite's plain FakeEngine does not carry.
+        let playedPitchTrackID = store.addTrack(kind: .audio).id.uuidString
+        let playedPitchAdd = await router.handle(ControlRequest(
+            id: "played-pitch-setup", command: "clip.addAudio",
+            params: ["trackId": .string(playedPitchTrackID), "path": .string("/tmp/PlayedPitchFixture.wav")]))
+        let playedPitchClipID = try #require(playedPitchAdd.result?["id"]?.stringValue)
+        let playedPitchSegmentID = UUID()
+        try store.setClipNotePitchOffset(
+            clipId: try #require(UUID(uuidString: playedPitchClipID)),
+            segmentId: playedPitchSegmentID, offsetCents: 0,
+            seedIfAbsent: PitchEditSet(analysisVersion: PitchEditSet.currentAnalysisVersion, segments: [
+                NoteSegment(id: playedPitchSegmentID, startSeconds: 0, endSeconds: 1,
+                            detectedHz: 220, detectedConfidence: 1),
+            ]))
         let paramsByCommand: [String: [String: JSONValue]] = [
+            "clip.getPlayedPitch": ["clipId": .string(playedPitchClipID)],
+            // I7a: clip.setNoteCleared is DRIVEN, not excluded, on the same
+            // setup clip as clip.getPlayedPitch above. Its stored one-note
+            // table, seeded off the wire, is exactly what the verb needs, so
+            // a real clear routes and succeeds. A cleared note changes nothing
+            // clip.getPlayedPitch needs, so their order in allCommands does
+            // not matter.
+            "clip.setNoteCleared": ["clipId": .string(playedPitchClipID),
+                                    "segmentIds": .array([.string(playedPitchSegmentID.uuidString)]),
+                                    "cleared": .bool(true)],
+            // U-D: clip.setNoteGain is DRIVEN, not excluded, the
+            // clip.setNoteCleared precedent immediately above — same setup
+            // clip, same stored one-note table. A level write changes
+            // nothing clip.getPlayedPitch needs either, so allCommands order
+            // still does not matter.
+            "clip.setNoteGain": ["clipId": .string(playedPitchClipID),
+                                 "segmentIds": .array([.string(playedPitchSegmentID.uuidString)]),
+                                 "gainDb": .number(-6)],
+            // m23-ap I4 wire leg: clip.setNotePitches is DRIVEN, not
+            // excluded, the clip.setNoteCleared/clip.setNoteGain precedent
+            // immediately above — same setup clip, same stored one-note
+            // table. This test only asserts `response.ok`, never a value, so
+            // a pitch write's effect on what clip.getPlayedPitch WOULD then
+            // return is irrelevant here (that assertion lives in
+            // PitchCorrectionCommandTests, not here) — allCommands order
+            // still does not matter.
+            "clip.setNotePitches": ["clipId": .string(playedPitchClipID),
+                                    "notes": .array([.object([
+                                        "segmentId": .string(playedPitchSegmentID.uuidString),
+                                        "cents": .number(50),
+                                    ])])],
+            // m23-ap I1 wire leg: clip.auditionNote is DRIVEN, not excluded,
+            // the clip.setNoteCleared/clip.setNoteGain/clip.setNotePitches
+            // precedent immediately above — same setup clip, same stored
+            // one-note table (a real audio clip, not MIDI; a non-empty
+            // stored table — clip.auditionNote's own two prerequisites,
+            // identical to clip.getPlayedPitch's). The engine here
+            // (FakeEngine) never overrides auditionClipSpan, so it answers
+            // through AudioEngineControlling's own protocol-extension
+            // default, `.unsupported` — a REAL, non-throwing answer
+            // (`audible: false`), which is still `response.ok == true`: a
+            // refusal without a throw is a SUCCESS on this door, never an
+            // error. allCommands order still does not matter.
+            "clip.auditionNote": ["clipId": .string(playedPitchClipID),
+                                  "segmentIds": .array([.string(playedPitchSegmentID.uuidString)])],
+            // C5a-3/NT-L3: the two vibrato writers are DRIVEN, not excluded,
+            // the clip.setNoteCleared/setNoteGain/setNotePitches/auditionNote
+            // precedent immediately above — same setup clip, same stored
+            // one-note table. Neither writer reads `isCleared` (grepped:
+            // NoteVibratoLimits.swift and setClipNotesVibrato's body have no
+            // such check), only that the segment's `origin` is not
+            // `.unpitched` — still `.detected` here, per the NT-W comment
+            // below. `clip.setNoteVibratos` re-sends the same field on the
+            // same note right after `clip.setNoteVibrato` (allCommands order:
+            // vibrato immediately before vibratos) — a second absolute write
+            // of the same value, not a conflict.
+            "clip.setNoteVibrato": ["clipId": .string(playedPitchClipID),
+                                    "segmentId": .string(playedPitchSegmentID.uuidString),
+                                    "vibratoDepthCents": .number(20)],
+            "clip.setNoteVibratos": ["clipId": .string(playedPitchClipID),
+                                     "notes": .array([.object([
+                                         "segmentId": .string(playedPitchSegmentID.uuidString),
+                                         "vibratoDepthCents": .number(20),
+                                     ])])],
             // m22-g P2: OFF is the idempotent never-refusing side of the A/B
             // monitor (design §5.6) — a legitimate headless route.
             "reference.setMonitor": ["on": .bool(false)],
@@ -1527,6 +1711,32 @@ struct CommandRouterTests {
             // bring the CoreMIDI client up and connect to the user's real MIDI
             // sources, which a unit test must never do. (Arming IS covered, in
             // MIDIControlTests, against a fake engine.)
+            // m23-ct: note.play is DRIVEN, not excluded — and driving it here is
+            // the point. It is note.audition's neighbour in allCommands but its
+            // OPPOSITE on the one axis that matters: it is deliberately NOT
+            // refused while a take is rolling, because this path IS captured.
+            // So it is the only note verb this loop can exercise with a REAL
+            // pitch at the point where transport.record has left a take open —
+            // genuine route coverage, not the degenerate no-op branch the
+            // pad.previewEffort exclusion below warns about. A held note is
+            // harmless: the store is discarded at the end of the test, and both
+            // the controller's 30 s ceiling and the render side's 3 s watchdog
+            // would release it anyway.
+            "note.play": ["trackId": .string(instTrackID),
+                          "pitches": .array([.number(60)])],
+            // m23-cv: a pure computation, but it deliberately REFUSES an empty
+            // call rather than defaulting to some chord nobody asked for — so
+            // the bare loop has to say what to voice. `[1, 5]` is the smallest
+            // input that also exercises the voice-leading step.
+            "chord.voice": ["degrees": .array([.number(1), .number(5)])],
+            // m34-l: the pedal. `down` is REQUIRED and deliberately has no
+            // default — "press or lift?" is not a question a verb may guess at,
+            // and a defaulted `false` would make a typo'd call silently lift a
+            // pedal the user is holding. `true` is used here so the loop
+            // exercises the VALIDATED branch rather than the never-refused lift;
+            // the store is discarded at the end of the test, and `stopAll` on
+            // the next project boundary lifts it regardless.
+            "play.sustain": ["trackId": .string(instTrackID), "down": .bool(true)],
             "midi.setControlMap": ["bindings": .array([])],
             "midi.learnControl": ["cancel": .bool(true)],
             "transport.seek": ["beats": .number(0)],
@@ -1574,6 +1784,41 @@ struct CommandRouterTests {
             "track.removeSend": ["trackId": .string(trackID), "sendId": .string(preSendID)],
             // Instrument-only; use the instrument track (the shared trackID is audio).
             "track.setInstrument": ["trackId": .string(instTrackID), "waveform": .string("saw")],
+            // m39-f: STAYS IN THE LOOP, unlike its sibling
+            // instrument.describeSampler two screens down in the exclusion
+            // list — and the difference is the point, not an oversight. That
+            // verb is excluded because a sampler can genuinely be UNCONFIGURED
+            // and it refuses when it is; this one cannot hit that state,
+            // because every instrument track HAS a poly synth (the default
+            // one) and the verb describes it. So a bare call here is a real
+            // route exercise with a real answer, which is exactly what this
+            // loop is for. It needs only the trackId.
+            "instrument.describeSynth": ["trackId": .string(instTrackID)],
+            // m39-dm: all three STAY IN THE LOOP for the describeSynth reason
+            // directly above — every instrument track carries a drum kit (the
+            // default one) whether or not the drum machine is the ACTIVE
+            // instrument, so none of them can hit the "unconfigured, therefore
+            // refuses" state that excludes instrument.describeSampler. They
+            // answer on this poly-synth track with isActiveInstrument: false,
+            // which is a real route exercise with a real answer.
+            // `instrument.listDrumPresets` takes no params and needs no entry.
+            "instrument.setDrumParam": ["trackId": .string(instTrackID),
+                                        "name": .string("kick.decay"),
+                                        "value": .number(0.4)],
+            "instrument.describeDrumKit": ["trackId": .string(instTrackID)],
+            // Wholesale: this REPLACES the kick.decay written two entries above.
+            // Harmless here — the loop proves routes, not values — but noted so
+            // nobody later reads an ordering bug into it.
+            "instrument.loadDrumPreset": ["trackId": .string(instTrackID),
+                                          "name": .string("909")],
+            // m39-levels-2 wire: see the dedicated-track setup above this
+            // dictionary — each verb gets its own subject, independent of
+            // where the other one falls in allCommands order.
+            "instrument.spreadSlice": ["trackId": .string(spreadSliceTrackID),
+                                       "zoneId": .string(spreadSliceZoneID)],
+            "instrument.setSpreadDirection": ["trackId": .string(setSpreadTrackID),
+                                              "spreadZoneId": .string(preSpreadZoneID),
+                                              "direction": .string("centered")],
             // m23-h: track.reorder sits at the END of allCommands, by which
             // point track.remove has already deleted the shared audio trackID —
             // so it moves the INSTRUMENT track, which survives the whole loop
@@ -1613,6 +1858,20 @@ struct CommandRouterTests {
             // automation.addLane targets "pan" — idempotent against the
             // pre-made removableLaneID, so it succeeds regardless of when it
             // runs relative to automation.removeLane below.
+            "mod.addSource": ["trackId": .string(trackID), "kind": .string("lfo")],
+            "mod.setSource": ["trackId": .string(trackID), "sourceId": .string(editableSourceID),
+                              "params": .object(["rateHz": .number(2)])],
+            "mod.removeSource": ["trackId": .string(trackID),
+                                 "sourceId": .string(removableSourceID)],
+            "mod.addRoute": ["trackId": .string(trackID), "sourceId": .string(routeSourceID),
+                             "target": .object(["type": .string("volume")]),
+                             "depth": .number(-0.1)],
+            "mod.setRouteDepth": ["trackId": .string(trackID),
+                                  "routeId": .string(editableRouteID), "depth": .number(0.2)],
+            "mod.removeRoute": ["trackId": .string(trackID),
+                                "routeId": .string(removableRouteID)],
+            "mod.setMacro": ["trackId": .string(trackID), "sourceId": .string(routeSourceID),
+                             "value": .number(0.5)],
             "automation.addLane": ["trackId": .string(trackID), "target": .object(["type": .string("pan")])],
             "automation.setPoints": ["trackId": .string(trackID), "laneId": .string(preLaneID),
                                      "points": .array([.object(["beat": .number(0), "value": .number(1)])])],
@@ -1673,6 +1932,68 @@ struct CommandRouterTests {
             // (no params) also stays IN the loop — a scan never errors.
             // instrument.importSoundBank is excluded above (real-FS copy).
             "instrument.listSoundBankPrograms": ["source": .string("gm")],
+            // NT-W (natural tuning §1(e)/§4.e): five of the six new verbs are
+            // DRIVEN, not excluded, the clip.setNoteCleared/setNoteGain/
+            // setNotePitches/auditionNote precedent immediately above — same
+            // setup clip, same stored one-note table. None of the five reads
+            // or depends on the note's `cleared`/`amplitudeDb`/
+            // `pitchOffsetCents` (each earlier verb in this same loop may
+            // already have set those), only on `origin` (still `.detected`)
+            // and/or the set existing at all — so allCommands order still
+            // does not matter. clip.setNoteTransition is the sixth, excluded
+            // above (needs a NEXT note this one-note fixture cannot supply).
+            "clip.setNoteFormant": ["clipId": .string(playedPitchClipID),
+                                    "segmentIds": .array([.string(playedPitchSegmentID.uuidString)]),
+                                    "formantSemitones": .number(0)],
+            "clip.setFormantCorrection": ["clipId": .string(playedPitchClipID), "amount": .number(1)],
+            "clip.setPitchTransitionSmoothness": ["clipId": .string(playedPitchClipID),
+                                                  "centsPerSecond": .number(3000)],
+            // amount MUST be 0: this note meets no curve neighbour on either
+            // side (a one-note table), so any amount above 0 refuses in
+            // words (PitchTransitionSentences.nothingToFollow) — 0 is always
+            // allowed, the verb's own documented exception.
+            "clip.setNoteGlideFollow": ["clipId": .string(playedPitchClipID),
+                                        "noteId": .string(playedPitchSegmentID.uuidString),
+                                        "amount": .number(0)],
+            // NT-W over NT-C C2: needs only pitchEdits != nil, which the
+            // shared seed provides regardless of anything an earlier verb in
+            // this loop did to the one note it carries. NT-E2 has since
+            // landed — the render mix is live; this call still just routes.
+            "clip.setConsonantProtection": ["clipId": .string(playedPitchClipID), "enabled": .bool(true)],
+            // C5b-3b: clip.setNoteShape is DRIVEN, not excluded — the same
+            // shared one-note table as the five verbs above. Unlike
+            // clip.setNoteTransition (excluded, five verbs above: needs a
+            // NEXT note this one-note fixture cannot supply), a drawn shape
+            // needs nothing from a neighbour, only points inside the note's
+            // own [0, 1) span, so allCommands order still does not matter.
+            "clip.setNoteShape": ["clipId": .string(playedPitchClipID),
+                                  "noteId": .string(playedPitchSegmentID.uuidString),
+                                  "points": .array([.object(["seconds": .number(0.2), "cents": .number(10)])])],
+            // W7-WIRE2: clip.setNoteShapes is DRIVEN, not excluded — the
+            // clip.setNoteShape entry above, wrapped in a single-item
+            // `notes` array (the batch verb's own shape). Same shared
+            // one-note table, same reasoning: allCommands order does not
+            // matter.
+            "clip.setNoteShapes": ["clipId": .string(playedPitchClipID),
+                                   "notes": .array([.object([
+                                       "noteId": .string(playedPitchSegmentID.uuidString),
+                                       "points": .array([.object(["seconds": .number(0.2), "cents": .number(10)])]),
+                                   ])])],
+            // X4: clip.upgradeNaturalTuning is DRIVEN, not excluded — needs
+            // only pitchEdits != nil, the same shared one-note table every
+            // other natural-tuning verb above already needs. By the time the
+            // loop reaches this entry, clip.setFormantCorrection above has
+            // already set formantCorrection to a real number, so the table
+            // is ALREADY at (or past) the seed values and this call is
+            // exercised as its own documented NO-OP path — `response.ok`
+            // still requires success, so that path routes too, allCommands
+            // order does not matter either way.
+            "clip.upgradeNaturalTuning": ["clipId": .string(playedPitchClipID)],
+            // m39-tpl-6: template.describe is read-only (changes nothing), so
+            // it is DRIVEN here rather than excluded — "lofi-chill" is one of
+            // BuiltInTemplateCatalog's own ids, always resolvable regardless
+            // of the test environment's template-library root.
+            "template.describe": ["template": .string("lofi-chill")],
         ]
         for command in CommandRouter.allCommands {
             // track.remove deletes the shared track; the project.* routes need
@@ -1714,6 +2035,43 @@ struct CommandRouterTests {
                 // returnedNotes split, the read-only pin, and every
                 // rejection).
                 "clip.getNotes",
+                // clip.repeatNotes (m31-c) needs a REAL MIDI clip id and a
+                // note already in it, like the other per-clip edits above —
+                // this loop's clip.addMIDI clip id is minted mid-loop, not
+                // known ahead of time, and a bare call would just be the
+                // ordinary "missing or invalid required param 'clipId'"
+                // refusal this loop (which sends no params to an unlisted
+                // command) cannot express. Proven by
+                // ClipRepeatNotesCommandTests (wire round-trip, every
+                // rejection, the no-notes-key response shape).
+                "clip.repeatNotes",
+                // clip.patchNotes (m26-a/m27-n) needs a REAL MIDI clip id
+                // and a real note id already in it, like clip.repeatNotes
+                // directly above — this loop's clip.addMIDI clip/note ids
+                // are minted mid-loop, not known ahead of time, and a bare
+                // call would just be the ordinary "missing or invalid
+                // required param 'clipId'" refusal this loop (which sends
+                // no params to an unlisted command) cannot express. Proven
+                // by ClipPatchNotesCommandTests (wire round-trip, every
+                // rejection including the ALL-OR-NOTHING unknown/duplicate
+                // id refusals, the counts-only response shape).
+                "clip.patchNotes",
+                // clip.setNotePitch / clip.splitNote (m23-ap Phase 2, item
+                // p2-c) need a REAL AUDIO clip id carrying a STORED pitch
+                // note table — deeper than clip.repeatNotes/clip.patchNotes
+                // directly above: those need a real MIDI clip+note id, these
+                // need a real audio clip that has ALREADY been through a
+                // full clip.autoCorrectPitch pass (there is no pitch
+                // detection on either of these two wire paths, by design —
+                // `ProjectStore+PitchNoteEdits.swift`'s own banner), which
+                // this params-free loop cannot supply. A bare call is the
+                // ordinary "missing or invalid required param 'segmentId'"
+                // refusal this loop cannot express. Proven by
+                // PitchCorrectionCommandTests (wire round-trip for both,
+                // clamp-and-read-back, the absolute-not-delta idempotency
+                // check, the split's minimum-half refusal and set-difference
+                // right-id, every clip-kind/no-table/unknown-id rejection).
+                "clip.setNotePitch", "clip.splitNote",
                 "clip.remove",
                 "clip.split", "clip.trim", "clip.move",
                 // clip.duplicate (m15-d) needs a clip id like the other per-clip
@@ -1789,6 +2147,22 @@ struct CommandRouterTests {
                 // DAWEngineTests ClipPitchAnalyzerTests (real SwiftF0
                 // inference).
                 "clip.detectPitch",
+                // clip.autoCorrectPitch (m23-q Phase 2) needs the SAME real
+                // clip id + real backing file as clip.detectPitch above (it
+                // calls detectClipPitch internally) — this loop's clip id is
+                // minted mid-loop and points at no real file. Proven by
+                // PitchCorrectionCommandTests (happy path, presets, scale,
+                // range validation, MIDI/comp-member/unknown-clip
+                // rejections, the hardTune warning) and DAWCore
+                // PitchCorrectionWriterTests.
+                "clip.autoCorrectPitch",
+                // clip.clearPitchEdits / clip.getPitchEdits (m23-q Phase 2)
+                // need a clip id like the other per-clip reads above — this
+                // loop's clip id is minted mid-loop, not known ahead of time.
+                // Both are no-ops/reads on a clip with no edits, so excluding
+                // them costs nothing but route coverage, which
+                // PitchCorrectionCommandTests supplies directly.
+                "clip.clearPitchEdits", "clip.getPitchEdits",
                 // clip.crossfade (m11-d) needs TWO adjacent audio clips with source
                 // material on each side of the seam — a fixture this shared, single-
                 // clip project doesn't have. Proven by ClipCrossfadeCommandTests
@@ -1797,6 +2171,18 @@ struct CommandRouterTests {
                 "clip.setStretch", "clip.stretchToLength",
                 "clip.deleteTimeRange", "clip.insertTimeRange", "clip.quantize",
                 "clip.humanize", "clip.detectTransients", "clip.quantizeAudio",
+                // clip.sliceToSampler (m32-b2) is clip-id-dependent like its
+                // detectTransients/quantizeAudio siblings above, AND needs a
+                // real engine implementing the m32-b2 slice-boundary seam
+                // (whose protocol default deliberately THROWS rather than
+                // fabricating a geometry). Proven by
+                // SliceToSamplerCommandTests (all three modes, the whole
+                // rejection ladder, undo granularity, snap reporting, and a
+                // save/open/zonePatches round trip), DAWCore
+                // SliceToSamplerPlanTests/SliceToSamplerRateTests, and
+                // DAWEngine BoundarySnapperTests/
+                // SliceToSamplerReconstructionTests.
+                "clip.sliceToSampler",
                 "fx.remove", "fx.reorder", "fx.setBypass", "fx.setParam",
                 // fx.setSidechain (m12-g) is effect-id-dependent AND needs a
                 // compressor/gate keyed from a valid source track — the shared
@@ -1834,6 +2220,26 @@ struct CommandRouterTests {
                 // coverage/gaps, paging, every refusal) by
                 // InstrumentDescribeSamplerCommandTests.
                 "instrument.describeSampler",
+                // instrument.probeLiveness (m31-f) RENDERS a velocity
+                // ladder offline: it needs a real track carrying a real
+                // instrument AND a live engine to render through, neither
+                // of which this bare loop stages — the
+                // instrument.describeSampler rationale directly above,
+                // verbatim. ⚠️ It is a READ-ONLY probe (lands no clip,
+                // pushes no undo step) but "read-only" is not the
+                // exclusion here; needing a rendered fixture is.
+                // TWO suites cover this verb, one per layer: the
+                // store/measurement layer — STATIC/LIVE/SILENT/INCONCLUSIVE
+                // verdicts, the self-check gate, the no-edit guarantee — is
+                // proven by TimbreLivenessProbeTests (DAWCoreTests, calling
+                // store.probeInstrumentLiveness directly; it never crosses
+                // the control layer). THIS verb's own wire contract — param
+                // decoding/defaulting, the control layer's OWN velocities
+                // validation, refusal wording, the JSON field shape, and
+                // that a failed self-check surfaces as a control-layer
+                // ERROR rather than a STATIC verdict — is proven by
+                // InstrumentProbeLivenessCommandTests, this target.
+                "instrument.probeLiveness",
                 // m23-k3: both MIDI-import verbs read a REAL .mid off disk — a
                 // fixture this bare loop doesn't stage — and clip.importMIDI
                 // additionally needs an existing MIDI clip. The
@@ -1919,6 +2325,21 @@ struct CommandRouterTests {
                 // AUParameterSurfaceTests (real AUDelay/DLSMusicDevice trees,
                 // audible-truth render).
                 "au.describeParams", "au.setParam",
+                // m23-cw: au.listPresets / au.loadPreset (hosted-AU PRESET
+                // surface) are excluded for exactly the reason above and one
+                // more. Both need a LIVE `.ready` hosted Audio Unit behind the
+                // target, which this bare router's FakeEngine has none of; and
+                // this loop passes NO params, so both refuse on the required
+                // `trackId` before they ever reach the engine. ⛔ Do NOT "fix"
+                // this by inventing a trackId in paramsByCommand: a made-up id
+                // would refuse with "No track with id …" instead, which is a
+                // DIFFERENT verb working and would silently stop testing what
+                // this entry claims to test. Proven by AUPresetCommandTests
+                // (full wire taxonomy + shapes over a preset-surface fake) and
+                // DAWEngine's AUPresetSurfaceTests (real AUMatrixReverb /
+                // AUDelay preset lists, a load that moves the rendered reverb
+                // tail, and the save/restore state round trip).
+                "au.listPresets", "au.loadPreset",
                 // vc.convertVocals/vc.trainVoice (m10-p-4) hit a REAL
                 // VoiceConversionClient talking to a REAL (almost certainly
                 // not-running-in-CI, and stopped again by the vc.sidecarStop
@@ -1934,6 +2355,22 @@ struct CommandRouterTests {
                 // AIServicesTests/VoiceConversionClientTests (convert/train
                 // against a stub facade).
                 "vc.convertVocals", "vc.trainVoice",
+                // vc.convertClips (m24-m leg A) is the SET form of
+                // vc.convertVocals and is excluded for the same three reasons
+                // verbatim: a REAL VoiceConversionClient against a REAL
+                // (not-running) sidecar, a required voiceId this loop cannot
+                // supply, and a required non-empty clipIds. It additionally
+                // needs a live ENGINE — the m24-o extraction renders the
+                // clip's own window before converting — which this bare
+                // router does not have. Proven by dedicated tests:
+                // DAWCoreTests/ClipVoiceConversionTests (the store contract:
+                // arrangement preservation, one undoable edit, all-or-nothing,
+                // every refusal), DAWControlTests/VoiceConvertClipsCommandTests
+                // (routing/param-shape/response-encoding via a fake
+                // VoiceConverting and a fake render engine), and
+                // DAWEngineTests/ClipVoiceConversionRenderTests (the audio
+                // itself, sample-exact, through a REAL AudioEngine).
+                "vc.convertClips",
                 // vc.listVoices (m10-p-5) likewise hits the REAL
                 // VoiceConversionClient talking to a REAL (almost certainly
                 // not-running-in-CI, and stopped again by the vc.sidecarStop
@@ -2007,6 +2444,22 @@ struct CommandRouterTests {
                 // transport by PadPreviewCommandTests — the note.audition
                 // rationale verbatim.
                 "pad.previewEffort",
+                // pad.playEffort (m34-f step ②) shares that verb's handler case
+                // and is excluded for HALF of its reasons — the half that still
+                // applies, and the difference matters enough to write out.
+                //  1. ⛔ NOT for the refuse-while-recording reason. This verb is
+                //     DELIBERATELY not refused mid-take; that single difference
+                //     is the entire feature, and pinning it is
+                //     `PadPreviewCommandTests.theTwoVerbsDifferExactlyHere`,
+                //     which drives BOTH verbs against one rolling take and
+                //     asserts the preview is refused where this one succeeds.
+                //  2. It is excluded because a params-free `begin` has no
+                //     `trackId`, and this loop supplies none. Feeding it
+                //     {gesture:"end"} is the SAME trap `pad.previewEffort`
+                //     documents above: with no gesture open it throws by design,
+                //     and if it ever stopped throwing the loop would be
+                //     exercising a degenerate no-op while looking like coverage.
+                "pad.playEffort",
                 // clip.transcribe (m23-n2b) hits a REAL WhisperTranscriber —
                 // this bare router doesn't inject a fake (there is no
                 // WhisperTranscriber protocol to fake; the actor IS the
@@ -2062,7 +2515,156 @@ struct CommandRouterTests {
                 // bare loop doesn't stage. Proven with injected temp dirs by
                 // VoiceModelImportCommandTests and AIServicesTests/
                 // VoiceModelImportTests.
-                "vc.importVoiceModel"].contains(command) {
+                "vc.importVoiceModel",
+                // vc.installEmbeddedVoice (m24-n) is the SAME exclusion class,
+                // twice over: it REQUIRES a `voiceId` this params-free loop
+                // cannot supply, and on success it copies a real voice model
+                // into the app-owned voice store. It also needs a SAVED project
+                // bundle that actually carries an embedded voice — a fixture
+                // this bare loop does not stage. Proven end-to-end, with an
+                // injected temp voice store and a real save/reopen round trip,
+                // by EmbeddedVoiceCommandTests and DAWCoreTests/
+                // VoiceProvenanceEmbeddingTests.
+                // ⚠️ Its READ sibling `project.embeddedVoices` stays IN the
+                // loop: it takes no params, writes nothing, and answers
+                // honestly on an empty project.
+                "vc.installEmbeddedVoice",
+                // m34-h LIVE LOOPING: transport.recordLayer / transport.finishLayer
+                // are excluded for OPPOSITE halves of the same state, and both
+                // reasons are written down because either alone invites the
+                // wrong repair.
+                //  1. This loop is mid-take from transport.record onwards, so
+                //     transport.recordLayer legitimately refuses — a layer needs
+                //     a transport that is playing and NOT already capturing
+                //     ("already recording a layer — finish it with
+                //     transport.finishLayer first"). That refusal is the verb
+                //     working, not failing.
+                //  2. ⛔ Do NOT "fix" this by reordering them BEFORE
+                //     transport.record. The transport is STOPPED there, and
+                //     recordLayer refuses a stopped transport just as firmly
+                //     (that is the whole point — it is the mirror image of
+                //     transport.record, not a relaxation of it). Neither
+                //     position can satisfy both verbs.
+                //  3. transport.finishLayer runs against this bare router's
+                //     FakeEngine, which does not implement the keep-playing
+                //     close, so it answers the AudioEngineControlling default —
+                //     "closed nothing" — which the store deliberately turns into
+                //     a throw rather than a silent success (a false success
+                //     there is a LOST TAKE; see finishLayer's own doc). Feeding
+                //     it a real take would still not help: only the real
+                //     AudioEngine can close one without stopping.
+                // Proven instead by TransportLayerCommandTests (the full wire
+                // taxonomy over a spy engine that DOES implement the close) and
+                // DAWEngineTests/LiveLayerCaptureTests (the real engine, both
+                // layers, playhead advancing across the close).
+                "transport.recordLayer", "transport.finishLayer",
+                // m34-h-1 LIVE LOOPING, the loop deck. Excluded for reasons
+                // that COMPOSE with the two above rather than repeating them,
+                // and each one is a verb WORKING:
+                //  1. looper.begin refuses outright here — this loop is
+                //     mid-take from transport.record onwards, and a deck
+                //     session cannot open over a rolling take.
+                //  2. looper.armLayer / looper.setLayerMuted need a `trackId` /
+                //     `layerId` this params-free loop cannot supply, and a
+                //     layer id only exists after a landed pass.
+                //  3. looper.finishLayer / looper.undoLayer / looper.end
+                //     legitimately refuse with no session open, which is what
+                //     they are for. ⛔ Do NOT "fix" this by opening a session
+                //     in the loop's fixture: the deck's landing path depends on
+                //     the keep-playing close, which this bare router's
+                //     FakeEngine does not implement (see point 3 above).
+                // ⚠️ looper.status is NOT excluded — it takes no params, writes
+                // nothing, and answers null honestly when no deck is open,
+                // which is exactly the shape this loop is good at.
+                "looper.begin", "looper.armLayer", "looper.finishLayer",
+                "looper.undoLayer", "looper.setLayerMuted", "looper.end",
+                // m34-c: excluded for two DIFFERENT reasons, both written down
+                // because either alone invites the wrong repair.
+                //  1. instrument.downloadSoundBank REQUIRES an `id` this
+                //     params-free loop cannot supply — and supplying one would
+                //     be worse: it would start a REAL 216 MB NETWORK TRANSFER
+                //     from every run of the suite. ⛔ Do NOT "fix" this by
+                //     adding it to paramsByCommand.
+                //  2. instrument.cancelSoundBankDownload legitimately REFUSES
+                //     when nothing is running ("there is nothing to cancel"),
+                //     which is the verb working, not failing — a no-op success
+                //     would let a caller believe it cancelled something. The
+                //     loop has nothing in flight by construction.
+                // Both are proven end to end, against an injected fake install
+                // function with no network, by SoundBankDownloadCommandTests.
+                "instrument.downloadSoundBank",
+                "instrument.cancelSoundBankDownload",
+                // NT-W (natural tuning §4.e): clip.setNoteTransition is
+                // excluded, not driven — the shared `playedPitchSegmentID`
+                // fixture five verbs above is a ONE-note table, and this
+                // verb's own rule (`PitchEditSet.applyingNoteTransition`,
+                // `PitchTransitionSentences.lastNoteHasNoSlide`) is that the
+                // LAST sung note has no next note to slide into. Extending
+                // the shared fixture to two notes would be the wrong fix:
+                // clip.getPlayedPitch/setNoteCleared/setNoteGain/
+                // setNotePitches/auditionNote all drive against it and may
+                // assume a single note. So the refusal here IS the verb
+                // working, the instrument.cancelSoundBankDownload precedent
+                // immediately above. Proven on a real three-note fixture
+                // (soft/gap/last joins) by PitchCorrectionCommandTests'
+                // setNoteTransition* tests.
+                "clip.setNoteTransition",
+                // UB-2: clip.findUnpitchedSounds is excluded, not driven —
+                // unlike clip.setNoteVibrato/setNoteVibratos above (same
+                // per-note door, same shared fixture), this verb calls
+                // `detectClipPitch` (`ProjectStore+PitchCorrection.swift`) to
+                // measure the clip's OWN noise floor from real audio frames.
+                // The shared fixture's clip was added over
+                // `/tmp/PlayedPitchFixture.wav`, a path that does not exist
+                // on disk (confirmed: `ls` finds nothing there) — every OTHER
+                // verb driven against it only ever reads the STORED note
+                // table, never audio content, so the missing file never
+                // matters until this one tries to decode it. This router
+                // also carries no `FakePitchDetectionEngine` (unlike
+                // PitchCorrectionCommandTests's `makeRouter`), so there is no
+                // safe stub to detect through either. Proven end to end,
+                // against a real (if minimal) audio file and a
+                // FakePitchDetectionEngine stub, by
+                // PitchCorrectionCommandTests' findUnpitchedSounds* tests.
+                "clip.findUnpitchedSounds",
+                // M35 — the five `view.*` verbs (the fifth, `view.openPitchEditor`,
+                // landed at the m23-ap Phase 2 p2-c pitch-editor command-surface
+                // door). Excluded because THIS ROUTER IS HEADLESS BY CONSTRUCTION
+                // (no `viewUI` seam installed) and the design's contract is that
+                // all five then fail LOUDLY rather than returning a success that
+                // means nothing: a `view.capture` that answered `ok` here would
+                // be reporting a screenshot of an app that does not exist. So the
+                // refusal IS the verb working.
+                // ⛔ Do NOT "fix" this by installing a fake seam in this
+                // fixture: the loud-refusal contract is the thing most worth
+                // protecting, and a fake here would make it untestable in the
+                // one place it is asserted.
+                // ⚠️ Three of the five would fail for a SECOND, unrelated reason
+                // as well — `view.selectClip` and `view.openPitchEditor` need a
+                // `clipId` and `view.openEditor` a `trackId`, which this
+                // params-free loop cannot supply — and that is recorded so a
+                // future reader does not "repair" the wrong half.
+                // `view.openPitchEditor` has a THIRD reason on top of those two:
+                // its clip lookup and MIDI-clip refusal are ROUTER-SIDE
+                // (`Commands.swift`'s own comment on the case), so even a
+                // well-formed `clipId` this loop does not have would still need
+                // to name a real, existing, non-MIDI clip. All five are proven,
+                // headless refusal included, by ViewSurfaceCommandTests.
+                "view.capture", "view.selectClip",
+                "view.panelLayout", "view.openEditor", "view.openPitchEditor",
+                // m39-tpl-6: the five MUTATING template verbs — each one
+                // either writes a file (save/import/export), deletes one
+                // (remove), or edits the shared fixture's song (apply, one
+                // undo step per call). Giving any of them a params table
+                // entry here would mean every OTHER command below it in this
+                // single params-free loop runs against a project this verb
+                // just changed — exactly the shared-fixture risk this test's
+                // own comments elsewhere in this file warn against. Proven
+                // instead, each with its own isolated router, in
+                // TemplateWireCommandTests.swift. template.list and
+                // template.describe are read-only and stay DRIVEN above.
+                "template.apply", "template.save", "template.remove",
+                "template.import", "template.export"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(
@@ -2070,6 +2672,83 @@ struct CommandRouterTests {
             ))
             #expect(response.ok, "command \(command) failed: \(response.error ?? "?")")
         }
+    }
+
+    // MARK: - W7-WNM: the wire number-magnitude ceiling, end to end through
+    // the router (walker-level coverage lives in the NEW, nonisolated
+    // WireNumberCeilingTests.swift — no new @MainActor suite is added here).
+
+    @Test("W7-WNM: at least one command per family refuses a wire number of 2^53 or more at its known, previously-unguarded Int(_:) site, naming the exact path — both the trap value (1e20) and the plant's value (1e17) are refused, and the process surviving to report it IS the proof (either value would have trapped the whole test binary before this pre-pass existed)")
+    func wireNumberCeilingRefusesKnownTrapSitesAcrossCommandFamilies() async {
+        let (router, _) = makeRouter()
+        let cases: [(command: String, path: String, build: (Double) -> [String: JSONValue])] = [
+            ("track.reorder", "params.index",
+             { ["index": .number($0)] }),
+            ("fx.add", "params.index",
+             { ["index": .number($0)] }),
+            ("clip.repeatNotes", "params.count",
+             { ["count": .number($0)] }),
+            ("clip.repeatNotes", "params.transposeSemitones[0]",
+             { ["transposeSemitones": .array([.number($0)])] }),
+            ("ai.generateSong", "params.seed",
+             { ["seed": .number($0)] }),
+            ("vc.convertVocals", "params.pitchSemitones",
+             { ["pitchSemitones": .number($0)] }),
+            ("tempo.setMap", "params.meterChanges[0].beatsPerBar",
+             { ["meterChanges": .array([.object(["beatsPerBar": .number($0)])])] }),
+            ("project.exportMIDI", "params.format",
+             { ["format": .number($0)] }),
+            ("track.setInstrument", "params.drumKit.kick.chokeGroup",
+             { ["drumKit": .object(["kick": .object(["chokeGroup": .number($0)])])] }),
+            ("track.setInstrument", "params.soundBank.program",
+             { ["soundBank": .object(["program": .number($0)])] }),
+            ("clip.setControllerLane", "params.points[0].value",
+             { ["points": .array([.object(["value": .number($0)])])] }),
+        ]
+        for value: Double in [1e20, 1e17] {
+            for row in cases {
+                let response = await router.handle(ControlRequest(
+                    id: "t", command: row.command, params: row.build(value)))
+                #expect(!response.ok, "\(row.command) at \(value) must be refused")
+                #expect(response.error == "\(row.path) is too large: "
+                    + "wire numbers must be below 9007199254740992",
+                        "\(row.command) at \(value): \(response.error ?? "no error")")
+            }
+        }
+    }
+
+    @Test("W7-WNM: 2^53 - 1 passes the pre-pass and reaches the command's own validation next — a positive control that this is not refusing everything")
+    func wireNumberCeilingPositiveControlJustUnderTheCeiling() async {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "p", command: "track.reorder", params: ["index": .number(9_007_199_254_740_991)]))
+        #expect(!response.ok)
+        #expect(response.error?.contains("too large") != true, "\(response.error ?? "no error")")
+        // track.reorder's OWN next check is the missing 'trackId' — proving
+        // the value was let through, not swallowed by this pre-pass.
+        #expect(response.error == "missing or invalid required param 'trackId'",
+                "\(response.error ?? "no error")")
+    }
+
+    @Test("W7-WNM: a negative magnitude past the ceiling is refused the same as a positive one")
+    func wireNumberCeilingRefusesNegativeMagnitude() async {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "n", command: "clip.repeatNotes", params: ["count": .number(-1e20)]))
+        #expect(response.error == "params.count is too large: wire numbers must be below 9007199254740992",
+                "\(response.error ?? "no error")")
+    }
+
+    @Test("W7-WNM: the exemption is real end to end too — clip.quantizeAudio's absurd 'divisions' reaches ITS OWN words, not this pre-pass's")
+    func wireNumberCeilingExemptionEndToEnd() async {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "e", command: "clip.quantizeAudio",
+            params: ["trackId": .string(UUID().uuidString), "clipId": .string(UUID().uuidString),
+                     "divisions": .number(1e20), "strength": .number(0)]))
+        #expect(!response.ok)
+        #expect(response.error?.contains("'divisions' must be a whole number between") == true,
+                "\(response.error ?? "no error")")
     }
 }
 

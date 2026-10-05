@@ -22,9 +22,10 @@ public struct SamplerParamSpec: Equatable, Sendable {
     /// verbatim.
     public let range: ClosedRange<Double>
     /// The double-click reset value. For a per-zone field this is the value the
-    /// domain's `nil` means (0 cents, no decay stage, sustain at peak, unity
-    /// gain) — see `SamplerEditorModel.zoneValue(for:)` for the two fields
-    /// whose nil resolves against a LIVE global instead.
+    /// domain's `nil` means when nothing else is set (0 cents, centred pan, no
+    /// decay stage, sustain at peak, unity gain) — but the FOUR envelope fields
+    /// (`attack`, `decay`, `sustain`, `release`) resolve nil against the LIVE
+    /// sampler global instead: see `SamplerEditorModel.zoneValue(_:in:globals:)`.
     public let defaultValue: Double
     /// The STORAGE unit ("s" / "linear" / "cents" / "pan" / "level") — display
     /// crossovers (ms↔s, dB-for-gain, %-for-levels, L/C/R-for-pan) live in
@@ -342,6 +343,90 @@ public final class SamplerEditorModel {
         detail: "Play each sample to its end and ignore note-off — for drums and "
               + "percussion. Zones that LOOP ignore this.")
 
+    // MARK: - VOICE MODE + GLIDE (m34-u — the UI half of m34-t)
+
+    /// The three voice modes in the order the card renders them: the DEFAULT
+    /// first, then the two monophonic ones in increasing degree of connection.
+    /// Sourced from the domain's own `CaseIterable` conformance rather than
+    /// retyped, so a FOURTH case added tomorrow appears in the picker instead of
+    /// being silently unreachable from the UI — the settable-but-invisible shape
+    /// this item exists to close, arriving one layer up.
+    ///
+    /// ⚠️ `allCases` order IS the declaration order (`poly, mono, legato`), and
+    /// that is the order wanted; the assertion below is what makes that a fact
+    /// rather than a coincidence.
+    public static let voiceModes: [SamplerVoiceMode] = SamplerVoiceMode.allCases
+
+    /// BEGINNER-READABLE names (docs/DESIGN-LANGUAGE.md Rule 6). "Poly",
+    /// "mono" and above all "legato" are the wire's words and the right ones
+    /// for an agent reading `instrument.describeSampler`; none of the three
+    /// passes the newcomer test on a chip 60 pt wide.
+    ///
+    /// ⛔ THE THREE MUST DIFFER IN WHAT THEY SAY, NOT ONLY IN WHICH IS LIT.
+    /// "One Note" and "Slurred" are both monophonic, so a label pair like
+    /// "Mono"/"Legato" tells a newcomer nothing about the one thing that
+    /// separates them — whether the next note RE-ATTACKS. The words chosen name
+    /// the audible result: chords, one note at a time, or one note at a time
+    /// slurred into the next.
+    public static func voiceModeLabel(_ mode: SamplerVoiceMode) -> String {
+        switch mode {
+        case .poly: return "Chords"
+        case .mono: return "One Note"
+        case .legato: return "Slurred"
+        }
+    }
+
+    /// What each mode actually does, in the same register `loopModeDetail`
+    /// uses — the tooltip that carries the re-attack distinction the two
+    /// monophonic labels cannot fit.
+    public static func voiceModeDetail(_ mode: SamplerVoiceMode) -> String {
+        switch mode {
+        case .poly:
+            return "Chords — every key you hold sounds at once. The normal setting, "
+                 + "and the only one that can play more than one note."
+        case .mono:
+            return "One Note — only the newest key sounds, and each new note starts "
+                 + "fresh with its own attack. Like a synth lead, or a wind player "
+                 + "tonguing every note."
+        case .legato:
+            return "Slurred — only the newest key sounds, and a note played while "
+                 + "another is still held CONTINUES it: the pitch changes with no new "
+                 + "attack, the way a wind player moves a finger without re-tonguing. "
+                 + "Add Glide to slide between the two pitches."
+        }
+    }
+
+    /// The GLIDE global — modelled apart from `specs` on purpose, and for the
+    /// same reason `oneShotSpec` is: `specs` is the card's UNIFORM knob row and
+    /// this one is not uniform with it. Glide belongs beside the voice picker
+    /// (it is meaningless without one) and it needs its own readout, because
+    /// **0 must read OFF and not "very fast"** — see `glideReadout`.
+    ///
+    /// Range and the meaning of the reset value come from `SamplerParams`
+    /// itself, so this table can never fork the domain clamp.
+    public static let glideSpec = SamplerParamSpec(
+        name: "glideTime", label: "Glide", range: SamplerParams.glideTimeRange,
+        defaultValue: 0, unit: "s")
+
+    /// ⛔ THE HONEST LIGHT, in the card's own words rather than the wire's.
+    /// `instrument.describeSampler` warns with "voiceMode is poly … set
+    /// 'legato' or 'mono'" because an AI agent reads it and those are the
+    /// values it must send. A human reading this card has never seen those
+    /// words — the chips above say Chords / One Note / Slurred — so the note
+    /// names the CHIPS. Same fact, two audiences (Rule 6).
+    /// ⚠️ **ONE LINE, AND THAT IS A MEASURED BUDGET RATHER THAN A STYLE
+    /// PREFERENCE.** This note sits in the card's FIXED chrome, so every line it
+    /// wraps to is a line `SamplerCardLayout.chromeHeight` must carry — and at
+    /// the default window each one costs a ZONE ROW off the list below. The
+    /// first draft was 128 characters and the second 63; BOTH wrapped to two
+    /// lines, and the zone list drew a sliced 5.79 rows instead of a clean 6.
+    /// **The line holds 51 characters at this width — counted off a capture,
+    /// not estimated**, and the estimate was wrong twice before the pixels
+    /// settled it. The *why* (a slide needs one note at a time) lives in the
+    /// GLIDE knob's tooltip, which costs no pixels at all.
+    public static let glideInertNote =
+        "CHORDS ignores Glide — use One Note or Slurred."
+
     // MARK: - The per-zone spec table (source of truth: SamplerZone)
 
     /// Every numeric per-zone parameter the card edits.
@@ -466,6 +551,185 @@ public final class SamplerEditorModel {
         }
     }
 
+    // MARK: - Voice mode + glide values/edits (m34-u)
+
+    /// The live voice mode. Reads through `effectiveVoiceMode`, so a sampler
+    /// that never set one lights the CHORDS chip rather than lighting nothing —
+    /// a three-way picker with no lit segment would claim a state the engine
+    /// does not have.
+    public var voiceMode: SamplerVoiceMode { params.effectiveVoiceMode }
+
+    /// The live glide time in seconds (0 = the pitch steps, the default).
+    public var glideTime: Double { params.effectiveGlideTime }
+
+    /// Whether glide can reach the sound AT ALL — `SamplerParams.glideIsEffective`
+    /// verbatim, never re-derived here. That conjunction (a time AND a
+    /// monophonic mode) has ONE home in the domain; the engine snapshot, the
+    /// wire's warning and this card all read it, so the card cannot come to a
+    /// different verdict than `instrument.describeSampler` publishes as
+    /// `glideEffective`.
+    public var glideIsEffective: Bool { params.glideIsEffective }
+
+    /// True when a glide is STORED but structurally inert — the card's
+    /// dim-the-knob + amber-note trigger. Not the negation of
+    /// `glideIsEffective`: an UNSET glide under chords is not a problem, it is
+    /// the default, and lighting a warning on it would teach nothing.
+    public var glideIsInert: Bool { glideTime > 0 && !glideIsEffective }
+
+    /// Applies the voice mode. Writes the EXPLICIT case, including `.poly` —
+    /// clicking CHORDS on an untouched sampler stores `poly` rather than
+    /// clearing to nil. Sound-identical either way (`effectiveVoiceMode`
+    /// resolves nil to `.poly`), and an explicit value is what a user pressing
+    /// a segment means.
+    public func setVoiceMode(_ mode: SamplerVoiceMode) {
+        mutate { params in
+            params.voiceMode = mode
+            return true
+        }
+    }
+
+    /// Applies the glide time. Clamps to the domain range first — this model's
+    /// clamp is the ONLY clamp on the sampler path (the store passes a supplied
+    /// `SamplerParams` through untouched).
+    public func setGlideTime(_ seconds: Double) {
+        let clamped = seconds.clamped(to: SamplerParams.glideTimeRange)
+        mutate { params in
+            params.glideTime = clamped
+            return true
+        }
+    }
+
+    /// Sets glide from a 0…1 knob travel fraction.
+    public func setGlideFraction(_ fraction: Double) {
+        setGlideTime(Self.value(forFraction: fraction, spec: Self.glideSpec))
+    }
+
+    /// Double-click reset — back to UNSET (nil), not to an explicit 0.
+    ///
+    /// The two are sound-identical (`effectiveGlideTime` resolves nil to 0), so
+    /// this is wire-shape hygiene rather than an audible difference: nil keeps a
+    /// project that never asked for glide byte-identical on a JSON round trip,
+    /// and keeps `glideTime` out of `instrument.describeSampler`'s only-when-SET
+    /// output. The per-zone `resetZoneParam` reasoning, one field over.
+    public func resetGlide() {
+        mutate { params in
+            params.glideTime = nil
+            return true
+        }
+    }
+
+    /// The glide knob's travel fraction.
+    public var glideFraction: Double {
+        Self.fraction(forValue: glideTime, spec: Self.glideSpec)
+    }
+
+    /// ⛔ **ZERO READS "OFF", NEVER "0 ms".** This is the single most likely way
+    /// to get this control wrong: `readout(value:spec:)` on an "s" unit formats
+    /// 0 as `0.0 ms`, which reads as *a very fast glide* — the exact
+    /// looks-live-does-nothing shape the rest of this card exists to avoid. The
+    /// bottom of this range is not a small amount of glide, it is the absence of
+    /// glide, and the readout has to say so.
+    ///
+    /// Above zero it falls through to the card's ordinary seconds formatter, so
+    /// glide speaks the same ms/s crossover every other time on the card does.
+    public static func glideReadout(_ seconds: Double) -> (text: String, unit: String) {
+        guard seconds > 0 else { return ("OFF", "") }
+        return readout(value: seconds, spec: glideSpec)
+    }
+
+    // MARK: - GLOBALS EVERY ZONE OVERRIDES (W7-SMP — the sax-team ② card half)
+
+    /// The sampler GLOBALS a zone can override, by field name. Taken from the
+    /// ENGINE's precedence, not from the field names: `SamplerInstrument`
+    /// resolves a zone's own `attack`/`decay`/`sustain`/`release` first and
+    /// falls back to the LIVE global only through its `-1` sentinel, and it
+    /// reads a zone's own `oneShot` (−1/0/1) before the global at note-off.
+    /// Nothing else qualifies: a zone's `gain` MULTIPLIES the global rather
+    /// than replacing it, and bend range, voice mode, glide, pedal hold and the
+    /// expression fields have no per-zone counterpart at all.
+    public static let zoneOverridableGlobals = ["attack", "decay", "sustain", "release", "oneShot"]
+
+    /// ⛔ THE SAME VERDICT `instrument.describeSampler` PUBLISHES. True when a
+    /// global is STORED BUT NEVER HEARD: zones exist and every one of them sets
+    /// its own value, so the engine never reads this one. Read straight off
+    /// DAWCore's `SamplerGlobalUse`/`SamplerOneShotUse` — the fold the wire
+    /// shapes into `effectiveGlobals.<name>.globalIsInert` — and never
+    /// re-derived here, so the card cannot reach a different verdict than an
+    /// agent reading the wire (the `glideIsEffective` rule, one field over).
+    ///
+    /// Field report 2026-08-20: a global Release of 3.4465 s on an imported
+    /// library whose every zone released in 0.5 s. The describe verb learned to
+    /// say so that day; this card went on drawing a live-looking knob that did
+    /// nothing when turned.
+    ///
+    /// False for every name outside `zoneOverridableGlobals` (`gain` included:
+    /// the zones scale it, they never replace it), and false for a sampler with
+    /// NO zones — that one is silent for a reason that has nothing to do with
+    /// this control, and calling it inert would point at the wrong repair.
+    public static func globalIsInert(_ name: String, in params: SamplerParams) -> Bool {
+        switch name {
+        case "attack": return SamplerGlobalUse.attack(of: params).globalIsInert
+        case "decay": return SamplerGlobalUse.decay(of: params).globalIsInert
+        case "sustain": return SamplerGlobalUse.sustain(of: params).globalIsInert
+        case "release": return SamplerGlobalUse.release(of: params).globalIsInert
+        case "oneShot": return SamplerOneShotUse.oneShot(of: params).globalIsInert
+        default: return false
+        }
+    }
+
+    /// The live verdict for one global — the card's dim-the-control trigger.
+    ///
+    /// ⚠️ INERT ⇒ DIM, BUT STILL LIVE, exactly as for glide: an edit still
+    /// writes the global (the wire stores it too, and its reply warns), because
+    /// a later zone edit can make that global heard again.
+    public func globalIsInert(_ name: String) -> Bool {
+        Self.globalIsInert(name, in: params)
+    }
+
+    /// The labels of the inert globals this card DRAWS, in the card's own order
+    /// (the knob row, then One Shot) — the words printed on the controls a
+    /// person can see. Global `decay`/`sustain` have no control on this card,
+    /// so they never appear here, even when inert.
+    public var inertGlobalLabels: [String] {
+        var labels = Self.specs.filter { globalIsInert($0.name) }.map(\.label)
+        if globalIsInert(Self.oneShotSpec.name) { labels.append(Self.oneShotSpec.label) }
+        return labels
+    }
+
+    /// The amber line under the GLOBALS row, or nil when nothing drawn is inert.
+    public var inertGlobalsNote: String? { Self.inertGlobalsNote(labels: inertGlobalLabels) }
+
+    /// ⚠️ ONE LINE, ≤ 51 CHARACTERS, IN THE WORST CASE — `glideInertNote`'s
+    /// measured budget, for its reason: this line sits in the card's FIXED
+    /// chrome, where a second wrapped line costs a zone row. The string that
+    /// must fit is the LONGEST this card can show — Attack, Release and One
+    /// Shot together, which one imported drum kit can author on every zone —
+    /// so the line carries only the dimmed controls' names, the FAULT ("do
+    /// nothing") and the cause ("set per zone"). The repair lives in each
+    /// control's tooltip, which costs no pixels (the glide precedent).
+    ///
+    /// Says "zone", not "sound": ZONES is the word printed on this card, and a
+    /// note must name what the reader can see (Rule 6, the glide note's rule).
+    ///
+    /// W7-SMP round 2: ONE SHOT ALONE says "not this card". "Set per zone"
+    /// sends a reader to the zone rows, which carry Attack and Release but no
+    /// One Shot control, so for One Shot alone that advice is a hunt with no
+    /// end. Measured headlessly (9 pt system font): 51 characters, 221.0 pt,
+    /// under the glide note's 222.4 pt, which a capture showed on one line.
+    /// The two- and three-label lines keep "set per zone": no 51-character
+    /// wording that also exempts One Shot fits, and One Shot's own tooltip
+    /// already says the card does not edit it.
+    public static func inertGlobalsNote(labels: [String]) -> String? {
+        switch labels.count {
+        case 0: return nil
+        case 1 where labels[0] == oneShotSpec.label:
+            return "\(labels[0]) does nothing: zones set it, not this card."
+        case 1: return "\(labels[0]) does nothing: set per zone."
+        case 2: return "\(labels[0]) and \(labels[1]) do nothing: set per zone."
+        default: return labels.joined(separator: ", ") + " do nothing: set per zone."
+        }
+    }
+
     // MARK: - Selection
 
     /// Selects a zone by its own id (nil deselects). An id that is not in the
@@ -493,17 +757,27 @@ public final class SamplerEditorModel {
     /// The EFFECTIVE value of one per-zone field: the zone's explicit value
     /// when it has one, otherwise what the domain's `nil` resolves to.
     ///
-    /// ⚠️ For `attack` and `release`, nil inherits the LIVE global — so this
-    /// returns the global's current value, not the spec's static default. That
-    /// is the number the engine will use, which is the number a knob must show.
+    /// ⚠️ For all FOUR envelope fields — `attack`, `decay`, `sustain`,
+    /// `release` — nil inherits the LIVE global, so this returns the global's
+    /// current value, not the spec's static default. That is the number the
+    /// engine will use (`SamplerInstrument` stores a nil zone field as its `-1`
+    /// sentinel and reads the global at trigger), which is the number a knob
+    /// must show. `decay`/`sustain` read it through `effectiveDecay`/
+    /// `effectiveSustain`: their own nil is the pre-m34-o pair (0 s, full
+    /// level), so an untouched sampler still shows exactly that.
+    ///
+    /// W7-SMP round 2: decay/sustain used to resolve to the literals 0 and 1
+    /// here, true only until m34-o gave them globals. A sampler whose global
+    /// decay was set over the wire then played a fade while this zone's knob
+    /// showed none.
     public static func zoneValue(_ name: String, in zone: SamplerZone,
                                  globals: SamplerParams) -> Double? {
         switch name {
         case "tuneCents": return zone.tuneCents ?? 0
         case "pan": return zone.pan ?? 0
         case "attack": return zone.attack ?? globals.attack
-        case "decay": return zone.decay ?? 0
-        case "sustain": return zone.sustain ?? 1
+        case "decay": return zone.decay ?? globals.effectiveDecay
+        case "sustain": return zone.sustain ?? globals.effectiveSustain
         case "release": return zone.release ?? globals.release
         case "gain": return zone.gain
         default: return nil
@@ -569,7 +843,8 @@ public final class SamplerEditorModel {
     /// Double-click reset for a per-zone row: back to UNSET (nil), which is the
     /// domain's real default — not to the nil-equivalent NUMBER, because for
     /// `pan` those two are audibly different (see `zoneParamIsUnset`) and for
-    /// `attack`/`release` an explicit number stops tracking the global.
+    /// the four envelope fields (`attack`/`decay`/`sustain`/`release`) an
+    /// explicit number stops tracking the global.
     /// `gain` is non-optional in the domain, so it resets to its 1.0 unity.
     public func resetZoneParam(_ spec: SamplerParamSpec) {
         mutateSelectedZone { zone in

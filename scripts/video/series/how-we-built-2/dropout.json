@@ -1,0 +1,48 @@
+{
+ "sourceRender": "/Users/dsemenov/Views/daw-pro/scripts/video/series/how-we-built-2/audio/mix-clean-full.wav",
+ "sampleRate": 48000,
+ "blockFrames": 512,
+ "blockMilliseconds": 10.666666666666666,
+ "excerptStartSeconds": 0.0,
+ "excerptSeconds": 12.0,
+ "dropouts": [
+  {
+   "startFrame": 122368,
+   "startSeconds": 2.5493333333333332,
+   "frames": 512,
+   "milliseconds": 10.666666666666666
+  },
+  {
+   "startFrame": 266240,
+   "startSeconds": 5.546666666666667,
+   "frames": 512,
+   "milliseconds": 10.666666666666666
+  },
+  {
+   "startFrame": 410112,
+   "startSeconds": 8.544,
+   "frames": 512,
+   "milliseconds": 10.666666666666666
+  }
+ ],
+ "differingFrames": 1536,
+ "runs": [
+  {
+   "start": 122368,
+   "length": 512
+  },
+  {
+   "start": 266240,
+   "length": 512
+  },
+  {
+   "start": 410112,
+   "length": 512
+  }
+ ],
+ "playGainDb": -6.0,
+ "differingFramesPerEar": 1536,
+ "channels": 2,
+ "excerptFramesPerEar": 576000,
+ "method": "rendered the project offline to a 24-bit WAV over the control socket, then wrote zeros over three separate 512-frame blocks of that file. The audio engine was not stalled, starved or crashed. Both halves were then turned down by the same -6.0 dB \u2014 one static gain, no compression \u2014 so the film's master would not clip; their relative levels are untouched."
+}

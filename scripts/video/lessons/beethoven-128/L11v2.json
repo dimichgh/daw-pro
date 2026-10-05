@@ -1,0 +1,786 @@
+{
+ "id": "L11v2",
+ "theme": "remix",
+ "size": "1920x1080",
+ "filename": "DAW Pro Lesson 11 - Beethoven At 128 (rebuild)",
+ "title": "Beethoven at 128 BPM: four notes, and what a laptop cannot show you",
+ "playlist": "Mixing, measured",
+ "categoryId": "27",
+ "cut": 5.2,
+ "playMax": 9.0,
+ "introSeconds": 4,
+ "outroSeconds": 3,
+ "meter": "br",
+ "bursts": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/bursts",
+ "cards": [
+  {
+   "type": "statement",
+   "size": 66,
+   "y": 250,
+   "lines": [
+    "FOUR NOTES, ONE PROJECT,",
+    "TWO COMPLETELY DIFFERENT",
+    "RECORDS."
+   ],
+   "sub": [
+    "Nothing here is an opinion.",
+    "Every number was measured off the renders you are hearing."
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THREE WORDS, IN PLAIN ENGLISH",
+   "step": 94,
+   "items": [
+    [
+     "motif",
+     "the smallest idea a piece of music can be built from"
+    ],
+    [
+     "the cell",
+     "this one is four notes long — and it is a RHYTHM",
+     "hot"
+    ],
+    [
+     "development",
+     "keeping that idea and changing everything around it"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "WHAT BEETHOVEN DOES WITH IT",
+   "step": 88,
+   "items": [
+    [
+     "states it",
+     "three short notes on one pitch, then a longer one lower"
+    ],
+    [
+     "moves it",
+     "to new pitches, upside down, passed between instruments"
+    ],
+    [
+     "never drops it",
+     "most of a first movement built from one cell",
+     "hot"
+    ],
+    [
+     "no contrast",
+     "he does not write a second idea and cut between them"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "WHAT A TECHNO RECORD DOES WITH IT",
+   "step": 88,
+   "items": [
+    [
+     "states a cell",
+     "short, rhythmic, usually not a tune"
+    ],
+    [
+     "does not change it",
+     "the loop is the point, not a limitation",
+     "hot"
+    ],
+    [
+     "changes the room",
+     "a strip arrives, a strip leaves, the cell stays"
+    ],
+    [
+     "same shape",
+     "different century, different building"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "HONESTLY: WHOSE IS WHAT",
+   "step": 88,
+   "items": [
+    [
+     "his",
+     "the four notes, their rhythm, and the idea of developing it"
+    ],
+    [
+     "mine",
+     "the repetition — he never wrote this as a loop",
+     "hot"
+    ],
+    [
+     "mine",
+     "the tempo. He left metronome marks; lesson seven covers the argument about them"
+    ],
+    [
+     "nothing sampled",
+     "402 notes, all programmed by hand"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THE PROJECT, ONE PROJECT",
+   "step": 84,
+   "items": [
+    [
+     "tempo",
+     "128 BPM — one eighth note is 234 ms"
+    ],
+    [
+     "length",
+     "16 bars, 30 seconds"
+    ],
+    [
+     "the riff",
+     "64 notes — the same cell, four bars, four times through",
+     "hot"
+    ],
+    [
+     "the room",
+     "134 drum hits and 12 sustained sub notes"
+    ],
+    [
+     "two renders",
+     "silence one group of tracks, then the other"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THE ORCHESTRAL VERSION",
+   "step": 88,
+   "items": [
+    [
+     "violins",
+     "the cell two octaves up"
+    ],
+    [
+     "celli",
+     "the cell one octave up"
+    ],
+    [
+     "double basses",
+     "the cell as written — 73 to 104 Hz",
+     "hot"
+    ],
+    [
+     "nothing else",
+     "no drums, nothing sustained, nothing below the basses"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THE ROOM ARRIVES, ONE STRIP AT A TIME",
+   "step": 88,
+   "items": [
+    [
+     "bar two",
+     "the kick, at 1.9 seconds"
+    ],
+    [
+     "bar four",
+     "offbeat hats, at 5.9 seconds"
+    ],
+    [
+     "bar five",
+     "the sustained sub, at 7.5 seconds",
+     "hot"
+    ],
+    [
+     "bar six",
+     "the clap, at 9.8 seconds"
+    ],
+    [
+     "the cell",
+     "never changes once, in any of them"
+    ]
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "BELOW 60 HZ, THE TWO VERSIONS",
+   "value": "+33.3",
+   "unit": "DB APART",
+   "size": 180,
+   "notes": [
+    "the techno render -21.1 dB, the orchestral one -54.4 dB",
+    "below about 41 Hz — the bottom string of a double bass,",
+    "and the floor of this particular scoring",
+    "measured off the two renders, not asserted"
+   ]
+  },
+  {
+   "type": "list",
+   "title": "AND THE PART MOST VIDEOS LEAVE OUT",
+   "step": 88,
+   "items": [
+    [
+     "below 100 Hz",
+     "only +7.4 dB apart"
+    ],
+    [
+     "60 to 100 Hz",
+     "the ORCHESTRA is louder, by 0.6 dB",
+     "hot"
+    ],
+    [
+     "they cross at",
+     "73 Hz"
+    ],
+    [
+     "so the claim is",
+     "not that an orchestra has no bass. It has a FLOOR."
+    ]
+   ]
+  },
+  {
+   "type": "bignumber",
+   "label": "WHAT YOUR SPEAKERS ARE NOT SHOWING YOU",
+   "value": "9.8",
+   "unit": "DB OF LEVEL",
+   "size": 180,
+   "notes": [
+    "that is what taking everything under 100 Hz away costs the techno render",
+    "but only 6.2 LU of measured LOUDNESS — a loudness meter already discounts the bottom",
+    "the same high-pass costs the orchestral version 1.4 dB — it was barely using that band"
+   ]
+  },
+  {
+   "type": "list",
+   "title": "THE SAME PART, WHERE YOU CAN HEAR IT",
+   "step": 88,
+   "items": [
+    [
+     "as written",
+     "32.7 and 49 Hz — a sine, sustained"
+    ],
+    [
+     "moved up two octaves",
+     "131 and 196 Hz — same rhythm, same notes"
+    ],
+    [
+     "overall level",
+     "changes by +0.01 dB. Essentially nothing"
+    ],
+    [
+     "above 100 Hz",
+     "changes by +51.7 dB",
+     "hot"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "IT IS NOT A LOUDNESS TRICK",
+   "step": 88,
+   "items": [
+    [
+     "orchestral",
+     "-19.9 LUFS"
+    ],
+    [
+     "techno",
+     "-20.9 LUFS"
+    ],
+    [
+     "apart",
+     "1.0 LU — about as matched as two different arrangements get",
+     "hot"
+    ],
+    [
+     "measured twice",
+     "by the app at render time and by ffmpeg after, agreeing to within 0.02 LU"
+    ]
+   ]
+  },
+  {
+   "type": "list",
+   "title": "IF YOU ARE ON LAPTOP SPEAKERS",
+   "step": 94,
+   "items": [
+    [
+     "you will hear",
+     "the cell, the kick, the hats, the clap"
+    ],
+    [
+     "you will not hear",
+     "most of the thing this film measured",
+     "hot"
+    ],
+    [
+     "that is not your fault",
+     "and it is why all of it is drawn as well as played"
+    ]
+   ]
+  },
+  {
+   "type": "closing",
+   "size": 54,
+   "lines": [
+    "He states one small idea",
+    "and refuses to stop developing it.",
+    "That is the whole method."
+   ],
+   "kicker": "Built, rendered and measured in DAW Pro."
+  }
+ ],
+ "stages": [
+  {
+   "id": "00-open",
+   "shots": [
+    0,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/arrange.png"
+   ],
+   "cut": 4.8,
+   "brandCheck": "DAW Pro",
+   "factCheck": [
+    [
+     "four notes"
+    ],
+    [
+     "a hundred and twenty eight",
+     "128"
+    ]
+   ],
+   "narration": "Everybody knows how Beethoven's Fifth starts. What gets missed is that it is not really a melody. It is three short notes on the same pitch and then one longer note lower down — a rhythm, with a pitch attached. And he builds most of a symphony out of it without ever letting it go. This lesson takes those four notes, rebuilds them as a techno riff at a hundred and twenty eight beats per minute, and then measures what is actually different between the two. It is built and measured inside DAW Pro. It is all built in DAW Pro, and there is one warning up front, because it is the honest thing to say. The biggest measured difference between these two versions lives in the bottom octave, which is the part a laptop speaker barely reproduces. So every step of it is drawn as well as played, and I will tell you exactly what your speakers are and are not handing you rather than asking you to listen harder."
+  },
+  {
+   "id": "01-motif",
+   "shots": [
+    1
+   ],
+   "cut": 6.0,
+   "factCheck": [
+    [
+     "motif",
+     "motive"
+    ],
+    [
+     "development"
+    ]
+   ],
+   "narration": "Start from the beginning, in case any of this is new. A motif is the smallest idea a piece of music can be built out of. Not a tune, not a chord sequence — just a shape, short enough that you recognise it again the moment it comes back. Beethoven's is four notes long, and the important thing about it is that most of what makes it recognisable is the rhythm rather than the pitches. Three short, one long. You could play it on a drum and people would still know it. The second word is development. Development means taking that one idea and keeping it, while changing everything around it: the pitch it starts on, the instrument playing it, what is underneath it, how many of them are going at once. Not replacing it with a new idea. Wearing it out and refusing to let go."
+  },
+  {
+   "id": "02-cell",
+   "shots": [
+    1,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/cellanim-final.png"
+   ],
+   "cut": 6.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/cellbed.wav",
+   "burst": "cellanim",
+   "playMax": 31.6,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "three short"
+    ],
+    [
+     "rhythm"
+    ]
+   ],
+   "narration": "Here it is, drawn. In a moment you will see a grid: time runs left to right and pitch runs up and down, exactly the way a piano roll works in any music program. The cell appears first on its own — three short blocks all at the same height, then one longer block lower down. G, G, G, E flat. Then watch what happens: the same shape appears twice more at different heights, and nothing else about it changes. Then all the pitches collapse onto one line, so only the rhythm is left, and you will find it still says the same thing. Three short, one long. At the end a kick drum and a hi-hat arrive underneath it, and the cell does not move at all. Underneath, you are hearing the cell itself, and then the first six bars of what this lesson builds out of it."
+  },
+  {
+   "id": "03-development",
+   "shots": [
+    2
+   ],
+   "cut": 5.6,
+   "factCheck": [
+    [
+     "one idea",
+     "one cell"
+    ],
+    [
+     "contrast",
+     "contrasting"
+    ]
+   ],
+   "narration": "So what does he actually do with it. He states it, hard, at the very top of the piece, in unison, with nothing underneath. Then he moves it to a different pitch and plays it again. Then he turns it upside down, so the shape that fell now rises, and the rhythm is untouched. Then he passes it between instruments, so it arrives from a different part of the orchestra each time. Then he stacks copies of it on top of each other. A first movement of seven or eight minutes, and very nearly every bar of it is that one cell in some form. What he conspicuously does not do is write a second, contrasting idea and cut between the two. That is the normal way to fill eight minutes, and he refuses it."
+  },
+  {
+   "id": "04-techno",
+   "shots": [
+    3
+   ],
+   "cut": 5.6,
+   "factCheck": [
+    [
+     "loop"
+    ],
+    [
+     "the room",
+     "everything around it"
+    ]
+   ],
+   "narration": "Which is, almost exactly, the method a techno record uses. State a short rhythmic cell that is usually not a tune. Do not change it — the loop is the point rather than a limitation. And then change everything around it: a drum arrives, a hi-hat arrives, something sustained appears underneath, a layer drops out and comes back. The listener's attention is held by the room being rebuilt around a thing that is standing still. Same shape as what Beethoven is doing. Different century, different building, and a completely different set of instruments — which turns out to be the part that shows up in the measurements."
+  },
+  {
+   "id": "05-honest",
+   "shots": [
+    4
+   ],
+   "cut": 6.4,
+   "factCheck": [
+    [
+     "repetition"
+    ],
+    [
+     "lesson seven",
+     "lesson 7"
+    ]
+   ],
+   "narration": "Before anything gets built, here is what belongs to whom, because this is exactly the kind of video that quietly blurs it. The four notes are Beethoven's. Their rhythm is Beethoven's. The idea of taking one small cell and developing it relentlessly is Beethoven's, and he did it further than almost anyone before him. The repetition is mine. He never wrote this as a four bar loop played four times, and nothing in this lesson should be read as claiming he did. The tempo is mine as well. He did leave metronome marks for this symphony, and there is a long standing argument about what they mean and whether his metronome was working — lesson seven is about exactly that argument, and I am not going to settle it here. A hundred and twenty eight is simply a tempo I chose. And nothing here is sampled and nothing here is generated: every note was typed in by hand."
+  },
+  {
+   "id": "06-project",
+   "shots": [
+    5,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/arrange.png",
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/roll-riff.png",
+     "zoom": [
+      0.02,
+      0.27,
+      0.34,
+      0.36
+     ]
+    }
+   ],
+   "cut": 5.2,
+   "factCheck": [
+    [
+     "four hundred and two",
+     "402"
+    ],
+    [
+     "sixteen bars",
+     "16 bars"
+    ],
+    [
+     "sixty four",
+     "64"
+    ]
+   ],
+   "narration": "So, one project. Sixteen bars, thirty seconds, a hundred and twenty eight beats per minute, and eight tracks — four hundred and two notes in total, all written by hand. The riff is sixty four of them: the cell, four bars of it, played four times through without a single alteration. Here it is in the note editor. Three short blocks on G, then a longer one on E flat, then the same shape starting on F, and so on. The trick that makes the rest of this lesson possible is that the orchestral version and the techno version live in the same project and play the same notes. To render one of them, I silence the other one's tracks. Same tempo, same length, same cell — so the only things that differ are the instruments and the arrangement, which is exactly the question being asked."
+  },
+  {
+   "id": "07-orch",
+   "shots": [
+    6,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/roll-basses.png",
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/arrange.png"
+   ],
+   "cut": 4.6,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/play-orch.wav",
+   "burst": "orchplay",
+   "playMax": 8.2,
+   "normalize": false,
+   "factCheck": [
+    [
+     "three octaves"
+    ],
+    [
+     "double bass",
+     "double basses"
+    ]
+   ],
+   "narration": "The orchestral version first. Three string parts playing the cell in three octaves in unison, which is roughly how the real thing opens: violins high, cellos an octave below them, and double basses at the bottom. There are no drums, there is nothing sustained, and there is nothing below the basses. That last point matters more than it sounds, and we will come back to it with numbers. Notice what the double bass part actually is — the same three short notes and one long one, down where you feel them rather than hear them. Here are eight seconds of it."
+  },
+  {
+   "id": "08-techno",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/arrange.png",
+    {
+     "path": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/synth-riff.png",
+     "zoom": [
+      0.39,
+      0.26,
+      0.22,
+      0.52
+     ]
+    }
+   ],
+   "cut": 5.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/play-techno.wav",
+   "burst": "technoplay",
+   "playMax": 8.2,
+   "normalize": false,
+   "factCheck": [
+    [
+     "saw",
+     "sawtooth"
+    ],
+    [
+     "two point four",
+     "2.4"
+    ]
+   ],
+   "narration": "Now the same sixty four notes, on a synthesiser. This is DAW Pro's built in poly synth, and here is its panel: a saw wave, which is the brightest of the basic shapes and the standard starting point for anything that has to cut through a drum machine, with the filter brought down to two point four kilohertz to take the harshness off the top, an attack of four milliseconds so each note starts sharply, and a little resonance at the filter. Nothing exotic. Same notes, same rhythm, same bar positions as the double basses you just heard. Eight seconds of that."
+  },
+  {
+   "id": "09-build",
+   "shots": [
+    7,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/chart-layers.png"
+   ],
+   "cut": 6.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/play-buildrec.wav",
+   "burst": "buildrec",
+   "playMax": 13.2,
+   "normalize": false,
+   "factCheck": [
+    [
+     "bar two",
+     "bar 2"
+    ],
+    [
+     "bar five",
+     "bar 5"
+    ]
+   ],
+   "narration": "And now the room, arriving one strip at a time, which is the part that is genuinely the same method. The kick comes in at bar two. Offbeat hi-hats at bar four. At bar five something sustained arrives underneath — hold on to that one, it is the whole second half of this lesson. And a clap at bar six. Watch the playhead crossing the arrangement while this happens, and watch the riff lane: it does not change. Not once. Every single thing that makes this feel like it is going somewhere is happening around a cell that is standing completely still."
+  },
+  {
+   "id": "10-versions",
+   "shots": [
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/arrange.png",
+    6
+   ],
+   "cut": 4.4,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/ab-ver-b.wav",
+   "normalize": false,
+   "playMax": 8.2,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/ab-ver-a.wav",
+    "beforeShots": [
+     6
+    ],
+    "afterShots": [
+     7
+    ],
+    "cycles": 2,
+    "seconds": 8.0
+   },
+   "factCheck": [
+    [
+     "same eight seconds",
+     "same eight",
+     "same 8"
+    ],
+    [
+     "same notes"
+    ]
+   ],
+   "narration": "Here they are back to back — the same eight seconds of the same bars, orchestral first and then techno. Both are turned up by exactly the same amount, one shared gain, so what you hear is the real relationship between them rather than two things normalised to sound equally loud. Same notes. Same tempo. Same length. Listen for what changes, and in particular listen for what happens at the very bottom when the second one arrives — and then, in a moment, we are going to find out how much of that you actually received."
+  },
+  {
+   "id": "11-spectrum",
+   "shots": [
+    8,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/chart-spectrum.png"
+   ],
+   "cut": 9.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "thirty three",
+     "33"
+    ],
+    [
+     "sixty hertz",
+     "60 hertz",
+     "60 Hz"
+    ],
+    [
+     "forty one",
+     "41"
+    ]
+   ],
+   "narration": "This is the measurement, and it is the centre of the lesson. What you are looking at is the frequency content of both renders drawn on top of each other: low notes on the left, high notes on the right, and how much energy each version has at each frequency going up. Blue is the orchestral render, orange is the techno one. Look at the left hand edge. The orange line stays up. The blue line falls off a cliff. In the shaded band — everything below sixty hertz — the techno version measures minus twenty one point one decibels and the orchestral version measures minus fifty four point four. That is a gap of thirty three point three decibels, and it is not a mixing decision. The dotted line is at about forty one hertz, which is the bottom string of a double bass. Some Viennese basses of the period were strung differently and stopped a little higher, so treat that line as approximate. Either way, below it there is no instrument in this arrangement at all."
+  },
+  {
+   "id": "12-bands",
+   "shots": [
+    9,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/chart-bands.png"
+   ],
+   "cut": 9.0,
+   "holdLast": true,
+   "factCheck": [
+    [
+     "seventy three",
+     "73"
+    ],
+    [
+     "louder"
+    ],
+    [
+     "below sixty hertz",
+     "below 60 hertz",
+     "below 60 Hz"
+    ],
+    [
+     "a floor",
+     "floor"
+    ]
+   ],
+   "narration": "And here is the part most videos about this would quietly leave out. Below one hundred hertz, the two versions are only seven point four decibels apart. Look at the third pair of bars. Between sixty and one hundred hertz the orchestral version is the LOUDER of the two, by six tenths of a decibel. A double bass section really does fill that band — that is what a double bass is for. The two lines cross at about seventy three hertz. So essentially the whole difference between these two records lives below sixty hertz, and almost none of it lives above. The honest claim is not that an orchestra has no bass. It has a floor. The floor is a piece of wood with a string on it, and below the floor there is nothing at all, because the orchestra he wrote this movement for has no instrument that reaches down there. Not that nothing in eighteen oh eight could reach it. A big church organ went far lower, and Beethoven himself brings in a contrabassoon for the finale of this very symphony, which goes below that line too. Neither of them is in the movement this lesson is built on, and that is the whole point."
+  },
+  {
+   "id": "13-marker",
+   "shots": [
+    7,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/submarker-final.png"
+   ],
+   "cut": 7.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/markerbed.wav",
+   "burst": "submarker",
+   "playMax": 17.7,
+   "normalize": false,
+   "bedEligible": false,
+   "factCheck": [
+    [
+     "forty four",
+     "44"
+    ],
+    [
+     "shaded"
+    ],
+    [
+     "control"
+    ]
+   ],
+   "narration": "This next chart tells you when to listen and where, so you are not hunting for it. It is the first twelve seconds of the techno version — the part where the room arrives — and a playhead sweeps it at real speed while you hear exactly that passage. There are two lines. The orange one is the level below sixty hertz, which is the thing being claimed. The blue one is the level above one hundred hertz, and that one is the control: if it moves when the orange one moves, then something changed everywhere and the claim means nothing. Watch what happens at seven and a half seconds, where the sustained part comes in. The orange line jumps by forty four and a half decibels. The blue line moves by eight tenths of a decibel, in the wrong direction. The shaded bar is not chosen by eye — it is every stretch where the bottom band stands more than fifteen decibels above where it sat before, worked out from the measurements."
+  },
+  {
+   "id": "14-laptop",
+   "shots": [
+    10,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/chart-laptop.png"
+   ],
+   "cut": 8.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/ab-lap-b.wav",
+   "normalize": false,
+   "bedEligible": false,
+   "playMax": 8.2,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/ab-lap-a.wav",
+    "beforeShots": [
+     10
+    ],
+    "afterShots": [
+     13
+    ],
+    "cycles": 2,
+    "seconds": 8.0
+   },
+   "factCheck": [
+    [
+     "nine point eight",
+     "9.8"
+    ],
+    [
+     "six point two",
+     "6.2"
+    ],
+    [
+     "one point four",
+     "1.4"
+    ]
+   ],
+   "narration": "So how much of that did you actually get. Here is the same techno render with everything below one hundred hertz taken away with a filter — which is roughly what a small speaker does to it before you hear it at all. Taking that band away costs nine point eight decibels of real level. But it costs only six point two LU of measured loudness, because a loudness meter is weighted like an ear and an ear already discounts the bottom octaves. Two different numbers, both correct, describing the same edit. Now the interesting one: the same filter on the orchestral version costs one point four decibels. Almost nothing, because there was almost nothing there to take. In other words, playing the techno version on a laptop speaker is a surprisingly good imitation of what the orchestra could do about the bottom octave in the first place. Here are both, the full render and then the filtered one. If they sound close to identical on your machine, that is not a fault. That is the measurement."
+  },
+  {
+   "id": "15-proxy",
+   "shots": [
+    11,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/chart-proxy.png"
+   ],
+   "cut": 8.0,
+   "loop": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/ab-sub-b.wav",
+   "normalize": false,
+   "bedEligible": false,
+   "playMax": 8.2,
+   "ab": {
+    "before": "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/audio/ab-sub-a.wav",
+    "beforeShots": [
+     11
+    ],
+    "afterShots": [
+     "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/chart-proxy.png"
+    ],
+    "cycles": 2,
+    "seconds": 8.0
+   },
+   "factCheck": [
+    [
+     "two octaves"
+    ],
+    [
+     "fifty one point seven",
+     "51.7"
+    ]
+   ],
+   "narration": "There is one more way to show you a thing your speakers will not deliver, and it is honest as long as I say plainly what it is. This is the sustained part on its own. As written it sits at thirty two point seven and forty nine hertz — a sine wave, held. Now here is exactly the same part with every note moved up two octaves, so it lands at a hundred and thirty one and a hundred and ninety six hertz instead. Same rhythm, same notes, same instrument, same length. Moving it changes its overall level by one hundredth of a decibel, which is nothing. But it changes how much of it lives above one hundred hertz by fifty one point seven decibels. First the real one, then the moved one. This is not what the record sounds like — it is a proxy, deliberately, so you can hear the shape of the part that is otherwise happening below your speakers."
+  },
+  {
+   "id": "16-loudness",
+   "shots": [
+    12,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/mixer.png"
+   ],
+   "cut": 6.4,
+   "factCheck": [
+    [
+     "one LU",
+     "1 LU",
+     "one Lu",
+     "1 Lu",
+     "one L U"
+    ],
+    [
+     "not a loudness trick",
+     "loudness trick"
+    ]
+   ],
+   "narration": "One last control, because a comparison between two mixes is worth nothing if one of them is simply louder. The orchestral render measures minus nineteen point nine LUFS. The techno render measures minus twenty point nine. That is one LU apart, which is about as matched as two genuinely different arrangements get, and it means none of the difference you have been shown is a loudness trick. Both figures were measured twice — once by the app as it rendered, and once by a completely separate tool afterwards — and the two instruments agree to within two hundredths of a LU. When two different instruments give you the same answer, that is worth more than either of them alone."
+  },
+  {
+   "id": "17-close",
+   "shots": [
+    14,
+    "/Users/dsemenov/Views/daw-pro/scripts/video/lessons/beethoven-128/shots/arrange.png"
+   ],
+   "cut": 6.0,
+   "brandCheck": "DAW Pro",
+   "factCheck": [
+    [
+     "four notes"
+    ],
+    [
+     "thirty three",
+     "33"
+    ]
+   ],
+   "narration": "So. Four notes, one project, two records. The thing worth taking away is not really the numbers, it is the method behind both halves. Beethoven states one small idea and then refuses to stop developing it — no contrast, no second subject to escape into, just that cell worn down and rebuilt for eight minutes. A techno producer does the same thing with a loop and a mixing desk. The measurements are what separates the two: below sixty hertz these versions are thirty three decibels apart, because one of them can sustain a note under the bottom string of a double bass and the other one physically cannot. Between sixty and one hundred hertz the orchestra wins. And most of that argument is happening below what your speakers will hand you, which is exactly why all of it was drawn as well as played. All of it was built and rendered in DAW Pro, and every number was measured off those DAW Pro renders. Thanks for watching."
+  }
+ ],
+ "tags": [
+  "Beethoven",
+  "Symphony No. 5",
+  "techno",
+  "remix",
+  "music production",
+  "classical music",
+  "motif",
+  "development",
+  "spectrum analysis"
+ ],
+ "description": "Beethoven's four-note cell rebuilt as a techno riff, in one DAW Pro project, and then measured. Every number on screen came off the renders you are hearing.\n\nTHE PROJECT\n128 BPM, 16 bars, 30 s, 402 notes written by hand across eight tracks. The riff is 64 notes — the same cell, four bars, four times through. The orchestral version plays it in three octaves in unison (violins, celli, double basses) and nothing else; the techno version plays the SAME notes on a saw and adds 134 drum hits and 12 sustained sub notes. Silencing one group of tracks or the other is the only difference between the two renders.\n\nMEASURED\nBelow 60 Hz: techno -21.1 dB, orchestral -54.4 dB — +33.3 dB apart, below the 41.2 Hz bottom string of a double bass of 1808.\nBelow 100 Hz: only +7.4 dB apart. From 60 to 100 Hz the ORCHESTRA is louder, by 0.6 dB. The two spectra cross at 73 Hz.\nLoudness: -19.9 LUFS against -20.9 LUFS — 1.0 LU apart, so the comparison is not a loudness trick. Measured twice, by the app and by ffmpeg, agreeing to within 0.02 LU.\n\nWHAT YOUR SPEAKERS ARE NOT SHOWING YOU\nSaid plainly rather than assumed. High-passing the techno render at 100 Hz costs 9.8 dB of level but only 6.2 LU of loudness; the same filter costs the orchestral version 1.4 dB, because it was barely using that band. So the film draws the spectrum, sweeps a real-time playhead over a measured chart of the bottom band against a control band above 100 Hz, and plays the sub part moved up two octaves as an explicit proxy — a shift that changes its overall level by +0.01 dB and what it puts above 100 Hz by +51.7 dB.\n\nHONESTLY\nThe four notes and their rhythm are Beethoven's, and so is the idea of developing one cell relentlessly. The repetition is mine — he never wrote this as a loop. The tempo is mine; he did leave metronome marks and there is a long-standing argument about them, which lesson 7 is about and this film does not try to settle.\n\nDISCLOSURE\nThe narration is a synthetic voice, generated locally. No music-generation model was used; every note was programmed by hand.\n\n#beethoven #techno #remix #musicproduction #classicalmusic #musictheory"
+}

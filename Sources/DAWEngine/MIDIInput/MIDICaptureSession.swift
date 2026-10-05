@@ -45,6 +45,12 @@ final class MIDICaptureSession {
     private var openNotes: [UInt8: (onBeat: Double, velocity: Int)] = [:]
     private var closed: [MIDINote] = []
     private var dropped = false
+    /// The newest ACCEPTED note edge, absolute beats (m34-a-2) — nil until the
+    /// first post-anchor note-on. Written ONLY on the two paths that actually
+    /// keep a note; a pre-anchor on, an orphan off and every controller event
+    /// leave it alone, so `liveExtent` can never claim a take has captured
+    /// something it would discard.
+    private var latestEventBeat: Double?
 
     /// One controller stream's in-flight capture state (design-m16b §8.4).
     private struct LaneCapture {
@@ -104,11 +110,39 @@ final class MIDICaptureSession {
                                    onBeat: open.onBeat, offBeat: beat))
             }
             openNotes[event.pitch] = (onBeat: beat, velocity: Int(event.velocity))
+            noteLatestEventBeat(beat)
         } else {
             guard let open = openNotes.removeValue(forKey: event.pitch) else { return }  // orphan off
             closed.append(note(pitch: event.pitch, velocity: open.velocity,
                                onBeat: open.onBeat, offBeat: beat))
+            noteLatestEventBeat(beat)
         }
+    }
+
+    /// Advances the live extent monotonically. Monotonic rather than
+    /// last-wins: ring arrival is host-time ordered so this is already
+    /// ascending, and a max() means a future re-ordering could never make the
+    /// provisional region SHRINK on screen mid-take.
+    private func noteLatestEventBeat(_ beat: Double) {
+        latestEventBeat = max(latestEventBeat ?? beat, beat)
+    }
+
+    /// What this take has accumulated so far (m34-a-2) — read from the main
+    /// actor at the transport tick's cadence while the take is still rolling,
+    /// so the arrange can draw a growing PROVISIONAL region.
+    ///
+    /// ⭐ `noteCount` is `closed + openNotes`, not `closed` alone: `finish`
+    /// clamps every still-open note to the stop beat and lands it, so a take
+    /// consisting of ONE key still being held has a note and must draw. Counted
+    /// on demand — nothing is cached, so this cannot drift from the take.
+    ///
+    /// ⚠️ Controller lanes are deliberately absent. `ProjectStore.finishTake`
+    /// discards a take with zero NOTES however many controller points it
+    /// captured, so a lane-only take must not draw a region.
+    var liveExtent: LiveTakeExtent {
+        LiveTakeExtent(anchorBeat: anchorBeats,
+                       latestEventBeat: latestEventBeat,
+                       noteCount: closed.count + openNotes.count)
     }
 
     /// Ends the take at `stopBeat` (computed from `derivedBeats()` BEFORE

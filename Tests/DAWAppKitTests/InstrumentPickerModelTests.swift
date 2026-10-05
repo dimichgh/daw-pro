@@ -60,6 +60,50 @@ struct InstrumentPickerModelTests {
                               builtin: false, sizeBytes: 100) })
     }
 
+    /// m31-g — a DISCOVERED-BUT-UNSUPPORTED bank (MuseScore's `.sf3`).
+    private static let sf3Bank = SoundBankInfo(
+        source: .file(path: "/Banks/FluidR3Mono_GM.sf3"), name: "FluidR3Mono_GM",
+        path: "/Banks/FluidR3Mono_GM.sf3", format: "sf3", builtin: false,
+        sizeBytes: 23_700_000,
+        unsupportedReason: "SF3 SoundFonts (Vorbis-compressed) can't be played yet. "
+            + "Open it in MuseScore or Polyphone and export a .sf2, then import that.")
+
+    // m31-g — the bank must be VISIBLE in the picker. Hiding it is the defect
+    // this item exists to fix, so a fix that filtered it out of the UI list
+    // would pass every wire test and still ship the bug.
+    @Test("m31-g: an unsupported bank is LISTED in the picker's bank list")
+    func unsupportedBankIsListed() {
+        let model = Self.makeModel(banks: [Self.gmBank, Self.sf3Bank])
+        model.prepare(trackID: UUID(), descriptor: nil, status: nil)
+        model.density = .pro
+        let names = model.filteredBanks.map(\.name)
+        #expect(names.contains("FluidR3Mono_GM"))
+        #expect(model.filteredBanks.first { $0.name == "FluidR3Mono_GM" }?.supported == false)
+    }
+
+    // m31-g — ⛔ but drilling in must be REFUSED, and refused OUT LOUD. A
+    // silent no-op click is the original defect wearing a different hat.
+    @Test("m31-g: drilling into an unsupported bank is refused, with the reason surfaced")
+    func drillIntoUnsupportedBankIsRefusedLoudly() {
+        let model = Self.makeModel(banks: [Self.gmBank, Self.sf3Bank])
+        model.prepare(trackID: UUID(), descriptor: nil, status: nil)
+        model.density = .pro
+
+        model.drillInto(Self.sf3Bank)
+        #expect(!model.isDrilledIn, "an unsupported bank must never open a program browser")
+        #expect(model.drilledBank == nil)
+        #expect(model.programGroups.isEmpty)
+        #expect(model.importError == Self.sf3Bank.unsupportedReason)
+
+        // Positive control: the SAME call on a supported bank DOES drill in and
+        // clears the alert — so the refusal above is about the format, not a
+        // model that refuses everything.
+        model.drillInto(Self.userBank)
+        #expect(model.isDrilledIn)
+        #expect(model.drilledBank?.name == "Vintage")
+        #expect(model.importError == nil)
+    }
+
     private static func prepared(density: PanelDensity = .pro,
                                  descriptor: InstrumentDescriptor? = nil) -> InstrumentPickerModel {
         let model = makeModel()
@@ -75,16 +119,19 @@ struct InstrumentPickerModelTests {
         let model = Self.prepared()
         #expect(model.banks.map(\.name) == ["General MIDI", "Vintage"])   // GM first
         #expect(model.audioUnits.count == 3)
-        // Pro built-ins: all three, Test Tone included.
-        #expect(model.builtIns.map(\.kind) == [.polySynth, .sampler, .testTone])
+        // Pro built-ins: all four, Test Tone included. m39-dm put the Drum
+        // Machine SECOND, immediately after Poly Synth and ahead of Sampler:
+        // these assertions are ORDER-sensitive on purpose, so the row order a
+        // beginner actually sees is pinned rather than incidental.
+        #expect(model.builtIns.map(\.kind) == [.polySynth, .drumSynth, .sampler, .testTone])
     }
 
     @Test("Simple hides Test Tone; Pro shows it")
     func builtInDensitySplit() {
         let model = Self.prepared(density: .simple)
-        #expect(model.builtIns.map(\.kind) == [.polySynth, .sampler])
+        #expect(model.builtIns.map(\.kind) == [.polySynth, .drumSynth, .sampler])
         model.density = .pro
-        #expect(model.builtIns.map(\.kind) == [.polySynth, .sampler, .testTone])
+        #expect(model.builtIns.map(\.kind) == [.polySynth, .drumSynth, .sampler, .testTone])
     }
 
     // MARK: - Search (spans all sections)

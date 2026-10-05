@@ -1,0 +1,96 @@
+{
+ "baseline": {
+  "tracks": 4,
+  "notes": 318,
+  "tempoBPM": 100,
+  "names": [
+   "Pad",
+   "Bass",
+   "Drums",
+   "Lead"
+  ],
+  "effects": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "sends": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "master": 1
+ },
+ "now": {
+  "tracks": 4,
+  "names": [
+   "Pad",
+   "Bass",
+   "Drums",
+   "Lead"
+  ],
+  "notes": 318,
+  "tempoBPM": 100,
+  "positionBeats": 0,
+  "isPlaying": false,
+  "master": 1,
+  "effects": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "sends": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "automation": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "muted": [
+   false,
+   false,
+   false,
+   false
+  ],
+  "soloed": [
+   false,
+   false,
+   false,
+   false
+  ],
+  "markers": 0,
+  "loop": {
+   "enabled": false,
+   "endBeat": 16,
+   "startBeat": 0
+  },
+  "width": 1600,
+  "height": 900
+ },
+ "layout": {
+  "sidebarWidth": 260,
+  "humanizePanelVisible": false,
+  "mixerInsertsCollapsed": false,
+  "waveformNormalize": true,
+  "auditionEnabled": true,
+  "pianoRollPPB": 32,
+  "humanizePanelClipId": null,
+  "editorEscapeMountHits": 0,
+  "followPlayhead": false,
+  "pianoRollMinimap": true,
+  "rowHeight": 50,
+  "pianoRollRowHeight": 14,
+  "editorFraction": 0.45,
+  "editorMaximized": false,
+  "waveformVerticalZoom": 1
+ },
+ "fail": []
+}

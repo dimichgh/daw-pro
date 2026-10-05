@@ -45,6 +45,25 @@ void css_set_transpose_semitones(css_stretch *_Nonnull s, float semitones,
 /// mode). false = formants follow the pitch shift (default).
 void css_set_formant_preserve(css_stretch *_Nonnull s, bool preserve);
 
+/// Natural tuning §1(b): a formant shift of `semitones`, written with the
+/// `compensatePitch` flag in ONE call (signalsmith `setFormantSemitones`
+/// writes both members). With `compensatePitch` true the shift is measured
+/// from the SOURCE envelope: 0 keeps the singer's envelope where it was while
+/// the pitch moves. Re-read by the stretcher on every block, so it may be
+/// called between css_process calls. Plain member writes: no allocation.
+/// ⚠️ Never mixed with css_set_formant_preserve on one handle: the curve loop
+/// calls exactly one of the two families per render.
+void css_set_formant_semitones(css_stretch *_Nonnull s, float semitones,
+                               bool compensatePitch);
+
+/// Natural tuning §1(b): the f0 HINT for the formant envelope, in HERTZ. The
+/// shim DIVIDES by the sample rate (signalsmith wants cycles per sample, the
+/// same conversion css_set_transpose_semitones does for its limit); a raw Hz
+/// value would silently weaken the correction (design risk 3, "units trap").
+/// `hz <= 0` hands signalsmith 0, its own rough estimator with cross-block
+/// IIR state, which the curve loop never asks for (callers pass >= 50 Hz).
+void css_set_formant_base_hz(css_stretch *_Nonnull s, float hz);
+
 /// Analysis-side latency in input frames: input must be supplied this far
 /// ahead of the processing position.
 int css_input_latency(const css_stretch *_Nonnull s);

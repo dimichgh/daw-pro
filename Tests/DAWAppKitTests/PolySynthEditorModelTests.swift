@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import DAWAppKit
@@ -119,6 +120,103 @@ struct PolySynthEditorModelTests {
         #expect(PolySynthEditorModel.waveformLabel(.sine) == "Sine")
     }
 
+    // MARK: - m39-ah: the DISCRETE census (the instrument twin of
+    //         `EffectChoiceParamTests.everyDiscreteParamAvoidsTheKnob`)
+
+    /// ⭐⭐ **THE INSTRUMENT-SIDE CENSUS, AND IT WAS FILED AGAINST A DEFECT THAT
+    /// TURNED OUT NOT TO EXIST.** m39-ah was briefed as "`PolySynthEditorOverlay`
+    /// draws every parameter as a rotary knob, so discrete choices render as
+    /// knobs" — the m39-ag defect, instrument side. It is **false as stated**:
+    /// `waveform` already draws as the OSC segmented picker
+    /// (`PolySynthEditorOverlay.oscSection`) and the card's knob table holds
+    /// seven genuinely continuous params. The intersection is empty TODAY.
+    ///
+    /// ⛔ **WHAT IS TRUE IS THAT NOTHING HELD IT THERE.**
+    /// `PolySynthEditorOverlay.groupSection` calls `knobCell(spec, width:)` with
+    /// **no dispatch arms at all**, and the only thing keeping a discrete param
+    /// off that path was that nobody had added one to `specs`. The nearest
+    /// existing check, `groupCoverage`, asserts the hardcoded literal
+    /// `!grouped.contains("waveform")` — which pins the one name already known
+    /// and cannot see the next one. That is precisely the shape that let
+    /// `djFilter.slopeDbPerOct` ship as a rotary over a 12/24 topology switch.
+    ///
+    /// ⛔⛔ **THE ORACLE IS DAWCore's, NOT THIS MODULE'S, AND THAT IS THE WHOLE
+    /// POINT.** `InstrumentParamSpec.discreteParamNames(for:)`
+    /// (`Sources/DAWCore/InstrumentParams.swift`) exists so
+    /// `ProjectStore+Modulation` can refuse an LFO route with
+    /// `modulationTargetUnsupported(.discrete)` — a render-safety concern with
+    /// nothing whatever to do with drawing. The SUBJECT is
+    /// `PolySynthEditorModel.specs`, the card's knob table, in a different
+    /// module. **Neither side references the other**, so this test cannot pass
+    /// by restating its own subject — the m32-e trap, where the pinning test
+    /// restated the source expression and two binary params shipped as knobs
+    /// with the suite green.
+    @Test("CENSUS: no DISCRETE poly synth param reaches the card's knob table")
+    func everyDiscreteInstrumentParamAvoidsTheKnob() {
+        // The ORACLE — DAWCore's, maintained for modulation refusal.
+        let discrete = InstrumentParamSpec.discreteParamNames(for: .polySynth)
+        // The SUBJECT — every name the card draws as a rotary.
+        let knobbed = Set(PolySynthEditorModel.specs.map(\.name))
+
+        // Where each discrete param actually lives, CLASSIFIED rather than
+        // assumed: one that is nowhere is named as such instead of quietly
+        // passing because it happens not to be on a knob.
+        var homes: [String: String] = [:]
+        for name in discrete {
+            if knobbed.contains(name) {
+                homes[name] = "KNOB — the defect"
+            } else if name == "waveform" {
+                // Structural, not a spelling check: the picker's population IS
+                // the domain's whole enum, so every legal value of this
+                // discrete param is reachable from the card.
+                homes[name] = PolySynthEditorModel.waveforms == PolySynthParams.Waveform.allCases
+                    ? "oscPicker" : "oscPicker (INCOMPLETE — not every legal value is offered)"
+            } else {
+                homes[name] = "absent from the card"
+            }
+        }
+
+        let offenders = homes.filter { $0.value.hasPrefix("KNOB") }.keys.sorted()
+        #expect(offenders.isEmpty,
+                "these DISCRETE instrument params render as rotary knobs over a continuum that does not exist — give each a chip or a picker (docs/DESIGN-LANGUAGE.md, the m39-ag law): \(offenders)")
+
+        // Non-vacuity, MEASURED rather than assumed: a census over an empty
+        // oracle proves nothing at all, and prints so a reader can see the
+        // population it actually swept.
+        print("[measured] poly synth discrete params \(discrete.sorted()) -> "
+              + "\(homes.sorted { $0.key < $1.key })")
+        print("[measured] poly synth knob table (\(knobbed.count)): \(knobbed.sorted())")
+        #expect(discrete.count == 2, "the discrete oracle returned \(discrete.sorted())")
+        #expect(knobbed.count == 7, "the knob table holds \(knobbed.sorted())")
+        #expect(homes["waveform"] == "oscPicker")
+
+        // ⛔ `pedalHoldLimit` IS SETTABLE ON THE WIRE AND INVISIBLE ON THE CARD:
+        // `track.setInstrument` accepts it (`Commands.swift`), `PolySynthParams`
+        // persists it, `PolySynthInstrument` honours it at voice-steal time, and
+        // `instrument.describeSynth` publishes it — but no view in `DAWApp` or
+        // model in `DAWAppKit` mentions the name. That is the
+        // settable-but-invisible shape m34-u closed for the sampler's
+        // `voiceMode`, still open here (and on the sampler, whose own
+        // `pedalHoldLimit` is equally absent). It is pinned as an ABSENCE rather
+        // than left unmentioned, so whoever gives it a face must come through
+        // this test and give it a NON-KNOB one: a 1…128 note count whose nil
+        // means "unlimited" is a stepper or a chip, never a rotary.
+        #expect(homes["pedalHoldLimit"] == "absent from the card")
+
+        // ⭐ THE CONVERSE, so the census fails in the other direction too. Every
+        // name the card knobs must be one DAWCore itself models as continuous —
+        // a discrete param that arrives on the card WITHOUT reaching the oracle
+        // reddens here, and so does a continuous param DAWCore gains that the
+        // card never grows a control for.
+        let continuous = InstrumentParamSpec.specs(for: .polySynth)
+        #expect(Set(continuous.map(\.name)) == knobbed,
+                "the card's knob table and DAWCore's continuous registry disagree — card \(knobbed.sorted()) vs registry \(continuous.map(\.name).sorted())")
+        for spec in continuous {
+            #expect(spec.modulatable != .refused,
+                    "\(spec.name) is drawn as a knob but DAWCore refuses it as discrete")
+        }
+    }
+
     // MARK: - Knob geometry (log cutoff, linear everything else)
 
     @Test("the cutoff is logarithmic; times and levels are linear")
@@ -150,6 +248,62 @@ struct PolySynthEditorModelTests {
                 #expect(abs(back - f) < 1e-9, "\(spec.name) round-trip at f=\(f)")
             }
         }
+    }
+
+    /// m39-a — the poly-synth half of the taper-lift conformance proof.
+    ///
+    /// The card's knob geometry no longer infers `unit == "Hz"`; it reads the
+    /// spec's DECLARED curve. This re-computes the pre-lift inline formula —
+    /// the arithmetic that stood at `PolySynthEditorModel.swift:287,299` — and
+    /// requires bit-for-bit equality at eleven points of travel on all seven
+    /// knobs, so a lift that moved a knob cannot pass.
+    ///
+    /// ⚠️ It also pins that the ENVELOPE TIMES are still LINEAR. The modulation
+    /// design (`docs/design/2026-09-19-modulation-layer.md` §4) proposes
+    /// `.logarithmic` for attack/decay/release on the future
+    /// `InstrumentParamSpec`; that is a real change to three shipping knobs and
+    /// is m39-b's deliberate call, not a refactor's side effect. If m39-b
+    /// adopts it, this test is the thing that must be updated ON PURPOSE.
+    @Test("m39-a: every knob lands on the same value it did before the taper lift")
+    func taperLiftMovesNoKnob() {
+        func legacyValue(_ f: Double, _ spec: PolySynthParamSpec) -> Double {
+            let lo = spec.range.lowerBound, hi = spec.range.upperBound
+            let f = f.clamped(to: 0...1)
+            if spec.unit == "Hz" && lo > 0 { return lo * pow(hi / lo, f) }
+            return lo + f * (hi - lo)
+        }
+        func legacyFraction(_ v: Double, _ spec: PolySynthParamSpec) -> Double {
+            let lo = spec.range.lowerBound, hi = spec.range.upperBound
+            guard hi > lo else { return 0 }
+            let v = v.clamped(to: spec.range)
+            if spec.unit == "Hz" && lo > 0 {
+                return (log(v / lo) / log(hi / lo)).clamped(to: 0...1)
+            }
+            return (v - lo) / (hi - lo)
+        }
+
+        #expect(PolySynthEditorModel.specs.count == 7)
+        var checked = 0
+        for spec in PolySynthEditorModel.specs {
+            // Declared == what the old string heuristic produced.
+            let inferred: PolySynthEditorModel.Scale =
+                spec.unit == "Hz" && spec.range.lowerBound > 0 ? .logarithmic : .linear
+            #expect(spec.curve == inferred, "\(spec.name) declared \(spec.curve)")
+            for step in 0...10 {
+                let f = Double(step) / 10
+                let lifted = PolySynthEditorModel.value(forFraction: f, spec: spec)
+                #expect(lifted == legacyValue(f, spec), "\(spec.name) at f=\(f)")
+                #expect(PolySynthEditorModel.fraction(forValue: lifted, spec: spec)
+                        == legacyFraction(lifted, spec), "\(spec.name) inverse at f=\(f)")
+                checked += 1
+            }
+        }
+        #expect(checked == 77, "only \(checked) travel points compared")
+        // Named, so the envelope-taper question cannot be closed by accident.
+        #expect(Self.spec("attack").curve == .linear)
+        #expect(Self.spec("decay").curve == .linear)
+        #expect(Self.spec("release").curve == .linear)
+        #expect(Self.spec("cutoffHz").curve == .logarithmic)
     }
 
     // MARK: - Readouts (deterministic strings, so captures pin exactly)
@@ -697,6 +851,219 @@ struct PolySynthEditorModelTests {
                 == [SamplerZoneCoverage.Gap(lowerBound: 41, upperBound: 79)])
     }
 
+    // MARK: Sampler — VOICE MODE + GLIDE (m34-u, the UI half of m34-t)
+
+    @Test("the voice picker offers every domain case, in declaration order")
+    func samplerVoiceModesCoverTheDomain() {
+        // ⛔ THE POINT IS COVERAGE, NOT THE LIST. m34-t added `.legato` as a
+        // THIRD case; a picker built from a retyped two-or-three-element literal
+        // is exactly how a shipped engine feature stays unreachable from the UI,
+        // which is the defect m34-u exists to close. Sourcing from
+        // `CaseIterable` makes a FOURTH case appear in the picker by
+        // construction — and this asserts the order that comes with it, because
+        // the card renders the array as it stands.
+        #expect(SamplerEditorModel.voiceModes == SamplerVoiceMode.allCases)
+        #expect(SamplerEditorModel.voiceModes == [.poly, .mono, .legato])
+        #expect(SamplerEditorModel.voiceModes.count == 3,
+                "a two-state control cannot express three modes")
+    }
+
+    @Test("every voice-mode label is beginner-readable, distinct, and jargon-free")
+    func samplerVoiceModeLabelsAreBeginnerReadable() {
+        let labels = SamplerEditorModel.voiceModes.map(SamplerEditorModel.voiceModeLabel)
+        #expect(labels == ["Chords", "One Note", "Slurred"])
+        #expect(Set(labels).count == labels.count, "two segments must never read alike")
+        // Rule 6: the wire's own words are correct for an agent and useless on a
+        // chip. None of them may leak into the label.
+        let jargon = ["poly", "mono", "legato", "portamento", "glide"]
+        for label in labels {
+            for word in jargon {
+                #expect(!label.lowercased().contains(word),
+                        "\(label) leaks the wire word '\(word)' onto a human control")
+            }
+        }
+        // The detail text carries the RE-ATTACK distinction the two monophonic
+        // labels cannot fit — that difference is the whole reason `.legato`
+        // exists, so it must be said somewhere a user can reach.
+        let mono = SamplerEditorModel.voiceModeDetail(.mono).lowercased()
+        let legato = SamplerEditorModel.voiceModeDetail(.legato).lowercased()
+        #expect(mono.contains("fresh") || mono.contains("own attack"))
+        #expect(legato.contains("no new") && legato.contains("attack"))
+        #expect(SamplerEditorModel.voiceModeDetail(.poly).lowercased().contains("at once"))
+    }
+
+    @Test("the voice mode round-trips through the same setInstrument funnel")
+    func samplerVoiceModeRoundTrip() throws {
+        let zone = Self.samplerZone(Self.ping)
+        let f = try Self.samplerFixture(SamplerParams(zones: [zone], gain: 0.5))
+        // An untouched sampler lights CHORDS — never nothing. A three-way picker
+        // with no lit segment claims a state the engine does not have.
+        #expect(Self.storedSampler(f.store, f.trackID)?.voiceMode == nil)
+        #expect(f.model.voiceMode == .poly)
+
+        f.model.setVoiceMode(.legato)
+        #expect(Self.storedSampler(f.store, f.trackID)?.voiceMode == .legato)
+        #expect(f.model.voiceMode == .legato)
+        #expect(f.model.lastErrorMessage == nil)
+
+        // Pressing CHORDS stores the EXPLICIT case rather than clearing to nil.
+        f.model.setVoiceMode(.poly)
+        #expect(Self.storedSampler(f.store, f.trackID)?.voiceMode == .poly)
+        #expect(f.model.voiceMode == .poly)
+
+        // The read-modify-write left everything else alone.
+        #expect(Self.storedSampler(f.store, f.trackID)?.zones == [zone])
+        #expect(Self.storedSampler(f.store, f.trackID)?.gain == 0.5)
+
+        // A WIRE edit under the open card moves the picker — the card reads the
+        // live descriptor, never a snapshot taken at open time.
+        _ = try f.store.setInstrument(
+            id: f.trackID, sampler: SamplerParams(zones: [zone], gain: 0.5, voiceMode: .mono))
+        #expect(f.model.voiceMode == .mono)
+    }
+
+    @Test("glide round-trips, clamps to the domain, and resets to UNSET not to 0")
+    func samplerGlideRoundTrip() throws {
+        let zone = Self.samplerZone(Self.ping)
+        let f = try Self.samplerFixture(SamplerParams(zones: [zone], gain: 0.5))
+        #expect(f.model.glideTime == 0)
+        #expect(SamplerEditorModel.glideSpec.range == SamplerParams.glideTimeRange,
+                "the spec table must never fork the domain clamp")
+
+        f.model.setGlideTime(0.4)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == 0.4)
+        #expect(f.model.glideTime == 0.4)
+
+        // This model's clamp is the ONLY clamp on the sampler path — the store
+        // passes a supplied `SamplerParams` through untouched.
+        f.model.setGlideTime(99)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime
+                == SamplerParams.glideTimeRange.upperBound)
+        f.model.setGlideTime(-5)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == 0)
+
+        // ⚠️ RESET GOES TO nil, NOT TO AN EXPLICIT 0. Sound-identical, but only
+        // nil keeps a project that never asked for glide byte-identical on a
+        // JSON round trip and out of describeSampler's only-when-SET output.
+        f.model.setGlideTime(1)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == 1)
+        f.model.resetGlide()
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == nil)
+        #expect(f.model.glideTime == 0, "nil still READS as 0 — that is what the engine uses")
+
+        // The knob fraction maps over the domain range, linearly.
+        f.model.setGlideFraction(0.5)
+        #expect(Self.storedSampler(f.store, f.trackID)?.glideTime == 2)
+        #expect(abs(f.model.glideFraction - 0.5) < 1e-9)
+    }
+
+    @Test("GLIDE's zero reads OFF, never a very fast glide")
+    func samplerGlideZeroReadsOff() {
+        // ⛔ THE SINGLE MOST LIKELY WAY TO GET THIS CONTROL WRONG. The card's
+        // ordinary seconds formatter renders 0 as "0.0 ms", which reads as a
+        // glide that is merely very quick. The bottom of this range is the
+        // ABSENCE of glide.
+        #expect(SamplerEditorModel.glideReadout(0).text == "OFF")
+        #expect(SamplerEditorModel.glideReadout(0).unit == "")
+        // Positive control: the formatter it delegates to really would have said
+        // that, so the guard above is doing work rather than agreeing by luck.
+        #expect(SamplerEditorModel.readout(value: 0, spec: SamplerEditorModel.glideSpec).text
+                == "0.0")
+        #expect(SamplerEditorModel.readout(value: 0, spec: SamplerEditorModel.glideSpec).unit
+                == "ms")
+        // Above zero it speaks the card's ordinary ms/s crossover.
+        #expect(SamplerEditorModel.glideReadout(0.25).text == "250")
+        #expect(SamplerEditorModel.glideReadout(0.25).unit == "ms")
+        #expect(SamplerEditorModel.glideReadout(2).text == "2.00")
+        #expect(SamplerEditorModel.glideReadout(2).unit == "s")
+    }
+
+    @Test("the honest light: a glide stored under CHORDS reads inert, and only then")
+    func samplerGlideInertUnderPoly() throws {
+        let zone = Self.samplerZone(Self.ping)
+        let f = try Self.samplerFixture(SamplerParams(zones: [zone]))
+
+        // (a) No glide, chords — the DEFAULT. Not a warning state: lighting one
+        // on the default would teach nothing.
+        #expect(f.model.glideIsInert == false)
+        #expect(f.model.glideIsEffective == false)
+
+        // (b) A glide set while the sampler plays chords is STRUCTURALLY inert —
+        // the engine resolves it away at the ScalarParams boundary — and this is
+        // the state the card must show rather than draw a live-looking knob.
+        f.model.setGlideTime(0.3)
+        #expect(f.model.glideIsInert)
+        #expect(f.model.glideIsEffective == false)
+
+        // (c) Both monophonic modes make it live. `.mono` too, not just
+        // `.legato`: the slide happens either way, the difference is the attack.
+        for mode in [SamplerVoiceMode.mono, .legato] {
+            f.model.setVoiceMode(mode)
+            #expect(f.model.glideIsEffective, "\(mode) must make a stored glide live")
+            #expect(f.model.glideIsInert == false)
+        }
+
+        // (d) Switching back to chords re-lights the warning.
+        f.model.setVoiceMode(.poly)
+        #expect(f.model.glideIsInert)
+
+        // (e) The card's verdict is the DOMAIN's, never a local re-derivation —
+        // so it cannot disagree with the `glideEffective` key
+        // `instrument.describeSampler` publishes to an agent.
+        let stored = try #require(Self.storedSampler(f.store, f.trackID))
+        #expect(f.model.glideIsEffective == stored.glideIsEffective)
+    }
+
+    @Test("the inert-glide note speaks to a human, not to an agent")
+    func samplerGlideInertNoteIsBeginnerReadable() {
+        let note = SamplerEditorModel.glideInertNote
+        // Rule 6: the person reading this card has never seen "poly"; they have
+        // seen the three chips. The note must name what they can see.
+        #expect(note.contains("CHORDS"))
+        #expect(note.contains("One Note") && note.contains("Slurred"))
+        for word in ["poly", "mono", "legato", "voiceMode"] {
+            #expect(!note.contains(word),
+                    "the note leaks the wire word '\(word)' at a human")
+        }
+        // It says what is wrong AND what to do — a warning that only names the
+        // fault leaves the repair to guesswork.
+        #expect(note.lowercased().contains("ignores"),
+                "the note must name the FAULT, not merely the repair")
+        #expect(note.lowercased().contains("use "),
+                "a warning that names only the fault leaves the repair to guesswork")
+        // ⚠️ It must stay SHORT enough to draw on ONE line: it lives in the
+        // card's fixed chrome, so a second line costs a zone row off the list —
+        // measured in pixels, twice, before the number settled (see
+        // `glideInertNote`'s own doc). 51 is what the card's width actually
+        // fits at 9 pt beside the warning glyph.
+        #expect(note.count <= 51, "\(note.count) chars will wrap and cost a zone row")
+    }
+
+    @Test("voice mode and glide obey the same honest gates as every other global")
+    func samplerVoiceAndGlideRefuseOnAWrongKind() throws {
+        let store = ProjectStore()
+        store.media = SamplerStubMedia()
+        let track = store.addTrack(kind: .instrument)
+        let model = Self.makeSamplerBacked(store)
+        model.prepare(trackID: track.id, targetLabel: "on Synth")
+        #expect(model.targetIsSampler == false)
+
+        // A poly-synth track: both edits refuse loudly and write nothing. An
+        // edit that appears to work and changes nothing audible is this
+        // codebase's characteristic failure mode.
+        model.setVoiceMode(.legato)
+        #expect(model.lastErrorMessage != nil)
+        #expect(store.tracks.first { $0.id == track.id }?.instrument?.sampler == nil)
+        // `select(zoneID:)` clears the inline error — the card's own reset — so
+        // the second edit is proven to raise its OWN refusal rather than
+        // inheriting the first one's.
+        model.select(zoneID: nil)
+        #expect(model.lastErrorMessage == nil)
+        model.setGlideTime(1)
+        #expect(model.lastErrorMessage != nil)
+        #expect(store.tracks.first { $0.id == track.id }?.instrument?.sampler == nil)
+    }
+
     // MARK: Sampler — loop fields (m20-g), the ones that make a note sustain
 
     @Test("the loop mode, start and end round-trip through the same setInstrument funnel")
@@ -1078,6 +1445,228 @@ struct PolySynthEditorModelTests {
                                            throwPoints: throwPoints) != 1.0)
     }
 
+    // MARK: Sampler — globals every zone overrides (W7-SMP, the sax-team ② card half)
+    //
+    // Field report 2026-08-20: a global Release of 3.4465 s on an imported
+    // library whose every zone released in 0.5 s. `instrument.describeSampler`
+    // learned to say so that day; this card went on drawing a live-looking knob
+    // that did nothing when turned. The census is the ENGINE's precedence, not
+    // the field names: attack, decay, sustain, release (the `-1` inherit
+    // sentinel) and oneShot (−1/0/1 at note-off). Gain multiplies and is never
+    // inert.
+
+    /// Two zones over real files. `field` is set on BOTH (the global reaches no
+    /// zone: INERT) or — with `inheritingSecond` — on the FIRST only (zone two
+    /// still hears the global: LIVE). The first zone always overrides, so a
+    /// verdict that looks only at `zones.first` gets the mixed case wrong.
+    private static func overridingParams(_ field: String,
+                                         inheritingSecond: Bool = false) -> SamplerParams {
+        func zone(_ url: URL, _ lo: Int, _ hi: Int, own: Bool) -> SamplerZone {
+            SamplerZone(audioFileURL: url, minPitch: lo, maxPitch: hi,
+                        oneShot: own && field == "oneShot" ? true : nil,
+                        attack: own && field == "attack" ? 0.3 : nil,
+                        decay: own && field == "decay" ? 1.5 : nil,
+                        sustain: own && field == "sustain" ? 0.25 : nil,
+                        release: own && field == "release" ? 0.5 : nil)
+        }
+        return SamplerParams(zones: [zone(ping, 0, 59, own: true),
+                                     zone(tink, 60, 127, own: !inheritingSecond)],
+                             release: 3.4465)
+    }
+
+    /// DAWCore's own fold, named per field here INDEPENDENTLY of the model's
+    /// switch — the cross-check that the card and `instrument.describeSampler`
+    /// (which shapes these same folds into `effectiveGlobals`) agree.
+    private static func domainSaysInert(_ field: String, _ params: SamplerParams) -> Bool {
+        switch field {
+        case "attack": return SamplerGlobalUse.attack(of: params).globalIsInert
+        case "decay": return SamplerGlobalUse.decay(of: params).globalIsInert
+        case "sustain": return SamplerGlobalUse.sustain(of: params).globalIsInert
+        case "release": return SamplerGlobalUse.release(of: params).globalIsInert
+        case "oneShot": return SamplerOneShotUse.oneShot(of: params).globalIsInert
+        default: return false
+        }
+    }
+
+    @Test("W7-SMP: each census global reads INERT when every zone sets its own, LIVE while one zone inherits")
+    func samplerGlobalInertPerCensusGlobal() throws {
+        #expect(SamplerEditorModel.zoneOverridableGlobals
+                == ["attack", "decay", "sustain", "release", "oneShot"])
+        for field in SamplerEditorModel.zoneOverridableGlobals {
+            let all = try Self.samplerFixture(Self.overridingParams(field))
+            #expect(all.model.globalIsInert(field),
+                    "\(field): every zone sets its own — the global is never heard")
+            // ONLY this field: every other global still reaches both zones.
+            for other in SamplerEditorModel.zoneOverridableGlobals where other != field {
+                #expect(all.model.globalIsInert(other) == false,
+                        "\(field) fixture: \(other) must stay live")
+            }
+            // The card's verdict is the DOMAIN's, never a local re-derivation.
+            let stored = try #require(Self.storedSampler(all.store, all.trackID))
+            #expect(all.model.globalIsInert(field) == Self.domainSaysInert(field, stored))
+
+            // The MIXED library — zone two inherits, so the global IS heard.
+            let mixed = try Self.samplerFixture(Self.overridingParams(field, inheritingSecond: true))
+            #expect(mixed.model.globalIsInert(field) == false,
+                    "\(field): zone two still inherits — the global is LIVE")
+        }
+        // Zero zones: silent for a reason that has nothing to do with any knob,
+        // and calling a global "inert" there would point at the wrong repair.
+        let empty = try Self.samplerFixture(SamplerParams(zones: [], release: 3.4465))
+        for field in SamplerEditorModel.zoneOverridableGlobals {
+            #expect(empty.model.globalIsInert(field) == false, "\(field) on a zoneless sampler")
+        }
+    }
+
+    @Test("W7-SMP control: gain is never inert — each zone's gain scales the global, it never replaces it")
+    func samplerGainIsNeverInert() throws {
+        // `SamplerZone.gain` is non-optional, so EVERY zone carries one — and the
+        // global still reaches every voice as the output gain.
+        let zones = [SamplerZone(audioFileURL: Self.ping, maxPitch: 59, gain: 0.5),
+                     SamplerZone(audioFileURL: Self.tink, minPitch: 60, gain: 1.5)]
+        let f = try Self.samplerFixture(SamplerParams(zones: zones))
+        #expect(f.model.globalIsInert("gain") == false)
+        // Outside the census entirely — glide keeps its own rule (`glideIsInert`).
+        #expect(f.model.globalIsInert("glideTime") == false)
+        #expect(f.model.globalIsInert("no-such-global") == false)
+        #expect(f.model.inertGlobalLabels.isEmpty)
+        #expect(f.model.inertGlobalsNote == nil)
+    }
+
+    @Test("W7-SMP: an inert knob is DIM BUT LIVE — the edit still writes the global, and zone two's own reset makes it heard")
+    func samplerInertGlobalStillWritesAndRecovers() throws {
+        let f = try Self.samplerFixture(Self.overridingParams("release"))
+        #expect(f.model.globalIsInert("release"))
+        #expect(f.model.inertGlobalLabels == ["Release"])
+        #expect(f.model.inertGlobalsNote == "Release does nothing: set per zone.")
+
+        // The card writes what the wire writes: the stored global moves…
+        f.model.set(name: "release", value: 1.25)
+        #expect(Self.storedSampler(f.store, f.trackID)?.release == 1.25)
+        #expect(f.model.lastErrorMessage == nil)
+        // …and is STILL not heard: no zone listens to it.
+        #expect(f.model.globalIsInert("release"))
+
+        // Hand zone two back to the global with the card's own per-zone reset,
+        // and the light goes out — the verdict follows the zones, live.
+        let secondZone = try #require(Self.storedSampler(f.store, f.trackID)?.zones.last?.id)
+        f.model.select(zoneID: secondZone)
+        f.model.resetZoneParam(Self.samplerZoneSpec("release"))
+        #expect(Self.storedSampler(f.store, f.trackID)?.zones.last?.release == nil)
+        #expect(f.model.globalIsInert("release") == false)
+        #expect(f.model.inertGlobalsNote == nil)
+    }
+
+    @Test("W7-SMP: the note names every dimmed control in card order, One Shot included")
+    func samplerInertGlobalLabelsFollowTheCard() throws {
+        func zone(_ url: URL, _ lo: Int, _ hi: Int) -> SamplerZone {
+            SamplerZone(audioFileURL: url, minPitch: lo, maxPitch: hi, oneShot: true,
+                        attack: 0.3, decay: 1, sustain: 0.5, release: 0.5)
+        }
+        let f = try Self.samplerFixture(SamplerParams(zones: [zone(Self.ping, 0, 59),
+                                                              zone(Self.tink, 60, 127)]))
+        #expect(f.model.inertGlobalLabels == ["Attack", "Release", "One Shot"])
+        #expect(f.model.inertGlobalsNote == "Attack, Release, One Shot do nothing: set per zone.")
+        // Global decay/sustain are inert too, but the card draws no control for
+        // them, so the note must not name a control nobody can see.
+        #expect(f.model.globalIsInert("decay"))
+        #expect(f.model.globalIsInert("sustain"))
+    }
+
+    /// W7-SMP round 2, item 1. Since m34-o a zone that leaves `decay`/`sustain`
+    /// unset plays the sampler's GLOBAL pair: `SamplerInstrument` stores the
+    /// nil as its `-1` sentinel and resolves it to `params.effectiveDecay`/
+    /// `effectiveSustain` at trigger. The knob read the literals 0 s / 100 %,
+    /// so a global decay set over the wire played a fade the knob never
+    /// showed. The globals reach the store here through `store.setInstrument`,
+    /// the call `track.setInstrument` makes. This target cannot import
+    /// DAWControl; the wire's own echo of the pair is pinned in
+    /// SamplerZoneIdentityWireTests.
+    @Test("W7-SMP r2: an unset zone's Decay and Sustain knobs show the sampler's GLOBAL pair, the one the engine plays, not 0 s / 100 %")
+    func samplerUnsetZoneKnobShowsGlobalDecaySustain() throws {
+        let inheriting = SamplerZone(audioFileURL: Self.ping, maxPitch: 59)
+        let own = SamplerZone(audioFileURL: Self.tink, minPitch: 60, decay: 0.4, sustain: 0.8)
+        let f = try Self.samplerFixture(
+            SamplerParams(zones: [inheriting, own], decay: 2.5, sustain: 0.3))
+        let stored = try #require(Self.storedSampler(f.store, f.trackID))
+        #expect(stored.decay == 2.5 && stored.sustain == 0.3, "the store kept the globals")
+
+        f.model.select(zoneID: inheriting.id)
+        #expect(f.model.zoneParamIsUnset("decay"))
+        #expect(f.model.zoneParamIsUnset("sustain"))
+        #expect(f.model.zoneValue(for: Self.samplerZoneSpec("decay")) == 2.5)
+        #expect(f.model.zoneValue(for: Self.samplerZoneSpec("sustain")) == 0.3)
+
+        // CONTROL: a zone with its own pair shows its own; the global does not leak in.
+        f.model.select(zoneID: own.id)
+        #expect(f.model.zoneValue(for: Self.samplerZoneSpec("decay")) == 0.4)
+        #expect(f.model.zoneValue(for: Self.samplerZoneSpec("sustain")) == 0.8)
+
+        // CONTROL: a sampler that never set the globals still shows the legacy pair.
+        let plain = SamplerZone(audioFileURL: Self.ping)
+        let g = try Self.samplerFixture(SamplerParams(zones: [plain]))
+        g.model.select(zoneID: plain.id)
+        #expect(g.model.zoneValue(for: Self.samplerZoneSpec("decay")) == SamplerParams.defaultDecay)
+        #expect(g.model.zoneValue(for: Self.samplerZoneSpec("sustain")) == SamplerParams.defaultSustain)
+    }
+
+    /// W7-SMP round 2, item 4. "Set per zone" sends a reader to the zone rows,
+    /// and the zone rows have no One Shot control, so for One Shot alone the
+    /// note says the card cannot change it.
+    @Test("W7-SMP r2: One Shot alone says 'not this card', because the zone rows have no One Shot control to send a reader to")
+    func samplerLoneOneShotNoteSaysNotThisCard() throws {
+        let f = try Self.samplerFixture(Self.overridingParams("oneShot"))
+        #expect(f.model.inertGlobalLabels == ["One Shot"])
+        let note = try #require(f.model.inertGlobalsNote)
+        #expect(note == "One Shot does nothing: zones set it, not this card.")
+        #expect(!note.contains("set per zone"), "the zone rows carry no One Shot control")
+        // The reason for the wording, read off the card's own table.
+        #expect(!SamplerEditorModel.zoneSpecs.contains { $0.name == "oneShot" })
+
+        // CONTROL: a control the zone rows DO carry keeps the per-zone advice.
+        let r = try Self.samplerFixture(Self.overridingParams("release"))
+        #expect(r.model.inertGlobalsNote == "Release does nothing: set per zone.")
+        #expect(SamplerEditorModel.zoneSpecs.contains { $0.name == "release" })
+    }
+
+    @Test("W7-SMP: the inert-globals note fits ONE line in every combination — m34-u's budget, measured")
+    func samplerInertGlobalsNoteFitsOneLine() throws {
+        // The line the note draws in: the card's 308 pt interior (340 − 2 × 16)
+        // less the 12 pt warning glyph (NSImage, 9 pt, measured 2026-09-27) and
+        // the 5 pt gap beside it. The face is the card's `.system(size: 9)`.
+        let face = NSFont.systemFont(ofSize: 9)
+        func width(_ text: String) -> CGFloat {
+            (text as NSString).size(withAttributes: [.font: face]).width
+        }
+        let line: CGFloat = 308 - 12 - 5
+
+        // Every combination of the controls the card DRAWS that can go inert,
+        // derived from the model's own tables so a new one joins the sweep.
+        let drawn = SamplerEditorModel.specs
+            .filter { SamplerEditorModel.zoneOverridableGlobals.contains($0.name) }
+            .map(\.label) + [SamplerEditorModel.oneShotSpec.label]
+        #expect(drawn == ["Attack", "Release", "One Shot"])
+        for mask in 1..<(1 << drawn.count) {
+            let labels = drawn.indices.filter { mask & (1 << $0) != 0 }.map { drawn[$0] }
+            let note = try #require(SamplerEditorModel.inertGlobalsNote(labels: labels))
+            print("[measured] \(note.count) chars, \(width(note)) pt: \(note)")
+            #expect(note.count <= 51, "\(note.count) chars will wrap and cost a zone row")
+            #expect(width(note) <= line, "\(width(note)) pt overruns the \(line) pt line")
+            // It names the FAULT, not merely the cause.
+            #expect(note.contains("nothing"))
+        }
+        #expect(SamplerEditorModel.inertGlobalsNote(labels: []) == nil)
+
+        // Calibration: the glide note, seen on a capture as ONE line, passes.
+        #expect(width(SamplerEditorModel.glideInertNote) <= line)
+        // Positive control — the gate CAN fail: the brief's own example
+        // sentence would wrap here and cost a zone row.
+        let wraps = "Each sound in this instrument sets its own release, so this knob has "
+            + "no effect. Change a sound's release instead."
+        #expect(width(wraps) > line)
+        #expect(wraps.count > 51)
+    }
+
     // MARK: - SamplerCardLayout (the collapsed-zone-list regression)
 
     /// The window heights that matter: the app's default and its floor.
@@ -1106,8 +1695,17 @@ struct PolySynthEditorModelTests {
             let visible = SamplerCardLayout.visibleRows(inHeight: height)
             #expect(visible >= 6,
                     "\(rowCount) zones: inspector open shows \(visible) rows, need ≥ 6")
-            #expect(visible == SamplerCardLayout.maxRowsWithInspector,
-                    "\(rowCount) zones: expected the \(SamplerCardLayout.maxRowsWithInspector)-row cap at the default window, got \(visible)")
+            // ⭐ m34-u MOVED THIS NUMBER, AND THE MOVE IS THE POINT OF THE
+            // ASSERTION. Until m34-u the 8-row CAP bound at the default window;
+            // the VOICE chip row plus the stored-but-inert GLIDE warning spend
+            // ~71 pt of chrome, so the BUDGET now binds first and the list draws
+            // 6. Pinned as a BAND, not as the cap: the cap is an upper bound the
+            // budget may legitimately sit under, and asserting equality with it
+            // would redden on every honest chrome change while saying nothing
+            // about the defect. What must never happen again is the slide toward
+            // ~1.7, and 6 is 3.5× that.
+            #expect(visible <= SamplerCardLayout.maxRowsWithInspector,
+                    "\(rowCount) zones: \(visible) rows exceeds the \(SamplerCardLayout.maxRowsWithInspector)-row cap")
         }
 
         // The state that was already fine must stay fine.

@@ -1,0 +1,587 @@
+{
+  "set": "hallreverb",
+  "description": "m39-l, the .hallReverb insert: the reverb that has an actual SIZE. Every variant plays the IDENTICAL sparse plucked figure (four bars at 120 BPM, three short notes and a low one per bar) so nothing but the room differs.\n\nTHE ONE AXIS IS `sizeMeters`. mix (0.30), decaySeconds (2.5), preDelayMs (20), width (1.0), diffusion (0.7), earlyLateBalance (0), the two decay multipliers and their crossovers, and the tail modulation are byte-for-byte identical in all three effect variants; only the size moves, 4 m -> 14 m -> 50 m. Variant 1 has no effect at all.\n\nWHY THIS AXIS EXISTS AT ALL, because it is the whole reason for a second reverb kind. The older `reverb` kind cannot do this. Its `roomSize` knob looks like a size control and is not one: it scales the FEEDBACK of eight comb filters whose lengths are compile-time constants, so turning it makes the tail ring LONGER in the same small room, forever. `hallReverb` scales the actual delay-line lengths, which is how long sound takes to cross the space - so the same decay time can happen in a broom cupboard or in a cathedral, and those are different sounds. `reverb` is not going anywhere: its small, bright, dense room is a good sound this one does not replicate.\n\nWHAT TO LISTEN FOR, and listen in the GAPS between the notes rather than under them. The tail is the same LENGTH in all three - decaySeconds is held at 2.5 - so what changes is its TEXTURE. In 'size-4m' the echoes come back so fast that they fuse into a bright, slightly metallic flutter sitting right on top of the note; it sounds like a tiled bathroom, not like a room you could walk across. In 'size-14m' the echoes have spread far enough apart to read as a hall with walls somewhere: the tail is smooth and the notes still sound close. In 'size-50m' the first reflections arrive late enough that you can hear a few of them INDIVIDUALLY before the wash builds up, and that separation is what the ear actually uses to judge that a space is big.\n\nWHAT WOULD MAKE THIS HARD TO HEAR: playing it quietly, or on a phone speaker with the notes overlapping. The difference lives in the decay tail, which sits 15-25 dB below the notes, so anything that squashes dynamics (a car stereo, a loudness-normalised player, a noisy room) will flatten the axis. On headphones at a normal level it is unmistakable. The 50 m variant is the easiest to identify; 4 m against 14 m is the harder pair and is worth a second pass.\n\nLOUDNESS, STATED SO IT IS NOT MISTAKEN FOR THE AXIS, with the MEASURED numbers. The three ON-AXIS variants came out at -30.4, -30.4 and -30.5 LUFS integrated: a spread of 0.1 LU, comfortably inside the 1.0 LU rule, so nothing here can be picked for being louder. (They are not exactly equal for a real reason rather than a mix decision: a smaller room recirculates the same energy more times per second, so it accumulates very slightly more of it.) The no-effect CONTROL measured -27.9 LUFS, which is 2.5 LU LOUDER than the other three, and it is exempt from the match by design (erratum E6). The cause is arithmetic, not a mix choice: at mix 0.30 the dry signal is multiplied by 0.70, which is -3.1 dB on its own, and the reverb tail - a decayed, diffuse copy at 0.30 gain, sitting mostly in the gaps - does not put that much back. Normalising the control would manufacture a confound rather than remove one, because 'a reverb changes the level' is part of what you are judging. DO NOT PICK THE CONTROL BECAUSE IT IS LOUDER; it is there to tell you what was added.\n\nHOW DIFFERENT ARE THEY, REALLY: measured on these exact renders, the sample-by-sample difference between the 4 m and 14 m variants sits 9.25 dB below the files themselves, and 4 m against 50 m sits 9.86 dB below. That is a gross difference in the audio, not a rounding one - roughly a third of the signal by RMS. The closest pair is 14 m against 50 m at 13.1 dB down, which is why that is the pair worth a second listen.\n\nWHAT IS NOT BEING SHOWN. `decaySeconds` (how LONG the tail rings, a real RT60 in seconds) is held still on purpose - it is the other half of the effect and it is a different demo. So are the two decay multipliers, which give bass and treble their own decay times, and `freeze`, which holds whatever is in the room indefinitely.",
+  "variants": [
+    {
+      "name": "no-effect",
+      "axis": "no reverb at all - the pluck dry, so you know what is being added",
+      "render": {
+        "durationSeconds": 12
+      },
+      "role": "control",
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "triangle",
+            "attack": 0.002,
+            "decay": 0.18,
+            "sustain": 0.0,
+            "release": 0.12,
+            "cutoffHz": 5200,
+            "resonance": 0.12,
+            "gain": 0.7,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0,
+            "unisonStereoSpread": 0,
+            "subLevel": 0.15,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 52,
+                "startBeat": 0.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 59,
+                "startBeat": 0.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 1.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 57,
+                "startBeat": 4.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 4.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 69,
+                "startBeat": 5.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 45,
+                "startBeat": 6.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 55,
+                "startBeat": 8.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 62,
+                "startBeat": 8.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 67,
+                "startBeat": 9.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 43,
+                "startBeat": 10.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 59,
+                "startBeat": 12.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 13.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.5,
+                "lengthBeats": 0.4
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "size-4m",
+      "axis": "sizeMeters 4 - a small tiled room: the echoes arrive fast and close together, so the tail reads as a bright grainy flutter rather than a space",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "triangle",
+            "attack": 0.002,
+            "decay": 0.18,
+            "sustain": 0.0,
+            "release": 0.12,
+            "cutoffHz": 5200,
+            "resonance": 0.12,
+            "gain": 0.7,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0,
+            "unisonStereoSpread": 0,
+            "subLevel": 0.15,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "hallReverb",
+            "params": {
+              "mix": 0.3,
+              "decaySeconds": 2.5,
+              "sizeMeters": 4,
+              "preDelayMs": 20,
+              "width": 1.0,
+              "diffusion": 0.7,
+              "earlyLateBalance": 0.0,
+              "lowDecayMultiplier": 1.0,
+              "highDecayMultiplier": 0.5,
+              "lowCrossoverHz": 200,
+              "highCrossoverHz": 6000,
+              "modRateHz": 0.3,
+              "modDepthMs": 0.15,
+              "freeze": 0
+            }
+          },
+          "as": "hall"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 52,
+                "startBeat": 0.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 59,
+                "startBeat": 0.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 1.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 57,
+                "startBeat": 4.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 4.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 69,
+                "startBeat": 5.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 45,
+                "startBeat": 6.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 55,
+                "startBeat": 8.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 62,
+                "startBeat": 8.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 67,
+                "startBeat": 9.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 43,
+                "startBeat": 10.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 59,
+                "startBeat": 12.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 13.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.5,
+                "lengthBeats": 0.4
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "size-14m",
+      "axis": "sizeMeters 14 - a concert hall: the echoes have spread far enough apart to read as a room with walls, and the tail is smooth",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "triangle",
+            "attack": 0.002,
+            "decay": 0.18,
+            "sustain": 0.0,
+            "release": 0.12,
+            "cutoffHz": 5200,
+            "resonance": 0.12,
+            "gain": 0.7,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0,
+            "unisonStereoSpread": 0,
+            "subLevel": 0.15,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "hallReverb",
+            "params": {
+              "mix": 0.3,
+              "decaySeconds": 2.5,
+              "sizeMeters": 14,
+              "preDelayMs": 20,
+              "width": 1.0,
+              "diffusion": 0.7,
+              "earlyLateBalance": 0.0,
+              "lowDecayMultiplier": 1.0,
+              "highDecayMultiplier": 0.5,
+              "lowCrossoverHz": 200,
+              "highCrossoverHz": 6000,
+              "modRateHz": 0.3,
+              "modDepthMs": 0.15,
+              "freeze": 0
+            }
+          },
+          "as": "hall"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 52,
+                "startBeat": 0.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 59,
+                "startBeat": 0.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 1.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 57,
+                "startBeat": 4.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 4.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 69,
+                "startBeat": 5.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 45,
+                "startBeat": 6.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 55,
+                "startBeat": 8.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 62,
+                "startBeat": 8.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 67,
+                "startBeat": 9.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 43,
+                "startBeat": 10.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 59,
+                "startBeat": 12.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 13.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.5,
+                "lengthBeats": 0.4
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "size-50m",
+      "axis": "sizeMeters 50 - a cathedral: the first echoes arrive late enough to hear INDIVIDUALLY before the wash builds, which is what 'big' actually sounds like",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pluck",
+            "kind": "instrument"
+          },
+          "as": "pluck"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "polySynth",
+            "waveform": "triangle",
+            "attack": 0.002,
+            "decay": 0.18,
+            "sustain": 0.0,
+            "release": 0.12,
+            "cutoffHz": 5200,
+            "resonance": 0.12,
+            "gain": 0.7,
+            "unisonVoices": 1,
+            "unisonDetuneCents": 0,
+            "unisonStereoSpread": 0,
+            "subLevel": 0.15,
+            "subOctave": -1,
+            "subWaveform": "sine"
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pluck",
+            "kind": "hallReverb",
+            "params": {
+              "mix": 0.3,
+              "decaySeconds": 2.5,
+              "sizeMeters": 50,
+              "preDelayMs": 20,
+              "width": 1.0,
+              "diffusion": 0.7,
+              "earlyLateBalance": 0.0,
+              "lowDecayMultiplier": 1.0,
+              "highDecayMultiplier": 0.5,
+              "lowCrossoverHz": 200,
+              "highCrossoverHz": 6000,
+              "modRateHz": 0.3,
+              "modDepthMs": 0.15,
+              "freeze": 0
+            }
+          },
+          "as": "hall"
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pluck",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 52,
+                "startBeat": 0.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 59,
+                "startBeat": 0.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 1.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 40,
+                "startBeat": 2.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 57,
+                "startBeat": 4.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 4.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 69,
+                "startBeat": 5.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 45,
+                "startBeat": 6.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 55,
+                "startBeat": 8.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 62,
+                "startBeat": 8.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 67,
+                "startBeat": 9.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 43,
+                "startBeat": 10.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 52,
+                "startBeat": 12.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 59,
+                "startBeat": 12.5,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 64,
+                "startBeat": 13.0,
+                "lengthBeats": 0.4
+              },
+              {
+                "pitch": 40,
+                "startBeat": 14.5,
+                "lengthBeats": 0.4
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

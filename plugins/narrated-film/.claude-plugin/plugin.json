@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "narrated-film",
+  "displayName": "Narrated Film Kit",
+  "version": "0.2.0",
+  "description": "Turn screenshots, screen footage and audio into a finished narrated video, entirely on your own machine — no cloud service and no API key. Local text-to-speech in one consistent cloned voice, a content gate that transcribes every line back and rejects takes that say the wrong words, ffmpeg assembly with ducked narration beds and before/after A/B beats, reusable branded intro and end cards, channel art, and a verifier that checks the finished film with positive controls.",
+  "author": {
+    "name": "dsemenov"
+  },
+  "repository": "https://github.com/dimichgh/daw-pro",
+  "keywords": [
+    "video",
+    "narration",
+    "text-to-speech",
+    "tts",
+    "voice-cloning",
+    "whisper",
+    "ffmpeg",
+    "screencast",
+    "tutorial",
+    "demo",
+    "youtube",
+    "branding",
+    "local-first"
+  ]
+}

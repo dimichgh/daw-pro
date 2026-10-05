@@ -20,14 +20,28 @@ public struct PolySynthParamSpec: Equatable, Sendable {
     /// The STORAGE unit ("s" / "Hz" / "linear") — display crossovers (ms↔s,
     /// Hz↔kHz, %-for-amounts, dB-for-gain) live in `readout(value:spec:)`.
     public let unit: String
+    /// How the knob's 0…1 travel maps onto `range` — **DECLARED**, the same
+    /// `DAWCore.ParamCurve` `EffectParamSpec` carries (m39-a). This card used
+    /// to re-derive `unit == "Hz"` for itself, a second independent copy of the
+    /// effect editor's rule; both now read the property.
+    ///
+    /// ⚠️ **Bridge, not a destination.** m39-b introduces
+    /// `DAWCore.InstrumentParamSpec` (`docs/design/2026-09-19-modulation-layer.md`
+    /// §4) carrying `name`/`range`/`unit`/`curve`/`modulatable` in DAWCore,
+    /// engine-free, so the modulation layer and `instrument.describeSynth` can
+    /// read the same numbers. THAT should absorb this table — otherwise this
+    /// DAWAppKit copy becomes the next duplicate, which is the whole failure
+    /// m39-a exists to end.
+    public let curve: ParamCurve
 
     public init(name: String, label: String, range: ClosedRange<Double>,
-                defaultValue: Double, unit: String) {
+                defaultValue: Double, unit: String, curve: ParamCurve) {
         self.name = name
         self.label = label
         self.range = range
         self.defaultValue = defaultValue
         self.unit = unit
+        self.curve = curve
     }
 }
 
@@ -142,27 +156,34 @@ public final class PolySynthEditorModel {
     public static let specs: [PolySynthParamSpec] = {
         let d = PolySynthParams()
         return [
+            // ⚠️ m39-a declared each curve as the value the old
+            // `unit == "Hz"` inference already produced — the envelope times
+            // stay LINEAR. `docs/design/2026-09-19-modulation-layer.md` §4
+            // proposes `.logarithmic` for attack/decay/release on the FUTURE
+            // `InstrumentParamSpec`; adopting that here would move three
+            // shipping knobs under a refactor, so it is m39-b's call to make
+            // deliberately, not m39-a's to smuggle in.
             PolySynthParamSpec(name: "attack", label: "Attack",
                                range: PolySynthParams.attackRange,
-                               defaultValue: d.attack, unit: "s"),
+                               defaultValue: d.attack, unit: "s", curve: .linear),
             PolySynthParamSpec(name: "decay", label: "Decay",
                                range: PolySynthParams.decayRange,
-                               defaultValue: d.decay, unit: "s"),
+                               defaultValue: d.decay, unit: "s", curve: .linear),
             PolySynthParamSpec(name: "sustain", label: "Sustain",
                                range: PolySynthParams.sustainRange,
-                               defaultValue: d.sustain, unit: "linear"),
+                               defaultValue: d.sustain, unit: "linear", curve: .linear),
             PolySynthParamSpec(name: "release", label: "Release",
                                range: PolySynthParams.releaseRange,
-                               defaultValue: d.release, unit: "s"),
+                               defaultValue: d.release, unit: "s", curve: .linear),
             PolySynthParamSpec(name: "cutoffHz", label: "Cutoff",
                                range: PolySynthParams.cutoffRange,
-                               defaultValue: d.cutoffHz, unit: "Hz"),
+                               defaultValue: d.cutoffHz, unit: "Hz", curve: .logarithmic),
             PolySynthParamSpec(name: "resonance", label: "Resonance",
                                range: PolySynthParams.resonanceRange,
-                               defaultValue: d.resonance, unit: "linear"),
+                               defaultValue: d.resonance, unit: "linear", curve: .linear),
             PolySynthParamSpec(name: "gain", label: "Gain",
                                range: PolySynthParams.gainRange,
-                               defaultValue: d.gain, unit: "linear"),
+                               defaultValue: d.gain, unit: "linear", curve: .linear),
         ]
     }()
 
@@ -264,40 +285,27 @@ public final class PolySynthEditorModel {
     /// How a knob's travel maps onto its range: the cutoff frequency is
     /// LOGARITHMIC — musical octaves read evenly across the travel (a linear
     /// 40 Hz–18 kHz knob buries everything below 2 kHz in the first tenth);
-    /// everything else — times and 0…1 levels — stays linear (the house rule:
-    /// only Hz-unit params get the log taper).
-    public enum Scale: Sendable, Equatable {
-        case linear
-        case logarithmic
-    }
+    /// everything else — times and 0…1 levels — stays linear.
+    ///
+    /// ⭐ m39-a: the house rule this comment used to state ("only Hz-unit
+    /// params get the log taper") was a STRING HEURISTIC, written out twice —
+    /// here and in `EffectEditorModel`. The curve is now declared on the spec
+    /// and read from it. The alias keeps every `PolySynthEditorModel.Scale`
+    /// caller and test compiling (additive only; nothing renamed).
+    public typealias Scale = ParamCurve
 
     public static func scale(for spec: PolySynthParamSpec) -> Scale {
-        spec.unit == "Hz" && spec.range.lowerBound > 0 ? .logarithmic : .linear
+        spec.curve
     }
 
-    /// The 0…1 knob fraction for a value (through the row's scale).
+    /// The 0…1 knob fraction for a value (through the row's declared curve).
     public static func fraction(forValue value: Double, spec: PolySynthParamSpec) -> Double {
-        let lo = spec.range.lowerBound, hi = spec.range.upperBound
-        guard hi > lo else { return 0 }
-        let v = value.clamped(to: spec.range)
-        switch scale(for: spec) {
-        case .linear:
-            return (v - lo) / (hi - lo)
-        case .logarithmic:
-            return (log(v / lo) / log(hi / lo)).clamped(to: 0...1)
-        }
+        spec.curve.fraction(forValue: value, in: spec.range)
     }
 
-    /// The value at a 0…1 knob fraction (through the row's scale).
+    /// The value at a 0…1 knob fraction (through the row's declared curve).
     public static func value(forFraction fraction: Double, spec: PolySynthParamSpec) -> Double {
-        let lo = spec.range.lowerBound, hi = spec.range.upperBound
-        let f = fraction.clamped(to: 0...1)
-        switch scale(for: spec) {
-        case .linear:
-            return lo + f * (hi - lo)
-        case .logarithmic:
-            return lo * pow(hi / lo, f)
-        }
+        spec.curve.value(forFraction: fraction, in: spec.range)
     }
 
     /// The current row fraction (for the thin view's knob position). Every

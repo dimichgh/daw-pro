@@ -481,7 +481,100 @@ struct TransportEndStopTests {
         return store
     }
 
-    /// Polls for an OUTCOME instead of sleeping a fixed wall-clock interval.
+    /// `Duration` → `Double` seconds. Local to this suite on purpose: it is
+    /// test-timing scaffolding, so it must not migrate into `DAWCore` (which
+    /// stays headless and ships the product domain model).
+    private static func secondsOf(_ duration: Duration) -> Double {
+        Double(duration.components.seconds)
+            + Double(duration.components.attoseconds) * 1e-18
+    }
+
+    /// What a headless wait OBSERVED — the outcome AND the main-actor
+    /// availability record that decides what a TIMEOUT means.
+    private struct WaitOutcome {
+        /// Did the awaited condition become true (grace re-check included)?
+        let satisfied: Bool
+        /// Wall seconds the wait consumed.
+        let elapsedSeconds: Double
+        /// Poll iterations completed. ~100/s on a quiet machine (10 ms cadence).
+        let polls: Int
+        /// **THE INSTRUMENT.** The longest interval between two consecutive
+        /// polls. This loop is `@MainActor`-isolated, exactly like the ticker
+        /// it is watching, so a gap of G seconds is a MEASUREMENT that the main
+        /// actor served this suite nothing for G seconds — and therefore that
+        /// the ticker, which needs the same actor, got no turn either. It is
+        /// not a proxy for load; it is the starvation itself.
+        let maxGapSeconds: Double
+    }
+
+    /// The load population these six headless tests are readable in — the
+    /// longest main-actor dark gap under which a TIMEOUT is still evidence
+    /// ABOUT THE FEATURE rather than evidence about the machine.
+    ///
+    /// ── WHY A FENCE EXISTS HERE AT ALL (m31-i, 2026-08-28) ─────────────────
+    /// MEASURED: this suite is 0.538 s green in isolation and has been observed
+    /// at 66.6 s under the loaded full suite — a ~124x inflation, with
+    /// `waitUntil` timeouts. It is the same class as the m19-e clean-path
+    /// flake fenced the same day in `AUPrepareRenegotiationStressTests`
+    /// (`populationValidityMaxMedianSeconds`), and it has the same cause: the
+    /// harness grew ~44 % (4 693 -> 6 752 tests) and the main actor is now
+    /// saturated for stretches long enough that a detached `@MainActor` ticker
+    /// gets NO turn. An earlier draft of these tests recorded
+    /// `positionBeats == 0.0` after 23 s of wall time — zero ticks, not "too
+    /// many". Under those conditions the wait measures the harness, not m25-d.
+    ///
+    /// ── WHY THIS FENCE IS NARROW, AND WHY THAT MATTERS ────────────────────
+    /// ⭐ It does NOT excuse a timeout. It excuses ONE residual, ambiguous
+    /// case. Every one of the six tests hands `requireHeadless` an
+    /// AFFIRMATIVE-REGRESSION predicate that is asserted UNCONDITIONALLY, at
+    /// any load, because starvation is only ever able to produce TOO FEW
+    /// ticks — it can never make the transport DO something:
+    ///   * the stop test: `positionBeats >= contentEnd` while still playing.
+    ///     The ticker assigns the position and stops IN THE SAME synchronous
+    ///     hop (no `await` between), so that state is unreachable unless the
+    ///     end-stop arming is broken.
+    ///   * the five keeps-running tests: `!isPlaying`. A stop is an
+    ///     affirmative act; a starved ticker leaves the transport rolling.
+    /// So the bug each test was written to catch — an early stop, a dead play
+    /// button, a phantom end — reddens at ANY load. What the fence covers is
+    /// only "the ticker did not get far enough, and the actor was dark", which
+    /// is not a statement about m25-d.
+    ///
+    /// ── THE VALUE, AND HOW TO RE-DERIVE IT ────────────────────────────────
+    /// DERIVED, not tuned: one ticker hop after t >= 0.5 s satisfies ALL SIX
+    /// tests, because the ticker advances by REAL ELAPSED TIME
+    /// (`ContinuousClock` delta x 240 BPM = 4 beats/s), not by a fixed
+    /// increment — a single hop at t = 0.5 s already lands the playhead at
+    /// 2 beats. The ticker's period is 33 ms. So a run whose largest dark gap
+    /// is <= 1.0 s left >= 29 of its 30 s served, during which a 33 ms-period
+    /// task cannot fail to be scheduled: a timeout there is the feature's
+    /// fault, not the machine's. Quiet-machine noise is ~0.010-0.015 s (the
+    /// 10 ms poll cadence), so the bound keeps ~70x of teeth in isolation.
+    ///
+    /// RE-DERIVATION: `maxGap` is printed on EVERY outcome, satisfied or not,
+    /// by `requireHeadless` — so any full-suite log is already a population
+    /// sample. Re-derive by tabulating `[endstop-gate` lines across >= 5 green
+    /// full-suite runs; the envelope must stay far above the isolated-run gap
+    /// (or the fence eats its own teeth) and below the dark stretches that
+    /// produce the timeouts.
+    ///
+    /// ⚠️ A TIMEOUT INSIDE THIS ENVELOPE IS NOT A FLAKE. It is a real
+    /// regression, or evidence the envelope needs re-deriving on a grown
+    /// harness. Investigate; do not raise this constant to make it green.
+    ///
+    /// ⚠️ HONEST CONSEQUENCE: on a saturated run the six waits can RECORD AND
+    /// SKIP their timeout leg. That is a real coverage loss, stated here so it
+    /// cannot be discovered by surprise. It is bounded by the affirmative legs
+    /// above (which never skip) and by the 40 non-headless tests in this file,
+    /// which need no ticker at all.
+    ///
+    /// ⛔ NOT A LICENCE TO SELF-EXCUSE ELSEWHERE. Licensed by one measured
+    /// fact: a wait whose contaminant is TOTAL (zero hops) rather than small
+    /// or multiplicative. A bound whose contaminant is small gets fixed.
+    private static let mainActorStarvationEnvelopeSeconds = 1.0
+
+    /// Polls for an OUTCOME instead of sleeping a fixed wall-clock interval,
+    /// and records the main-actor availability of the window it polled.
     ///
     /// ⚠️ **Measured, not defensive.** The headless ticker is a detached `Task`
     /// that must hop to the MAIN ACTOR on every iteration. Under a saturated
@@ -490,15 +583,104 @@ struct TransportEndStopTests {
     /// of wall time — zero ticks, not "too many". A fixed sleep measures the
     /// machine's load, not the feature. Polling for the outcome makes these
     /// load-independent, and fast in the common case.
-    @discardableResult
+    ///
+    /// ⚠️ **The grace re-check is not padding — it closes a measured race.**
+    /// This loop and the ticker contend for the SAME actor. If the actor goes
+    /// dark until just before the deadline, this loop can be resumed FIRST,
+    /// see the deadline expired and report a timeout while the ticker sits
+    /// queued one slot behind it, about to do exactly the right thing. Yielding
+    /// past the deadline before the final read costs nothing on the happy path
+    /// (it is only reached on an otherwise-failing wait) and removes a failure
+    /// mode that is purely an artefact of scheduling order.
     private func waitUntil(_ budget: Duration = .seconds(30),
-                           _ condition: () -> Bool) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: budget)
+                           _ condition: () -> Bool) async -> WaitOutcome {
+        let start = ContinuousClock.now
+        let deadline = start.advanced(by: budget)
+        var polls = 0
+        var maxGapSeconds = 0.0
+        var previous = start
         while ContinuousClock.now < deadline {
-            if condition() { return true }
+            let now = ContinuousClock.now
+            maxGapSeconds = max(maxGapSeconds, Self.secondsOf(previous.duration(to: now)))
+            previous = now
+            polls += 1
+            if condition() {
+                return WaitOutcome(satisfied: true,
+                                   elapsedSeconds: Self.secondsOf(start.duration(to: now)),
+                                   polls: polls,
+                                   maxGapSeconds: maxGapSeconds)
+            }
             try? await Task.sleep(for: .milliseconds(10))
         }
-        return condition()
+        try? await Task.sleep(for: .milliseconds(150))
+        let end = ContinuousClock.now
+        maxGapSeconds = max(maxGapSeconds, Self.secondsOf(previous.duration(to: end)))
+        return WaitOutcome(satisfied: condition(),
+                           elapsedSeconds: Self.secondsOf(start.duration(to: end)),
+                           polls: polls,
+                           maxGapSeconds: maxGapSeconds)
+    }
+
+    /// THE DECISION POINT for all six headless waits: assert, or RECORD AND
+    /// SKIP **loudly**. It never silently passes — every call prints exactly
+    /// one `[endstop-gate …]` line, so a campaign log states on its face
+    /// whether these bounds ran or declined.
+    ///
+    /// Three legs, in order:
+    ///  1. **AFFIRMATIVE REGRESSION — asserted at ANY load.** `regression`
+    ///     names a state that REQUIRES the ticker to have run. Starvation can
+    ///     only ever produce too few ticks, so no load envelope excuses it.
+    ///     This is where each test's real bug lives; see
+    ///     `mainActorStarvationEnvelopeSeconds` for the per-test list.
+    ///  2. **THE ACTOR WAS AVAILABLE — asserted.** The largest dark gap sits
+    ///     inside the envelope, so a 33 ms-period ticker had its turns and did
+    ///     not take them. Red.
+    ///  3. **OUT OF POPULATION — recorded, NOT asserted.** Loud, greppable,
+    ///     and it prints the values it declined to assert on.
+    ///
+    /// ⚠️ The print prefix is `[endstop-gate` and deliberately NOT
+    /// `[measured] ` — `scripts/gates/m23aw-prepare-headroom.mjs` and Leg D of
+    /// `MainActorOccupancySiteTests` both key off that prefix and must see
+    /// exactly what they saw before.
+    private func requireHeadless(_ outcome: WaitOutcome,
+                                 _ label: String,
+                                 regression: Bool,
+                                 state: String,
+                                 failure: String,
+                                 sourceLocation: SourceLocation = #_sourceLocation) {
+        let record = "polls \(outcome.polls) over \(outcome.elapsedSeconds) s, "
+            + "maxGap \(outcome.maxGapSeconds) s, envelope "
+            + "\(Self.mainActorStarvationEnvelopeSeconds) s"
+        if outcome.satisfied {
+            print("[endstop-gate ACTIVE] \(label): outcome REACHED, assertions ran (\(record)).")
+            return
+        }
+        if regression {
+            print("[endstop-gate ACTIVE] \(label): timeout ASSERTED as an AFFIRMATIVE "
+                  + "REGRESSION — load-independent (\(record)).")
+            Issue.record("""
+                \(failure) — state: \(state). This state REQUIRES the ticker to have run; \
+                main-actor starvation can only ever produce too FEW ticks, so no load envelope \
+                excuses it. \(record)
+                """, sourceLocation: sourceLocation)
+            return
+        }
+        if outcome.maxGapSeconds <= Self.mainActorStarvationEnvelopeSeconds {
+            print("[endstop-gate ACTIVE] \(label): timeout ASSERTED — the main actor stayed "
+                  + "inside the envelope, so the ticker had its turns (\(record)).")
+            Issue.record("""
+                \(failure) — state: \(state). The main actor's longest dark gap was \
+                \(outcome.maxGapSeconds) s, inside the \(Self.mainActorStarvationEnvelopeSeconds) s \
+                envelope, so a 33 ms-period ticker was schedulable throughout. This is a real \
+                failure, not ambient load. \(record)
+                """, sourceLocation: sourceLocation)
+            return
+        }
+        print("[endstop-gate skipped: ambient load] \(label): timeout RECORDED, NOT ASSERTED — "
+              + "the main actor went dark for \(outcome.maxGapSeconds) s, past the "
+              + "\(Self.mainActorStarvationEnvelopeSeconds) s envelope, so the headless ticker "
+              + "provably got no turn. Unasserted: \(failure) — state: \(state). \(record). "
+              + "This is NOT a pass of that bound.")
     }
 
     @Test("headless: playback STOPS at the content end, playhead parked exactly there")
@@ -506,10 +688,21 @@ struct TransportEndStopTests {
         let store = makeHeadless(contentEnd: 1)
         store.play()
         #expect(store.transport.isPlaying)
-        let stopped = await waitUntil { !store.transport.isPlaying }
-        #expect(stopped, "the transport should have stopped at the last clip")
-        #expect(store.transport.positionBeats == 1,
-                "parked exactly on the content end, not wherever the tick overshot to")
+        let w = await waitUntil { !store.transport.isPlaying }
+        requireHeadless(w, "headlessStopsAtContentEnd",
+                        // AFFIRMATIVE: the ticker demonstrably reached the content
+                        // end and did NOT stop. The ticker assigns the position and
+                        // stops in ONE synchronous hop, so this is unreachable
+                        // unless arming is broken — starvation cannot fake it.
+                        regression: store.transport.positionBeats >= 1,
+                        state: "positionBeats \(store.transport.positionBeats), "
+                             + "isPlaying \(store.transport.isPlaying)",
+                        failure: "the transport should have stopped at the last clip")
+        if w.satisfied {
+            #expect(store.transport.positionBeats == 1,
+                    "parked exactly on the content end, not wherever the tick overshot to")
+        }
+        store.stop()
     }
 
     @Test("headless: an EMPTY project does not stop instantly — it keeps running")
@@ -520,8 +713,13 @@ struct TransportEndStopTests {
         // end would have been. If the feature wrongly stopped an empty project
         // the playhead freezes and this wait fails — that is the discriminating
         // assertion, not the `isPlaying` read after it.
-        let advanced = await waitUntil { store.transport.positionBeats > 2 }
-        #expect(advanced, "an empty project must not stop the instant you press play")
+        let w = await waitUntil { store.transport.positionBeats > 2 }
+        requireHeadless(w, "headlessEmptyProjectKeepsRunning",
+                        // AFFIRMATIVE: a stop is an act. This IS the bug.
+                        regression: !store.transport.isPlaying,
+                        state: "positionBeats \(store.transport.positionBeats), "
+                             + "isPlaying \(store.transport.isPlaying)",
+                        failure: "an empty project must not stop the instant you press play")
         #expect(store.transport.isPlaying)
         store.stop()
     }
@@ -531,8 +729,12 @@ struct TransportEndStopTests {
         let store = makeHeadless(contentEnd: 1)
         store.setStopAtContentEnd(false)
         store.play()
-        let ranPast = await waitUntil { store.transport.positionBeats > 1 }
-        #expect(ranPast, "ran past the last clip, as asked")
+        let w = await waitUntil { store.transport.positionBeats > 1 }
+        requireHeadless(w, "headlessPreferenceOffRunsPast",
+                        regression: !store.transport.isPlaying,
+                        state: "positionBeats \(store.transport.positionBeats), "
+                             + "isPlaying \(store.transport.isPlaying)",
+                        failure: "ran past the last clip, as asked")
         #expect(store.transport.isPlaying)
         store.stop()
     }
@@ -542,8 +744,12 @@ struct TransportEndStopTests {
         let store = makeHeadless(contentEnd: 1)
         try store.setLoop(enabled: true, startBeat: 0, endBeat: 4)
         store.play()
-        let ranPast = await waitUntil { store.transport.positionBeats > 1 }
-        #expect(ranPast, "looping takes precedence over the content-end stop")
+        let w = await waitUntil { store.transport.positionBeats > 1 }
+        requireHeadless(w, "headlessLoopKeepsRunning",
+                        regression: !store.transport.isPlaying,
+                        state: "positionBeats \(store.transport.positionBeats), "
+                             + "isPlaying \(store.transport.isPlaying)",
+                        failure: "looping takes precedence over the content-end stop")
         #expect(store.transport.isPlaying)
         store.stop()
     }
@@ -552,14 +758,35 @@ struct TransportEndStopTests {
     func headlessSecondPlayFreeRuns() async {
         let store = makeHeadless(contentEnd: 1)
         store.play()
-        #expect(await waitUntil { !store.transport.isPlaying })
+        let first = await waitUntil { !store.transport.isPlaying }
+        requireHeadless(first, "headlessSecondPlayFreeRuns/firstStop",
+                        regression: store.transport.positionBeats >= 1,
+                        state: "positionBeats \(store.transport.positionBeats), "
+                             + "isPlaying \(store.transport.isPlaying)",
+                        failure: "the first play must stop at the content end")
+        guard first.satisfied else {
+            // The second half is only meaningful from a parked playhead. Its
+            // own bound is not being skipped for load — it is UNREACHABLE, and
+            // saying so is different from saying it passed.
+            print("[endstop-gate skipped: ambient load] headlessSecondPlayFreeRuns/secondPlay: "
+                  + "NOT REACHED — the first stop never happened, so the dead-button bound had no "
+                  + "parked playhead to start from. This is NOT a pass of that bound.")
+            store.stop()
+            return
+        }
         #expect(store.transport.positionBeats == 1)
         // The playhead now sits AT the content end. A `<=` arming rule would
         // stop again immediately and the play button would look dead; strict
         // `<` free-runs instead.
         store.play()
-        let ranOn = await waitUntil { store.transport.positionBeats > 1 }
-        #expect(ranOn, "the second press must not be a dead button")
+        let second = await waitUntil { store.transport.positionBeats > 1 }
+        requireHeadless(second, "headlessSecondPlayFreeRuns/secondPlay",
+                        // AFFIRMATIVE, and it is THE bug this test exists for: a
+                        // `<=` arming rule stops instantly, which is an ACT.
+                        regression: !store.transport.isPlaying,
+                        state: "positionBeats \(store.transport.positionBeats), "
+                             + "isPlaying \(store.transport.isPlaying)",
+                        failure: "the second press must not be a dead button")
         #expect(store.transport.isPlaying)
         store.stop()
     }
@@ -569,8 +796,12 @@ struct TransportEndStopTests {
         let store = makeHeadless(contentEnd: 1)
         try store.seek(toBeats: 8)
         store.play()
-        let ranOn = await waitUntil { store.transport.positionBeats > 8 }
-        #expect(ranOn, "starting past the content end free-runs, it does not stop")
+        let w = await waitUntil { store.transport.positionBeats > 8 }
+        requireHeadless(w, "headlessStartPastContentRunsOn",
+                        regression: !store.transport.isPlaying,
+                        state: "positionBeats \(store.transport.positionBeats), "
+                             + "isPlaying \(store.transport.isPlaying)",
+                        failure: "starting past the content end free-runs, it does not stop")
         #expect(store.transport.isPlaying)
         store.stop()
     }

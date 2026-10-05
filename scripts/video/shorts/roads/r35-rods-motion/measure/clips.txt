@@ -1,0 +1,15 @@
+clip                                                        dur      bytes  md5
+--- r35-rods-motion/out
+V0-no-rods-control.mp4                                     18.000000   14411143 2230486034b8de42350209d60c49887c
+V1-bass-thin-tall-lit-not-emitting.mp4                     18.000000   14441812 9c6d08f33422b69c48abe07ad5bb5045
+V1h-thin-tall-with-a-hole.mp4                              18.000000   14446023 ca698cb3103e81c6e8429f67d6f93f2e
+V4-bass-height-from-duration.mp4                           18.000000   14526179 1d945b48558c8df8cc0bb3e3057803a0
+V8-standing-ahead-at-V5-colour.mp4                         18.000000   14725528 9fabc9667bb9c72f1d09fdef754d4492
+V9-horizontal-duration-bar.mp4                             18.000000   14529877 dd9303eb69f12438a2f4531fa89496d8
+--- r35-rods-motion/out-w2
+V0-no-rods-control.mp4                                     16.000000   20214466 1b507189cbc9e3753a97811c795249bc
+V1-bass-thin-tall-lit-not-emitting.mp4                     16.000000   20355970 415c12028ab69bd3cb5a8110e653d1f9
+V1h-thin-tall-with-a-hole.mp4                              16.000000   20366009 87673a92192db8d5d0ed2927f80cbbec
+V4-bass-height-from-duration.mp4                           16.000000   20431391 768b78d33bf925403843f14d79ee9e59
+V8-standing-ahead-at-V5-colour.mp4                         16.000000   20709532 2e70a996f935604125a975e26075b400
+V9-horizontal-duration-bar.mp4                             16.000000   20671459 1ae086f674cc273bed834008839be70d

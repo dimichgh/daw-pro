@@ -18,7 +18,9 @@ struct DeleteMenuPolicyTests {
     func mixWorkspaceRefuses() {
         let item = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: false, isModalPresented: false,
-            pianoRollHasNoteSelection: true, automationPointCount: 3, arrangeClipCount: 5)
+            pianoRollHasNoteSelection: true, automationPointCount: 3,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 5)
         #expect(item.isEnabled == false)
         #expect(item.surface == nil)
         #expect(item.refusedBy == .workspace)
@@ -32,7 +34,9 @@ struct DeleteMenuPolicyTests {
     func modalRefuses() {
         let item = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: true, isModalPresented: true,
-            pianoRollHasNoteSelection: true, automationPointCount: 3, arrangeClipCount: 5)
+            pianoRollHasNoteSelection: true, automationPointCount: 3,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 5)
         #expect(item.refusedBy == .modal)
         #expect(item.isEnabled == false)
     }
@@ -45,7 +49,9 @@ struct DeleteMenuPolicyTests {
         // happens to refuse. Both conditions true -> the FIRST must be named.
         let item = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: false, isModalPresented: true,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 0)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 0)
         #expect(item.refusedBy == .workspace)
     }
 
@@ -53,7 +59,9 @@ struct DeleteMenuPolicyTests {
     func emptySelectionRefuses() {
         let item = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 0)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 0)
         #expect(item.refusedBy == .emptySelection)
         #expect(item.isEnabled == false)
         #expect(item.title == DeleteMenuPolicy.inertTitle)
@@ -69,7 +77,9 @@ struct DeleteMenuPolicyTests {
         // holding notes consumes the key and the arrange never sees it.
         let item = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: true, automationPointCount: 2, arrangeClipCount: 7)
+            pianoRollHasNoteSelection: true, automationPointCount: 2,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 7)
         #expect(item.surface == .pianoRollNotes)
         #expect(item.isEnabled)
         // NO COUNT: the bridge publishes a Bool, so the policy has no number and
@@ -82,7 +92,9 @@ struct DeleteMenuPolicyTests {
     func automationTakesPrecedenceOverClips() {
         let item = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 1, arrangeClipCount: 7)
+            pianoRollHasNoteSelection: false, automationPointCount: 1,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 7)
         #expect(item.surface == .automationPoints)
         #expect(item.title == "Delete Automation Point")
     }
@@ -91,7 +103,9 @@ struct DeleteMenuPolicyTests {
     func automationPluralises() {
         let item = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 3, arrangeClipCount: 0)
+            pianoRollHasNoteSelection: false, automationPointCount: 3,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 0)
         #expect(item.surface == .automationPoints)
         #expect(item.title == "Delete 3 Automation Points")
     }
@@ -100,12 +114,16 @@ struct DeleteMenuPolicyTests {
     func arrangeIsTheFallback() {
         let one = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 1)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 1)
         #expect(one.surface == .arrangeClips)
         #expect(one.title == "Delete Clip")
         let many = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 4)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 4)
         #expect(many.surface == .arrangeClips)
         #expect(many.title == "Delete 4 Clips")
     }
@@ -119,25 +137,122 @@ struct DeleteMenuPolicyTests {
         // open-roll-empty-selection state, and the menu must behave the same way.
         let item = DeleteMenuPolicy.editMenuItem(
             arrangeWorkspace: true, isModalPresented: false,
-            pianoRollHasNoteSelection: false, automationPointCount: 0, arrangeClipCount: 2)
+            pianoRollHasNoteSelection: false, automationPointCount: 0,
+            pitchEditorOpen: false, pitchEditorHasNoteSelection: false,
+            arrangeClipCount: 2)
         #expect(item.surface == .arrangeClips)
         #expect(item.title == "Delete 2 Clips")
+    }
+
+    // MARK: - m23-ap p2-del — the NOTE EDITOR (pitch editor) pane is open
+
+    /// One call per state, so each assertion below reads as the state it pins.
+    private func menuItem(arrange: Bool = true, modal: Bool = false, notes: Bool = false,
+                      points: Int = 0, pitch: Bool, pitchNotes: Bool = false,
+                      clips: Int) -> DeleteMenuItem {
+        DeleteMenuPolicy.editMenuItem(
+            arrangeWorkspace: arrange, isModalPresented: modal,
+            pianoRollHasNoteSelection: notes, automationPointCount: points,
+            pitchEditorOpen: pitch, pitchEditorHasNoteSelection: pitchNotes,
+            arrangeClipCount: clips)
+    }
+
+    @Test("the note editor open greys Edit ▸ Delete by name — the menu is a door to the same clip")
+    func noteEditorOpenGreysTheMenu() {
+        // The fixture: the pane is open on the ONE selected clip (it opens only
+        // on the arrange focus clip), no roll notes, no breakpoint.
+        let open = menuItem(pitch: true, clips: 1)
+        #expect(open.refusedBy == .pitchEditorOpen)
+        #expect(open.surface == nil)
+        #expect(open.isEnabled == false)
+        // A disabled item names no blast radius — never a greyed "Delete Clip".
+        #expect(open.title == DeleteMenuPolicy.inertTitle)
+        // CONTROL: the same state with the pane SHUT is the shipped behaviour, so
+        // the refusal above is the new term talking and not a policy that greys
+        // everything.
+        let shut = menuItem(pitch: false, clips: 1)
+        #expect(shut.surface == .arrangeClips)
+        #expect(shut.title == "Delete Clip")
+    }
+
+    @Test("the note-editor guard sits after both editors and before the arrange")
+    func noteEditorGuardPlacement() {
+        // The Mix console and a modal are named FIRST, as for every refusal.
+        #expect(menuItem(arrange: false, pitch: true, clips: 1).refusedBy == .workspace)
+        #expect(menuItem(modal: true, pitch: true, clips: 1).refusedBy == .modal)
+        // A breakpoint the user clicked still takes the key: the hazard is the
+        // CLIP, and deleting a point with the pane open deletes no clip.
+        #expect(menuItem(points: 2, pitch: true, clips: 1).surface == .automationPoints)
+        // Roll notes AND the pitch pane open is unreachable in the app (the two
+        // panes resolve the same `selectedClipID` on opposite sides of
+        // `isMIDI`). The roll wins it — the router's own tie-break, measured
+        // here rather than cited, so the two cannot disagree silently.
+        #expect(EditorSurfaceRouter.openSurface(workspaceIsArrange: true, rollOpen: true,
+                                                pitchEditorOpen: true).reason == .rollOpen)
+        #expect(menuItem(notes: true, pitch: true, clips: 1).surface == .pianoRollNotes)
+        // An open pane with NOTHING selected is unreachable too (the pane needs
+        // its clip selected). It is still the pane's refusal, never
+        // `.emptySelection`: while the pane is open the arrange owns nothing.
+        #expect(menuItem(pitch: true, clips: 0).refusedBy == .pitchEditorOpen)
+        #expect(menuItem(pitch: true, clips: 4).refusedBy == .pitchEditorOpen)
+    }
+
+    /// ⚠️ RENAMED AND REWRITTEN at m23-ap I7b from "I4: the note-selection arm
+    /// sits directly in front of the note-editor refusal and only narrows it"
+    /// (`noteSelectionArmPlacement`). I4 greyed Edit ▸ Delete here by name
+    /// until ⌫ had a clear action with a visible result; I7b ships it, so the
+    /// arm is a LIVE Clear. Its PLACEMENT — every guard in front of it still
+    /// names itself first, a stale bit with the pane shut is inert — is
+    /// re-asserted unchanged.
+    @Test("I7b: the note-selection arm is a LIVE Clear, directly in front of the note-editor refusal, and only narrows it")
+    func noteSelectionArmIsALiveClear() {
+        // The fixture: the pane open on its one selected clip, notes selected
+        // in it. Edit ▸ Delete is LIVE and says what it does — the same action
+        // as ⌫ and the note editor's right-click Clear (I7b).
+        let selected = menuItem(pitch: true, pitchNotes: true, clips: 1)
+        #expect(selected.surface?.rawValue == "pitch-editor-notes")
+        #expect(selected.refusedBy == nil)
+        #expect(selected.isEnabled)
+        #expect(selected.title == "Clear Selected Notes")
+        // A CLEAR, NEVER A DELETE: the word the user reads must not promise to
+        // remove something that stays on screen, hollow, and can be restored.
+        #expect(!selected.title.contains("Delete"))
+        // It ONLY NARROWS p2-del's refusal: every guard in front of it still
+        // names itself first, exactly as with the pane open and nothing selected.
+        #expect(menuItem(arrange: false, pitch: true, pitchNotes: true, clips: 1).refusedBy == .workspace)
+        #expect(menuItem(modal: true, pitch: true, pitchNotes: true, clips: 1).refusedBy == .modal)
+        #expect(menuItem(points: 2, pitch: true, pitchNotes: true, clips: 1).surface == .automationPoints)
+        #expect(menuItem(notes: true, pitch: true, pitchNotes: true, clips: 1).surface == .pianoRollNotes)
+        // A STALE BIT WITH THE PANE SHUT IS INERT: the arm reads openness too,
+        // so a bridge that failed to clear cannot lock ⌫ out of the clips.
+        #expect(menuItem(pitch: false, pitchNotes: true, clips: 1).surface == .arrangeClips)
+        #expect(menuItem(pitch: false, pitchNotes: true, clips: 0).refusedBy == .emptySelection)
+        // CONTROL: the pane open with NOTHING selected keeps p2-del's refusal.
+        #expect(menuItem(pitch: true, pitchNotes: false, clips: 1).refusedBy == .pitchEditorOpen)
     }
 
     @Test("every surface is reachable — no branch is dead")
     func everySurfaceIsReachable() {
         // ANTI-VACUITY. A policy that always returned `.arrangeClips` would pass
-        // several assertions above individually; this pins that all three cases
-        // of the sum type are actually produced by some input.
+        // several assertions above individually; this pins that every case of
+        // the sum type is actually produced by some input. ⚠️ m23-ap I7b added
+        // the fourth row (the note editor open WITH notes selected — the live
+        // Clear) and the fourth case; without that row `seen` stops one short of
+        // `allCases` and this goes red, which is the point of the line.
         var seen: Set<DeleteSurface> = []
-        for (notes, points, clips) in [(true, 0, 0), (false, 1, 0), (false, 0, 1)] {
+        for (notes, points, pitch, pitchNotes, clips) in [(true, 0, false, false, 0),
+                                                          (false, 1, false, false, 0),
+                                                          (false, 0, false, false, 1),
+                                                          (false, 0, true, true, 1)] {
             let item = DeleteMenuPolicy.editMenuItem(
                 arrangeWorkspace: true, isModalPresented: false,
                 pianoRollHasNoteSelection: notes, automationPointCount: points,
+                pitchEditorOpen: pitch, pitchEditorHasNoteSelection: pitchNotes,
                 arrangeClipCount: clips)
             if let surface = item.surface { seen.insert(surface) }
         }
         #expect(seen == Set(DeleteSurface.allCases))
+        #expect(seen.count == 4)
     }
 
     @Test("an enabled item always names a surface, a disabled one never does")
@@ -146,16 +261,25 @@ struct DeleteMenuPolicyTests {
             for modal in [true, false] {
                 for notes in [true, false] {
                     for points in [0, 2] {
-                        for clips in [0, 3] {
-                            let item = DeleteMenuPolicy.editMenuItem(
-                                arrangeWorkspace: arrange, isModalPresented: modal,
-                                pianoRollHasNoteSelection: notes,
-                                automationPointCount: points, arrangeClipCount: clips)
-                            #expect(item.isEnabled == (item.surface != nil))
-                            // The two are complements, never both and never neither:
-                            // a live item with a refusal, or a dead one without,
-                            // would each make the reported reason meaningless.
-                            #expect((item.refusedBy == nil) == item.isEnabled)
+                        // m23-ap p2-del: the note-editor term, so the complement
+                        // law is proven over the new refusal too — and (m23-ap
+                        // I4) the pane's note-selection term, for the same reason.
+                        for (pitch, clips) in [(false, 0), (false, 3), (true, 0), (true, 3)] {
+                            for pitchNotes in [false, true] {
+                                let item = DeleteMenuPolicy.editMenuItem(
+                                    arrangeWorkspace: arrange, isModalPresented: modal,
+                                    pianoRollHasNoteSelection: notes,
+                                    automationPointCount: points,
+                                    pitchEditorOpen: pitch,
+                                    pitchEditorHasNoteSelection: pitchNotes,
+                                    arrangeClipCount: clips)
+                                #expect(item.isEnabled == (item.surface != nil))
+                                // The two are complements, never both and never
+                                // neither: a live item with a refusal, or a dead
+                                // one without, would each make the reported
+                                // reason meaningless.
+                                #expect((item.refusedBy == nil) == item.isEnabled)
+                            }
                         }
                     }
                 }

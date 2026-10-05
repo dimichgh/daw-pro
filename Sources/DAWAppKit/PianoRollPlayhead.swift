@@ -113,13 +113,17 @@ public enum PianoRollPlayhead {
     /// would be that second home. What lives here is the clamp and the clip
     /// offset, which is geometry this namespace already owns.
     ///
-    /// ⚠️ **AND THE SNAP MUST BE APPLIED IN CLIP-LOCAL SPACE, BEFORE THIS CALL.**
-    /// The roll's grid, its bar emphasis and its ruler labels are all clip-local
-    /// and 1-based (`PianoRollScrubRuler`'s axis note). Snapping the PROJECT beat
-    /// this returns would land the playhead on the ARRANGE's grid instead, which
-    /// is a different set of lines entirely whenever `clipStartBeat` is not a
-    /// multiple of the meter — i.e. the playhead would visibly miss the line the
-    /// user aimed at, in exactly the case the snap exists for.
+    /// ⚠️ **AND THE SNAP MUST BE APPLIED BEFORE THIS CALL, NEVER AROUND ITS
+    /// RESULT.** Snapping what this returns would snap AFTER the clamp, pushing a
+    /// clip edge that sits off the grid off the clip.
+    ///
+    /// ⭐ **Which grid changed in m23-ap I5-F2.** This used to say "in CLIP-LOCAL
+    /// space", because the roll's grid, bar emphasis, ruler labels and "BAR n"
+    /// were all clip-local and a project-space snap would have missed the lines
+    /// drawn. All four now read the SONG's bars (`PianoRollScrubRuler`'s note),
+    /// so the one snap is on the song's grid: `PianoRollSongGrid
+    /// .placementLocalBeat` snaps the song beat and clamps to the clip, and hands
+    /// its clip-local result here.
     public static func projectBeat(localBeat: Double, clipStartBeat: Double,
                                    lengthBeats: Double) -> Double {
         clipStartBeat + min(max(0, localBeat), max(0, lengthBeats))

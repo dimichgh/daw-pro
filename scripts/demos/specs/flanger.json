@@ -1,0 +1,327 @@
+{
+  "set": "flanger",
+  "description": "m39-j, the .flanger insert: the jet-plane whoosh. Every variant plays the IDENTICAL five-note saw pad (E1 + E3 + B3 + E4 + B4, 8 bars at 120 BPM) so nothing but the one parameter differs.\n\nTHE ONE AXIS IS `feedback`, and it runs from NEGATIVE through zero to POSITIVE. rateHz (0.35), depthMs (4), delayMs (1.0), mix (0.5) and stereoPhaseDeg (90) are byte-for-byte identical in all three effect variants. Variant 1 has no effect at all.\n\nWHAT A FLANGER ACTUALLY DOES, because it is not an EQ and not a reverb. It adds a copy of your sound delayed by one to a few THOUSANDTHS of a second. That copy is close enough to arrive on top of the original rather than after it, so the two either cancel or reinforce at each frequency - cancelling wherever half a wavelength fits the delay exactly. The result is a row of evenly spaced notches (a COMB), and the effect slides the delay back and forth so the whole comb sweeps up and down the spectrum. That sweep is the whoosh. `feedback` sends the delayed copy back around the loop, which is what turns the gentle comb into something that rings.\n\nWHAT TO LISTEN FOR. Variant 1 is the pad untouched, so you know what is being changed. In ‘feedback-none’ the comb is there and sweeping, but it is polite - a soft, hollow breathing across the pad, the kind of flanging that sits under a mix without announcing itself. In ‘feedback-positive’ the sweep starts to SING: the peaks between the notches sharpen into resonances, and you hear a definite pitched tone climbing and falling with the sweep. This is the classic dramatic flanger. In ‘feedback-negative’ the response INVERTS - the peaks and the notches swap places - and the result is hollower and more metallic, with more of its character down in the low mids and less of the singing top. Negative feedback is not a broken positive one; it is the other half of the effect, and it is the reason this control crosses zero at all.\n\nWHAT WOULD MAKE THIS HARD TO HEAR: nothing on a normal system, but there is one honest caveat. The sweep itself is a whole-spectrum motion and survives a laptop speaker and a phone intact. The difference between the negative variant and the other two is partly a low-mid difference, so on a very small speaker that rolls off below about 200 Hz it will read as ‘similar but thinner’ rather than as the distinctly hollow sound it is on headphones. If you are picking between the three, use headphones. Also: stereoPhaseDeg is 90 here, so the left and right sweeps are a quarter cycle apart and the effect moves ACROSS the stereo field. That is deliberate and it is where a lot of the pleasure lives - but it means a mono fold-down will sound noticeably tamer than the stereo file.\n\nLOUDNESS, STATED SO IT IS NOT MISTAKEN FOR THE AXIS (all measured on these exact renders). The three effect variants are -17.2, -18.2 and -18.0 LUFS integrated; the median of the on-axis three is -18.0, so the widest offset is 0.8 LU, inside the 1.0 LU rule. The no-effect CONTROL sits at -14.6 LUFS, +3.4 LU above that median, and that gap is arithmetic rather than a mix decision: at mix 0.5 half the output is a comb-filtered copy that is cancelling with itself, so the wet half is quieter than the dry half it replaced. Do not pick the control because it is louder; it is there to tell you what was taken away.\n\nONE MEASURED SURPRISE, RECORDED HERE BECAUSE SOMEONE WILL CHECK IT. The `feedback` parameter’s own documentation says positive feedback makes the effect LOUDER and negative makes it QUIETER, and gives the arithmetic: on a STEADY TONE the whole unit’s gain is (1-mix) + mix/(1-feedback), so +0.5 is +3.5 dB and -0.5 is -1.6 dB. On this broadband, moving material the opposite happened - the NEGATIVE variant measured 1.0 LU LOUDER than feedback 0, and the positive one measured 0.2 LU louder. Both statements are true and they are about different things: the closed form describes the response at DC (0 Hz), while a full-band pad is heard through the whole comb at once, and negative feedback puts a reinforcing PEAK where positive feedback puts a cancelling notch. Trust the closed form for a sustained bass note; trust your ears, or this measurement, for anything with content across the spectrum.",
+  "variants": [
+    {
+      "name": "no-effect",
+      "axis": "no flanger at all - the pad untouched, so you know what is being changed",
+      "role": "control",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.9,
+            "release": 0.8,
+            "cutoffHz": 9000,
+            "resonance": 0.1,
+            "gain": 0.58,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 59,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 71,
+                "startBeat": 0,
+                "lengthBeats": 24
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "feedback-negative",
+      "axis": "feedback -0.5: the response inverts, peaks and notches swap places, and the sweep goes hollow and metallic rather than singing",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.9,
+            "release": 0.8,
+            "cutoffHz": 9000,
+            "resonance": 0.1,
+            "gain": 0.58,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 59,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 71,
+                "startBeat": 0,
+                "lengthBeats": 24
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "flanger",
+            "params": {
+              "rateHz": 0.35,
+              "depthMs": 4,
+              "delayMs": 1.0,
+              "feedback": -0.5,
+              "mix": 0.5,
+              "stereoPhaseDeg": 90
+            }
+          },
+          "as": "flanger"
+        }
+      ]
+    },
+    {
+      "name": "feedback-none",
+      "axis": "feedback 0: a plain swept comb with no recirculation - the polite, breathing version of the effect",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.9,
+            "release": 0.8,
+            "cutoffHz": 9000,
+            "resonance": 0.1,
+            "gain": 0.58,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 59,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 71,
+                "startBeat": 0,
+                "lengthBeats": 24
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "flanger",
+            "params": {
+              "rateHz": 0.35,
+              "depthMs": 4,
+              "delayMs": 1.0,
+              "feedback": 0.0,
+              "mix": 0.5,
+              "stereoPhaseDeg": 90
+            }
+          },
+          "as": "flanger"
+        }
+      ]
+    },
+    {
+      "name": "feedback-positive",
+      "axis": "feedback +0.5 (the shipped default): the peaks between the notches sharpen into resonances and the sweep SINGS",
+      "render": {
+        "durationSeconds": 12
+      },
+      "commands": [
+        {
+          "command": "track.add",
+          "params": {
+            "name": "Pad",
+            "kind": "instrument"
+          },
+          "as": "pad"
+        },
+        {
+          "command": "track.setInstrument",
+          "params": {
+            "trackId": "$pad",
+            "kind": "polySynth",
+            "waveform": "saw",
+            "attack": 0.03,
+            "decay": 0.5,
+            "sustain": 0.9,
+            "release": 0.8,
+            "cutoffHz": 9000,
+            "resonance": 0.1,
+            "gain": 0.58,
+            "unisonVoices": 3,
+            "unisonDetuneCents": 9
+          }
+        },
+        {
+          "command": "clip.addMIDI",
+          "params": {
+            "trackId": "$pad",
+            "atBeat": 0,
+            "notes": [
+              {
+                "pitch": 40,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 52,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 59,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 64,
+                "startBeat": 0,
+                "lengthBeats": 24
+              },
+              {
+                "pitch": 71,
+                "startBeat": 0,
+                "lengthBeats": 24
+              }
+            ]
+          }
+        },
+        {
+          "command": "fx.add",
+          "params": {
+            "trackId": "$pad",
+            "kind": "flanger",
+            "params": {
+              "rateHz": 0.35,
+              "depthMs": 4,
+              "delayMs": 1.0,
+              "feedback": 0.5,
+              "mix": 0.5,
+              "stereoPhaseDeg": 90
+            }
+          },
+          "as": "flanger"
+        }
+      ]
+    }
+  ]
+}

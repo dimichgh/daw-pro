@@ -1,0 +1,90 @@
+[
+ {
+  "at": 2,
+  "text": "track.add  {\"name\":\"Drums\",\"kind\":\"instrument\"}"
+ },
+ {
+  "at": 2.9,
+  "text": "clip.addMIDI  {\"trackId\":\"BA50D64E…\",\"atBeat\":0,\"lengthBeats\":32,\"notes\":[ 96 ]}"
+ },
+ {
+  "at": 4.201,
+  "text": "track.add  {\"name\":\"Bass\",\"kind\":\"instrument\"}"
+ },
+ {
+  "at": 5.102,
+  "text": "clip.addMIDI  {\"trackId\":\"586198A9…\",\"atBeat\":0,\"lengthBeats\":32,\"notes\":[ 32 ]}"
+ },
+ {
+  "at": 6.401,
+  "text": "track.add  {\"name\":\"Keys\",\"kind\":\"instrument\"}"
+ },
+ {
+  "at": 7.301,
+  "text": "clip.addMIDI  {\"trackId\":\"317D6917…\",\"atBeat\":0,\"lengthBeats\":32,\"notes\":[ 48 ]}"
+ },
+ {
+  "at": 8.599,
+  "text": "track.add  {\"name\":\"Pad\",\"kind\":\"instrument\"}"
+ },
+ {
+  "at": 9.501,
+  "text": "clip.addMIDI  {\"trackId\":\"924902E3…\",\"atBeat\":0,\"lengthBeats\":32,\"notes\":[ 24 ]}"
+ },
+ {
+  "at": 10.801,
+  "text": "track.add  {\"name\":\"Lead\",\"kind\":\"instrument\"}"
+ },
+ {
+  "at": 11.701,
+  "text": "clip.addMIDI  {\"trackId\":\"FD8FB6ED…\",\"atBeat\":0,\"lengthBeats\":32,\"notes\":[ 28 ]}"
+ },
+ {
+  "at": 13.401,
+  "text": "transport.setLoop  {\"enabled\":true,\"startBeat\":0,\"endBeat\":32}"
+ },
+ {
+  "at": 14.201,
+  "text": "transport.play  {}"
+ },
+ {
+  "at": 21.501,
+  "text": "transport.stop  {}"
+ },
+ {
+  "at": 22.301,
+  "text": "ui.showMixer  {\"show\":true}"
+ },
+ {
+  "at": 23.603,
+  "text": "track.setVolume  {\"trackId\":\"317D6917…\",\"volume\":0.450}"
+ },
+ {
+  "at": 24.063,
+  "text": "track.setVolume  {\"trackId\":\"317D6917…\",\"volume\":0.527}"
+ },
+ {
+  "at": 24.522,
+  "text": "track.setVolume  {\"trackId\":\"317D6917…\",\"volume\":0.604}"
+ },
+ {
+  "at": 24.981,
+  "text": "track.setVolume  {\"trackId\":\"317D6917…\",\"volume\":0.681}"
+ },
+ {
+  "at": 25.443,
+  "text": "track.setVolume  {\"trackId\":\"317D6917…\",\"volume\":0.758}"
+ },
+ {
+  "at": 25.903,
+  "text": "track.setVolume  {\"trackId\":\"317D6917…\",\"volume\":0.835}"
+ },
+ {
+  "at": 26.362,
+  "text": "track.setVolume  {\"trackId\":\"317D6917…\",\"volume\":0.912}"
+ },
+ {
+  "at": 27.2,
+  "text": "track.setVolume  {\"trackId\":\"317D6917…\",\"volume\":0.450}"
+ }
+]
