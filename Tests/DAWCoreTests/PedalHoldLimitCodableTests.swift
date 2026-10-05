@@ -233,7 +233,7 @@ struct PedalHoldLimitCodableTests {
             sourcePath: "/tmp/none.sfz", displayName: "Test Patch",
             expressionModDepth: 0.42, expressionFilterDepth: 0.37, expressionFilterCC: 2,
             bendRangeSemitones: 6, voiceMode: .legato, decay: 1.7, sustain: 0.23,
-            pedalHoldLimit: 5, glideTime: 0.35, glideMode: .constantRate)
+            pedalHoldLimit: 5, glideTime: 0.35, glideMode: .constantRate, sliceKit: true)
         let descriptor = InstrumentDescriptor(kind: .sampler, sampler: configured)
 
         let data = try Self.encoder.encode(InstrumentDocument(from: descriptor, mediaRefs: [:]))
@@ -268,6 +268,9 @@ struct PedalHoldLimitCodableTests {
             // touch points would have turned the failure green while the
             // setting still vanished on save.
             "glideMode": restored.glideMode == configured.glideMode,
+            // PK-F2 (W7-PK): the chop's slice-kit marker, threaded through
+            // SamplerDocument's four touch points in the same patch.
+            "sliceKit": restored.sliceKit == configured.sliceKit,
         ]
         print("[measured] sampler globals surviving save/open: "
               + survived.keys.sorted().map { "\($0)=\(survived[$0]! ? "yes" : "NO")" }
@@ -280,7 +283,7 @@ struct PedalHoldLimitCodableTests {
                            "expressionModDepth", "expressionFilterDepth", "expressionFilterCC",
                            "pedalHoldLimit",
                            "decay", "sustain", "bendRangeSemitones", "voiceMode",
-                           "glideTime", "glideMode"]
+                           "glideTime", "glideMode", "sliceKit"]
         for name in mustSurvive {
             #expect(survived[name] == true,
                     """

@@ -102,12 +102,18 @@ extension ProjectStore {
     ///   landing during that detection gap (a drag released mid-call) must
     ///   not be silently replaced just because the table looked untouched
     ///   when the call started.
+    /// - Parameter melody: **Tune to Melody** (design §3.2-§3.4): `nil`, the
+    ///   default, is everything above, untouched. A request tunes each sung
+    ///   note to the melody note it overlaps most; see
+    ///   `autoCorrectClipPitchReport` for how the melody is read and refused.
     @discardableResult
     public func autoCorrectClipPitch(
-        clipId: UUID, options: PitchAutoCorrectOptions, replaceExisting: Bool = true
+        clipId: UUID, options: PitchAutoCorrectOptions, replaceExisting: Bool = true,
+        melody: MelodyTuning? = nil
     ) async throws -> Clip {
         try await autoCorrectClipPitchReport(clipId: clipId, options: options,
-                                             replaceExisting: replaceExisting).clip
+                                             replaceExisting: replaceExisting,
+                                             melody: melody).clip
     }
 
     /// `autoCorrectClipPitch`, plus what the unpitched finder decided while
@@ -116,9 +122,28 @@ extension ProjectStore {
     /// the wire's `unpitchedCount` / `unpitchedSkippedReason` echo (UB-2) has
     /// a path: the plain verb returns only the clip, and the finder's reason
     /// never reaches a `Clip`.
+    ///
+    /// ⭐ **TUNE TO MELODY (`melody`, M2).** The melody is the TARGET and the
+    /// options stay the preset (retune, wobble, slide shape): each held note
+    /// goes to the melody note it overlaps most (`PitchMelodyTarget`), and the
+    /// report's `melody` says what happened to every note on both sides (§3.3).
+    ///  * **Strength (rule 5):** `melody.strength`, or 1 when none was sent,
+    ///    over the options' own; `appliedOptions` echoes it.
+    ///  * **Read AFTER the detection's await**, in its final state: the
+    ///    melody's clips, the vocal's window and the tempo map as they are
+    ///    when the table is built (§3.3's last row), the shift's rule.
+    ///  * **Refused in words, nothing run or stored:** a strength that tunes
+    ///    nothing, an unknown or non-MIDI source, a track with no MIDI clip,
+    ///    and no melody note under the vocal. All of them are checked before
+    ///    the detection (argument errors, beside the voice-size refusal), and
+    ///    the source and the overlap again after it, on the final state.
+    ///  * The replace guard, the C-F3 re-check, the carries, the stamp and the
+    ///    ONE `performEdit` are this function's own: a melody pass goes through
+    ///    every one of them, so there is no second copy (§3.4).
     @discardableResult
     public func autoCorrectClipPitchReport(
-        clipId: UUID, options: PitchAutoCorrectOptions, replaceExisting: Bool = true
+        clipId: UUID, options: PitchAutoCorrectOptions, replaceExisting: Bool = true,
+        melody: MelodyTuning? = nil
     ) async throws -> PitchAutoCorrectReport {
         guard let (t, c) = locateClipIndexForPitchCorrection(clipId) else {
             throw ProjectError.clipNotFound(clipId)
@@ -137,19 +162,52 @@ extension ProjectStore {
                 "The voice-size amount has to be a number from 0 to 1 (or left out to keep "
                     + "this clip's own amount); \(amount) is not one. Nothing was changed.")
         }
+        // Tune to Melody: the request's own argument errors, the same place
+        // and the same reason as the voice size above (fail fast, before the
+        // slow detection). The source and the overlap are asked again after
+        // the await, on the final state.
+        if let melody {
+            _ = try melody.appliedStrength()
+            _ = try melodyNotes(melodySourceClips(melody.source), under: tracks[t].clips[c])
+        }
         if !replaceExisting, let existing = tracks[t].clips[c].pitchEdits,
            existing.hasHandEditsSinceAutoCorrect {
             throw Self.replaceExistingRefusal(existing)
         }
 
         let detection = try await detectClipPitch(clipId: clipId)
-        let build = PitchAutoCorrect.build(from: detection.pitch, options: options)
-        let editSet = build.editSet
 
         guard let (t2, c2) = locateClipIndexForPitchCorrection(clipId) else {
             throw ProjectError.clipNotFound(clipId)
         }
         try requireNotCompMember(trackIndex: t2, clipIndex: c2)
+        // PK-F1: the scale applies to what PLAYS, so the policy is given the
+        // clip's pitch shift, read NOW (after the detection's await), because
+        // that is the shift this table will play under. The wire reply
+        // (`clip.autoCorrectPitch`) echoes the kept detune as
+        // `keptDetuneCents` / `keptDetuneNotice`, and the MCP tool
+        // `clip_auto_correct_pitch` says the scale is the key as heard.
+        let clipShift = tracks[t2].clips[c2].pitchShiftSemitones
+        // Tune to Melody: resolved HERE, after the await, from the melody's
+        // clips, the vocal and the tempo map as they are NOW (§3.3: "the
+        // melody is edited during detection" -> its final state). Rule 5's
+        // strength replaces the options' own for this pass.
+        var passOptions = options
+        var resolved: (request: PitchMelodyTarget.Request, refs: [PitchMelodyReport.NoteRef],
+                       name: String)?
+        if let melody {
+            passOptions.strength = try melody.appliedStrength()
+            let source = try melodySourceClips(melody.source)
+            let notes = try melodyNotes(source, under: tracks[t2].clips[c2])
+            resolved = (PitchMelodyTarget.Request(notes: notes.map(\.note),
+                                                  octaveMatch: melody.octaveMatch,
+                                                  unmatched: melody.unmatched),
+                        notes.map(\.ref), source.name)
+        }
+        let build = PitchAutoCorrect.build(
+            from: detection.pitch, options: passOptions, clipShiftSemitones: clipShift,
+            melody: resolved?.request)
+        let editSet = build.editSet
         // m23-ap C-F3 RE-CHECK (swift-app review, 2026-09-24): detection just
         // awaited — on the measured dry vocal, a real model pass, seconds —
         // and the pre-check above ran BEFORE that gap opened. A hand-edit
@@ -209,7 +267,25 @@ extension ProjectStore {
             // the setClipStretch precedent for a ClipKey-affecting edit.
             engine?.tracksDidChange(tracks)
         }
-        return PitchAutoCorrectReport(clip: tracks[t2].clips[c2], unpitched: build.unpitched)
+        // The 10-04 ruling: a fractional shift is a detune the pass KEPT; the
+        // report says so, in cents, whenever a note was corrected under one.
+        let detune = PitchAutoCorrect.splitClipShift(clipShift).fraction
+        let corrected = editSet.segments.contains { $0.origin != .unpitched }
+        // Tune to Melody's report, mapped from the plan's indices to the
+        // stored segments' ids and the MIDI notes. A melody pass always has a
+        // plan here: its strength is above 0, so `build` never short-circuits.
+        var melodyReport: PitchMelodyReport?
+        if let melody, let resolved, let applied = build.melody {
+            melodyReport = PitchMelodyReport(
+                source: melody.source, sourceName: resolved.name,
+                octaveMatch: melody.octaveMatch, unmatched: melody.unmatched,
+                refs: resolved.refs, applied: applied)
+        }
+        return PitchAutoCorrectReport(
+            clip: tracks[t2].clips[c2], unpitched: build.unpitched,
+            keptDetuneCents: corrected && abs(detune) > PitchAutoCorrectReport.detuneEpsilonSemitones
+                ? detune * 100 : nil,
+            appliedOptions: passOptions, melody: melodyReport)
     }
 
     /// Add the SOUNDS with no detected pitch to a clip's STORED note table
@@ -412,6 +488,51 @@ extension ProjectStore {
                 + "over deliberately.")
     }
 
+    // MARK: Tune to Melody (M2)
+
+    /// Tune to Melody: the MIDI clips a `MelodySource` names and the name a sentence uses,
+    /// read from the store as it is NOW. Refused in words: an unknown clip or track, a clip
+    /// that is not MIDI, a track with no MIDI clip.
+    private func melodySourceClips(_ source: MelodySource) throws -> (clips: [Clip], name: String) {
+        switch source {
+        case .clip(let id):
+            guard let (t, c) = locateClipIndexForPitchCorrection(id) else {
+                throw ProjectError.clipNotFound(id)
+            }
+            let clip = tracks[t].clips[c]
+            guard clip.isMIDI else {
+                throw ProjectError.invalidClipEdit(
+                    "The melody has to be a MIDI clip or a track with MIDI clips; "
+                        + "\u{201C}\(clip.name)\u{201D} is an audio clip. Pick the clip or track "
+                        + "that holds the melody's notes. Nothing was changed.")
+            }
+            return ([clip], clip.name)
+        case .track(let id):
+            guard let track = tracks.first(where: { $0.id == id }) else {
+                throw ProjectError.trackNotFound(id)
+            }
+            let clips = track.clips.filter(\.isMIDI)
+            guard !clips.isEmpty else {
+                throw ProjectError.invalidClipEdit(
+                    "The track \u{201C}\(track.name)\u{201D} has no MIDI clips, so there is no "
+                        + "melody on it to tune to. Pick the track or clip that holds the "
+                        + "melody's notes. Nothing was changed.")
+            }
+            return (clips, track.name)
+        }
+    }
+
+    /// The melody's notes under `vocal` (§3.2), or the refusal naming both spans (§3.3).
+    private func melodyNotes(_ source: (clips: [Clip], name: String),
+                             under vocal: Clip) throws -> [MelodyTuning.SourcedNote] {
+        let notes = MelodyTuning.notes(of: source.clips, under: vocal, tempoMap: transport.tempoMap)
+        guard !notes.isEmpty else {
+            throw MelodyTuning.noOverlapRefusal(vocal: vocal, melodyName: source.name,
+                                                melodyClips: source.clips)
+        }
+        return notes
+    }
+
     /// Locates a clip by id across every track (extension-local; the
     /// repo-wide convention — `ProjectStore.swift`'s private `locateClip(_:)`
     /// is not visible cross-file, so every extension that needs this keeps
@@ -438,10 +559,47 @@ public struct PitchAutoCorrectReport: Sendable, Equatable {
     public let clip: Clip
     /// `nil` exactly when the pass never ran the finder (strength 0).
     public let unpitched: PitchUnpitchedFinder.Result?
+    /// The detune the pass KEPT, in cents (the 2026-10-04 ruling): the part of
+    /// the clip's pitch shift past its nearest whole semitone
+    /// (`PitchAutoCorrect.splitClipShift`), which Auto-Correct never snaps.
+    /// Each corrected note plays this far off the scale. `nil` when the shift
+    /// is whole or no note was corrected.
+    public let keptDetuneCents: Double?
+    /// The options the pass RAN with: the caller's, except that a Tune to
+    /// Melody pass runs at rule 5's strength (`MelodyTuning.strength`: 1
+    /// unless one was sent). The wire's `appliedOptions` echo reads this, so
+    /// it says what was applied, never what the preset would have used.
+    public let appliedOptions: PitchAutoCorrectOptions
+    /// What a Tune to Melody pass did (§3.3); `nil` for a pass without a melody.
+    public let melody: PitchMelodyReport?
 
-    public init(clip: Clip, unpitched: PitchUnpitchedFinder.Result?) {
+    /// A shift within this many semitones of a whole number keeps no detune:
+    /// a fractional shift moved up and back down is float addition.
+    public static let detuneEpsilonSemitones = 1e-6
+
+    public init(clip: Clip, unpitched: PitchUnpitchedFinder.Result?,
+                keptDetuneCents: Double? = nil, appliedOptions: PitchAutoCorrectOptions,
+                melody: PitchMelodyReport? = nil) {
         self.clip = clip
         self.unpitched = unpitched
+        self.keptDetuneCents = keptDetuneCents
+        self.appliedOptions = appliedOptions
+        self.melody = melody
+    }
+
+    /// `keptDetuneCents` in words for a person, or nil. For a clip shifted
+    /// +3.3: "Kept this clip's +30 cent detune (its pitch shift is +3.3
+    /// semitones): each corrected note plays 30 cents sharp of the scale, as
+    /// the shift asks." A Tune to Melody pass says "of the melody": its notes
+    /// are aimed at the melody's notes, and the detune is kept the same way.
+    public var keptDetuneNotice: String? {
+        guard let cents = keptDetuneCents else { return nil }
+        let size = ClampNotice.number(abs(cents))
+        let shift = clip.pitchShiftSemitones
+        let target = melody == nil ? "the scale" : "the melody"
+        return "Kept this clip's \(cents > 0 ? "+" : "-")\(size) cent detune (its pitch shift is "
+            + "\(shift > 0 ? "+" : "")\(ClampNotice.number(shift)) semitones): each corrected note "
+            + "plays \(size) cents \(cents > 0 ? "sharp" : "flat") of \(target), as the shift asks."
     }
 
     /// Sounds in the STORED set, counted off the set itself rather than the
@@ -479,4 +637,272 @@ public struct FoundUnpitchedSounds: Sendable, Equatable {
     public let sounds: [Sound]
 
     public var added: Int { sounds.count }
+}
+
+// MARK: - Tune to Melody, M2: the store's half (design `2026-09-24-unpitched-notes-presets-midi-targets.md` §3.2-§3.4)
+
+/// Where a Tune to Melody pass reads its melody (design §3.4).
+public enum MelodySource: Sendable, Equatable {
+    /// One MIDI clip.
+    case clip(UUID)
+    /// Every MIDI clip on one track.
+    case track(UUID)
+}
+
+/// A Tune to Melody request to the store (`ProjectStore.autoCorrectClipPitchReport(…,
+/// melody:)`): where the melody is, and the rules the caller chose. Not a
+/// `PitchAutoCorrectOptions` field: the options are the preset (retune, wobble, slide
+/// shape), the melody is the target (§3.4).
+///
+/// A struct rather than a bare `MelodySource`, on purpose: rule 5's "strength is 1 unless
+/// sent" needs to know whether a strength was SENT, which `PitchAutoCorrectOptions` cannot
+/// say (its `strength` always holds a number, the preset's own when nobody sent one).
+public struct MelodyTuning: Sendable, Equatable {
+    public var source: MelodySource
+    /// Rule 3: the melody's note in the octave nearest what was sung (the default), so a low
+    /// voice can follow a high lead, or the note exactly as written.
+    public var octaveMatch: PitchMelodyTarget.OctaveMatch
+    /// §3.3 row 1: a sung note where the melody rests stays as sung (the default), or goes
+    /// to the options' scale. The wire picks `.toScale` exactly when the request named a scale.
+    public var unmatched: PitchMelodyTarget.Unmatched
+    /// Rule 5: `nil` (the default) tunes at strength 1, so the notes land ON the melody
+    /// whatever the preset's own strength (Natural's 0.85 would stop 15 % short). A number is
+    /// a strength the caller SENT, and it wins; above 1 reads as 1. Zero, a negative or a
+    /// non-number is refused in words: it would leave every note as sung.
+    public var strength: Double?
+
+    public init(source: MelodySource,
+                octaveMatch: PitchMelodyTarget.OctaveMatch = .nearestOctave,
+                unmatched: PitchMelodyTarget.Unmatched = .asSung,
+                strength: Double? = nil) {
+        self.source = source
+        self.octaveMatch = octaveMatch
+        self.unmatched = unmatched
+        self.strength = strength
+    }
+
+    /// An overlap shorter than this, seconds, is the arithmetic of two beat sums meeting at
+    /// a shared edge, not a note under the vocal.
+    public static let overlapEpsilonSeconds = 1e-9
+
+    /// One melody note in VOCAL SOURCE seconds, and the MIDI note it came from.
+    public struct SourcedNote: Sendable, Equatable {
+        public let note: PitchMelodyTarget.MelodyNote
+        public let ref: PitchMelodyReport.NoteRef
+    }
+
+    /// **§3.2, beats to vocal seconds**: a TIMELINE beat as the vocal's SOURCE-file second,
+    /// `startOffsetSeconds + tempoMap.seconds(from: vocal.startBeat, to: beat) / stretchRatio`.
+    /// The inverse of `ProjectStore.detectClipTransients`' projection, and the
+    /// `ClipPitchFrame.timeSeconds` domain the detection's frames are in. A beat before the
+    /// vocal's start gives a second before its offset (the map's integral is signed).
+    public static func sourceSeconds(atBeat beat: Double, vocal: Clip,
+                                     tempoMap: TempoMap) -> Double {
+        vocal.startOffsetSeconds
+            + tempoMap.seconds(from: vocal.startBeat, to: beat) / vocal.stretchRatio
+    }
+
+    /// The vocal's window in source seconds, `[offset, offset + sourceWindowSeconds)`: the
+    /// span `ProjectStore.detectClipPitch` analyses.
+    public static func vocalWindow(of vocal: Clip, tempoMap: TempoMap)
+        -> (start: Double, end: Double) {
+        (vocal.startOffsetSeconds,
+         vocal.startOffsetSeconds + vocal.sourceWindowSeconds(tempoMap: tempoMap))
+    }
+
+    /// A note's sounding span in its clip's own beats: clipped to `[0, lengthBeats)` (a MIDI
+    /// clip sounds nothing past its end), `nil` when nothing of it sounds.
+    static func soundingBeats(of note: MIDINote, in clip: Clip) -> (start: Double, end: Double)? {
+        let start = max(0, note.startBeat)
+        let end = min(note.endBeat, clip.lengthBeats)
+        guard start < clip.lengthBeats, end > start else { return nil }
+        return (start, end)
+    }
+
+    /// **§3.2, every melody note under the vocal**: each note of `melodyClips` (non-MIDI clips
+    /// are skipped) clipped to its clip, converted to vocal source seconds, and KEPT when it
+    /// overlaps the vocal's window. Kept notes are not clipped to that window: two notes
+    /// starting before it would otherwise share a start and read as a chord instead of
+    /// legato. Sorted by start, then pitch, then clip order, then note order, so the plan's
+    /// melody indices are deterministic.
+    public static func notes(of melodyClips: [Clip], under vocal: Clip,
+                             tempoMap: TempoMap) -> [SourcedNote] {
+        let window = vocalWindow(of: vocal, tempoMap: tempoMap)
+        var kept: [(sourced: SourcedNote, clip: Int, note: Int)] = []
+        for (clipIndex, clip) in melodyClips.enumerated() {
+            guard let notes = clip.notes else { continue }
+            for (noteIndex, note) in notes.enumerated() {
+                guard let beats = soundingBeats(of: note, in: clip) else { continue }
+                let start = sourceSeconds(atBeat: clip.startBeat + beats.start, vocal: vocal,
+                                          tempoMap: tempoMap)
+                let end = sourceSeconds(atBeat: clip.startBeat + beats.end, vocal: vocal,
+                                        tempoMap: tempoMap)
+                guard min(end, window.end) - max(start, window.start) > overlapEpsilonSeconds
+                else { continue }
+                let sourced = SourcedNote(
+                    note: PitchMelodyTarget.MelodyNote(startSeconds: start, endSeconds: end,
+                                                       midi: note.pitch),
+                    ref: PitchMelodyReport.NoteRef(clipId: clip.id, noteId: note.id,
+                                                   pitch: note.pitch, startBeat: note.startBeat))
+                kept.append((sourced, clipIndex, noteIndex))
+            }
+        }
+        kept.sort {
+            if $0.sourced.note.startSeconds != $1.sourced.note.startSeconds {
+                return $0.sourced.note.startSeconds < $1.sourced.note.startSeconds
+            }
+            if $0.sourced.note.midi != $1.sourced.note.midi {
+                return $0.sourced.note.midi < $1.sourced.note.midi
+            }
+            return ($0.clip, $0.note) < ($1.clip, $1.note)
+        }
+        return kept.map(\.sourced)
+    }
+
+    /// The TIMELINE beats the melody's notes sound over, first start to last end, or `nil`
+    /// when none sounds: the refusal names it.
+    static func soundingSpan(of melodyClips: [Clip]) -> (start: Double, end: Double)? {
+        var span: (start: Double, end: Double)?
+        for clip in melodyClips {
+            for note in clip.notes ?? [] {
+                guard let beats = soundingBeats(of: note, in: clip) else { continue }
+                let start = clip.startBeat + beats.start
+                let end = clip.startBeat + beats.end
+                span = (min(span?.start ?? start, start), max(span?.end ?? end, end))
+            }
+        }
+        return span
+    }
+
+    /// The refusal when no melody note overlaps the vocal (§3.3: "refused, with a teaching
+    /// error naming both clips' spans"). The plan itself never refuses: with nothing under
+    /// the vocal it would leave every note unmatched, a pass that changes nothing it promised.
+    static func noOverlapRefusal(vocal: Clip, melodyName: String,
+                                 melodyClips: [Clip]) -> ProjectError {
+        let vocalSpan = "the vocal \u{201C}\(vocal.name)\u{201D} (beats "
+            + "\(ClampNotice.number(vocal.startBeat)) to "
+            + "\(ClampNotice.number(vocal.startBeat + vocal.lengthBeats)))"
+        guard let span = soundingSpan(of: melodyClips) else {
+            return .invalidClipEdit(
+                "The melody \u{201C}\(melodyName)\u{201D} has no notes, so there is nothing to "
+                    + "tune \(vocalSpan) to. Add the melody's notes, or pick another melody. "
+                    + "Nothing was changed.")
+        }
+        return .invalidClipEdit(
+            "No note of the melody \u{201C}\(melodyName)\u{201D} plays under \(vocalSpan): its "
+                + "notes play from beat \(ClampNotice.number(span.start)) to beat "
+                + "\(ClampNotice.number(span.end)). Move the melody under the vocal, or pick "
+                + "another melody. Nothing was changed.")
+    }
+
+    /// Rule 5 as a number, or the refusal for a strength that would tune nothing.
+    func appliedStrength() throws -> Double {
+        guard let sent = strength else { return 1 }
+        guard sent > 0, sent.isFinite else {
+            throw ProjectError.invalidClipEdit(
+                "Tune to Melody moves each sung note onto the melody, so its strength has to be "
+                    + "above 0 (at most 1); \(sent) would leave every note as sung. Leave the "
+                    + "strength out to land on the melody exactly, or use clip.clearPitchEdits "
+                    + "to remove tuning. Nothing was changed.")
+        }
+        return min(sent, 1)
+    }
+}
+
+/// What a Tune to Melody pass did (§3.3: "every case gets a defined result and a field;
+/// nothing is silent"), mapped from `PitchMelodyTarget.Plan`'s indices to the STORED
+/// segments' ids and to the MIDI notes, so a reader never re-derives one.
+public struct PitchMelodyReport: Sendable, Equatable {
+    /// One MIDI note, as the clip stores it.
+    public struct NoteRef: Sendable, Equatable {
+        public let clipId: UUID
+        public let noteId: UUID
+        public let pitch: Int
+        /// Relative to its clip's start, as `MIDINote.startBeat` (and `clip.getNotes`) has it.
+        public let startBeat: Double
+    }
+    /// A cut the melody added inside one sung note (rule 2).
+    public struct Cut: Sendable, Equatable {
+        /// Source seconds: where the right-hand piece starts.
+        public let seconds: Double
+        /// The melody's own boundary the cut was searched around.
+        public let melodyBoundarySeconds: Double
+        public let placement: PitchMelodyTarget.Cut.Placement
+        /// The two stored segments either side of the cut, left first.
+        public let segmentIds: [UUID]
+    }
+    public struct OctaveFold: Sendable, Equatable {
+        public let segmentId: UUID
+        /// Octaves between the target and the written note (−1: an octave below it).
+        public let octaves: Int
+    }
+    public struct FarMove: Sendable, Equatable {
+        public let segmentId: UUID
+        /// The stored move, cents (more than `PitchMelodyTarget.farMoveCents`).
+        public let cents: Double
+    }
+
+    public let source: MelodySource
+    /// The melody clip's or track's name, for a sentence.
+    public let sourceName: String
+    public let octaveMatch: PitchMelodyTarget.OctaveMatch
+    public let unmatched: PitchMelodyTarget.Unmatched
+    /// Melody notes that overlap the vocal's window: what the match was given.
+    public let notesConsidered: Int
+    /// How many of those some sung note took.
+    public let notesUsed: Int
+    /// How many sung notes (and pieces of cut notes) were tuned to the melody.
+    public let matchedParts: Int
+    /// Sung notes where the melody rests (§3.3 row 1): as sung, or to the scale.
+    public let unmatchedParts: [UUID]
+    /// Melody notes nobody sang (§3.3 row 2): nothing to tune.
+    public let unsungNotes: [NoteRef]
+    /// Melody notes a sung note overlaps but none took (a note under 60 ms inside a longer
+    /// one, an edge the cut guard kept, a majority lost).
+    public let outvotedNotes: [NoteRef]
+    public let cutsAdded: [Cut]
+    /// Notes that lost sounding time to a HIGHER note: a chord reduced to its top note.
+    public let chordsReduced: [NoteRef]
+    public let octaveFolded: [OctaveFold]
+    public let farMoves: [FarMove]
+
+    /// The report of `applied`, a melody pass's plan and its rows' stored ids, over the
+    /// notes it was given (`refs[i]` is melody index `i`'s MIDI note).
+    init(source: MelodySource, sourceName: String, octaveMatch: PitchMelodyTarget.OctaveMatch,
+         unmatched: PitchMelodyTarget.Unmatched, refs: [NoteRef],
+         applied: PitchMelodyTarget.Applied) {
+        let plan = applied.plan
+        let ids = applied.segmentIDs
+        func id(_ piece: Int) -> UUID? { ids.indices.contains(piece) ? ids[piece] : nil }
+        func refsOf(_ indices: [Int]) -> [NoteRef] {
+            indices.compactMap { refs.indices.contains($0) ? refs[$0] : nil }
+        }
+        self.source = source
+        self.sourceName = sourceName
+        self.octaveMatch = octaveMatch
+        self.unmatched = unmatched
+        self.notesConsidered = refs.count
+        self.notesUsed = plan.notesUsed.count
+        self.matchedParts = plan.matchedParts
+        self.unmatchedParts = plan.unmatchedParts.compactMap(id)
+        self.unsungNotes = refsOf(plan.unsungNotes)
+        self.outvotedNotes = refsOf(plan.outvotedNotes)
+        // A cut's right-hand piece starts at the cut, bit for bit (`PitchMelodyTarget.Piece`).
+        self.cutsAdded = plan.cutsAdded.map { cut in
+            let right = plan.pieces.indices.first {
+                plan.pieces[$0].partIndex == cut.partIndex
+                    && plan.pieces[$0].startSeconds == cut.seconds
+            }
+            let sides = right.map { [id($0 - 1), id($0)].compactMap { $0 } } ?? []
+            return Cut(seconds: cut.seconds, melodyBoundarySeconds: cut.melodyBoundarySeconds,
+                       placement: cut.placement, segmentIds: sides)
+        }
+        self.chordsReduced = refsOf(plan.chordsReduced)
+        self.octaveFolded = plan.octaveFolded.compactMap { fold in
+            id(fold.pieceIndex).map { OctaveFold(segmentId: $0, octaves: fold.octaves) }
+        }
+        self.farMoves = plan.farMoves.compactMap { move in
+            id(move.pieceIndex).map { FarMove(segmentId: $0, cents: move.cents) }
+        }
+    }
 }

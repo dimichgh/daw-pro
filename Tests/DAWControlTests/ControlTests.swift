@@ -1989,6 +1989,11 @@ struct CommandRouterTests {
             // still requires success, so that path routes too, allCommands
             // order does not matter either way.
             "clip.upgradeNaturalTuning": ["clipId": .string(playedPitchClipID)],
+            // m39-tpl-6: template.describe is read-only (changes nothing), so
+            // it is DRIVEN here rather than excluded — "lofi-chill" is one of
+            // BuiltInTemplateCatalog's own ids, always resolvable regardless
+            // of the test environment's template-library root.
+            "template.describe": ["template": .string("lofi-chill")],
         ]
         for command in CommandRouter.allCommands {
             // track.remove deletes the shared track; the project.* routes need
@@ -2646,7 +2651,20 @@ struct CommandRouterTests {
                 // to name a real, existing, non-MIDI clip. All five are proven,
                 // headless refusal included, by ViewSurfaceCommandTests.
                 "view.capture", "view.selectClip",
-                "view.panelLayout", "view.openEditor", "view.openPitchEditor"].contains(command) {
+                "view.panelLayout", "view.openEditor", "view.openPitchEditor",
+                // m39-tpl-6: the five MUTATING template verbs — each one
+                // either writes a file (save/import/export), deletes one
+                // (remove), or edits the shared fixture's song (apply, one
+                // undo step per call). Giving any of them a params table
+                // entry here would mean every OTHER command below it in this
+                // single params-free loop runs against a project this verb
+                // just changed — exactly the shared-fixture risk this test's
+                // own comments elsewhere in this file warn against. Proven
+                // instead, each with its own isolated router, in
+                // TemplateWireCommandTests.swift. template.list and
+                // template.describe are read-only and stay DRIVEN above.
+                "template.apply", "template.save", "template.remove",
+                "template.import", "template.export"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(
@@ -2654,6 +2672,83 @@ struct CommandRouterTests {
             ))
             #expect(response.ok, "command \(command) failed: \(response.error ?? "?")")
         }
+    }
+
+    // MARK: - W7-WNM: the wire number-magnitude ceiling, end to end through
+    // the router (walker-level coverage lives in the NEW, nonisolated
+    // WireNumberCeilingTests.swift — no new @MainActor suite is added here).
+
+    @Test("W7-WNM: at least one command per family refuses a wire number of 2^53 or more at its known, previously-unguarded Int(_:) site, naming the exact path — both the trap value (1e20) and the plant's value (1e17) are refused, and the process surviving to report it IS the proof (either value would have trapped the whole test binary before this pre-pass existed)")
+    func wireNumberCeilingRefusesKnownTrapSitesAcrossCommandFamilies() async {
+        let (router, _) = makeRouter()
+        let cases: [(command: String, path: String, build: (Double) -> [String: JSONValue])] = [
+            ("track.reorder", "params.index",
+             { ["index": .number($0)] }),
+            ("fx.add", "params.index",
+             { ["index": .number($0)] }),
+            ("clip.repeatNotes", "params.count",
+             { ["count": .number($0)] }),
+            ("clip.repeatNotes", "params.transposeSemitones[0]",
+             { ["transposeSemitones": .array([.number($0)])] }),
+            ("ai.generateSong", "params.seed",
+             { ["seed": .number($0)] }),
+            ("vc.convertVocals", "params.pitchSemitones",
+             { ["pitchSemitones": .number($0)] }),
+            ("tempo.setMap", "params.meterChanges[0].beatsPerBar",
+             { ["meterChanges": .array([.object(["beatsPerBar": .number($0)])])] }),
+            ("project.exportMIDI", "params.format",
+             { ["format": .number($0)] }),
+            ("track.setInstrument", "params.drumKit.kick.chokeGroup",
+             { ["drumKit": .object(["kick": .object(["chokeGroup": .number($0)])])] }),
+            ("track.setInstrument", "params.soundBank.program",
+             { ["soundBank": .object(["program": .number($0)])] }),
+            ("clip.setControllerLane", "params.points[0].value",
+             { ["points": .array([.object(["value": .number($0)])])] }),
+        ]
+        for value: Double in [1e20, 1e17] {
+            for row in cases {
+                let response = await router.handle(ControlRequest(
+                    id: "t", command: row.command, params: row.build(value)))
+                #expect(!response.ok, "\(row.command) at \(value) must be refused")
+                #expect(response.error == "\(row.path) is too large: "
+                    + "wire numbers must be below 9007199254740992",
+                        "\(row.command) at \(value): \(response.error ?? "no error")")
+            }
+        }
+    }
+
+    @Test("W7-WNM: 2^53 - 1 passes the pre-pass and reaches the command's own validation next — a positive control that this is not refusing everything")
+    func wireNumberCeilingPositiveControlJustUnderTheCeiling() async {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "p", command: "track.reorder", params: ["index": .number(9_007_199_254_740_991)]))
+        #expect(!response.ok)
+        #expect(response.error?.contains("too large") != true, "\(response.error ?? "no error")")
+        // track.reorder's OWN next check is the missing 'trackId' — proving
+        // the value was let through, not swallowed by this pre-pass.
+        #expect(response.error == "missing or invalid required param 'trackId'",
+                "\(response.error ?? "no error")")
+    }
+
+    @Test("W7-WNM: a negative magnitude past the ceiling is refused the same as a positive one")
+    func wireNumberCeilingRefusesNegativeMagnitude() async {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "n", command: "clip.repeatNotes", params: ["count": .number(-1e20)]))
+        #expect(response.error == "params.count is too large: wire numbers must be below 9007199254740992",
+                "\(response.error ?? "no error")")
+    }
+
+    @Test("W7-WNM: the exemption is real end to end too — clip.quantizeAudio's absurd 'divisions' reaches ITS OWN words, not this pre-pass's")
+    func wireNumberCeilingExemptionEndToEnd() async {
+        let (router, _) = makeRouter()
+        let response = await router.handle(ControlRequest(
+            id: "e", command: "clip.quantizeAudio",
+            params: ["trackId": .string(UUID().uuidString), "clipId": .string(UUID().uuidString),
+                     "divisions": .number(1e20), "strength": .number(0)]))
+        #expect(!response.ok)
+        #expect(response.error?.contains("'divisions' must be a whole number between") == true,
+                "\(response.error ?? "no error")")
     }
 }
 

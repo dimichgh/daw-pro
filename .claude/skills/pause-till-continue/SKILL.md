@@ -90,6 +90,18 @@ the process and then resume either with dev cycle or when I say continue."*
    update the roadmap/CHANGELOG entry you were mid-way through. A pause that loses
    uncommitted reasoning is a cancellation wearing a different name.
 
+   ⛔ **Back up the scratchpad OUTSIDE `/private/tmp`, every time.** The session
+   scratchpad is not reboot-volatile, it is IDLE-volatile: on this Mac a nightly job
+   deletes `/private/tmp` files untouched for ~4 days. The 2026-09-27 → 10-04 pause
+   came back to 33 surviving files out of 16,000+, with no reboot; only the backup
+   saved the lanes' briefs, STATUS files and the lock-queue script. Tar every text
+   file (`.md/.sh/.py/.txt/.mjs/.swift/.diff/.json`, under 2 MB, pruning `.build`,
+   `node_modules`, `.swiftpm` and scratch trees) to
+   `~/.claude/projects/<project>/pause-<date>/scratch-docs.tgz`, prove it lists the
+   key files and no audio, and write the path into the resume point. On resume,
+   restore with `tar -xzkf` and tell every lane its scratch trees and binaries are
+   gone (memory: env-quirks §2026-10-04).
+
 4. **Release expensive resources** — the same hygiene as any close-out. ⛔ **This
    step runs only AFTER step 2 has finished, and that ordering is load-bearing: a
    running agent may be driving staging or the sidecar, so killing them while one is

@@ -221,6 +221,11 @@ public struct TemplateWarning: Sendable, Equatable, Codable {
         case unknownPresetSkipped
         case unknownGenreSkipped
         case modulationSourceWarned
+        // Added by TPL-5b: `template.import` gave the file a NEW id (its own was
+        // missing, a built-in's, or already taken). Before this it rode
+        // `valueChanged`, which says a setting changed, not that the template
+        // will be found under another id.
+        case idReplaced
     }
 
     public var code: Code

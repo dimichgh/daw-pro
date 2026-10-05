@@ -9021,11 +9021,20 @@ registerTool(
       "'gentle' nudges badly-out notes halfway to pitch and leaves slides/scoops/vibrato " +
       "alone; 'natural' lands every note in tune while still sounding sung; 'tight' snaps " +
       "notes into tune the instant they start, the modern pop-lead sound; 'hardTune' " +
-      "REPLACES the sung pitch outright, the robot/T-Pain effect -- it is NOT a stronger " +
+      "holds each note on its target and cuts the wobble inside it (by a third to two thirds, " +
+      "measured -- see below), the robot/T-Pain effect -- it is NOT a stronger " +
       "'tight', it is a structurally different algorithm (see the warning below). " +
       "`tonicPitchClass`/`mode` pick the SCALE a note may be pulled onto and are ALWAYS " +
       "independent of `preset` (a preset says how correction behaves, the scale says which " +
-      "notes are allowed -- so 'gentle, in G minor' is expressible). `strength`/`retuneMs`/" +
+      "notes are allowed -- so 'gentle, in G minor' is expressible). The scale applies to " +
+      "the key as HEARD: on a clip with a pitch shift (clip_set_stretch `semitones`), each " +
+      "note is pulled onto the scale where it PLAYS, the shift included, so a clip moved +3 " +
+      "and corrected to the song's key lands on that key. A FRACTIONAL shift is kept as a " +
+      "detune, not corrected away: the shift's whole semitones (the nearest whole number) go " +
+      "through the scale and the rest stays, so on a clip shifted +3.3 every corrected note " +
+      "plays 30 cents sharp of the scale, and the reply carries keptDetuneCents (30) and " +
+      "keptDetuneNotice (the same fact in words); both are left out when nothing was kept. " +
+      "`strength`/`retuneMs`/" +
       "`preserveVibrato`, when given, OVERRIDE whatever a named preset would otherwise use " +
       "for that one knob, so 'gentle, but instant' is one call. THE COUPLING TRAP: " +
       "`preserveVibrato:false` with `strength` < 1 pulls the note only `strength` of the way " +
@@ -9053,7 +9062,8 @@ registerTool(
       "sung contour onto the target, which needs the detected pitch contour AT RENDER TIME " +
       "-- and, as of the contour-to-render work (2026-09-24), the render path threads one " +
       "through: measured on a real vocal, Hard Tune cuts the wobble inside each held note by " +
-      "a median 49% (68% by an independent pitch meter) and keeps every measured note on its " +
+      "a median 49% (68% by an independent pitch meter; a synthetic +/-35-cent vibrato keeps " +
+      "about two thirds of its depth) and keeps every measured note on its " +
       "own note, while Tight leaves the wobble as sung -- not the near-zero change a " +
       "constant-offset fallback would give. ⚠️ The one remaining honest caveat: if the pitch " +
       "detector could not run AT RENDER TIME, THAT render falls back to a constant per-note " +
@@ -9100,7 +9110,7 @@ registerTool(
       "'transition' for a " +
       "sung slide, or 'unpitched' for a SOUND with no detected pitch -- a breath or a " +
       "consonant, see clip_find_unpitched_sounds)}], warnings, unpitchedCount, " +
-      "unpitchedSkippedReason} -- " +
+      "unpitchedSkippedReason, keptDetuneCents, keptDetuneNotice} -- " +
       "every segment field is ALWAYS present, unlike the clip's own on-disk storage which " +
       "omits defaults, so you can't mistake 'default value' for 'field absent' when reading " +
       "this back. This pass ALREADY searches for sounds with no detected pitch and includes " +
@@ -9116,7 +9126,31 @@ registerTool(
       "description. Pass `formantCorrection` (0 to 1) to choose how much of the singer's own " +
       "voice size the new tuning keeps; leave it out and the clip keeps its own setting. " +
       "Re-running a preset also keeps a consonant setting you chose with " +
-      "clip_set_consonant_protection.",
+      "clip_set_consonant_protection. " +
+      "TUNE TO MELODY: pass `melodyClipId` (one MIDI clip) or `melodyTrackId` (every MIDI clip " +
+      "on a track) -- never both -- and each sung note is tuned to the melody note it overlaps " +
+      "most instead of the nearest scale note. The melody decides WHICH note; the singing still " +
+      "decides WHERE notes start and end (one sung note that spans two melody notes of different " +
+      "pitch is cut where the voice moves between them). The preset still sets how it sounds " +
+      "(retune speed, wobble kept or flattened), but the pass runs at strength 1 so notes land ON " +
+      "the melody, unless you send `strength`. `octaveMatch` picks the octave. A sung note where " +
+      "the melody rests stays as sung, or goes to the scale if you also sent tonicPitchClass/mode. " +
+      "Timing is never changed: a late note is tuned where it was sung. The melody is the WRITTEN " +
+      "MIDI pitch. Refused in words, nothing changed: both ids, octaveMatch without a melody id, " +
+      "strength 0, a source that is missing or not MIDI, or a melody with no note under the vocal " +
+      "(the error names both spans in beats). With a melody the reply adds `melody`: {source " +
+      "{kind 'clip'|'track', clipId|trackId, name}, octaveMatch, unmatched ('asSung'|'toScale'), " +
+      "notesConsidered (melody notes under the vocal), notesUsed (how many a sung note took), " +
+      "matchedParts (sung notes tuned to the melody), unmatchedParts [segment ids where the melody " +
+      "rests], unsungNotes [melody notes nobody sang -- nothing is invented], outvotedNotes [melody " +
+      "notes a sung note overlapped but none took, e.g. one under 60 ms inside a longer note], " +
+      "cutsAdded [{seconds, melodyBoundarySeconds, placement 'crossing'|'melodyBoundary', " +
+      "segmentIds [left, right]}], chordsReduced [notes that lost to a HIGHER note sounding at the " +
+      "same time: a chord is tuned to its top note], octaveFolded [{segmentId, octaves}], farMoves " +
+      "[{segmentId, cents}: moves over 300 cents, applied and reported because a move that large " +
+      "can change the voice's character]}; every note reference is {clipId, noteId, pitch, " +
+      "startBeat (relative to its clip, as clip_get_notes reports it)}. appliedOptions.strength " +
+      "says the strength that ran.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the AUDIO clip to correct, from project_snapshot."),
       preset: z
@@ -9125,7 +9159,8 @@ registerTool(
         .describe(
           "One-click tuning: 'gentle' (strength 0.5, 200ms retune, keeps vibrato), " +
             "'natural' (0.85, 110ms, keeps vibrato), 'tight' (1.0, 40ms, keeps vibrato), or " +
-            "'hardTune' (1.0, 30ms floor, REPLACES the contour -- see the tool description's " +
+            "'hardTune' (1.0, 30ms floor, flattens the sung contour toward the target -- see the " +
+            "tool description's " +
             "warning about this one). Omit to build options from strength/retuneMs/" +
             "preserveVibrato directly (defaults: chromatic, strength 1, retuneMs 30, " +
             "preserveVibrato true)."
@@ -9214,6 +9249,31 @@ registerTool(
             "from before voice-keeping, call clip_set_formant_correction with amount null " +
             "after this call."
         ),
+      melodyClipId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Tune to Melody: the id of ONE MIDI clip whose notes are the melody each sung note is " +
+            "tuned to (see TUNE TO MELODY in the tool description). Send this or melodyTrackId, " +
+            "never both."
+        ),
+      melodyTrackId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Tune to Melody: the id of a track; every MIDI clip on it together is the melody. Send " +
+            "this or melodyClipId, never both."
+        ),
+      octaveMatch: z
+        .enum(["nearestOctave", "exact"])
+        .optional()
+        .describe(
+          "Tune to Melody only (refused without melodyClipId/melodyTrackId): 'nearestOctave' (the " +
+            "default) tunes each note to the melody's note in the octave nearest what was sung, " +
+            "so a low voice can follow a high lead; 'exact' tunes to the note as written."
+        ),
     },
   },
   async ({
@@ -9226,6 +9286,9 @@ registerTool(
     preserveVibrato,
     replaceExisting,
     formantCorrection,
+    melodyClipId,
+    melodyTrackId,
+    octaveMatch,
   }) =>
     toToolResult(() =>
       bridge.send("clip.autoCorrectPitch", {
@@ -9238,6 +9301,11 @@ registerTool(
         preserveVibrato,
         replaceExisting,
         formantCorrection,
+        // Tune to Melody (W7-TTM2): forwarded ONLY when given, so a call without them sends the
+        // app exactly the keys it sent before (additive).
+        ...(melodyClipId !== undefined ? { melodyClipId } : {}),
+        ...(melodyTrackId !== undefined ? { melodyTrackId } : {}),
+        ...(octaveMatch !== undefined ? { octaveMatch } : {}),
       })
     )
 );

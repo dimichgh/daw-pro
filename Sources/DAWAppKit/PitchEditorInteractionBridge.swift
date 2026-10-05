@@ -82,6 +82,34 @@ public struct PitchEditorChord: Sendable, Equatable {
     /// No keys held.
     public static let none = PitchEditorChord()
 
+    /// `NSEvent.EventType.leftMouseDown.rawValue` and `.leftMouseUp.rawValue`,
+    /// as plain numbers so this module stays AppKit-free (the
+    /// `ClipboardResponderRouting` rule: the app converts once, at the
+    /// boundary). `PitchEditorVoiceToolTests` binds both to AppKit's own values.
+    public static let leftMouseDownEventType: UInt = 1
+    public static let leftMouseUpEventType: UInt = 2
+
+    /// W7-NTU (2026-10-04) — THE CLICK COUNT OF THE EVENT BEING HANDLED, the
+    /// one decision behind the Voice tool's double-click, here so tests can
+    /// drive it with REAL `NSEvent`s (`PitchEditorVoiceToolTests`).
+    ///
+    /// `eventType` is the raw type of the event being handled (nil: none).
+    /// `readClickCount` is called ONLY for a left mouse-down or mouse-up:
+    /// `NSEvent.clickCount` is defined for mouse events alone, and reading it
+    /// on any other raises, so a key event or a scroll never reaches it. Any
+    /// other event, or none, is one click. A count below 1 reads 1.
+    ///
+    /// The live pane's `PitchEditorChord.current` (DAWApp) hands it
+    /// `NSApp.currentEvent`. That THAT event is the mouse-up when SwiftUI's
+    /// `DragGesture.onEnded` runs is the one link no headless test reaches: it
+    /// needs a running event loop, a window and a real pointer.
+    public static func clickCount(eventType: UInt?, readClickCount: () -> Int) -> Int {
+        guard let eventType,
+              eventType == leftMouseDownEventType || eventType == leftMouseUpEventType
+        else { return 1 }
+        return max(1, readClickCount())
+    }
+
     /// The click half, for the router and the click table.
     public var clickModifiers: ArrangeClickModifiers {
         var mods: ArrangeClickModifiers = []

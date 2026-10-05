@@ -114,6 +114,8 @@ final class PitchEditorChromeLedger {
     private(set) var dragReadout = ""
     /// The refusal prose on screen, or "".
     private(set) var refusalText = ""
+    /// W7-NTU §1(f) item 4 — the far-move hint on screen, or "".
+    private(set) var farMoveHint = ""
     /// How many commits the MODEL has emitted, as the palette last saw it.
     /// ⭐ This is the number that makes a per-tick commit VISIBLE from outside
     /// the view: it can only move on a gesture end.
@@ -370,13 +372,15 @@ final class PitchEditorChromeLedger {
     }
 
     func recordInteraction(toolKey: String, paletteLabels: [String], toolHelp: String,
-                           dragReadout: String, refusalText: String, commitCount: Int) {
+                           dragReadout: String, refusalText: String, farMoveHint: String,
+                           commitCount: Int) {
         interactionTicks += 1
         self.toolKey = toolKey
         self.paletteLabels = paletteLabels
         self.toolHelp = toolHelp
         self.dragReadout = dragReadout
         self.refusalText = refusalText
+        self.farMoveHint = farMoveHint
         self.commitCount = commitCount
     }
 
@@ -401,6 +405,7 @@ final class PitchEditorChromeLedger {
         toolHelp = ""
         dragReadout = ""
         refusalText = ""
+        farMoveHint = ""
         commitCount = 0
         interactionTicks = 0
         statusKey = ""
@@ -1895,6 +1900,10 @@ struct PitchEditorToolPalette: View {
     /// C-0 — the one sentence about the LINE (design §4.4), or nil: still
     /// matching it to the sound, or a way it cannot be the sound.
     var lineCaption: PitchEditorLineCaption? = nil
+    /// W7-NTU §1(f) item 4 — the far-move hint, or nil
+    /// (`PitchEditorModel.farMoveHint`). Handed in, and reported to the ledger
+    /// from the same value.
+    var farMoveHint: String? = nil
     var onSelect: (PitchEditorTool) -> Void
 
     var body: some View {
@@ -1924,6 +1933,17 @@ struct PitchEditorToolPalette: View {
                             .foregroundStyle(DAWTheme.textSecondary)
                     }
                 }
+            }
+            // W7-NTU §1(f) item 4 — ADVICE, NOT A WARNING: the move was taken,
+            // nothing was refused, so secondary ink and no triangle (the
+            // `.progress` caption's dress, without its spinner). It appears
+            // after a release, never mid-drag, so the line it adds never moves
+            // a row under the pointer.
+            if let farMoveHint {
+                Text(farMoveHint)
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textSecondary)
+                    .lineLimit(1)
             }
             HStack(spacing: PitchEditorPaletteLayout.spacing) {
                 ForEach(PitchEditorTool.allCases) { candidate in
@@ -2993,6 +3013,8 @@ struct PitchEditorView: View {
         let refusal = model.refusal
         // C-0 — the SAME value `recordPlayedLine` reports to the ledger.
         let lineCaption = model.lineCaption
+        // W7-NTU §1(f) item 4 — ONE call, shared with the ledger.
+        let farMoveHint = model.farMoveHint(formantPreserve: clip.formantPreserve)
         PitchEditorToolPalette(
             tool: tool,
             help: help,
@@ -3000,6 +3022,7 @@ struct PitchEditorView: View {
             readoutIsWarning: model.drag == nil && model.brush == nil && wobbleReadout?.isWarning == true,
             refusal: refusal,
             lineCaption: lineCaption,
+            farMoveHint: farMoveHint,
             onSelect: { chosen in selectTool(chosen) })
             .onAppear { recordInteraction() }
             .onChange(of: model.tool) { _, _ in recordInteraction() }
@@ -3021,6 +3044,10 @@ struct PitchEditorView: View {
             .onChange(of: model.voiceDrag) { _, _ in recordInteraction() }
             .onChange(of: voiceReadout) { _, _ in recordInteraction() }
             .onChange(of: voiceMarks) { _, _ in recordInteraction() }
+            // W7-NTU §1(f) item 4 — the hint comes and goes with the STORED
+            // table (a read-back, an undo, the voice-size amount), not with a
+            // gesture: report it when it changes.
+            .onChange(of: farMoveHint) { _, _ in recordInteraction() }
     }
 
     /// C5a-4b × C5b-4b — the point the Wobble tool's DOT answers to: the hover,
@@ -3056,6 +3083,7 @@ struct PitchEditorView: View {
             dragReadout: model.drag?.readout ?? model.brush?.readout ?? voiceReadout
                 ?? wobbleReadout?.text ?? "",
             refusalText: model.refusal ?? "",
+            farMoveHint: model.farMoveHint(formantPreserve: clip.formantPreserve) ?? "",
             commitCount: model.commitCount)
     }
 
@@ -4433,21 +4461,21 @@ extension PitchEditorChord {
     /// at the tick. A staged step passes its chord EXPLICITLY instead, so a gate
     /// proves the decisions made WITH a chord, not this one line of plumbing.
     ///
-    /// W7-NTU U3 — and the click count, for the Voice tool's double-click. Read
-    /// off the event being handled, and ONLY for a mouse-down or mouse-up:
-    /// `NSEvent.clickCount` is defined for those alone, and reading it on any
-    /// other event raises. Every other tick reads 1. NOT PROVEN HEADLESSLY, for
-    /// the same reason as the keys; a staged release passes `clicks`. Main
-    /// actor: `NSApp` is, and every caller is a gesture callback of the view.
+    /// W7-NTU U3 — and the click count, for the Voice tool's double-click, off
+    /// the event being handled. The DECISION (read it only for a left
+    /// mouse-down or mouse-up, since `NSEvent.clickCount` raises on any other
+    /// event) is `PitchEditorChord.clickCount(eventType:readClickCount:)`,
+    /// tested with real `NSEvent`s. What stays NOT PROVEN HEADLESSLY is this
+    /// line's premise, that `NSApp.currentEvent` is the mouse-up when the
+    /// gesture ends: a staged release passes `clicks` instead. Main actor:
+    /// `NSApp` is, and every caller is a gesture callback of the view.
     @MainActor
     static var current: PitchEditorChord {
         let flags = NSEvent.modifierFlags
         let click = ArrangeClickModifiers.from(flags)
-        var clicks = 1
-        if let event = NSApp.currentEvent,
-           event.type == .leftMouseUp || event.type == .leftMouseDown {
-            clicks = event.clickCount
-        }
+        let event = NSApp.currentEvent
+        let clicks = PitchEditorChord.clickCount(eventType: event.map { UInt($0.type.rawValue) },
+                                                 readClickCount: { event?.clickCount ?? 1 })
         return PitchEditorChord(shift: click.contains(.shift),
                                 command: click.contains(.command),
                                 option: flags.contains(.option),

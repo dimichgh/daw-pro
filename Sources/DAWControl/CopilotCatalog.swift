@@ -124,6 +124,25 @@ private func arraySchema(_ description: String, items: JSONValue) -> JSONValue {
     ])
 }
 
+/// m39-tpl-6: a template — either an id (from template.list) or a whole
+/// template object to preview/apply inline. No single JSON Schema "type"
+/// describes both, so this is a `oneOf`, mirroring mcp-server's
+/// `z.union([z.string(), z.record(...)])` for the same param (design §6.1).
+/// The object branch is deliberately bare (no declared properties): the
+/// Copilot catalog has no schema vocabulary for "any object", and
+/// `TrackSetTemplateCodec` — not this schema — is the real validator, so a
+/// misspelled key inside an inline template is still refused by path at the
+/// wire, never silently dropped here.
+private func templateParamSchema(_ description: String) -> JSONValue {
+    .object([
+        "description": .string(description),
+        "oneOf": .array([
+            .object(["type": .string("string")]),
+            .object(["type": .string("object")]),
+        ]),
+    ])
+}
+
 /// Shared by clip.addMIDI/clip.setNotes — one MIDI note. Mirrors
 /// mcp-server's `noteSchema` (index.ts): `pitch`/`startBeat` required,
 /// `velocity`/`lengthBeats` optional with the store's own defaults
@@ -1238,6 +1257,32 @@ public enum CopilotToolCatalog {
                     "A General MIDI percussion note (0-127) to resolve within a drum-kit track. Only meaningful together with trackId, on a track whose instrument is a percussion kit.",
                     minimum: 0, maximum: 127)),
             ])
+        ),
+
+        // MARK: template (3, m39-tpl-6)
+
+        CopilotTool(
+            command: "template.list",
+            description: "List every available multi-instrument template — built-in starting points (e.g. a lo-fi chill kit, a pop band) plus anything saved — with its id, name, summary, genres, track count, and whether it needs mixer routing or AudioUnit plug-ins. Call this before template.apply or template.describe to see what's on offer.",
+            schema: schemaObject([])
+        ),
+        CopilotTool(
+            command: "template.describe",
+            description: "Preview a multi-instrument template without changing the song: every track it would add, in plain language (name, kind, what it plays), plus whether it uses mixer routing (sends/buses). Use this before template.apply to show the user what a template contains, or to compare templates.",
+            schema: schemaObject([
+                ("template", templateParamSchema(
+                    "A template's id (from template.list), or a whole template object to preview one that is not saved.")),
+            ], required: ["template"])
+        ),
+        CopilotTool(
+            command: "template.apply",
+            description: "Add every track from a multi-instrument template to the song in one step — instruments, mixer presets, sends and routing all set up together — as a single undo (one call to edit.undo removes all of it). Set dryRun to true to preview the result first without changing the song (the same information template.describe gives).",
+            schema: schemaObject([
+                ("template", templateParamSchema(
+                    "A template's id (from template.list), or a whole template object to apply directly.")),
+                ("dryRun", booleanSchema(
+                    "Preview what applying this template would do, without changing the song. Defaults to false.")),
+            ], required: ["template"])
         ),
     ]
 

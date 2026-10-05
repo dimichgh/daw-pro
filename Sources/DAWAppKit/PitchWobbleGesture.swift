@@ -1304,8 +1304,17 @@ public enum PitchWobbleCopy {
     public static let cannotWiden =
         "As you sang it. This note is too short to make its wobble wider."
     /// §18.3: the handoff refused (short or uneven, not yet flat).
+    ///
+    /// W7-NTU (2026-10-04, by grant): 11 characters shorter than §18.3's
+    /// wording ("first" and the second "drag" dropped; the steps and their
+    /// order are unchanged). It is the palette's readout while it shows, and
+    /// at 95 characters (588 pt, MEASURED) it left the Wobble help 281 pt at
+    /// the 1208 pt floor beside four slots: three lines in a two-line box. At
+    /// 84 (520 pt) the help has 349 pt, two lines, the same room as beside
+    /// `tooUnevenToMeasure`. `PitchEditorPaletteFitTests.wobbleHelpFitsAtTheFloor`
+    /// measures it, with the old wording as its control.
     public static let handoffRefused =
-        "To change its speed, first drag down to smooth it flat, then drag sideways to add a new wobble."
+        "To change its speed, drag down to smooth it flat, then sideways to add a new wobble."
     /// §9.2 / §18.3: `.noWobble` — "the app can measure", never "no wobble":
     /// a singer's wobble under the 20 c report floor is real and unmeasured.
     public static let noWobbleToMeasure = "No wobble the app can measure. Drag up to add one."

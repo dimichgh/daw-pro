@@ -132,6 +132,32 @@ struct ArrangeCommandTests {
         #expect(bad.error?.contains("'atBar' must be >= 1") == true)
     }
 
+    @Test("W7-WNM: arrange.insertBars / arrange.deleteBars refuse a fractional 'count' naming the param, rather than silently truncating it (Int(2.7) was 2) — the MCP schema already says .int()")
+    func insertDeleteBarsRefuseFractionalCount() async throws {
+        let (router, store) = makeRouter()
+        let trackID = try await addTrack(router, kind: "instrument")
+        _ = await router.handle(ControlRequest(
+            id: "c", command: "clip.addMIDI",
+            params: ["trackId": .string(trackID), "atBeat": .number(8), "lengthBeats": .number(4)]))
+
+        let insFrac = await router.handle(ControlRequest(
+            id: "if", command: "arrange.insertBars",
+            params: ["atBar": .number(1), "count": .number(2.7)]))
+        #expect(!insFrac.ok)
+        #expect(insFrac.error == "'count' must be a whole number of bars to insert, got 2.7",
+                "\(insFrac.error ?? "no error")")
+
+        let delFrac = await router.handle(ControlRequest(
+            id: "df", command: "arrange.deleteBars",
+            params: ["fromBar": .number(1), "count": .number(2.7)]))
+        #expect(!delFrac.ok)
+        #expect(delFrac.error == "'count' must be a whole number of bars to delete, got 2.7",
+                "\(delFrac.error ?? "no error")")
+
+        // Nothing moved or shifted on the refused calls.
+        #expect(abs(store.tracks[0].clips[0].startBeat - 8) < 1e-9)
+    }
+
     // MARK: - F5 hardening (audit F4/F5)
 
     @Test("track.setOutput rejects a typo'd key with a teaching error listing valid keys")

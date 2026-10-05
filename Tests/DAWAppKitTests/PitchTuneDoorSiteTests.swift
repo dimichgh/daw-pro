@@ -337,11 +337,14 @@ struct PitchTuneDoorSiteTests {
         #expect(cancel.contains("applyTuningPreset(") == false,
                 "Cancel applies the preset — the one outcome Cancel must never have")
 
-        // The gate reads THE signal — the store's own "hand-edited since the last
-        // preset" answer, never a second estimate of it.
+        // The gate reads THE signal — DAWCore's own "would a re-run of THIS
+        // preset lose hand edits" answer (W7-NTU ruling 1: since 2026-10-04 the
+        // one that folds what the preset keeps), never a second estimate of it.
         let gate = Self.code("DAWAppKit/PitchPresetReplaceGate.swift")
-        #expect(gate.contains("hasHandEditsSinceAutoCorrect"),
-                "the gate does not consult PitchEditSet.hasHandEditsSinceAutoCorrect — it is deciding on something else")
+        #expect(gate.contains("current?.hasHandEditsARerunWouldReplace(preset.options()) == true"),
+                "the gate does not consult PitchEditSet.hasHandEditsARerunWouldReplace with the clicked preset's options — it is deciding on something else")
+        #expect(!gate.contains("hasHandEditsSinceAutoCorrect"),
+                "the gate still reads the whole-set rule, which asks about settings the preset keeps")
         // And AppModel owns one gate, so both doors share its one pending request.
         let app = Self.code("DAWApp/DAWProApp.swift")
         #expect(app.contains("let pitchPresetReplaceGate = PitchPresetReplaceGate()"))
@@ -700,6 +703,93 @@ struct PitchTuneDoorSiteTests {
         #expect(!voices.isEmpty)
         #expect(voices.allSatisfy { $0 == 0 }, "a note's Voice survived the preset: the card names a loss that is not one")
         #expect(engine.detectCalls == 3)
+    }
+
+    /// W7-NTU ruling 1 (2026-10-04): the card asked when the ONLY change since
+    /// the preset was a setting the preset KEEPS (a voice size, a consonant
+    /// choice). Through the REAL store: those alone apply now, and the preset
+    /// keeps them; a Slides pick (which a preset replaces) still asks.
+    /// Planted and seen red (W7-NTU P-r1-gate, 2026-10-04 window R1W2; the line said "to be planted" until it has been): the gate back on
+    /// `hasHandEditsSinceAutoCorrect`.
+    @Test("⭐ W7-NTU ruling 1 — through the REAL store: a voice size and a consonant choice changed after a preset apply NOW (no card), and the preset keeps both; a Slides pick still asks")
+    @MainActor
+    func keptSettingsAloneApplyNow() async throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w7ntu-kept-\(UUID().uuidString).wav")
+        try Data([0x00]).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let clip = Clip(name: "Lead", startBeat: 0, lengthBeats: 8, audioFileURL: url)
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [clip])])
+        let engine = TuneDoorFakeDetectEngine(stubResult: Self.twoNotesOffPitch())
+        store.engine = engine
+        func stored() throws -> PitchEditSet { try #require(store.tracks[0].clips[0].pitchEdits) }
+
+        _ = try await store.autoCorrectClipPitch(clipId: clip.id,
+                                                 options: PitchCorrectionPreset.natural.options())
+        _ = try store.setClipFormantCorrection(clipId: clip.id, amount: 0.6)
+        _ = try store.setClipConsonantProtection(clipId: clip.id, enabled: false)
+        // The whole-set rule calls this "hand-edited": the card used to ask.
+        #expect(try stored().hasHandEditsSinceAutoCorrect, "the fixture changed nothing")
+        let gate = PitchPresetReplaceGate()
+        for preset in PitchCorrectionPreset.offeredInUI {
+            #expect(gate.request(preset, clipID: clip.id, clipName: "Lead", current: try stored()) == .applyNow,
+                    "\(preset.displayName) asks about settings it keeps")
+            #expect(gate.pending == nil)
+        }
+        // Applied now, the preset keeps both: there was nothing to lose.
+        _ = try await store.autoCorrectClipPitch(clipId: clip.id,
+                                                 options: PitchCorrectionPreset.tight.options())
+        #expect(try stored().formantCorrection == 0.6)
+        #expect(try stored().consonantProtection == .offByChoice)
+
+        // A Slides pick is replaced by a preset: the card asks, and says so.
+        _ = try store.setClipPitchTransitionSmoothness(
+            clipId: clip.id, centsPerSecond: PitchEditorSlideStep.quick.centsPerSecond)
+        #expect(gate.request(.natural, clipID: clip.id, clipName: "Lead", current: try stored()) == .askFirst)
+        let request = try #require(gate.pending)
+        #expect(request.settings.changed == [PitchPresetReplaceSettings.Change(row: .slides, to: "Smooth")])
+        #expect(engine.detectCalls == 2)
+    }
+
+    /// W7-NTU ruling 1 — the user's old-vocals rule: a stamp that moved a
+    /// render key would re-render vocals. `ClipRenderSignature` compares the
+    /// set (all but its notes) with `==`, which DOES see a new stored field,
+    /// so its `Tuning` clears this stamp beside `autoCorrectStamp`. The
+    /// engine's own keys never read it (`PitchEditSetDigest.hex` hashes named
+    /// fields; `NaturalTuningDigestTests`' census row and
+    /// `PitchEditReplaceableStampRenderKeyTests` prove those).
+    /// Planted and seen red (W7-NTU P-r1-sig, 2026-10-04 window R1W2; the line said "to be planted" until it
+    /// has been): `Tuning.init` no longer clearing the new stamp.
+    @Test("W7-NTU ruling 1 — the replace stamp leaves the clip's render signature alone, alone or beside the preset stamp; a retune-speed change (control) moves it")
+    func replaceableStampLeavesTheRenderSignature() {
+        let tuned = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.0, endSeconds: 0.5, detectedHz: 220, detectedConfidence: 0.95),
+            NoteSegment(startSeconds: 0.5, endSeconds: 1.0, detectedHz: 246.9,
+                        detectedConfidence: 0.95, pitchOffsetCents: -35),
+        ])
+        func tracks(_ set: PitchEditSet) -> [Track] {
+            [Track(name: "Vocals", kind: .audio, clips: [
+                Clip(id: UUID(uuidString: "B0000000-0000-4000-8000-0000000000A1")!, name: "Vocal",
+                     startBeat: 0, lengthBeats: 8,
+                     audioFileURL: URL(fileURLWithPath: "/ntu-r1/vocal.wav"), pitchEdits: set),
+            ])]
+        }
+        let base = tracks(tuned)
+        #expect(base[0].clips[0].rendersThroughStretchCache, "premise: the clip renders, so it HAS a signature to move")
+        var stamped = tuned
+        stamped.autoCorrectReplaceableStamp = "fedcba9876543210"
+        var both = stamped
+        both.autoCorrectStamp = "0123456789abcdef"
+        #expect(stamped != tuned, "premise: the sets DIFFER under ==, so equal signatures are the clearing's doing")
+        #expect(ClipRenderSignature(tracks: tracks(stamped)) == ClipRenderSignature(tracks: base),
+                "the replace stamp alone re-keyed the clip: an old vocal would re-render")
+        #expect(ClipRenderSignature(tracks: tracks(both)) == ClipRenderSignature(tracks: base),
+                "the two stamps a preset writes together re-keyed the clip")
+        // Control: the comparison CAN say "different" for this clip.
+        var faster = tuned
+        faster.retuneMs += 10
+        #expect(ClipRenderSignature(tracks: tracks(faster)) != ClipRenderSignature(tracks: base),
+                "CONTROL: a retune-speed change must move the signature")
     }
 
     /// ⭐ THE PANE SHIPPED WITH NO WAY IN, AND THAT IS WHY THIS TEST EXISTS.

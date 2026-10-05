@@ -49,9 +49,17 @@ struct ConsonantChoiceTests {
         switch name {
         case "legacy": return legacy()
         case "presetNatural":
-            return PitchEditSet.seeded(analysisVersion: 1, segments: notes(), retuneMs: 110,
-                                       partKinds: [:], seedPolicy: .preset)
+            // W7-NTU (2026-10-04): today's preset output ALSO writes
+            // `autoCorrectReplaceableStamp`, which this frozen literal predates.
+            // The ONE key is cleared here, so the bytes below still test every
+            // other byte; `PitchEditReplaceableStampTests` pins that the output
+            // carries it, and that the literal (without it) decodes to today's
+            // whole-set rule.
+            var output = PitchEditSet.seeded(analysisVersion: 1, segments: notes(), retuneMs: 110,
+                                             partKinds: [:], seedPolicy: .preset)
                 .stampedAsAutoCorrectOutput()
+            output.autoCorrectReplaceableStamp = nil
+            return output
         case "upgraded": return legacy().upgradedToNaturalTuning()
         case "legacyConsonantsOn":
             var set = legacy()

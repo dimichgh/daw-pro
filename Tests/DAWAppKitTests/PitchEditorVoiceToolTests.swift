@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import DAWCore
 import Foundation
@@ -184,7 +185,7 @@ struct PitchEditorVoiceToolTests {
     static var everyVoiceString: [String] {
         var strings = [C.voiceToolLabel, C.voiceToolDirections, C.voiceToolKeys,
                        C.voiceToolHelp(drawToolAvailable: true), C.voiceToolHelp(drawToolAvailable: false),
-                       C.voiceTooShort, C.voiceSoundRefusal]
+                       C.voiceTooShort, C.voiceSoundRefusal, C.farMoveHint]
         for value in [-24.0, -6, -2, -0.1, 0, 0.1, 2, 6, 24] {
             strings += [C.voiceChip(value), C.voiceToolReadout(value), C.voiceMenuTitle(value)]
         }
@@ -349,5 +350,122 @@ struct PitchEditorVoiceToolTests {
         #expect(!PitchEditorVoiceWrite.took(before: before, segmentIDs: [b], semitones: 0,
                                             stored: before.upgradedToNaturalTuning()),
                 "a no-op that updated the whole vocal read as a success")
+    }
+
+    // MARK: - The far-move hint (§1(f) item 4, R26's words — W7-NTU 2026-10-04)
+
+    /// Four notes: up 300, down 300, up 299 and as sung. `keep` is the vocal's
+    /// own voice-size amount (nil: tuned before this update).
+    static func farFixture(keep: Double?) -> PitchEditSet {
+        var set = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0, endSeconds: 0.5, detectedHz: 220, detectedConfidence: 0.95,
+                        pitchOffsetCents: 300),
+            NoteSegment(startSeconds: 0.5, endSeconds: 1, detectedHz: 220, detectedConfidence: 0.95,
+                        pitchOffsetCents: -300),
+            NoteSegment(startSeconds: 1, endSeconds: 1.5, detectedHz: 220, detectedConfidence: 0.95,
+                        pitchOffsetCents: 299),
+            NoteSegment(startSeconds: 1.5, endSeconds: 2, detectedHz: 220, detectedConfidence: 0.95),
+        ])
+        set.formantCorrection = keep
+        return set
+    }
+
+    /// Planted and seen red (W7-NTU P-far-edge): `farMoveCents` compared with
+    /// `>` (a move of exactly 3 semitones would not ask).
+    @Test("§1(f) item 4 — the hint: R26's words; a note 3 semitones or more from where it was sung, either way, on a vocal keeping UNDER half its voice size; 299 is not far, 0.5 is not under")
+    func farMoveHintRule() {
+        typealias H = PitchEditorFarMoveHint
+        #expect(C.farMoveHint == "Big jump: turn up Keep voice size so it doesn't sound squeaky.")
+        #expect(C.farMoveHint.contains(C.voiceLabel), "the hint names a control that is not on screen")
+        #expect(H.farMoveCents == 300)
+        #expect(H.keepBelow == 0.5)
+        let off = Self.farFixture(keep: 0)
+        let up = off.segments[0].id, down = off.segments[1].id
+        let nearly = off.segments[2].id, still = off.segments[3].id
+        // How far: inclusive at 300, either direction; 299 and 0 are not far.
+        #expect(H.line(movedNoteIDs: [up], table: off, formantPreserve: false) == C.farMoveHint)
+        #expect(H.line(movedNoteIDs: [down], table: off, formantPreserve: false) == C.farMoveHint)
+        #expect(H.line(movedNoteIDs: [nearly], table: off, formantPreserve: false) == nil)
+        #expect(H.line(movedNoteIDs: [still], table: off, formantPreserve: false) == nil)
+        // A group: any far note asks.
+        #expect(H.line(movedNoteIDs: [nearly, still, up], table: off, formantPreserve: false) == C.farMoveHint)
+        // Nothing moved, or a note that is not in the table: nothing to say.
+        #expect(H.line(movedNoteIDs: [], table: off, formantPreserve: false) == nil)
+        #expect(H.line(movedNoteIDs: [UUID()], table: off, formantPreserve: false) == nil)
+        // How much is kept: under 0.5 asks, 0.5 and over does not. The vocal's
+        // own amount wins over the clip flag.
+        for (keep, asks) in [(0.0, true), (0.25, true), (0.49, true), (0.5, false), (0.75, false), (1.0, false)] {
+            let table = Self.farFixture(keep: keep)
+            #expect((H.line(movedNoteIDs: [table.segments[0].id], table: table, formantPreserve: true) != nil) == asks,
+                    "keep \(keep)")
+        }
+        // A vocal with no amount of its own: the clip flag decides, 1 or 0.
+        let legacy = Self.farFixture(keep: nil)
+        #expect(H.effectiveKeep(legacy, formantPreserve: true) == 1)
+        #expect(H.effectiveKeep(legacy, formantPreserve: false) == 0)
+        #expect(H.line(movedNoteIDs: [legacy.segments[0].id], table: legacy, formantPreserve: true) == nil)
+        #expect(H.line(movedNoteIDs: [legacy.segments[0].id], table: legacy, formantPreserve: false) == C.farMoveHint)
+        #expect(H.effectiveKeep(Self.farFixture(keep: 0.3), formantPreserve: true) == 0.3)
+    }
+
+    // MARK: - The double-click, from a REAL event (W7-NTU ruling 4, 2026-10-04)
+
+    /// A real `NSEvent` of `type`, with `clicks` as its click count.
+    static func mouseEvent(_ type: NSEvent.EventType, clicks: Int) throws -> NSEvent {
+        try #require(NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                                        windowNumber: 0, context: nil, eventNumber: 0,
+                                        clickCount: clicks, pressure: 0))
+    }
+
+    /// The live pane's one line, `PitchEditorChord.current`, as a function of
+    /// the event: `clickCount(eventType:readClickCount:)` with the event's
+    /// own type and count. `reads` counts every time the count was READ.
+    static func clicks(of event: NSEvent?, reads: inout Int) -> Int {
+        PitchEditorChord.clickCount(eventType: event.map { UInt($0.type.rawValue) },
+                                    readClickCount: { reads += 1; return event?.clickCount ?? 1 })
+    }
+
+    /// Planted and seen red (W7-NTU P-clicks): the decision reading the count
+    /// on every event type.
+    @Test("a double-click's mouse-up reads 2 from a REAL NSEvent; a key event or no event reads 1 and the count is NEVER read (it raises on those)")
+    func clickCountFromRealEvents() throws {
+        // The plain numbers are AppKit's own.
+        #expect(PitchEditorChord.leftMouseDownEventType == UInt(NSEvent.EventType.leftMouseDown.rawValue))
+        #expect(PitchEditorChord.leftMouseUpEventType == UInt(NSEvent.EventType.leftMouseUp.rawValue))
+
+        var reads = 0
+        #expect(Self.clicks(of: try Self.mouseEvent(.leftMouseUp, clicks: 2), reads: &reads) == 2)
+        #expect(Self.clicks(of: try Self.mouseEvent(.leftMouseDown, clicks: 2), reads: &reads) == 2)
+        #expect(Self.clicks(of: try Self.mouseEvent(.leftMouseUp, clicks: 1), reads: &reads) == 1)
+        #expect(Self.clicks(of: try Self.mouseEvent(.leftMouseUp, clicks: 3), reads: &reads) == 3)
+        #expect(reads == 4, "a mouse-down or mouse-up must READ its count")
+
+        // Never read: a drag tick, a right click, a key, no event at all. The
+        // spy answers 9 WITHOUT touching the event (reading a key event's
+        // count raises, which would end the run rather than fail this test),
+        // so a decision that reads anyway returns 9 here.
+        func unread(_ event: NSEvent?) -> Int {
+            PitchEditorChord.clickCount(eventType: event.map { UInt($0.type.rawValue) },
+                                        readClickCount: { reads += 1; return 9 })
+        }
+        reads = 0
+        #expect(unread(try Self.mouseEvent(.leftMouseDragged, clicks: 2)) == 1)
+        #expect(unread(try Self.mouseEvent(.rightMouseUp, clicks: 2)) == 1)
+        let key = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                                timestamp: 0, windowNumber: 0, context: nil,
+                                                characters: "a", charactersIgnoringModifiers: "a",
+                                                isARepeat: false, keyCode: 0))
+        #expect(unread(key) == 1)
+        #expect(unread(nil) == 1)
+        #expect(reads == 0, "the count was read on an event that does not define it")
+
+        // A count below 1 reads 1, as `PitchEditorChord.init` does.
+        #expect(PitchEditorChord.clickCount(eventType: PitchEditorChord.leftMouseUpEventType,
+                                            readClickCount: { 0 }) == 1)
+
+        // And a chord built from it carries it to the release.
+        let chord = PitchEditorChord(clickCount: Self.clicks(of: try Self.mouseEvent(.leftMouseUp, clicks: 2),
+                                                             reads: &reads))
+        #expect(chord.clickCount == 2)
     }
 }

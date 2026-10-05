@@ -92,11 +92,35 @@ public enum SliceBoundaries {
     /// boundaries are computed entirely in the SOURCE-SECONDS domain and never
     /// consult the tempo map, so they stay correct across a tempo change and
     /// must NOT be rejected.
+    ///
+    /// ⭐ TOTAL, AND WALKS ONLY WHAT IT KEEPS (m23-ap I5-F4 round 4). This used
+    /// to list EVERY grid line in the window and then condition the list: a
+    /// 1e-20 grid on a 4-beat clip asked `Int(_:)` for 4e20 lines (a trap), and
+    /// a 1e-12 grid walked 4e12 of them on the main actor. It now answers the
+    /// same question without the list. The lines are still the ones the walk
+    /// visited (line `index + t` for `t` = 0 … the old `maxLines`, each position
+    /// computed with the old expressions), and their seconds never decrease with
+    /// `t`, so each of `condition`'s tests is false-then-true (or true-then-
+    /// false) along them: a search finds the next line `condition` would keep,
+    /// skipping every line it would drop. For every input the old walk could
+    /// finish, every index it visited is an integer below 2^53, and the answer
+    /// is the old answer, bit for bit (`SliceGridTotalityTests` compares the two
+    /// on a grid of cases). Two things are new, and only past anything the app
+    /// can send (the wire's grid is at least 1/1024 beat, its positions at most
+    /// 2^20 beats, and `SliceToSamplerSettings` keeps `minSliceSeconds` at least
+    /// 1 ms):
+    ///  - a window whose grid-line indices do not all fit below 2^53 gives no
+    ///    boundaries (there, one Double can no longer tell two lines apart);
+    ///  - at most `maximumBoundaries` are returned (default 2^24), the first
+    ///    ones. The one app caller refuses a chop of more than 96 pads long
+    ///    before, so for it the cap can only change the pad count its refusal
+    ///    quotes, for a chop of more than 16,777,216 pads.
     public static func gridDivisions(clipStartBeat: Double,
                                      windowStart: Double, windowEnd: Double,
                                      gridBeats: Double,
                                      tempoMap: TempoMap,
-                                     minSliceSeconds: Double) -> [Double] {
+                                     minSliceSeconds: Double,
+                                     maximumBoundaries: Int = maximumGridBoundaries) -> [Double] {
         guard gridBeats > 0, windowEnd > windowStart else { return [] }
         let spb = tempoMap.secondsPerBeat(atBeat: clipStartBeat)
         guard spb > 0 else { return [] }
@@ -106,21 +130,74 @@ public enum SliceBoundaries {
         // wherever the clip happens to sit.
         let startBeat = clipStartBeat
         let endBeat = clipStartBeat + (windowEnd - windowStart) / spb
-        var raw: [Double] = []
-        var index = (startBeat / gridBeats).rounded(.down)
-        // Walk forward from the last grid line at or before the window start.
-        // Bounded by the beat span, so a pathological gridBeats cannot spin.
-        let maxLines = Int(((endBeat - startBeat) / gridBeats).rounded(.up)) + 2
-        var emitted = 0
-        while emitted <= maxLines {
-            let beat = index * gridBeats
-            index += 1
-            emitted += 1
-            if beat <= startBeat { continue }
-            if beat >= endBeat { break }
-            raw.append(windowStart + (beat - startBeat) * spb)
+        // The lines the old walk visited: index `firstIndex + t` for t = 0 …
+        // `lastStep` (its `maxLines`), starting at the last grid line at or
+        // before the window start. Kept as Doubles: every one must be an exact
+        // integer (below 2^53), or there is no grid to answer with.
+        let firstIndex = (startBeat / gridBeats).rounded(.down)
+        let lastStep = ((endBeat - startBeat) / gridBeats).rounded(.up) + 2
+        let exact = 9_007_199_254_740_992.0   // 2^53
+        guard lastStep < exact, firstIndex.magnitude < exact,
+              (firstIndex + lastStep).magnitude < exact else { return [] }
+        let stepCount = lastStep + 1
+        // The old expressions, verbatim: a line's beat, and its source second.
+        func beat(_ t: Double) -> Double { (firstIndex + t) * gridBeats }
+        func seconds(_ t: Double) -> Double { windowStart + (beat(t) - startBeat) * spb }
+        // The walk skipped lines at or before the window start, and stopped at
+        // the first line at or after its end: the lines it listed are [from, to).
+        guard let from = firstLine(from: 0, below: stepCount, where: { beat($0) > startBeat }) else {
+            return []
         }
-        return condition(onsetsSourceSeconds: raw, windowStart: windowStart,
-                         windowEnd: windowEnd, minSliceSeconds: minSliceSeconds)
+        let to = firstLine(from: from, below: stepCount, where: { beat($0) >= endBeat }) ?? stepCount
+        // `condition`, one kept boundary at a time. A line passes the tests that
+        // only get truer as the seconds grow (inside the start, `minSliceSeconds`
+        // clear of the start and of the last kept one); the first line that
+        // fails a test that only gets falser (inside the end, clear of the end)
+        // ends the walk, since no later line can pass it either.
+        var boundaries: [Double] = []
+        var last: Double?
+        var t = from
+        while t < to, boundaries.count < maximumBoundaries {
+            guard let next = firstLine(from: t, below: to, where: { line in
+                let o = seconds(line)
+                if !(o > windowStart) || (o - windowStart) < minSliceSeconds { return false }
+                if let last, (o - last) < minSliceSeconds { return false }
+                return true
+            }) else { break }
+            let o = seconds(next)
+            if !(o < windowEnd) || (windowEnd - o) < minSliceSeconds { break }
+            boundaries.append(o)
+            last = o
+            t = next + 1
+        }
+        return boundaries
+    }
+
+    /// The most boundaries `gridDivisions` returns unless told otherwise: 2^24.
+    public static let maximumGridBoundaries = 1 << 24
+
+    /// The first whole `t` in `[start, end)` where `passes` holds, or nil, for a
+    /// `passes` that is false and then true along the range (every caller's
+    /// test only gets truer as `t` grows). Gallops out from `start`, then
+    /// bisects, so a near answer costs a step or two and a far one ~2·log2 of
+    /// the distance. All values are whole numbers below 2^53, so exact.
+    private static func firstLine(from start: Double, below end: Double,
+                                  where passes: (Double) -> Bool) -> Double? {
+        guard start < end else { return nil }
+        if passes(start) { return start }
+        var failing = start
+        var reach = 1.0
+        var probe = start + 1
+        while probe < end, !passes(probe) {
+            failing = probe
+            reach *= 2
+            probe = start + reach
+        }
+        var passing = min(probe, end)   // passes, or `end` (nothing known to pass)
+        while passing - failing > 1 {
+            let middle = failing + ((passing - failing) / 2).rounded(.down)
+            if passes(middle) { passing = middle } else { failing = middle }
+        }
+        return passing < end ? passing : nil
     }
 }

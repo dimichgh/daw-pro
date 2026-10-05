@@ -5120,4 +5120,52 @@ struct PitchCorrectionCommandTests {
                 "an unchosen OFF is switched ON by the update, the seed's own state")
         #expect(freshUpgrade.result?["consonantsOffByChoice"]?.boolValue == false)
     }
+
+    // MARK: - W7-PK round 3 (PK-F1, the 10-04 ruling): a clip's fractional
+    // pitch shift is a detune Auto-Correct KEEPS, and the reply says so.
+
+    @Test("clip.autoCorrectPitch echoes keptDetuneCents/keptDetuneNotice for a +3.3 shift, and OMITS both for a whole +3 shift")
+    func autoCorrectPitchEchoesKeptDetune() async throws {
+        // One fresh project per shift: the shift goes on over the wire
+        // (clip.setStretch), then the correction runs over the wire.
+        func corrected(shift: Double) async throws -> ControlResponse {
+            let engine = makeMelodicEngine()
+            let (router, _) = makeRouter(engine: engine)
+            let fileURL = try makeRealAudioFile()
+            defer { try? FileManager.default.removeItem(at: fileURL) }
+            let (trackID, clipID) = try await addAudioClip(router, path: fileURL.path)
+            let shifted = await router.handle(ControlRequest(
+                id: "s", command: "clip.setStretch",
+                params: ["trackId": .string(trackID), "clipId": .string(clipID),
+                         "semitones": .number(shift)]))
+            #expect(shifted.ok, "\(shifted.error ?? "?")")
+            #expect(shifted.result?["pitchShiftSemitones"]?.doubleValue == shift)
+            let response = await router.handle(ControlRequest(
+                id: "1", command: "clip.autoCorrectPitch", params: ["clipId": .string(clipID)]))
+            #expect(response.ok, "\(response.error ?? "?")")
+            #expect(response.result?["segmentCount"]?.doubleValue == 2, "both notes corrected")
+            return response
+        }
+
+        // +3.3: the +0.3 fraction is kept, as +30 cents, and said in words.
+        let detuned = try await corrected(shift: 3.3)
+        let cents = try #require(detuned.result?["keptDetuneCents"]?.doubleValue,
+                                 "a +3.3 shift must echo keptDetuneCents")
+        #expect(abs(cents - 30) < 1e-9, "kept \(cents) c, expected +30")
+        #expect(detuned.result?["keptDetuneNotice"]?.stringValue
+                == "Kept this clip's +30 cent detune (its pitch shift is +3.3 semitones): each "
+                + "corrected note plays 30 cents sharp of the scale, as the shift asks.")
+
+        // +3: a whole shift keeps no detune. OMITTED, not null: `== nil` is
+        // false for an explicit `.null`, so this tells the two apart.
+        let whole = try await corrected(shift: 3)
+        #expect(whole.result?["keptDetuneCents"] == nil, "a whole shift keeps no detune")
+        #expect(whole.result?["keptDetuneNotice"] == nil)
+
+        // Additive only: the keys this reply carried before are all still there.
+        for key in ["clipId", "hasPitchEdits", "segmentCount", "segments", "appliedOptions",
+                    "unpitchedCount", "unpitchedSkippedReason"] {
+            #expect(detuned.result?[key] != nil, "\(key) is missing from the reply")
+        }
+    }
 }

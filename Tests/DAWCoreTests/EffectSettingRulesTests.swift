@@ -71,8 +71,10 @@ extension EffectChainStoreTests {
         }
         print("TPL1-MEASURE effect agreement: \(cases) cases, \(disagreements.count) disagreements")
         #expect(cases > 1000, "positive control: the table must drive every setting of every kind")
-        #expect(disagreements.isEmpty,
-                "\(disagreements.count) disagreements, first: \(disagreements.prefix(3))")
+        // A Bool, not the array: a failing `#expect` prints every value it
+        // captured in full, and this table holds thousands of cases.
+        let agree = disagreements.isEmpty
+        #expect(agree, "\(disagreements.count) disagreements, first: \(disagreements.first ?? "")")
     }
 
     @Test("m39-tpl-1: the master chain's setter writes exactly what the one writer writes")
@@ -99,7 +101,10 @@ extension EffectChainStoreTests {
         }
         print("TPL1-MEASURE master effect agreement: \(cases) cases, \(disagreements.count) disagreements")
         #expect(cases > 500, "positive control")
-        #expect(disagreements.isEmpty, "\(disagreements.prefix(5))")
+        // A Bool, not the array: a failing `#expect` prints every value it
+        // captured in full, and this table holds thousands of cases.
+        let agree = disagreements.isEmpty
+        #expect(agree, "\(disagreements.count) disagreements, first: \(disagreements.first ?? "")")
     }
 }
 

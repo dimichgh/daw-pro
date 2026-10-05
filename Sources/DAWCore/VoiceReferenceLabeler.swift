@@ -117,8 +117,10 @@ public enum VoiceReferenceLabeler {
     public static let minVoicedInsideSpans = 0.90
     public static let minSpanSeconds = 0.060
 
-    /// §5.7 "Poor alignment".
-    public static let poorAlignmentMessage = "I couldn't follow your recording closely (did you sing the same words?). "
+    /// §5.7 "Poor alignment". It also fires for a different TUNE (p2-sing-d3-mis), so it asks about tune and words; two
+    /// sentences, not a mid-sentence question (copy ruled 2026-10-05).
+    public static let poorAlignmentMessage = "I couldn't follow your recording closely. "
+        + "Did you sing the guide's tune and words? "
         + "Your voice will still work, but it may sound less like you."
 
     // MARK: - Labelling

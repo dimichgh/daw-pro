@@ -92,6 +92,20 @@ struct PitchEditorPaletteFitTests {
         PitchWobbleCopy.noWobbleToMeasure,
     ]
 
+    /// W7-NTU (2026-10-04) — the sentences the Wobble tool's readout slot
+    /// shows DURING a drag, beside the same help: the refused handoff (the
+    /// longest, which left the help three lines before it was shortened) and
+    /// the widening cap.
+    static let dragSentences: [String] = [
+        PitchWobbleCopy.handoffRefused,
+        PitchWobbleCopy.cannotWiden,
+    ]
+
+    /// The handoff sentence as §18.3 worded it, before W7-NTU shortened it:
+    /// the CONTROL that this suite can see the case it was changed for.
+    static let handoffAsFirstWorded =
+        "To change its speed, first drag down to smooth it flat, then drag sideways to add a new wobble."
+
     /// The readouts the Voice tool draws at REST, hovering a note
     /// (`PitchEditorModel.voiceReadout(hover:)`): none, as sung, the UI's
     /// deepest, the wire's brightest (the widest number), and R11's line.
@@ -121,7 +135,7 @@ struct PitchEditorPaletteFitTests {
         #expect(help.contains("Hold ⌘ to draw instead."), "the sentence this suite exists for is gone")
         #expect(Self.atRestReadouts[1] == "Your wobble: about 5.5 per second, about 55 cents each way",
                 "C5a-F11's captured readout changed; re-derive this suite's case")
-        for readout in Self.atRestReadouts {
+        for readout in Self.atRestReadouts + Self.dragSentences.map(Optional.some) {
             let width = P.helpWidth(rowWidth: Self.floorPane, slotWidths: Self.slots,
                                     readoutWidth: readout.map(Self.readoutWidth))
             // A 4 pt margin: SwiftUI's line breaker is not TextKit's.
@@ -135,6 +149,13 @@ struct PitchEditorPaletteFitTests {
                                    readoutWidth: Self.atRestReadouts[1].map(Self.readoutWidth))
         #expect(Self.helpLines(help, width: captured) > 1,
                 "one line holds the help in \(captured) pt — the two-line box is unneeded")
+        // CONTROL — the measuring can say NO to the case the handoff sentence
+        // was shortened for: §18.3's wording leaves the help THREE lines.
+        #expect(PitchWobbleCopy.handoffRefused != Self.handoffAsFirstWorded)
+        let firstWorded = P.helpWidth(rowWidth: Self.floorPane, slotWidths: Self.slots,
+                                      readoutWidth: Self.readoutWidth(Self.handoffAsFirstWorded))
+        #expect(Self.helpLines(help, width: firstWorded - 4) > P.helpLineLimit,
+                "the first wording fits in \(firstWorded) pt: this control no longer controls")
     }
 
     /// Planted and seen red (W7-NTU P-v-fit): one more sentence in the Voice
@@ -159,6 +180,45 @@ struct PitchEditorPaletteFitTests {
         let alone = P.helpWidth(rowWidth: Self.floorPane, slotWidths: Self.slots, readoutWidth: nil)
         #expect(Self.helpLines(help, width: alone) > 1,
                 "one line holds the Voice help in \(alone) pt")
+    }
+
+    /// W7-NTU ruling 3 (2026-10-04) — the design asks that `mouth` be checked
+    /// on macOS 14, and this machine runs a later one, so loading it here
+    /// (`measuringIsReal`) proves nothing about the floor. Apple's own table
+    /// does: CoreGlyphs' `name_availability.plist` maps each symbol to its SF
+    /// Symbols year and each year to its first macOS. MEASURED: `mouth` 2020
+    /// (macOS 11.0), `cursorarrow` 2020 (11.0), `scissors` and
+    /// `waveform.path` 2019 (10.15). A missing table or key FAILS, never
+    /// skips: a check that did not look must not read as one that passed.
+    @Test("every palette glyph exists on the app's floor, macOS 14, by Apple's own availability table — and the table can say no")
+    func everyGlyphExistsOnTheFloorOS() throws {
+        let table = URL(fileURLWithPath:
+            "/System/Library/CoreServices/CoreGlyphs.bundle/Contents/Resources/name_availability.plist")
+        let data = try Data(contentsOf: table)
+        let plist = try #require(
+            try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        let years = try #require(plist["symbols"] as? [String: String], "no symbols table")
+        let releases = try #require(plist["year_to_release"] as? [String: [String: String]],
+                                    "no year_to_release table")
+        func firstMacOS(_ symbol: String) -> [Int]? {
+            guard let year = years[symbol], let macOS = releases[year]?["macOS"] else { return nil }
+            return macOS.split(separator: ".").map { Int($0) ?? Int.max }
+        }
+        let floor = [14, 0]
+        // CONTROLS: a made-up name is absent, and SOME symbol in the table
+        // arrived after the floor, so "≤ 14" below is a comparison that can fail.
+        #expect(firstMacOS("w7ntu.no.such.glyph") == nil)
+        #expect(years.keys.contains { firstMacOS($0).map { floor.lexicographicallyPrecedes($0) } == true },
+                "no symbol in the table is newer than macOS 14: the comparison cannot fail")
+        for tool in PitchEditorTool.allCases {
+            let first = firstMacOS(tool.symbolName)
+            #expect(first != nil, "\(tool.symbolName) is not in Apple's table")
+            if let first {
+                #expect(!floor.lexicographicallyPrecedes(first),
+                        "\(tool.symbolName) first ships in macOS \(first), after the floor")
+            }
+        }
+        #expect(firstMacOS(PitchEditorTool.voice.symbolName) == [11, 0])
     }
 
     @Test("every tool's help fits its two lines at the floor with no readout; Move and Split fit in one")

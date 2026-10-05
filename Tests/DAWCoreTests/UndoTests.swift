@@ -427,6 +427,167 @@ struct UndoRoundTripTests {
                                   layers: [LoopLayer(trackID: store.tracks[2].id, ordinal: 1)])
         #expect(try store.transposeProject(semitones: 1).applied)
     }
+
+    // MARK: - Auto-Correct on a shifted clip (PK-F1, round 3, lane W7-PK)
+    //
+    // The store door over `PitchAutoCorrect.build(…, clipShiftSemitones:)`: it
+    // hands the policy the clip's CURRENT shift, and the pass stays ONE undo
+    // step. The physics (tracked pitch through the render) is pinned in
+    // DAWEngineTests' `ProjectTransposeRenderTests`. Appended here, not a new
+    // suite, because of the @MainActor suite cap.
+
+    private static let eFlatMajorOptions = PitchAutoCorrectOptions(
+        scale: PKF1Fixture.eFlatMajor, strength: 1, retuneMs: 30, preserveVibrato: true)
+
+    /// One vocal clip at `shift`, on a real (tiny) file: `detectClipPitch`
+    /// checks the file exists before it asks the engine.
+    private func autoCorrectFixture(shift: Double) throws
+        -> (store: ProjectStore, engine: PKF1PitchEngine, clipID: UUID) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w7-pk-f1-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("verse.wav")
+        try Data([0x52, 0x49, 0x46, 0x46]).write(to: url)
+        let clip = Clip(name: "Verse take", startBeat: 0, lengthBeats: 8,
+                        audioFileURL: url, pitchShiftSemitones: shift)
+        let store = ProjectStore(tracks: [Track(name: "Lead vocal", kind: .audio, clips: [clip])])
+        let engine = PKF1PitchEngine()
+        store.engine = engine
+        return (store, engine, clip.id)
+    }
+
+    @Test("PK-F1: Auto-Correct on a clip moved +3 snaps what PLAYS onto the song's key, and undoes in one step")
+    func autoCorrectSnapsThePlayedPitch() async throws {
+        let (store, engine, clipID) = try autoCorrectFixture(shift: 3)
+        let clip = try await store.autoCorrectClipPitch(clipId: clipID, options: Self.eFlatMajorOptions)
+        #expect(engine.detectCalls == 1)
+        // Played = sung + 3 = 59.65 / 62.3 / 64.6 -> C4 / D4 / F4, all on E-flat
+        // major, stored relative to the RECORDING: +35 / -30 / +40 cents.
+        let offsets = PKF1Fixture.noteOffsets(clip.pitchEdits)
+        #expect(offsets.count == 3)
+        for (offset, expected) in zip(offsets, [35.0, -30, 40]) {
+            #expect(abs(offset - expected) < 1e-6, "stored \(offset), expected \(expected)")
+        }
+        // Bit for bit what the policy builds at the clip's shift.
+        let atShift = PitchAutoCorrect.build(from: PKF1Fixture.result(), options: Self.eFlatMajorOptions,
+                                             clipShiftSemitones: 3).editSet
+        #expect(offsets.map(\.bitPattern) == PKF1Fixture.noteOffsets(atShift).map(\.bitPattern))
+        // NEGATIVE CONTROL, the pre-PK-F1 arithmetic: the RECORDING snapped with
+        // the shift ignored stores -65 / +70 / +40, which then plays B3 (off the
+        // key) and E-flat4 (a wrong note) once the +3 shift is added.
+        let ignored = PitchAutoCorrect.build(from: PKF1Fixture.result(), options: Self.eFlatMajorOptions).editSet
+        let ignoredOffsets = PKF1Fixture.noteOffsets(ignored)
+        for (offset, expected) in zip(ignoredOffsets, [-65.0, 70, 40]) {
+            #expect(abs(offset - expected) < 1e-6, "stored \(offset), expected \(expected)")
+        }
+        #expect(offsets != ignoredOffsets)
+        // ONE undo step, and redo puts back exactly the same table.
+        try store.undo()
+        #expect(store.tracks[0].clips[0].pitchEdits == nil)
+        try store.redo()
+        #expect(PKF1Fixture.noteOffsets(store.tracks[0].clips[0].pitchEdits) == offsets)
+        withExtendedLifetime(engine) {}
+    }
+
+    @Test("PK-F1: the shift the policy snaps at is the one the clip has AFTER detection, the one the table plays under")
+    func autoCorrectReadsTheShiftAfterDetection() async throws {
+        let (store, engine, clipID) = try autoCorrectFixture(shift: 0)
+        // A key change (the real one, `project.transpose` +3) lands while the
+        // pitch is being detected.
+        var landed = false
+        engine.onDetect = { landed = (try? store.transposeProject(semitones: 3))?.applied ?? false }
+        let clip = try await store.autoCorrectClipPitch(clipId: clipID, options: Self.eFlatMajorOptions)
+        #expect(landed)
+        #expect(clip.pitchShiftSemitones == 3)
+        let offsets = PKF1Fixture.noteOffsets(clip.pitchEdits)
+        #expect(offsets.count == 3)
+        for (offset, expected) in zip(offsets, [35.0, -30, 40]) {
+            #expect(abs(offset - expected) < 1e-6, "stored \(offset), expected \(expected)")
+        }
+        withExtendedLifetime(engine) {}
+    }
+
+    @Test("PK-F1 INVARIANCE: a clip at shift 0 stores exactly what the frozen pre-change arithmetic stores, bit for bit")
+    func autoCorrectAtShiftZeroIsUnchanged() async throws {
+        let (store, engine, clipID) = try autoCorrectFixture(shift: 0)
+        let report = try await store.autoCorrectClipPitchReport(clipId: clipID, options: Self.eFlatMajorOptions)
+        let clip = report.clip
+        // `PrePitchNoteSplitReference` is the FROZEN copy of the policy's old
+        // arithmetic (one segment per run; this contour has one note per run).
+        let frozen = PrePitchNoteSplitReference.editSet(from: PKF1Fixture.result(),
+                                                        options: Self.eFlatMajorOptions)
+        #expect(frozen.segments.count == 3)
+        #expect(PKF1Fixture.noteOffsets(clip.pitchEdits).map(\.bitPattern)
+                == frozen.segments.map(\.pitchOffsetCents.bitPattern))
+        #expect(report.keptDetuneCents == nil)
+        // Every stored field but `id`, note by note (the oracle's own comparison).
+        let notes = (clip.pitchEdits?.segments ?? []).filter { $0.origin != .unpitched }
+        try #require(notes.count == frozen.segments.count)
+        for (i, (stored, reference)) in zip(notes, frozen.segments).enumerated() {
+            let fields = PrePitchNoteSplitReference.differingFields(stored, reference)
+            #expect(fields.compared >= 14 && fields.differing.isEmpty,
+                    "note \(i): \(fields.differing) (\(fields.compared) fields compared)")
+        }
+        withExtendedLifetime(engine) {}
+    }
+
+    @Test("PK-F1 ruling: on a clip shifted +3.3, Auto-Correct stores the +3 table, keeps the +30 c detune, and says so in its response")
+    func autoCorrectReportsTheKeptDetune() async throws {
+        let (store, engine, clipID) = try autoCorrectFixture(shift: 3.3)
+        let report = try await store.autoCorrectClipPitchReport(clipId: clipID, options: Self.eFlatMajorOptions)
+        let atWhole = PitchAutoCorrect.build(from: PKF1Fixture.result(), options: Self.eFlatMajorOptions,
+                                             clipShiftSemitones: 3).editSet
+        let stored = PKF1Fixture.noteOffsets(report.clip.pitchEdits)
+        #expect(stored.count == 3)
+        #expect(stored.map(\.bitPattern) == PKF1Fixture.noteOffsets(atWhole).map(\.bitPattern))
+        // ...and that table is the pre-registered one: +35 / -30 / +40 cents.
+        for (offset, expected) in zip(stored, [35.0, -30, 40]) {
+            #expect(abs(offset - expected) < 1e-6, "stored \(offset), expected \(expected)")
+        }
+        let kept = try #require(report.keptDetuneCents)
+        #expect(abs(kept - 30) < 1e-9)
+        #expect(report.keptDetuneNotice == "Kept this clip's +30 cent detune (its pitch shift is +3.3 "
+                + "semitones): each corrected note plays 30 cents sharp of the scale, as the shift asks.")
+        // A FLAT detune says so: -0.5 rounds away from zero to -1, keeping +50 c.
+        let (flatStore, flatEngine, flatID) = try autoCorrectFixture(shift: 0.5)
+        let flat = try await flatStore.autoCorrectClipPitchReport(clipId: flatID, options: Self.eFlatMajorOptions)
+        #expect(flat.keptDetuneNotice == "Kept this clip's -50 cent detune (its pitch shift is +0.5 "
+                + "semitones): each corrected note plays 50 cents flat of the scale, as the shift asks.")
+        // CONTROL: a whole shift keeps nothing and says nothing.
+        let (wholeStore, wholeEngine, wholeID) = try autoCorrectFixture(shift: 3)
+        let plain = try await wholeStore.autoCorrectClipPitchReport(clipId: wholeID, options: Self.eFlatMajorOptions)
+        #expect(plain.keptDetuneCents == nil)
+        #expect(plain.keptDetuneNotice == nil)
+        withExtendedLifetime((engine, flatEngine, wholeEngine)) {}
+    }
+
+    @Test("(d) the store door names a pending AI fix before the key moves, in a preview too, and nothing when none is pending")
+    func transposeNamesPendingFixesBeforeTheKeyMoves() throws {
+        let clip = Clip(name: "Verse take", startBeat: 0, lengthBeats: 8,
+                        audioFileURL: URL(fileURLWithPath: "/tmp/w7-pk-d-verse.wav"))
+        let store = ProjectStore(tracks: [Track(name: "Lead vocal", kind: .audio, clips: [clip])])
+        store.pendingClipFixes["job-1"] = PendingClipFix(
+            jobID: "job-1", trackID: store.tracks[0].id,
+            target: .clip(id: clip.id, fingerprint: ClipGeometryFingerprint(of: clip)),
+            windowStartBeat: 0, windowLengthBeats: 8, regionStartBeat: 0, regionEndBeat: 8,
+            mapRevision: 0, regionBPM: 120, submittedAt: Date())
+
+        let preview = try store.transposeProject(semitones: 2, dryRun: true)
+        #expect(store.tracks[0].clips[0].pitchShiftSemitones == 0, "a preview moves nothing")
+        let named = preview.warnings.filter { $0.code == .pendingFixWillBeRefused }
+        #expect(named.count == 1)
+        #expect(named.first?.clipIds == [clip.id])
+        #expect(named.first?.message.contains("'Lead vocal'") == true)
+
+        let applied = try store.transposeProject(semitones: 2)
+        #expect(applied.applied)
+        #expect(applied.warnings.filter { $0.code == .pendingFixWillBeRefused }.count == 1)
+
+        store.pendingClipFixes = [:]
+        let quiet = try store.transposeProject(semitones: 1)
+        #expect(quiet.applied)
+        #expect(quiet.warnings.allSatisfy { $0.code != .pendingFixWillBeRefused })
+    }
 }
 
 @MainActor

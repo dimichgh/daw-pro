@@ -104,6 +104,11 @@ public enum AppDirectories {
         /// `isExcludedFromBackupKey = true` — this type only resolves paths; it never creates a
         /// directory or sets a resource value for any category.
         case singingCache = "SingingCache"
+        /// Saved multi-instrument templates (M39 wave 3, TPL-5; design
+        /// `docs/design/2026-09-27-multi-instrument-templates.md` §6.1, §7.2): one
+        /// `.dawtemplate` file per saved template — USER CONTENT. `TemplateLibrary.standard`
+        /// resolves here (and to a per-process temp folder under a Swift test process).
+        case templates = "Templates"
 
         /// The on-disk directory name.
         public var directoryName: String { rawValue }

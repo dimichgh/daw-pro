@@ -106,12 +106,20 @@ public struct ClipConversionSource: Sendable, Equatable {
     /// The source clip's name — the landed clip reuses it, so a converted
     /// arrangement still reads like the one it came from.
     public var name: String
+    /// The pitch shift BAKED into `url`: the key the converter heard the clip
+    /// in (the stale-key rule, lane W7-PK round 3). `convertClipsToVoice`
+    /// refuses to land when the clip no longer plays at it
+    /// (`ClipVoiceConversion.pitchDrift`). Read from the SAME clip value the
+    /// extraction renders, so it is the baked shift by construction. Defaulted
+    /// and last, so a caller that builds a source by hand compiles unchanged.
+    public var pitchShiftSemitones: Double
 
     public init(clipId: UUID, trackId: UUID, url: URL,
                 startBeat: Double, lengthBeats: Double, seconds: Double,
                 gainDb: Double, fadeInBeats: Double, fadeOutBeats: Double,
                 fadeInCurve: FadeCurve, fadeOutCurve: FadeCurve,
-                gainEnvelope: [ClipGainPoint], name: String) {
+                gainEnvelope: [ClipGainPoint], name: String,
+                pitchShiftSemitones: Double = 0) {
         self.clipId = clipId
         self.trackId = trackId
         self.url = url
@@ -125,6 +133,7 @@ public struct ClipConversionSource: Sendable, Equatable {
         self.fadeOutCurve = fadeOutCurve
         self.gainEnvelope = gainEnvelope
         self.name = name
+        self.pitchShiftSemitones = pitchShiftSemitones
     }
 }
 
@@ -143,6 +152,45 @@ public enum ClipVoiceConversion {
     /// conversion would be noise nobody reads. 10 ms is also the point where
     /// a placement error starts being audible against a click track.
     public static let driftWarningSeconds = 0.010
+
+    /// A clip's pitch shift counts as unchanged within this many semitones: a
+    /// fractional shift moved up and back down is float addition, not
+    /// identity. The value of `ProjectStore.lanePitchEpsilon` (the PK-F3 rule
+    /// for take-group fixes), restated beside the rule that uses it.
+    public static let pitchShiftEpsilon = 1e-6
+
+    /// THE STALE-KEY RULE (lane W7-PK round 3; PK-F3's rule for take-group
+    /// fixes): why a conversion may not land, or nil when every converted
+    /// clip's source still plays at the pitch shift its extraction baked. Each
+    /// entry is a converted clip's name, the shift BAKED into what the
+    /// converter heard, and the shift its source clip has NOW.
+    ///
+    /// The converter hears each clip at its extraction-time shift and the
+    /// converted clip lands at shift 0, so it sounds in the key the source had
+    /// then. A key change (`project.transpose`) or a hand edit during the
+    /// minutes a conversion takes would land a voice out of tune against the
+    /// song while every other check passes. Refused in words, never repaired:
+    /// shifting the converted audio would move its formants too, so the honest
+    /// fix is to convert again.
+    public static func pitchDrift(
+        _ clips: [(name: String, extracted: Double, now: Double)]
+    ) -> String? {
+        let moved = clips.filter { abs($0.now - $0.extracted) > pitchShiftEpsilon }
+        guard let first = moved.first else { return nil }
+        let delta = first.now - first.extracted
+        let together = moved.count == clips.count
+            && moved.allSatisfy { abs(($0.now - $0.extracted) - delta) <= pitchShiftEpsilon }
+        let size = abs(delta)
+        let cause = together
+            ? "\(clips.count == 1 ? "the clip" : "every clip") moved "
+                + "\(delta > 0 ? "up" : "down") \(ClampNotice.number(size)) "
+                + "\(size == 1 ? "semitone" : "semitones"), as a key change does"
+            : moved.map { "\"\($0.name)\" \(ClampNotice.number($0.extracted)) → "
+                + "\(ClampNotice.number($0.now))" }.joined(separator: ", ") + " semitones"
+        return "the pitch shift changed while converting (\(cause)) — the converted voice "
+            + "was made at the old pitch and would sound out of tune against the song, so "
+            + "nothing landed; convert again"
+    }
 }
 
 /// Per-clip voice conversion (m24-m leg A / m24-o) — the selection-driven
@@ -258,7 +306,8 @@ extension ProjectStore {
             gainDb: clip.gainDb,
             fadeInBeats: clip.fadeInBeats, fadeOutBeats: clip.fadeOutBeats,
             fadeInCurve: clip.fadeInCurve, fadeOutCurve: clip.fadeOutCurve,
-            gainEnvelope: clip.gainEnvelope, name: clip.name)
+            gainEnvelope: clip.gainEnvelope, name: clip.name,
+            pitchShiftSemitones: clip.pitchShiftSemitones)
     }
 
     /// Converts EVERY clip in `clipIds` separately and lands the whole set on
@@ -284,6 +333,11 @@ extension ProjectStore {
     ///    trimming one would break the single promise this feature makes (the
     ///    arrangement survives). Converting them in two passes costs nothing —
     ///    every conversion makes its own track anyway.
+    ///
+    /// **The one rejection AFTER the work** (the stale-key rule, lane W7-PK
+    /// round 3): a clip whose pitch shift changed while the set was converting
+    /// — a key change, or a hand edit — → `invalidClipEdit` saying what moved,
+    /// and NOTHING lands. Its converted voice was made at the old pitch.
     ///
     /// **Geometry is the SOURCE clip's, not the converted file's.** The landed
     /// clip takes `startBeat`/`lengthBeats` straight from the clip it came from
@@ -363,8 +417,11 @@ extension ProjectStore {
         // --- 2. Extract + convert, one clip at a time, OUTSIDE any edit ----
         var warnings: [String] = []
         var landed: [(report: ConvertedClipReport, clip: Clip)] = []
+        // The stale-key rule's record: each clip's shift as its extraction baked it.
+        var baked: [(id: UUID, name: String, shift: Double)] = []
         for span in ordered {
             let source = try await extractClipAudioForConversion(clipId: span.id)
+            baked.append((span.id, source.name, source.pitchShiftSemitones))
             // Re-locate after the await (the sliceClipToSampler law): a clip
             // that vanished mid-flight fails the whole call rather than
             // landing a partial set.
@@ -428,6 +485,23 @@ extension ProjectStore {
                     extractedPath: source.url.path, file: stableURL.path,
                     sourceSeconds: source.seconds, convertedSeconds: info.durationSeconds),
                 newClip))
+        }
+
+        // --- 2b. The stale-key rule, at the moment of landing --------------
+        // Checked HERE, after the last await and with none between it and the
+        // edit below, because this is when the set lands: a clip re-pitched
+        // while a LATER clip was converting has already had its own turn above.
+        // A source deleted after its own turn is not this rule's to judge and
+        // is skipped, exactly as it was before the rule.
+        let pitchNow = baked.compactMap { entry -> (name: String, extracted: Double, now: Double)? in
+            guard let (t, c) = locateConversionClip(entry.id) else { return nil }
+            return (entry.name, entry.shift, tracks[t].clips[c].pitchShiftSemitones)
+        }
+        // TODO(wire round): the MCP tool `vc_convert_clips` (mcp-server/src/
+        // server.ts) should list this refusal: a clip re-pitched while it was
+        // converting lands nothing, and says what moved.
+        if let why = ClipVoiceConversion.pitchDrift(pitchNow) {
+            throw ProjectError.invalidClipEdit(why)
         }
 
         // --- 3. ONE edit: one new violet track carrying the whole set ------

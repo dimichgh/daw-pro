@@ -74,6 +74,43 @@ import Foundation
 // choice made after a preset reads as a change since that preset, exactly as
 // a flip of the flag always has.
 //
+// ═══════════════════════════════════════════════════════════════════════════
+// W7-NTU (2026-10-04): A SECOND STAMP, FOR WHAT A PRESET WOULD REPLACE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The whole-set stamp moves when the voice size or the consonant choice is
+// changed after a preset, exactly as a moved note moves it. But the next
+// preset does not lose those two: `ProjectStore.autoCorrectClipPitchReport`
+// CARRIES a voice size the table holds (unless the options name one) and a
+// consonant setting somebody chose (all but `.offByDefault`). So a card that
+// asks before replacing hand edits asked about something it would keep.
+//
+// `replaceableContentStamp` is the content stamp with those two FOLDED to
+// "kept / not kept" (a voice size → the seed's, nil stays nil; a chosen
+// consonant setting → `.on`, `.offByDefault` stays). The preset records it in
+// `autoCorrectReplaceableStamp` beside the whole one, and
+// `hasHandEditsARerunWouldReplace(_:)` compares it. Everything a preset DOES
+// replace is still in it: every note, the slide smoothness (re-seeded, never
+// carried), the retune speed.
+//
+// ⛔ **`hasHandEditsSinceAutoCorrect` IS UNCHANGED, ON PURPOSE.** It is also
+// the store's `replaceExisting:false` refusal, and the WIRE may name a voice
+// size of its own (`PitchAutoCorrectOptions.formantCorrection`), which
+// REPLACES the hand-set one. Relaxing it would let that call overwrite a
+// hand-set voice size with no refusal. The new predicate takes the options
+// and folds the voice size only when they name none.
+//
+// ⭐ **ABSENT IS TODAY'S BEHAVIOUR.** A set saved before the field has no
+// replaceable stamp, and the predicate answers exactly as
+// `hasHandEditsSinceAutoCorrect` does: one more question for that clip, and
+// the preset that follows writes both stamps (the rule this banner already
+// states for sets saved before `autoCorrectStamp`).
+//
+// The new stamp is a THIRD field `StretchRenderCache.Params`' `==` sees and the
+// digest does not. It is written only WITH `autoCorrectStamp`, by the same
+// preset write, so it adds no same-notes path of its own: the stamp paragraph
+// above covers it.
+//
 // ⚠️ **WHY FNV-1a AND NOT SHA256.** DAWCore imports Foundation only, and
 // Swift's `Hashable` is seeded per process, so it would never match a stamp
 // saved by an earlier launch. This is change detection, not security: 64 bits
@@ -90,17 +127,20 @@ import Foundation
 extension PitchEditSet {
 
     /// A deterministic stamp of everything this set would SAVE, except the
-    /// stamp field itself. nil only if the set cannot be encoded at all, and
+    /// two stamp fields. nil only if the set cannot be encoded at all, and
     /// the predicate below reads that as "may carry hand edits".
     ///
-    /// Computed on a copy with `autoCorrectStamp = nil`, through the type's own
-    /// `encode(to:)` (which omits a nil stamp), so the stamp can never be part
-    /// of its own input. Sorted keys make the bytes independent of dictionary
+    /// Computed on a copy with `autoCorrectStamp` and
+    /// `autoCorrectReplaceableStamp` nil, through the type's own `encode(to:)`
+    /// (which omits a nil stamp), so neither stamp can be part of its own
+    /// input. On a set with no replaceable stamp (every set saved before
+    /// 2026-10-04) that is the same bytes, so the same stamp, as before. Sorted keys make the bytes independent of dictionary
     /// order. Cost: one JSON encode plus one pass over the bytes. It is asked
     /// once per preset write and once per preset click, never per frame.
     public var contentStamp: String? {
         var unstamped = self
         unstamped.autoCorrectStamp = nil
+        unstamped.autoCorrectReplaceableStamp = nil
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         guard let bytes = try? encoder.encode(unstamped) else { return nil }
@@ -114,11 +154,37 @@ extension PitchEditSet {
         return String(format: "%016llx", hash)
     }
 
+    /// W7-NTU (2026-10-04) — the content stamp of what a preset would REPLACE:
+    /// `contentStamp` of this set with the two settings a preset KEEPS folded
+    /// to "kept / not kept". The fold is the store's carry rule
+    /// (`ProjectStore.autoCorrectClipPitchReport`): a voice size the set holds
+    /// is carried (→ `newSetFormantCorrection`; nil, which a preset re-seeds,
+    /// stays nil), and a consonant setting somebody chose is kept (`.on` and
+    /// `.offByChoice` → `.on`; `.offByDefault`, which a preset re-seeds,
+    /// stays). The slide smoothness is NOT folded: a preset re-seeds it.
+    /// `PitchEditReplaceableStampTests` runs the REAL store's preset after each
+    /// change and reads the result back, so a carry rule that moves turns it
+    /// red.
+    public var replaceableContentStamp: String? {
+        var folded = self
+        if folded.formantCorrection != nil {
+            folded.formantCorrection = Self.newSetFormantCorrection
+        }
+        if folded.consonantProtection != .offByDefault {
+            folded.consonantProtection = .on
+        }
+        return folded.contentStamp
+    }
+
     /// This set as an auto-correct pass writes it: stamped with its own
-    /// content. `ProjectStore.autoCorrectClipPitch` is the one caller.
+    /// content, whole and as a preset would replace it.
+    /// `ProjectStore.autoCorrectClipPitch` is the caller (and the
+    /// `findUnpitchedSounds` merge, re-stamping a set that was exactly a
+    /// preset's output).
     public func stampedAsAutoCorrectOutput() -> PitchEditSet {
         var stamped = self
         stamped.autoCorrectStamp = contentStamp
+        stamped.autoCorrectReplaceableStamp = replaceableContentStamp
         return stamped
     }
 
@@ -141,6 +207,37 @@ extension PitchEditSet {
     /// callers answer that before reaching here.
     public var hasHandEditsSinceAutoCorrect: Bool {
         guard let stamp = autoCorrectStamp, let now = contentStamp else { return true }
+        return stamp != now
+    }
+
+    /// W7-NTU (2026-10-04) — ⭐ **THE question the preset CARD asks: would
+    /// re-running a preset with `options` throw away work it cannot re-create?**
+    ///
+    /// **false** when everything a preset REPLACES is exactly what the last
+    /// pass wrote: the notes, the slide smoothness and the retune speed are
+    /// untouched, and any change is to a setting the preset KEEPS (a voice
+    /// size, a consonant choice). **true** otherwise, exactly as
+    /// `hasHandEditsSinceAutoCorrect`, whenever:
+    ///  * the options NAME a voice size (only the wire can): that preset
+    ///    replaces the voice size too, so nothing is folded;
+    ///  * the set has no replaceable stamp (saved before 2026-10-04, or
+    ///    never written by a preset): today's whole-set rule, one question.
+    ///
+    /// The store's `replaceExisting:false` refusal still asks
+    /// `hasHandEditsSinceAutoCorrect`: it is the more careful of the two, and
+    /// it moves to this one only with its own route (W7-NTU STATUS).
+    ///
+    /// TODO(mcp-integration-engineer, W7-NTU ruling 1 wire half): adopt this in
+    /// `ProjectStore.autoCorrectClipPitchReport`'s two `replaceExisting:false`
+    /// checks (`existing.hasHandEditsARerunWouldReplace(options)`), and echo it
+    /// beside `handEditedSinceAutoCorrect` in `clip.getPitchEdits`, so the wire
+    /// and the card agree again. MCP tools `clip_auto_correct_pitch` and
+    /// `clip_get_pitch_edits`.
+    public func hasHandEditsARerunWouldReplace(_ options: PitchAutoCorrectOptions) -> Bool {
+        guard options.formantCorrectionOverride == nil,
+              let stamp = autoCorrectReplaceableStamp,
+              let now = replaceableContentStamp
+        else { return hasHandEditsSinceAutoCorrect }
         return stamp != now
     }
 }

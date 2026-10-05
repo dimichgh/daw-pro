@@ -61,7 +61,10 @@ extension AutomationStoreTests {
         #expect(cases > 1000, "positive control: the fixture must cover the targets")
         #expect(accepted > 0 && warned > 0 && refused > 0 && accepted + warned + refused == cases,
                 "positive control: accepted, warned and refused must all occur, and nothing else")
-        #expect(disagreements.isEmpty, "\(disagreements.prefix(3))")
+        // A Bool, not the array: a failing `#expect` prints every value it
+        // captured in full, and this table holds thousands of cases.
+        let agree = disagreements.isEmpty
+        #expect(agree, "\(disagreements.count) disagreements, first: \(disagreements.first ?? "")")
     }
 
     @Test("m39-tpl-1: ModulationRules predicts every addModulationRoute budget verdict before the store gives it")

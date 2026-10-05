@@ -2167,6 +2167,20 @@ public struct SamplerParams: Codable, Sendable, Equatable {
     /// `effectivePedalHoldLimit` to a cap no voice pool can reach.
     public var pedalHoldLimit: Int?
 
+    /// PK-F2 (lane W7-PK) — A SLICE KIT: Chop to Sampler made these zones, so
+    /// each note plays one slice of a recording and is a trigger, not a pitch.
+    /// `project.transpose` skips a marked track the way it skips drums: moving
+    /// its notes would play different slices, not the same groove in a new
+    /// key. SET BY THE CHOP and never read off the wire — provenance, like
+    /// `sourcePath` (m26-h), so it rides through edits unchanged. Never guessed
+    /// from zone shapes: one-key zones are also how a drum multisample is laid
+    /// out. Read it through `isSliceKit`; set it through `markSliceKit()`.
+    ///
+    /// ADDITIVE-OPTIONAL on the `bendRangeSemitones` pattern: nil (every
+    /// sampler that was not chopped, every project saved before the key) never
+    /// encodes, so a pre-existing project's JSON stays byte-identical.
+    public var sliceKit: Bool?
+
     public static let attackRange: ClosedRange<Double> = 0...1
     public static let releaseRange: ClosedRange<Double> = 0.001...8
     public static let gainRange: ClosedRange<Double> = 0...1
@@ -2280,7 +2294,9 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         // m34-w: APPENDED LAST for the same m34-s reason `glideTime` was —
         // argument order is declaration order, and `SamplerDocument`'s
         // reconstruction calls this labelled-positionally.
-        glideMode: SamplerGlideMode? = nil
+        glideMode: SamplerGlideMode? = nil,
+        // PK-F2: APPENDED LAST for the same m34-s reason as `glideTime`.
+        sliceKit: Bool? = nil
     ) {
         self.zones = zones
         self.oneShot = oneShot
@@ -2326,6 +2342,8 @@ public struct SamplerParams: Codable, Sendable, Equatable {
         // m34-w: nil stays nil, so a project that never chose a mode keeps a
         // byte-identical JSON shape AND the pre-m34-w sound.
         self.glideMode = glideMode
+        // PK-F2: nil stays nil, so an un-chopped sampler's JSON is unchanged.
+        self.sliceKit = sliceKit
     }
 
     /// The figure the ENGINE uses — the stored value, or the GM default. One

@@ -120,6 +120,12 @@ extension AppModel {
     /// was showing, exactly once (the gate hands it back once and forgets it).
     func confirmPresetReplace() {
         guard let held = pitchPresetReplaceGate.confirm() else { return }
+        // Tune to Melody (W7-TTM3): a request its card sent carries the melody and goes back
+        // to that card's door, which runs exactly what was held (`TuneToMelodyStaging.swift`).
+        if let run = tuneToMelodyDoor.confirmedRun(held) {
+            performTuneToMelody(run)
+            return
+        }
         applyTuningPreset(clipID: held.clipID, preset: held.preset)
     }
 
@@ -127,6 +133,8 @@ extension AppModel {
     /// is changed. The hand edits stay exactly as they were.
     func cancelPresetReplace() {
         pitchPresetReplaceGate.cancel()
+        // Tune to Melody (W7-TTM3): if its card was the one asking, it goes back to picking.
+        tuneToMelodyDoor.replaceDeclined()
     }
 
     /// THE ONE STORE CALL both preset doors reach, only after the gate said
@@ -420,9 +428,9 @@ extension AppModel {
     /// applies asynchronously (detection), so read `clip.getPitchEdits` for the
     /// result.
     func tuneVocalDebug(_ params: [String: JSONValue]) throws -> JSONValue {
-        let known: Set<String> = ["clipId", "preset", "answer"]
+        let known: Set<String> = ["clipId", "preset", "answer", "melody"]
         if let unknown = params.keys.sorted().first(where: { !known.contains($0) }) {
-            throw DebugError("debug.tuneVocal: unknown key '\(unknown)'. Known: clipId, preset, answer")
+            throw DebugError("debug.tuneVocal: unknown key '\(unknown)'. Known: clipId, preset, answer, melody")
         }
         var clipID: UUID?
         if let raw = params["clipId"]?.stringValue {
@@ -438,6 +446,14 @@ extension AppModel {
             }
             guard let clipID else { throw DebugError("debug.tuneVocal: 'preset' needs a 'clipId'") }
             tuneVocalFromContextMenu(clipID: clipID, preset: preset)
+        }
+        // Tune to Melody (W7-TTM3): the card's own funnels, before `answer`, so one call can
+        // press Apply and answer the replace card it raises.
+        if let melody = params["melody"] {
+            guard let block = melody.objectValue else {
+                throw DebugError("debug.tuneVocal: 'melody' must be an object")
+            }
+            try tuneToMelodyDebug(block, clipID: clipID)
         }
         if let raw = params["answer"]?.stringValue {
             switch raw {
@@ -460,10 +476,12 @@ extension AppModel {
                 "undoNote": .string(copy.undoNote),
                 "confirmLabel": .string(copy.confirmLabel),
                 "cancelLabel": .string(copy.cancelLabel),
+                "tuneToMelody": .bool(held.melody != nil),
             ])
         } else {
             echo["pending"] = .null
         }
+        echo.merge(tuneToMelodyEcho(clipID: clipID)) { current, _ in current }
         if let clipID, let clip = liveClip(clipID) {
             let edits = clip.pitchEdits
             echo["clip"] = .object([

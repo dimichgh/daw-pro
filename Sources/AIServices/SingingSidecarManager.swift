@@ -95,9 +95,11 @@ public enum SingingStopReason: Sendable, Equatable {
     /// from admission (another model is booting), an explicit `ai.modelUnload`, an idle timeout,
     /// or app shutdown; the current protocol does not distinguish those from inside this type.
     case evictedByCoordinator
-    /// The runaway watchdog killed the tree. `detail` is the human reason (over the footprint cap,
-    /// or 2 consecutive Critical samples).
-    case watchdog(detail: String)
+    /// The runaway watchdog killed the tree. **FIX NOW #8 (architect review):** `trigger` is the
+    /// structured fact a caller can switch on; `detail` stays the human reason, for messages
+    /// only — never parsed back, since `ModelMemory.formatGB` rounds to one decimal in 10^9
+    /// units and a footprint just over a binary cap can print a figure that reads back under it.
+    case watchdog(trigger: SingingWatchdogTrigger, detail: String)
 }
 
 public protocol SingingSidecarManaging: Sendable {
@@ -157,9 +159,14 @@ public actor SingingSidecarManager: SingingSidecarManaging {
     private var lastStopReason: SingingStopReason?
 
     private let watchdog: SingingSidecarWatchdog
-    /// Owned only when the configuration did not inject its own pressure reader — i.e. only in
-    /// the shipped app, never in a test. See `MemoryPressureObserver`'s doc for why it is
-    /// UNVERIFIED against genuine Critical pressure.
+    /// Owned only when the configuration did not inject its own pressure reader. FIX NOW #6
+    /// (architect review): this was previously true only by ACCIDENT for most tests and FALSE
+    /// for `underCapNeverKills` specifically (it never injected one, so it owned a REAL
+    /// `MemoryPressureObserver`, exposed to genuine system memory pressure, same as the shipped
+    /// app) — every `SingingSidecarManagerTests` test now gets `{ false }` injected by its
+    /// shared `testConfiguration` helper, overridden explicitly where a test wants real pressure
+    /// behavior. See `MemoryPressureObserver`'s doc for why it is UNVERIFIED against genuine
+    /// Critical pressure.
     private let pressureObserver: MemoryPressureObserver?
 
     public init(configuration: Configuration = .resolved()) {
@@ -178,7 +185,9 @@ public actor SingingSidecarManager: SingingSidecarManaging {
                 ?? SingingSidecarWatchdog.liveFootprintBytes,
             readMemoryPressureCritical: configuration.watchdogReadMemoryPressureCritical
                 ?? { observer?.readCritical() ?? false },
-            sleepSeconds: configuration.watchdogSleepSeconds))
+            sleepSeconds: configuration.watchdogSleepSeconds,
+            // FIX NOW #4: the real `killTree` must re-check identity before it signals anything.
+            identity: SingingSidecarManager.stopIdentity(scriptsDir: configuration.scriptsDir)))
     }
 
     // MARK: - Status
@@ -421,6 +430,12 @@ public actor SingingSidecarManager: SingingSidecarManaging {
         if let flightTicket {
             await config.lifecycle.recordBootPid(flightTicket, pid: process.processIdentifier)
         }
+        // FIX NOW #3 (architect review): arm at SPAWN, not only once `.healthy` — otherwise the
+        // watchdog cannot see a runaway during the LOAD window (design R6: SoulX's load landing
+        // on top of a busy ACE). Safe to call unconditionally thanks to `arm`'s own idempotence
+        // for the same pid: every later `.ready` probe inside the poll loop below re-arms this
+        // exact pid and is a no-op.
+        await armWatchdog(rootPid: process.processIdentifier)
 
         let deadline = bootStartedAt.addingTimeInterval(config.startupTimeoutSeconds)
         while Date() < deadline {
@@ -472,9 +487,16 @@ public actor SingingSidecarManager: SingingSidecarManaging {
     /// the facade may itself have spawned something, and because the identical rule for RVC (which
     /// also has no such split) is what makes it safe to reuse this planner verbatim.
     private var stopIdentity: SidecarStop.Identity {
+        Self.stopIdentity(scriptsDir: config.scriptsDir)
+    }
+
+    /// Static so `init` can build the watchdog's `Configuration.identity` (FIX NOW #4) before
+    /// `self` is fully initialized — `stopIdentity` (above) stays the instance-facing name every
+    /// other call site already uses.
+    static func stopIdentity(scriptsDir: URL?) -> SidecarStop.Identity {
         SidecarStop.Identity(
             argsPattern: #"(^|/)sing/(server|stub_server)\.py(\s|$)"#,
-            directoryPath: config.scriptsDir?.path)
+            directoryPath: scriptsDir?.path)
     }
 
     private static let stopVocabulary = SidecarStop.Vocabulary(
@@ -532,12 +554,21 @@ public actor SingingSidecarManager: SingingSidecarManaging {
                 pidfilePath: config.pidfileURL?.path))
 
         case .terminate(let pid, let discovery):
+            // FIX NOW #1 (architect review): recorded BEFORE the signal goes out, not after
+            // `terminateTree` returns -- the manager actor is free for that whole `await`
+            // (`terminateTree` is a nonisolated `static … async`), so a caller that reads
+            // `lastStopClassification()` the instant the process dies must never see `nil` and
+            // read that as an unrequested crash. `.refused` mutates nothing (SidecarStop invariant
+            // 2), so it restores the previous value.
+            let previousStopReason = lastStopReason
+            lastStopReason = classification
             let outcome: SidecarStop.TerminationOutcome
             switch await SidecarStop.terminateTree(
                 target: pid, discovery: discovery, identity: stopIdentity,
                 stopTimeoutSeconds: config.stopTimeoutSeconds
             ) {
             case .refused(let refusal):
+                lastStopReason = previousStopReason
                 throw SidecarError.stopFailed(SidecarStop.refusalMessage(
                     refusal, vocabulary: Self.stopVocabulary, baseURL: config.baseURL,
                     pidfilePath: config.pidfileURL?.path))
@@ -549,11 +580,21 @@ public actor SingingSidecarManager: SingingSidecarManaging {
             startedAt = nil
             flightTicket = nil
             lastTerminationOutcome = outcome
-            lastStopReason = classification
             await watchdog.disarm()
 
-            let after = await status()
-            if after.state == .healthy || after.state == .error {
+            // FIX NOW #7 (architect review, Q3): decide "still up" from the PROBE directly, not
+            // from the derived `SingingSidecarState` -- SoulX's probe has a `.loading` case that
+            // `status()` maps to `.starting` (neither `.healthy` nor `.error`), so the old check
+            // let `stop()` report success while something still answered "loading" on the port.
+            // Also check `outcome.targetSurvived`: a target that survived SIGKILL (stuck in an
+            // uninterruptible wait) and no longer answers HTTP must not be reported "stopped".
+            let answering: Bool
+            let probed = await probeHealth()
+            switch probed {
+            case .unreachable: answering = false
+            case .ready, .loading, .modelError, .malformed: answering = true
+            }
+            if answering || outcome.targetSurvived {
                 throw SidecarError.stopFailed(SidecarStop.stillAnsweringMessage(
                     outcome: outcome, baseURL: config.baseURL, vocabulary: Self.stopVocabulary))
             }
@@ -595,8 +636,19 @@ public actor SingingSidecarManager: SingingSidecarManaging {
     /// a runaway kill.
     public func lastStopClassification() async -> SingingStopReason? {
         if let lastStopReason { return lastStopReason }
-        if let reason = await watchdog.lastKillReason { return .watchdog(detail: reason) }
+        if let trigger = await watchdog.lastKillTrigger, let reason = await watchdog.lastKillReason {
+            return .watchdog(trigger: trigger, detail: reason)
+        }
         return nil
+    }
+
+    /// FIX NOW #6 (architect review): lets a test prove the watchdog's loop actually RAN, not
+    /// just that nothing happened because nothing looked — the `disarmBeforeFirstSamplePrevents
+    /// Sampling` test is the existing "a control sits at the input of the stage it controls"
+    /// precedent this reuses rather than duplicates: that test proves 0 samples when disarmed
+    /// before the first poll; this accessor lets OTHER tests assert `> 0` when armed normally.
+    func watchdogSamplesTaken() async -> UInt64 {
+        await watchdog.samplesTaken
     }
 
     // MARK: - Health probe
@@ -782,9 +834,7 @@ extension SingingSidecarManager {
             watchdogPollIntervalSeconds: Double = 0.25,
             watchdogSampleFootprintBytes: (@Sendable (Int32) -> UInt64?)? = nil,
             watchdogReadMemoryPressureCritical: (@Sendable () -> Bool)? = nil,
-            watchdogSleepSeconds: @escaping @Sendable (Double) async -> Void = { seconds in
-                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-            },
+            watchdogSleepSeconds: (@Sendable (Double) async -> Void)? = nil,
             testExtraEnvironment: [String: String] = [:]
         ) {
             self.baseURL = baseURL
@@ -803,7 +853,12 @@ extension SingingSidecarManager {
             self.watchdogPollIntervalSeconds = watchdogPollIntervalSeconds
             self.watchdogSampleFootprintBytes = watchdogSampleFootprintBytes
             self.watchdogReadMemoryPressureCritical = watchdogReadMemoryPressureCritical
-            self.watchdogSleepSeconds = watchdogSleepSeconds
+            // `nil` = the real sleep, supplied HERE and never as the default argument (an async
+            // default-argument closure miscompiles across modules in Swift 6.3.3; see
+            // `ModelLifecycleCoordinator.init` and `scripts/gates/async-default-dup.py`).
+            self.watchdogSleepSeconds = watchdogSleepSeconds ?? { seconds in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            }
             self.testExtraEnvironment = testExtraEnvironment
         }
 

@@ -229,6 +229,11 @@ public struct TransposeReport: Codable, Sendable, Equatable {
             /// stops while the whole clip is shifted
             /// (`ConsonantMixInactiveReason.clipTransposed`).
             case consonantProtectionStops
+            /// An AI fix (`ai.fixClipRegion`) is still being made from audio this
+            /// key change moves. It was made at the old pitch, so it is refused
+            /// as out of date when it arrives (`clipFixStale`). Said BEFORE the
+            /// key moves (round 3 (d)).
+            case pendingFixWillBeRefused
         }
         public enum Source: String, Codable, Sendable { case recorded, generated }
         public var code: Code
@@ -320,7 +325,7 @@ public enum ProjectTranspose {
     ///   - dryRun: only the report's wording depends on it.
     ///   - sliceKit: which tracks are slice kits. Production always takes the
     ///     default, `isSliceKitTrack` (the stored marker); a test passes its own
-    ///     so the skip is testable while the marker is not stored yet.
+    ///     so the skip is testable without building a real chop.
     /// - Throws: `TransposeRefusal` (range, a note leaving 0…127, an audio clip
     ///   past ±24, an open looper) or `ProjectError.trackNotFound`.
     public static func plan(tracks: [Track], semitones: Int,
@@ -582,6 +587,48 @@ public enum ProjectTranspose {
 
     // MARK: Warnings
 
+    /// The in-flight AI fixes this key change will make stale (round 3 (d)), as
+    /// warnings a caller can show BEFORE the key moves. A fix goes stale on
+    /// pitch when the audio it was made from moves: a plain clip's shift (its
+    /// fingerprint, checked at import) or ANY lane's shift in a take group
+    /// (`PendingClipFix.frozenLanePitch`, PK-F3). `before` and `after` are the
+    /// tracks as they are and as the plan leaves them, so a skipped or excluded
+    /// track names nothing. Ordered by submit time.
+    ///
+    /// In-flight VOICE CONVERSIONS are not named: the store does not track them
+    /// (`convertClipsToVoice` keeps its state on its own stack), so there is
+    /// nothing to read; they refuse at landing instead (the stale-key rule).
+    public static func pendingFixWarnings(_ pending: [PendingClipFix], before: [Track],
+                                          after: [Track]) -> [TransposeReport.Warning] {
+        let ordered = pending.sorted { ($0.submittedAt, $0.jobID) < ($1.submittedAt, $1.jobID) }
+        var out: [TransposeReport.Warning] = []
+        for fix in ordered {
+            guard let was = before.first(where: { $0.id == fix.trackID }),
+                  let now = after.first(where: { $0.id == fix.trackID }) else { continue }
+            let clipIds: [UUID]
+            switch fix.target {
+            case .clip(let id, _):
+                guard let a = was.clips.first(where: { $0.id == id }),
+                      let b = now.clips.first(where: { $0.id == id }),
+                      a.pitchShiftSemitones != b.pitchShiftSemitones else { continue }
+                clipIds = [id]
+            case .group(let id, _, _):
+                guard let a = was.takeGroups.first(where: { $0.id == id }),
+                      let b = now.takeGroups.first(where: { $0.id == id }),
+                      a.lanes.map(\.clip.pitchShiftSemitones) != b.lanes.map(\.clip.pitchShiftSemitones)
+                else { continue }
+                clipIds = was.clips.filter { $0.takeGroupID == id }.map(\.id)
+            }
+            out.append(.init(
+                code: .pendingFixWillBeRefused, trackId: was.id, trackName: was.name,
+                clipIds: clipIds, source: nil,
+                message: "An AI fix for '\(was.name)' is still being made from the audio at its "
+                    + "old pitch. It started before this key change, so when it arrives it will "
+                    + "be turned away as out of date; ask for the fix again after the key change."))
+        }
+        return out
+    }
+
     private static func audioWarnings(track: Track, shifted: [Clip],
                                       semitones: Int) -> [TransposeReport.Warning] {
         guard !shifted.isEmpty else { return [] }
@@ -731,24 +778,16 @@ public enum ProjectTranspose {
 
 // MARK: - The slice-kit marker (round 2, PK-F2)
 
-// ⚠️ INTERIM. The marker is STORED as `SamplerParams.sliceKit: Bool?` (absent
-// means "not a kit", so every existing project decodes unchanged), but that
-// field lives in `Model.swift` + `SamplerDocument`, which W7-SD2 holds right
-// now; the orchestrator installs the drafted patch after SD2 releases them.
-// The patch adds the field and flips the two bodies below:
-//   isSliceKit      → `sliceKit == true`
-//   markSliceKit()  → `sliceKit = true`
-// Until it lands, no sampler reads as a slice kit and marking one does
-// nothing, so a key change still moves a chop's notes (PK-F2 stays open,
-// pinned as a known issue). Every reader and writer already goes through
-// these two, so the call sites do not change when the field arrives.
+// The marker is STORED as `SamplerParams.sliceKit: Bool?` (absent means "not
+// a kit", so every existing project decodes unchanged) and saved by
+// `SamplerDocument`. Every reader and writer goes through these two.
 extension SamplerParams {
     /// True when these zones are a chopped loop made by `clip.sliceToSampler`:
     /// each key plays one slice of a recording, so a note is a trigger, not a
     /// pitch.
-    public var isSliceKit: Bool { false }
+    public var isSliceKit: Bool { sliceKit == true }
 
     /// Marks these zones as a chopped loop. `sliceClipToSampler` is the only
     /// writer: a library import or a fresh instrument starts unmarked.
-    public mutating func markSliceKit() {}
+    public mutating func markSliceKit() { sliceKit = true }
 }

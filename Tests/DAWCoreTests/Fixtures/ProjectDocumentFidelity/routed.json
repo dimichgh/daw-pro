@@ -1,0 +1,73 @@
+{
+  "markers" : [
+    {
+      "beat" : 0,
+      "id" : "00000000-0000-0000-0000-000000000605",
+      "name" : "Intro"
+    }
+  ],
+  "masterVolume" : 1,
+  "name" : "Routed",
+  "savedAt" : "2026-09-21T14:13:20Z",
+  "schemaVersion" : 1,
+  "tracks" : [
+    {
+      "clips" : [
+
+      ],
+      "effects" : [
+        {
+          "id" : "00000000-0000-0000-0000-000000000602",
+          "kind" : "reverb"
+        }
+      ],
+      "id" : "00000000-0000-0000-0000-000000000601",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "bus",
+      "name" : "Verb",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+
+      ],
+      "id" : "00000000-0000-0000-0000-000000000603",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "audio",
+      "name" : "Snare",
+      "outputBusId" : "00000000-0000-0000-0000-000000000601",
+      "pan" : 0,
+      "sends" : [
+        {
+          "busId" : "00000000-0000-0000-0000-000000000601",
+          "id" : "00000000-0000-0000-0000-000000000604",
+          "level" : 0.5
+        }
+      ],
+      "volume" : 1
+    }
+  ],
+  "transport" : {
+    "countInBars" : 1,
+    "isLoopEnabled" : false,
+    "isMetronomeEnabled" : false,
+    "isPunchEnabled" : false,
+    "loopEndBeat" : 16,
+    "loopStartBeat" : 0,
+    "positionBeats" : 0,
+    "punchInBeat" : 0,
+    "punchOutBeat" : 4,
+    "tempoBPM" : 120,
+    "timeSignature" : {
+      "beatUnit" : 4,
+      "beatsPerBar" : 4
+    }
+  }
+}

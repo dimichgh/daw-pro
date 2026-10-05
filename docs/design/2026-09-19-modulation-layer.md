@@ -1483,3 +1483,45 @@ engine's formula, with 36 of 42 digests pinned byte-identical.
 
 > **"By construction" held only where the construction reached.** The track strips shared the one
 > seam (`applyParameters`); the master strip's publication lived outside it, so nothing forced parity.
+
+## 16. ERRATUM — 2026-10-04 (found 2026-09-27): modulation never reached the file
+
+§7.6 promised that `Track` "gains `modulationSources` and `modulationRoutes`, both additive-optional", and that
+"the master strip carries the same two arrays". Both were built. Neither was ever SAVED, in any build from m39-e's first
+(`ec69328`, 2026-09-19) through `e6f7a27` (2026-09-27), the last before the W7-MODP fix: a project with an LFO, a step sequencer, an envelope follower or
+a macro — on any track or on the master — saved without a trace of them, and reopened, recovered after a crash, or
+autosaved with none.
+
+### What shipped broken (MEASURED on the unmodified e6f7a27 code, W7-MODP census 2026-10-04 18:54)
+- `TrackDocument` — the save format, a hand-written mirror of `Track` — never got the two fields. The project file
+  mentioned "odulation" zero times; every other field of every mirrored type came back equal.
+- `ProjectDocument` had no field for the master strip's arrays, which live only in `ProjectStore`.
+- The master strip's arrays were not in `EditState`, so a master modulation edit made NO undo step (`canUndo`
+  false), and New and Open left the previous project's master modulation in place (F1).
+- The autosave and crash-recovery document is built by the same code, so it lost the same data (F4).
+
+### Why no test saw it
+Every §7.6 persistence test encoded `Track` with `Track`'s OWN `Codable` — which does carry the arrays. The save
+path never uses that encoder; it goes through `TrackDocument`. A comment in `ProjectStore` stated that master
+modulation "rides `EditState`, persists additively"; both halves were false, and nothing compared the claim to
+the code. This is the mirror-DTO trap (m12-f) again: a hand-written mirror compiles, and silently drops, a field
+nobody threaded through it.
+
+### The fix (W7-MODP)
+`TrackDocument` and `ProjectDocument` carry both arrays, omitted when empty, so a project without modulation saves
+byte-for-byte as before; open and crash recovery restore them (master clamped to the same caps as a track) and tell
+the engine; New clears them; `EditState` carries the master arrays, so master edits undo and redo.
+
+### The gates
+- G1 (`PersistenceTests/modpFidelity…`): the store's real save → open and crash recovery bring back every source
+  kind on tracks and master; New and Open replace master modulation; master edits undo and redo.
+- G2 (`ProjectDocumentFidelityTests`): four modulation-free projects encode to the exact bytes the PRE-fix
+  encoder wrote (goldens captured on e6f7a27); a modulated project cannot match them.
+- G3 (`ProjectDocumentFidelityTests` + `PersistenceTests/modpFidelityStoreStateIsClassified`): `Mirror` lists every
+  stored property of `Track`, `Clip`, `TransportState`, `Send`, `EffectDescriptor`, `InstrumentDescriptor`,
+  `SamplerZone`, `TakeGroup`, `TakeLane`, `ReferenceSlot`, the modulation types, `ProjectDocument` and
+  `ProjectStore`; each must be classified "saved under key K" (and K must exist in the save format) or "not saved,
+  because …". A new property nobody classified fails BY NAME.
+
+> **What this does not undo:** projects already saved by an affected build lost their modulation when they were
+> saved. The file never held it; nothing can recover it.

@@ -334,7 +334,7 @@ struct NaturalTuningDigestTests {
                          "transitionSlopeCentsPerSecond", "consonantProtection"]
     /// `autoCorrectStamp`: provenance, not render material (its own doc,
     /// PitchCorrection.swift, "DELIBERATELY ABSENT FROM `PitchEditSetDigest.hex`").
-    static let exempt = ["autoCorrectStamp"]
+    static let exempt = ["autoCorrectStamp", "autoCorrectReplaceableStamp"]
     /// A field that exists but whose digest slot has not landed. Empty since
     /// NT-C C2; the mechanism stays for the next set-level field.
     static let pending: [String] = []
@@ -365,6 +365,7 @@ struct NaturalTuningDigestTests {
             "retuneMs": { $0.retuneMs = 90 },
             "formantCorrection": { $0.formantCorrection = 0.25 },
             "autoCorrectStamp": { $0.autoCorrectStamp = "stamp" },
+            "autoCorrectReplaceableStamp": { $0.autoCorrectReplaceableStamp = "stamp" },
             "consonantProtection": { $0.consonantProtection = .on },
             "transitionSlopeCentsPerSecond": { $0.transitionSlopeCentsPerSecond = 3000 },
         ]

@@ -1579,3 +1579,11 @@ manual route exists today: cut the note with C3's scissors (`clip.splitNote`) an
     the report, never silently deleted.
 - **Stored edits:** a changed splitter changes segment boundaries for NEW passes only. It must never re-segment a clip that already has stored edits (the C-F3
   `replaceExisting` rule and the hand-edit stamp stay in force).
+
+## ERRATUM — 2026-10-04: Hard Tune's summary overclaimed
+The preset table above (line ~754) gives Hard Tune's summary as "Replaces your pitch with the exact note. The robot
+effect." and says to use the strings verbatim. Measured on 2026-10-04 (W7-TTM3, real detector + render + an
+independent tracker), a held note under Hard Tune keeps about two thirds of its vibrato (±36 → ±23 c); the preset's own
+notes record a 49–68 % cut. Nothing is "replaced" and nothing is "exact". The product string is now **"Holds each note
+in tune, with less vibrato. The robot effect."** (`Sources/DAWCore/PitchCorrectionPresets.swift`), pinned by
+`presetSummariesNeverOverclaim`. The table above is left as written, as a dated record.

@@ -30,7 +30,11 @@
 //      60 ms), hovered: R11's line;
 //   v6 the preset card when the ONLY change since the preset is a SETTING
 //      (Slides → Quick): the note list says "any", and the card ends by saying
-//      Slides changes to Smooth.
+//      Slides changes to Smooth;
+//   v7 (2026-10-04, §1(f) item 4) the FAR-MOVE HINT: on a vocal keeping none
+//      of its voice size (`clip.setFormantCorrection` 0), a ⌥ pitch drag that
+//      leaves the lowest note 3+ semitones from where it was sung draws R26's
+//      line above the palette; keeping half takes it away (the control).
 // plus, echo-and-store only (a context menu and a refusal line are not
 // pictures a staged step can take): the note menu's "Voice: Deeper 2.0" and
 // "Voice: As sung" (each ONE step), a press on a SOUND refused in words with
@@ -98,6 +102,7 @@ const WORDS = {
   handEdits: "any note you moved or split by hand, any note you made deeper or brighter, "
     + "any wobble you changed and any pitch line you drew",
   slidesToSmooth: "“Slides” changes to Smooth.",
+  farMove: "Big jump: turn up Keep voice size so it doesn't sound squeaky.",
 };
 
 /** The frontmost app's name AND pid, from lsappinfo. `name` null = lsappinfo
@@ -484,6 +489,43 @@ try {
     check("v6: Replace lands Slides on Smooth (3000), as the card said",
       after.set.transitionSlopeCentsPerSecond === 3000,
       `store ${after.set.transitionSlopeCentsPerSecond}`);
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // v7 — THE FAR-MOVE HINT (§1(f) item 4, R26's words; W7-NTU 2026-10-04)
+  // ═════════════════════════════════════════════════════════════════════════
+  {
+    await must("clip.setFormantCorrection", { clipId: clip.id, amount: 0 });
+    await stage({ act: "tool", tool: "pointer" });
+    e = await waitEcho((x) => x.tool === "pointer" && sung().length >= 3);
+    const rowH = e.pitchWindow?.rowHeight;
+    if (!(rowH > 0)) refuseRun(`the echo carries no row height (${rowH})`);
+    // The LOWEST sung note, so 3.6 rows up stays inside the drawn window.
+    const low = [...sung()].sort((a, b) => b.y - a.y)[0];
+    const quiet = e.interaction?.farMoveHint;
+    const pl = centre(low);
+    await stage({ act: "press", x: pl.x, y: pl.y });
+    await stage({ act: "drag", x: pl.x, y: pl.y - 1.8 * rowH, option: true });
+    await stage({ act: "drag", x: pl.x, y: pl.y - 3.6 * rowH, option: true });
+    await stage({ act: "release", x: pl.x, y: pl.y - 3.6 * rowH, option: true });
+    e = await waitEcho((x) => (x.interaction?.farMoveHint ?? "") !== "");
+    const s = await storedVoices();
+    const moved = (s.set.segments ?? []).find((g) => g.id === low.id)?.pitchOffsetCents;
+    looks.v7 = { hint: e.interaction?.farMoveHint, before: quiet, moved, keep: s.set.formantCorrection };
+    check("v7: a ⌥ drag that leaves a note 3+ semitones from where it was sung, on a vocal keeping none of its "
+      + "voice size, draws R26's hint (and none was drawn before the drag)",
+      quiet === "" && typeof moved === "number" && Math.abs(moved) >= 300 && s.set.formantCorrection === 0
+        && e.interaction?.farMoveHint === WORDS.farMove,
+      JSON.stringify(looks.v7));
+    await shoot("v7", "ntu-v7-far-move-hint-1208.png");
+    // CONTROL — half the voice size kept: the hint goes, the note stays.
+    await must("clip.setFormantCorrection", { clipId: clip.id, amount: 0.5 });
+    e = await waitEcho((x) => (x.interaction?.farMoveHint ?? "?") === "");
+    const s2 = await storedVoices();
+    check("v7 control: keeping half the voice size takes the hint away, with the note still moved",
+      e.interaction?.farMoveHint === ""
+        && (s2.set.segments ?? []).find((g) => g.id === low.id)?.pitchOffsetCents === moved,
+      `hint "${e.interaction?.farMoveHint}"; keep ${s2.set.formantCorrection}`);
   }
 
   {

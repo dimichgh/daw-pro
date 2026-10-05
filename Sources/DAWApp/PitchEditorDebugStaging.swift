@@ -1486,6 +1486,8 @@ extension AppModel {
             "toolHelp": .string(chrome.toolHelp),
             "dragReadout": .string(chrome.dragReadout),
             "refusalText": .string(chrome.refusalText),
+            // W7-NTU §1(f) item 4 — the far-move hint as drawn, or "".
+            "farMoveHint": .string(chrome.farMoveHint),
             "commitCount": .number(Double(chrome.commitCount)),
             "interactionTicks": .number(Double(chrome.interactionTicks)),
         ])

@@ -2034,3 +2034,30 @@ test("clip_set_note_vibratos surfaces an app-side error (e.g. ALL-OR-NOTHING unk
   assert.ok(r.isError, "an app-side error must be a tool error, never a silent success");
   assert.match(r.content[0].text as string, /No note with id .* 1 note\(s\)/);
 });
+
+// --- PK-F1 (W7-PK round 3, the 10-04 ruling) ----------------------------------
+
+test("clip_auto_correct_pitch says the scale is the key as HEARD and a fractional shift is kept as a detune, and its keptDetune fields round-trip verbatim", async () => {
+  const listed = await client.listTools();
+  const tool = listed.tools.find((t) => t.name === "clip_auto_correct_pitch");
+  assert.ok(tool, "clip_auto_correct_pitch is registered");
+  const description = tool!.description ?? "";
+  assert.match(description, /The scale applies to the key as HEARD/);
+  assert.match(description, /A FRACTIONAL shift is kept as a detune, not corrected away/);
+  assert.match(description, /30 cents sharp of the scale/);
+  assert.match(description, /unpitchedSkippedReason, keptDetuneCents, keptDetuneNotice\}/,
+    "the reply's key list names both new keys");
+
+  const clipId = randomUUID();
+  const stubbed = makeStubbedResponse({
+    keptDetuneCents: 30,
+    keptDetuneNotice:
+      "Kept this clip's +30 cent detune (its pitch shift is +3.3 semitones): each corrected " +
+      "note plays 30 cents sharp of the scale, as the shift asks.",
+  });
+  queuedResult = stubbed;
+  const result = await client.callTool({ name: "clip_auto_correct_pitch", arguments: { clipId } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.autoCorrectPitch");
+  assert.deepEqual(parseJSON(result as any), stubbed, "keptDetuneCents/keptDetuneNotice round-trip verbatim");
+});

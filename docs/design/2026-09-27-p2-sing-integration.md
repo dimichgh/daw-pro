@@ -1541,3 +1541,56 @@ SING-6 files).
 | That the rebuilt built-in cut WAV is byte-identical | p2-sing-b |
 | That renders are byte-identical across processes | p2-sing-g |
 | Every [A] threshold | The item named beside it |
+
+## Errata 2026-10-05 (W7-SD3, round 3)
+
+Appended by W7-SD3 on the orchestrator's ruling. No line above was edited. Where a line above disagrees with this section,
+this section is what ships. [M] = measured in the p2-sing-d3 rounds (logs in the lane's STATUS).
+
+1. **§3.7 step 7, "Gaps" (line 771): each gap belongs only to its NEAREST boundary.**
+   - Ships (`VoiceReferenceLabeler.placeGaps`): a gap is owned by the nearest note boundary within 80 ms
+     (`repeatedNoteSnapSeconds`); a tie goes to the earlier boundary [A]. A boundary that owns no gap keeps its aligned
+     position. Before, every boundary claimed its own nearest gap, so one gap could be claimed several times.
+   - Why [M]: on the user's recording one breath (3.296–3.520 s) was claimed by three boundaries: three identical rests,
+     and two notes squeezed to one frame (16 ms). After the fix the rest is listed once. On the synthetic fixtures it
+     removed the one-frame (16 ms) shortest note on five fixtures (frames 3 and 8, audio 3, 4 and 8): audio 4's worst
+     boundary error fell from 114.1 to 34.1 ms, and frames fixture 3's median from 120 to 96 ms.
+   - Residual [M]: two boundaries aligned inside ONE breath still leave the later note a single frame (there is no
+     voiced time to give it). It happens on the user's recording: after the fix "gent-" is still one frame (16 ms).
+   - Plant [M]: the old rule turns 4 tests red with 8 issues: the two multi-claim tests (4 and 2 issues) and the user's
+     shape on frames and through SwiftF0 (1 each).
+2. **§3.7 "Quality" (lines 778–785): the verdict mapping, and a calibrated different-melody threshold.**
+   - The section names the measures but gives no mapping. Ships (p2-sing-d3-mis): **poor** if there is no DTW path,
+     the DTW mean local cost is above 1.30, fewer than 7 spans are steady, or 2 or more of {at least 9 steady spans, at
+     least 90% of voiced frames inside spans, no span under 60 ms} are missed; **good** if the cost is 1.30 or less and
+     none is missed; **fair** otherwise.
+   - The cost thresholds were 2.0 (poor) and 1.5 (good) [A], never calibrated: the different-melody fixture graded poor
+     only through the one-frame notes that item 1 removed.
+   - Measured costs [M]: a different melody 1.582 (frames) and 1.630 (through SwiftF0); the user's shape 1.059 and
+     0.977; the user's own recording 0.985; every other right-melody fixture 0.234 or less. A 0.20 margin on each side of
+     1.30 is pinned in tests. Plant [M]: the thresholds back to 2.0 / 1.5 turn 3 tests red (5 issues).
+   - v0 only: calibrated on ONE different melody, rendered two ways. Filed `sd3-threshold-evidence`: at least 3
+     different melodies before the feature reaches the user.
+3. **§5.7 "Poor alignment" (line 1184): the copy.**
+   - The notice now also fires for a different TUNE (item 2), and a question in brackets mid-sentence is hard for a
+     novice to read. Ruled 2026-10-05, ships in `VoiceReferenceLabeler.poorAlignmentMessage`, pinned by the
+     different-melody test:
+     "I couldn't follow your recording closely. Did you sing the guide's tune and words? Your voice will still work,
+     but it may sound less like you."
+   - Was: "I couldn't follow your recording closely (did you sing the same words?). Your voice will still work, but it
+     may sound less like you."
+   - It is not on any screen yet, and no fit gate covers it.
+4. **§3.8 `guide_leak` (lines 857–860): the threshold, and the −20 dB fixture.**
+   - The section says "peak ≥ 0.25 and ≥ 4× the median [A]" and "the guide mixed at −20 dB into a clean stand-in must
+     trip it". Ships: peak ≥ **0.138** (`VoiceClipCheck.leakPeakThreshold`) and ≥ 4× the median.
+   - 0.138 was set by a rule pre-registered before it was computed: the geometric mean of the Swift peaks on SING-6's two
+     model-rendered fixtures, the unison stand-in (0.1164, must not trip) and the leak fixture (0.1641, must trip) [M].
+   - Measured detection floor [M], under a synthetic stand-in that does NOT sing in unison with the guide: about −18 dB
+     (−16 dB peak 0.1707, −18 dB 0.1397 trips, −20 dB 0.1149 misses). The design's own −20 dB fixture trips only because
+     its stand-in sings in unison with the guide (the unison voice alone reaches 0.1164). So line 860 holds for that
+     fixture but not in general: the synthetic −20 dB test (`guideLeakTrips`) is a recorded known issue, not a pass.
+   - "≥ 4× the median" is kept as the design wrote it but never decides anything: the median over all lags is about
+     1e-4 on every fixture (measured in p2-sing-d3; recorded on `VoiceClipCheck.leakMedianMultiple`).
+   - The two SING-6 calibration recordings were lost from scratch storage (filed `sd3-fixture-in-scratch`). The test
+     that reads them (`leakCalibration`, enabled only when `SING_LEAK_CALIBRATION_DIR` is set) cannot run until they
+     are restored.

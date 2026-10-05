@@ -22,9 +22,10 @@ public struct SamplerParamSpec: Equatable, Sendable {
     /// verbatim.
     public let range: ClosedRange<Double>
     /// The double-click reset value. For a per-zone field this is the value the
-    /// domain's `nil` means (0 cents, no decay stage, sustain at peak, unity
-    /// gain) — see `SamplerEditorModel.zoneValue(for:)` for the two fields
-    /// whose nil resolves against a LIVE global instead.
+    /// domain's `nil` means when nothing else is set (0 cents, centred pan, no
+    /// decay stage, sustain at peak, unity gain) — but the FOUR envelope fields
+    /// (`attack`, `decay`, `sustain`, `release`) resolve nil against the LIVE
+    /// sampler global instead: see `SamplerEditorModel.zoneValue(_:in:globals:)`.
     public let defaultValue: Double
     /// The STORAGE unit ("s" / "linear" / "cents" / "pan" / "level") — display
     /// crossovers (ms↔s, dB-for-gain, %-for-levels, L/C/R-for-pan) live in
@@ -709,9 +710,20 @@ public final class SamplerEditorModel {
     ///
     /// Says "zone", not "sound": ZONES is the word printed on this card, and a
     /// note must name what the reader can see (Rule 6, the glide note's rule).
+    ///
+    /// W7-SMP round 2: ONE SHOT ALONE says "not this card". "Set per zone"
+    /// sends a reader to the zone rows, which carry Attack and Release but no
+    /// One Shot control, so for One Shot alone that advice is a hunt with no
+    /// end. Measured headlessly (9 pt system font): 51 characters, 221.0 pt,
+    /// under the glide note's 222.4 pt, which a capture showed on one line.
+    /// The two- and three-label lines keep "set per zone": no 51-character
+    /// wording that also exempts One Shot fits, and One Shot's own tooltip
+    /// already says the card does not edit it.
     public static func inertGlobalsNote(labels: [String]) -> String? {
         switch labels.count {
         case 0: return nil
+        case 1 where labels[0] == oneShotSpec.label:
+            return "\(labels[0]) does nothing: zones set it, not this card."
         case 1: return "\(labels[0]) does nothing: set per zone."
         case 2: return "\(labels[0]) and \(labels[1]) do nothing: set per zone."
         default: return labels.joined(separator: ", ") + " do nothing: set per zone."
@@ -745,17 +757,27 @@ public final class SamplerEditorModel {
     /// The EFFECTIVE value of one per-zone field: the zone's explicit value
     /// when it has one, otherwise what the domain's `nil` resolves to.
     ///
-    /// ⚠️ For `attack` and `release`, nil inherits the LIVE global — so this
-    /// returns the global's current value, not the spec's static default. That
-    /// is the number the engine will use, which is the number a knob must show.
+    /// ⚠️ For all FOUR envelope fields — `attack`, `decay`, `sustain`,
+    /// `release` — nil inherits the LIVE global, so this returns the global's
+    /// current value, not the spec's static default. That is the number the
+    /// engine will use (`SamplerInstrument` stores a nil zone field as its `-1`
+    /// sentinel and reads the global at trigger), which is the number a knob
+    /// must show. `decay`/`sustain` read it through `effectiveDecay`/
+    /// `effectiveSustain`: their own nil is the pre-m34-o pair (0 s, full
+    /// level), so an untouched sampler still shows exactly that.
+    ///
+    /// W7-SMP round 2: decay/sustain used to resolve to the literals 0 and 1
+    /// here, true only until m34-o gave them globals. A sampler whose global
+    /// decay was set over the wire then played a fade while this zone's knob
+    /// showed none.
     public static func zoneValue(_ name: String, in zone: SamplerZone,
                                  globals: SamplerParams) -> Double? {
         switch name {
         case "tuneCents": return zone.tuneCents ?? 0
         case "pan": return zone.pan ?? 0
         case "attack": return zone.attack ?? globals.attack
-        case "decay": return zone.decay ?? 0
-        case "sustain": return zone.sustain ?? 1
+        case "decay": return zone.decay ?? globals.effectiveDecay
+        case "sustain": return zone.sustain ?? globals.effectiveSustain
         case "release": return zone.release ?? globals.release
         case "gain": return zone.gain
         default: return nil
@@ -821,7 +843,8 @@ public final class SamplerEditorModel {
     /// Double-click reset for a per-zone row: back to UNSET (nil), which is the
     /// domain's real default — not to the nil-equivalent NUMBER, because for
     /// `pan` those two are audibly different (see `zoneParamIsUnset`) and for
-    /// `attack`/`release` an explicit number stops tracking the global.
+    /// the four envelope fields (`attack`/`decay`/`sustain`/`release`) an
+    /// explicit number stops tracking the global.
     /// `gain` is non-optional in the domain, so it resets to its 1.0 unity.
     public func resetZoneParam(_ spec: SamplerParamSpec) {
         mutateSelectedZone { zone in

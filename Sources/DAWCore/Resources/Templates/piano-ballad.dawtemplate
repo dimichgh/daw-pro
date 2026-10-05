@@ -1,0 +1,27 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "piano-ballad",
+  "name": "Piano Ballad",
+  "summary": "A piano, strings, a warm pad and a soft bass, with no drums, all sharing one long hall reverb.",
+  "songForm": "ballad",
+  "genres": ["ballad"],
+  "tracks": [
+    { "key": "piano", "name": "Piano", "kind": "instrument", "volume": 2.0, "mixerPreset": "warm-keys",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 0 } },
+      "sends": [ { "bus": "hall", "level": 0.3 } ] },
+    { "key": "strings", "name": "Strings", "kind": "instrument", "volume": 0.65,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 48 } },
+      "sends": [ { "bus": "hall", "level": 0.24 } ] },
+    { "key": "pad", "name": "Warm Pad", "kind": "instrument", "volume": 0.6,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 89 } },
+      "sends": [ { "bus": "hall", "level": 0.22 } ] },
+    { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.85, "mixerPreset": "bass-tight",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 32 } } },
+    { "key": "vocal", "name": "Lead Vocal", "kind": "audio", "mixerPreset": "vocal-presence",
+      "sends": [ { "bus": "hall", "level": 0.3 } ] },
+    { "key": "hall", "name": "Hall", "kind": "bus",
+      "inserts": [ { "kind": "hallReverb", "params": { "mix": 1, "sizeMeters": 30, "decaySeconds": 3.2 } } ] }
+  ]
+}

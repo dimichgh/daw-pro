@@ -39,47 +39,89 @@ actor SingingSidecarWatchdog {
         var sampleFootprintBytes: @Sendable (Int32) -> UInt64?
         /// Real default reads a long-lived `DispatchSource` observer's last-known level — see
         /// `MemoryPressureObserver` below. **UNVERIFIED against genuine Critical pressure** (see
-        /// that type's doc and `$S/w7/SC/REVIEW-REQUEST.md`); every test injects a scripted fake.
+        /// that type's doc and `$S/w7/SC/REVIEW-REQUEST.md`). FIX NOW #6 (architect review): this
+        /// doc previously claimed "every test injects a scripted fake," which was false for
+        /// `SingingSidecarManagerTests.underCapNeverKills` specifically — it is now true, via the
+        /// shared `testConfiguration` helper injecting `{ false }` for every manager test.
         var readMemoryPressureCritical: @Sendable () -> Bool
         var sleepSeconds: @Sendable (Double) async -> Void
+        /// **FIX NOW #4 (architect review).** Whether the tracked pid is still alive, checked
+        /// EVERY sample before sampling its footprint — a watchdog that keeps owning a pid after
+        /// an unrequested death (crash, jetsam, Force Quit) just keeps forking `ps` at a dead pid
+        /// forever, speeding up pid recycling into the exact wrong-process hazard this item
+        /// exists to prevent. Real default is the plain `kill(pid, 0) == 0` liveness probe (ESRCH
+        /// means gone); injectable because a TEST's `rootPid` is deliberately never a real
+        /// process (see `SingingSidecarWatchdogTests.swift`'s own `rootPid()` doc), and the real
+        /// syscall would report every one of those as already-dead.
+        var pidIsAlive: @Sendable (Int32) -> Bool
+        /// **FIX NOW #4.** The identity re-check `killTree` applies to the root pid's OWN command
+        /// line (from the same snapshot it already takes) before signalling anything — the second
+        /// half of "stop owning a pid it has lost": a pid can be ALIVE and simply not be the
+        /// sidecar anymore (recycled onto an unrelated process between samples). An inert default
+        /// (`SidecarStop.Identity()`, which `Identity.matches` documents as matching nothing) is
+        /// deliberate: a caller that does not set this and does not inject its own `kill` closure
+        /// gets a watchdog that samples but can never actually kill through the real `killTree`,
+        /// rather than one that kills anything merely alive at the tracked pid.
+        var identity: SidecarStop.Identity
         /// The actual OS-level action once `decide` says kill — a plain, synchronous, pure-effect
         /// closure (no actor hop needed: it is `SingingSidecarWatchdog.killTree`, which owns no
-        /// state of its own). `recordSample` has already stored the human reason in
-        /// `lastKillReason` before this runs, so the manager reconciles ITS OWN bookkeeping later,
-        /// lazily, by reading that property — never by this closure calling back into the manager
-        /// (which would need `self` captured before `init` finishes; see `SingingSidecarManager`'s
-        /// doc for why that reconcile-on-read design was chosen instead).
-        var kill: @Sendable (Int32, String) -> Void
+        /// state of its own). `recordSample` has already stored the trigger and human reason in
+        /// `lastKillTrigger`/`lastKillReason` before this runs, so the manager reconciles ITS OWN
+        /// bookkeeping later, lazily, by reading those properties — never by this closure calling
+        /// back into the manager (which would need `self` captured before `init` finishes; see
+        /// `SingingSidecarManager`'s doc for why that reconcile-on-read design was chosen
+        /// instead). Returns whether a signal was actually sent — **FIX NOW #4**: `false` means
+        /// the identity check refused (the pid is no longer the sidecar), not merely "the OS call
+        /// failed".
+        var kill: @Sendable (Int32, SidecarStop.Identity) -> Bool
 
         init(
             capBytes: UInt64,
             pollIntervalSeconds: Double = 0.25,
             sampleFootprintBytes: @escaping @Sendable (Int32) -> UInt64? = SingingSidecarWatchdog.liveFootprintBytes,
             readMemoryPressureCritical: @escaping @Sendable () -> Bool = { false },
-            sleepSeconds: @escaping @Sendable (Double) async -> Void = { seconds in
-                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-            },
-            kill: @escaping @Sendable (Int32, String) -> Void = { pid, _ in
-                SingingSidecarWatchdog.killTree(rootPid: pid)
+            sleepSeconds: (@Sendable (Double) async -> Void)? = nil,
+            pidIsAlive: @escaping @Sendable (Int32) -> Bool = { pid in Darwin.kill(pid, 0) == 0 },
+            identity: SidecarStop.Identity = SidecarStop.Identity(),
+            kill: @escaping @Sendable (Int32, SidecarStop.Identity) -> Bool = { pid, identity in
+                SingingSidecarWatchdog.killTree(rootPid: pid, identity: identity)
             }
         ) {
             self.capBytes = capBytes
             self.pollIntervalSeconds = pollIntervalSeconds
             self.sampleFootprintBytes = sampleFootprintBytes
             self.readMemoryPressureCritical = readMemoryPressureCritical
-            self.sleepSeconds = sleepSeconds
+            // `nil` = the real sleep, supplied HERE and never as the default argument (an async
+            // default-argument closure miscompiles across modules in Swift 6.3.3; see
+            // `ModelLifecycleCoordinator.init` and `scripts/gates/async-default-dup.py`).
+            self.sleepSeconds = sleepSeconds ?? { seconds in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            }
+            self.pidIsAlive = pidIsAlive
+            self.identity = identity
             self.kill = kill
         }
     }
 
     private let configuration: Configuration
     private var armedEpoch: UInt64?
+    /// **FIX NOW #3 (architect review).** The pid the current epoch is tracking, so `arm` can
+    /// tell "the same boot asking again" (every `.ready` probe, `start()`'s own poll — see
+    /// `SingingSidecarManager.status()`/`spawnAndPoll`) from "a genuinely different pid" (a new
+    /// boot). Only the latter may revoke the loop and reset the debounce/kill-reason state.
+    private var armedPid: Int32?
     private var epochCounter: UInt64 = 0
     /// Most-recent-last; only the last two ever matter (`decide`'s "2 consecutive" rule).
     private var recentCritical: [Bool] = []
     /// Set right before `configuration.kill` is invoked — read by tests, and by the manager's own
     /// bookkeeping closure, to explain why the process is gone.
     private(set) var lastKillReason: String?
+    /// **FIX NOW #8 (architect review).** The structured twin of `lastKillReason` — the SAME
+    /// fact, in a form a caller can switch on instead of pattern-matching a formatted string
+    /// (`ModelMemory.formatGB` rounds to one decimal in 10^9 units, so a footprint just over a
+    /// binary cap can print a byte count that reads back UNDER it — see the architect's own Q4
+    /// walkthrough). Always set together with `lastKillReason`, never independently.
+    private(set) var lastKillTrigger: SingingWatchdogTrigger?
     /// Total samples taken, across every arming — the anti-vacuity check: a test asserting "no
     /// kill" must also prove the loop actually ran, or an inert loop and a correct one look alike.
     private(set) var samplesTaken: UInt64 = 0
@@ -88,15 +130,25 @@ actor SingingSidecarWatchdog {
         self.configuration = configuration
     }
 
-    /// Arms sampling for `rootPid`. Any previous arming is revoked first (never cancelled — see
-    /// the type doc).
+    /// Arms sampling for `rootPid`. **FIX NOW #3: idempotent for the SAME pid** — no revoke, no
+    /// debounce reset, no `lastKillReason`/`lastKillTrigger` reset, the running loop (and its
+    /// epoch) are left exactly as they are. Every OTHER probe/poll that happens to see `.ready`
+    /// re-arms with the SAME pid it already armed; without this, each one silently restarted the
+    /// debounce window, so a caller polling `status()` at or above the sample rate could defeat
+    /// both kill rules forever (the architect's Q3/§2.3 finding). A genuinely DIFFERENT pid (a
+    /// new boot) still gets the full revoke-and-reset treatment.
     func arm(rootPid: Int32) {
+        if armedEpoch != nil, armedPid == rootPid {
+            return
+        }
         disarm()
         epochCounter &+= 1
         let epoch = epochCounter
         armedEpoch = epoch
+        armedPid = rootPid
         recentCritical = []
         lastKillReason = nil
+        lastKillTrigger = nil
         let config = configuration
         Task.detached { [weak self] in
             await SingingSidecarWatchdog.loop(rootPid: rootPid, epoch: epoch, config: config, owner: self)
@@ -106,6 +158,7 @@ actor SingingSidecarWatchdog {
     /// Revokes the current epoch. The loop notices on its next wake and returns.
     func disarm() {
         armedEpoch = nil
+        armedPid = nil
     }
 
     /// Clears a PREVIOUS boot's kill record. Called by the manager at the start of every new
@@ -114,6 +167,7 @@ actor SingingSidecarWatchdog {
     /// is itself armed (which only happens once it reaches `.healthy`), a real staleness window.
     func clearLastKillReason() {
         lastKillReason = nil
+        lastKillTrigger = nil
     }
 
     var isArmed: Bool { armedEpoch != nil }
@@ -129,7 +183,10 @@ actor SingingSidecarWatchdog {
         let action = Self.decide(
             footprintBytes: footprintBytes, capBytes: configuration.capBytes,
             recentCritical: recentCritical)
-        if case .kill(let reason) = action { lastKillReason = reason }
+        if case .kill(let trigger, let reason) = action {
+            lastKillTrigger = trigger
+            lastKillReason = reason
+        }
         return action
     }
 
@@ -140,14 +197,27 @@ actor SingingSidecarWatchdog {
             await config.sleepSeconds(config.pollIntervalSeconds)
             guard let owner else { return }
             guard await owner.stillArmed(epoch) else { return }
+            // FIX NOW #4: stop owning a pid we have lost. An unrequested death (crash, jetsam,
+            // Force Quit) must disarm immediately, not keep sampling a dead pid until an idle
+            // unload (or forever) while its own `ps` forks help recycle that very pid onto an
+            // unrelated process.
+            guard config.pidIsAlive(rootPid) else {
+                await owner.disarm()
+                return
+            }
             let footprint = config.sampleFootprintBytes(rootPid)
             let critical = config.readMemoryPressureCritical()
             let action = await owner.recordSample(footprintBytes: footprint, critical: critical)
             switch action {
             case .ok:
                 continue
-            case .kill(let reason):
-                config.kill(rootPid, reason)
+            case .kill:
+                // FIX NOW #4: a kill the identity check REFUSED must not be recorded as a kill --
+                // a crashed sidecar whose pid got recycled onto an unrelated process would
+                // otherwise read as "the watchdog killed it" via lastStopClassification().
+                if !config.kill(rootPid, config.identity) {
+                    await owner.clearLastKillReason()
+                }
                 await owner.disarm()
                 return
             }
@@ -164,13 +234,16 @@ actor SingingSidecarWatchdog {
     ) -> SingingWatchdogAction {
         if let footprintBytes, footprintBytes > capBytes {
             return .kill(
+                trigger: .footprint(bytes: footprintBytes, capBytes: capBytes),
                 reason: "the sidecar tree's memory footprint reached "
                     + ModelMemory.formatGB(footprintBytes) + ", over the "
                     + ModelMemory.formatGB(capBytes) + " cap")
         }
         let lastTwo = recentCritical.suffix(2)
         if lastTwo.count == 2 && lastTwo.allSatisfy({ $0 == true }) {
-            return .kill(reason: "system memory pressure read Critical on 2 consecutive samples")
+            return .kill(
+                trigger: .pressure,
+                reason: "system memory pressure read Critical on 2 consecutive samples")
         }
         return .ok
     }
@@ -188,22 +261,39 @@ actor SingingSidecarWatchdog {
 
     /// IMPURE. Immediate SIGKILL of `rootPid` and every descendant captured BEFORE signalling (the
     /// m23-az-1 rule: a child whose parent has already died is reparented to pid 1 and the linkage
-    /// is gone). Unlike `SidecarStop.terminateTree` there is no grace period and no identity
-    /// re-check: the watchdog only ever acts on a pid the manager itself is tracking as the
-    /// sidecar it spawned, and a runaway process is exactly the case where waiting out a graceful
-    /// SIGTERM window is the wrong trade.
-    nonisolated static func killTree(rootPid: Int32) {
+    /// is gone). There is still no grace period — a runaway process is exactly the case where
+    /// waiting out a graceful SIGTERM window is the wrong trade — but **FIX NOW #4 (architect
+    /// review) ADDS an identity re-check**: `loop`'s own liveness guard (`pidIsAlive`) only
+    /// proves the pid is occupied by SOMETHING; between samples that something can have been
+    /// recycled onto an unrelated process. This re-check matches `rootPid`'s OWN command line,
+    /// from the snapshot already taken here, against `identity` before signalling anything.
+    /// Returns whether a signal was actually sent.
+    @discardableResult
+    nonisolated static func killTree(rootPid: Int32, identity: SidecarStop.Identity) -> Bool {
         let snapshot = SidecarProcessDiscovery.captureSnapshot()
+        guard let rootArgs = snapshot.args(of: rootPid), identity.matches(args: rootArgs) else {
+            return false
+        }
         for descendant in snapshot.descendants(of: rootPid) {
             kill(descendant.pid, SIGKILL)
         }
         kill(rootPid, SIGKILL)
+        return true
     }
+}
+
+/// **FIX NOW #8 (architect review).** Which rule fired, as a value a caller can switch on —
+/// never by parsing `ModelMemory.formatGB`'s one-decimal-in-10^9-units string back into a byte
+/// count (the architect's own walkthrough: a footprint just over a binary cap can print a GB
+/// figure that reads back UNDER it).
+public enum SingingWatchdogTrigger: Sendable, Equatable {
+    case footprint(bytes: UInt64, capBytes: UInt64)
+    case pressure
 }
 
 enum SingingWatchdogAction: Sendable, Equatable {
     case ok
-    case kill(reason: String)
+    case kill(trigger: SingingWatchdogTrigger, reason: String)
 }
 
 // MARK: - The real Critical-pressure observer

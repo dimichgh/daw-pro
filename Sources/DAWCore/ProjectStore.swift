@@ -3084,7 +3084,10 @@ public final class ProjectStore {
     ///     engine map is UUID-keyed and reconcile's signature is a dictionary,
     ///     so the reconcile is a no-op and nothing announces. Guarding it would
     ///     refuse mid-take an edit that cannot reach audio at all.
-    private func requireRoutingMutationAllowed(_ action: String) throws {
+    /// Module-internal (not private) since m39-tpl-2, the `performEdit`
+    /// precedent: `ProjectStore+Templates.swift` refuses a routed template
+    /// mid-take through this SAME guard.
+    func requireRoutingMutationAllowed(_ action: String) throws {
         guard !transport.isRecording else {
             throw ProjectError.transportBusy(
                 "cannot \(action) while recording — stop first")
@@ -3200,19 +3203,13 @@ public final class ProjectStore {
     /// (import/clip family precedent): unknown track → `trackNotFound`; a bus
     /// source → `busRoutingFixed` (buses always output to master in v0); a
     /// missing destination → `trackNotFound`; a non-bus destination → `notABus`.
+    /// Those rules have ONE home, `RoutingRules.checkOutput` (m39-tpl-2a.2),
+    /// which the template builder runs too.
     public func setTrackOutput(id: UUID, busID: UUID?) throws {
         try requireRoutingMutationAllowed("change a track's output")  // m13-c
-        guard let index = tracks.firstIndex(where: { $0.id == id }) else {
-            throw ProjectError.trackNotFound(id)
-        }
-        guard tracks[index].kind != .bus else { throw ProjectError.busRoutingFixed }
-        if let busID {
-            guard let destIndex = tracks.firstIndex(where: { $0.id == busID }) else {
-                throw ProjectError.trackNotFound(busID)
-            }
-            guard tracks[destIndex].kind == .bus else { throw ProjectError.notABus(busID) }
-        }
-        let name = tracks[index].name
+        try RoutingRules.checkOutput(of: id, to: busID, in: tracks)
+        // The rules above proved the track exists; the fallback is a label only.
+        let name = trackName(id) ?? id.uuidString
         editTrack(id: id, label: "Set '\(name)' Output") { $0.outputBusID = busID }
     }
 
@@ -3221,24 +3218,17 @@ public final class ProjectStore {
     /// missing destination → `trackNotFound`; non-bus destination → `notABus`; a
     /// second send to the same bus → `duplicateSend` (which also bounds send count
     /// by bus count). `level` clamps to `Send.levelRange` through `Send.init`.
+    /// Those rules have ONE home, `RoutingRules.checkSend` (m39-tpl-2a.2), which
+    /// the template builder runs too.
     @discardableResult
     public func addSend(toTrack id: UUID, busID: UUID, level: Double = 1) throws -> Send {
         try requireRoutingMutationAllowed("add a send")  // m13-c
-        guard let index = tracks.firstIndex(where: { $0.id == id }) else {
-            throw ProjectError.trackNotFound(id)
-        }
-        guard tracks[index].kind != .bus else { throw ProjectError.busRoutingFixed }
-        guard let destIndex = tracks.firstIndex(where: { $0.id == busID }) else {
-            throw ProjectError.trackNotFound(busID)
-        }
-        guard tracks[destIndex].kind == .bus else { throw ProjectError.notABus(busID) }
-        guard !tracks[index].sends.contains(where: { $0.destinationBusID == busID }) else {
-            throw ProjectError.duplicateSend(busID)
-        }
+        try RoutingRules.checkSend(from: id, to: busID, in: tracks)
         let send = Send(destinationBusID: busID, level: level)
-        let trackName = tracks[index].name
-        let busName = tracks[destIndex].name
-        editTrack(id: id, label: "Add Send '\(trackName)' → '\(busName)'") { $0.sends.append(send) }
+        // The rules above proved both tracks exist; the fallbacks are labels only.
+        let sourceName = trackName(id) ?? id.uuidString
+        let busName = trackName(busID) ?? busID.uuidString
+        editTrack(id: id, label: "Add Send '\(sourceName)' → '\(busName)'") { $0.sends.append(send) }
         return send
     }
 
@@ -3873,8 +3863,9 @@ public final class ProjectStore {
     /// throws and records no undo entry): the source must resolve to an
     /// existing file (`SoundBankLibrary.resolve`, shared with the engine's
     /// pre-instantiation check) carrying an `.sf2`/`.dls` extension
-    /// (case-insensitive).
-    private func validateSoundBank(_ config: SoundBankConfig) throws {
+    /// (case-insensitive). Module-internal since m39-tpl-2 (the `performEdit`
+    /// precedent): `applyTemplate` checks a template's banks through it.
+    func validateSoundBank(_ config: SoundBankConfig) throws {
         let url = try soundBankLibrary.resolve(config.source)
         let ext = url.pathExtension.lowercased()
         // ⛔ m31-g: this is one of the gates that makes a DISCOVERED-but-
@@ -3892,7 +3883,9 @@ public final class ProjectStore {
     /// `importAudio`. An empty zones array is a silent sampler — legal, and it
     /// needs no media service. A non-empty array with no media service wired up
     /// throws `mediaServiceUnavailable`, exactly like an import attempt.
-    private func validateSamplerZones(_ zones: [SamplerZone]) throws {
+    /// Module-internal since m39-tpl-2 (the `performEdit` precedent):
+    /// `applyTemplate` checks a template's zone files through it.
+    func validateSamplerZones(_ zones: [SamplerZone]) throws {
         guard !zones.isEmpty else { return }
         guard let media else { throw ProjectError.mediaServiceUnavailable }
         for zone in zones {
@@ -7448,7 +7441,9 @@ public final class ProjectStore {
                          grooveTemplates: grooveTemplates, markers: markers,
                          masterEffects: masterEffects,
                          masterAutomation: masterAutomation,
-                         reference: reference)
+                         reference: reference,
+                         masterModulationSources: masterModulationSources,
+                         masterModulationRoutes: masterModulationRoutes)
     }
 
     /// The single funnel every undoable mutation passes through. Captures the
@@ -7519,6 +7514,12 @@ public final class ProjectStore {
         masterVolume = target.masterVolume
         masterEffects = target.masterEffects
         masterAutomation = target.masterAutomation
+        // Master modulation (F2, W7-MODP): rides the snapshot now; pushed to the engine below with the other
+        // master intents. Compared BEFORE the overwrite so the push fires only when it moved.
+        let masterModulationMoved = masterModulationSources != target.masterModulationSources
+            || masterModulationRoutes != target.masterModulationRoutes
+        masterModulationSources = target.masterModulationSources
+        masterModulationRoutes = target.masterModulationRoutes
         // Groove palette rides the same snapshot (no engine involvement — grooves
         // are pure data applied at quantize time).
         grooveTemplates = target.grooveTemplates
@@ -7547,6 +7548,9 @@ public final class ProjectStore {
         if masterChanged { engine?.masterVolumeChanged(masterVolume) }
         if masterFXChanged { engine?.masterEffectsChanged(masterEffects) }
         if masterAutoChanged { engine?.masterAutomationChanged(masterAutomation) }
+        if masterModulationMoved {
+            engine?.masterModulationChanged(sources: masterModulationSources, routes: masterModulationRoutes)
+        }
         // Reference slot (m22-g P2): keep the transient monitor honest across
         // the restore — a restore that removes/replaces the slot mid-audition
         // turns the monitor OFF (un-gating the mix); an offset/trim restore
@@ -7677,7 +7681,10 @@ public final class ProjectStore {
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
             copilotChats: persistedChats,
-            reference: reference
+            reference: reference,
+            // m39-e (W7-MODP): the master strip's modulation was never handed to the save format.
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes
         )
         do {
             try ProjectBundle.write(
@@ -7877,6 +7884,10 @@ public final class ProjectStore {
         masterVolume = 1
         masterEffects = []  // m13-d: a fresh session carries no master chain
         masterAutomation = []  // m15-c: … and no master automation
+        // m39-e (F1, W7-MODP): … and no master modulation. It used to survive New — in the store AND in the
+        // live graph — so the last project's master LFO kept playing in the new one.
+        masterModulationSources = []
+        masterModulationRoutes = []
         grooveTemplates = []
         markers = []
         reference = nil  // m22-g: … and no reference slot
@@ -7934,6 +7945,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.masterModulationChanged(sources: masterModulationSources, routes: masterModulationRoutes)
         engine?.referenceChanged(reference)  // m22-g P2: clear the lane cache
         engine?.loopChanged(transport)
 
@@ -7958,6 +7970,11 @@ public final class ProjectStore {
         masterVolume = runtime.masterVolume
         masterEffects = runtime.masterEffects
         masterAutomation = runtime.masterAutomation
+        // Master modulation (m39-e; F1, W7-MODP): the document's — EMPTY when the file has none, which is what
+        // stops the previous session's master modulation surviving the open.
+        let masterModulation = document.runtimeMasterModulation
+        masterModulationSources = masterModulation.sources
+        masterModulationRoutes = masterModulation.routes
         // Resume the persisted map revision (m12-d) so a reopened non-trivial
         // map keeps a stable, monotonic identity; trivial projects load 0.
         mapRevision = document.tempoMapRevision ?? 0
@@ -8029,6 +8046,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.masterModulationChanged(sources: masterModulationSources, routes: masterModulationRoutes)
         engine?.referenceChanged(reference)  // m22-g P2: fresh lane cache
         engine?.loopChanged(transport)
 
@@ -8254,7 +8272,10 @@ public final class ProjectStore {
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
             copilotChats: includeChats ? copilotChatsForPersistence() : [],
-            reference: reference
+            reference: reference,
+            // m39-e (W7-MODP): crash-recovery and untitled-recovery bundles carry it too (F4).
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes
         )
     }
 
@@ -8398,6 +8419,10 @@ public final class ProjectStore {
         masterVolume = runtime.masterVolume
         masterEffects = runtime.masterEffects
         masterAutomation = runtime.masterAutomation
+        // Master modulation (m39-e; F1 + F4, W7-MODP): the recovered snapshot's, the open-path rule.
+        let masterModulation = document.runtimeMasterModulation
+        masterModulationSources = masterModulation.sources
+        masterModulationRoutes = masterModulation.routes
         // Resume the persisted map revision (m12-d), like the open path.
         mapRevision = document.tempoMapRevision ?? 0
         grooveTemplates = document.grooveTemplates ?? []
@@ -8437,6 +8462,7 @@ public final class ProjectStore {
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
         engine?.masterAutomationChanged(masterAutomation)
+        engine?.masterModulationChanged(sources: masterModulationSources, routes: masterModulationRoutes)
         engine?.referenceChanged(reference)  // m22-g P2: fresh lane cache
         engine?.loopChanged(transport)
 

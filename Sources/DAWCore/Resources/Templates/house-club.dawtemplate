@@ -1,0 +1,36 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "house-club",
+  "name": "House Club",
+  "summary": "Club drums, a synth bass and chords that duck under the kick, a slowly moving filter, and echoes that follow the tempo.",
+  "songForm": "house",
+  "genres": ["house"],
+  "tracks": [
+    { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 0.74,
+      "instrument": { "kind": "drumSynth", "drumPreset": "909", "drumKit": { "noteLayout": "gm" } },
+      "sends": [ { "bus": "room", "level": 0.1 } ] },
+    { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.06, "output": "pump",
+      "instrument": { "kind": "polySynth", "waveform": "saw", "attack": 0.002, "decay": 0.25, "sustain": 0.6,
+                      "release": 0.08, "cutoffHz": 900, "resonance": 0.2, "subLevel": 0.5, "subOctave": -1,
+                      "subWaveform": "sine" } },
+    { "key": "chords", "name": "Chords", "kind": "instrument", "volume": 0.74, "output": "pump",
+      "instrument": { "kind": "polySynth", "waveform": "saw", "attack": 0.01, "decay": 0.4, "sustain": 0.6,
+                      "release": 0.3, "cutoffHz": 3000, "unisonVoices": 2, "unisonDetuneCents": 10 },
+      "inserts": [ { "key": "sweep", "kind": "djFilter", "params": { "position": -0.25 } } ],
+      "sends": [ { "bus": "echo", "level": 0.25 }, { "bus": "room", "level": 0.2 } ],
+      "modulation": {
+        "sources": [ { "key": "slow-sweep", "kind": "lfo", "params": { "waveform": "sine", "rateHz": 0.0625 } } ],
+        "routes": [ { "source": "slow-sweep", "depth": 0.1,
+                      "target": { "type": "effectParam", "insert": "sweep", "param": "position" } } ] } },
+    { "key": "pump", "name": "Pump", "kind": "bus",
+      "inserts": [ { "kind": "compressor", "sidechainSource": "drums",
+                     "params": { "thresholdDb": -15, "ratio": 4, "attackMs": 1, "releaseMs": 120 } } ] },
+    { "key": "echo", "name": "Echo", "kind": "bus",
+      "inserts": [ { "kind": "delay", "params": { "sync": 1, "division": 0.75, "feedback": 0.35, "mix": 1,
+                                                  "highCutHz": 6000 } } ] },
+    { "key": "room", "name": "Room", "kind": "bus",
+      "inserts": [ { "kind": "hallReverb", "params": { "mix": 1, "sizeMeters": 14, "decaySeconds": 1.6 } } ] }
+  ]
+}

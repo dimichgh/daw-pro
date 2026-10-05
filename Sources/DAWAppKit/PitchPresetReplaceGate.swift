@@ -8,8 +8,11 @@ import Observation
 // Both preset doors (the clip menu's Tune Vocal ▸ <preset> and the note
 // editor's preset chips) reach one funnel, `AppModel.tuneVocalFromContextMenu`.
 // The funnel asks this gate first. The gate answers from ONE signal,
-// `PitchEditSet.hasHandEditsSinceAutoCorrect`, which DAWCore owns and tests.
-// No second estimate of "was this edited" is made here.
+// `PitchEditSet.hasHandEditsARerunWouldReplace(_:)` with the clicked preset's
+// options, which DAWCore owns and tests (W7-NTU 2026-10-04: until then
+// `hasHandEditsSinceAutoCorrect`, which also counts a voice size or a
+// consonant choice the preset KEEPS). No second estimate of "was this edited"
+// is made here.
 //
 // The gate is a headless model rather than a stored property on `AppModel`
 // because `DAWApp` has no test target. Here, "Cancel applies nothing",
@@ -27,23 +30,33 @@ public struct PitchPresetReplaceRequest: Equatable, Sendable {
     /// settings, read from the clip's set AT THE CLICK
     /// (`PitchPresetReplaceSettings(current:)`), for the card's sentence.
     public let settings: PitchPresetReplaceSettings
+    /// Tune to Melody (M3, W7-TTM3): the melody this click tunes to, held WITH the request so
+    /// "Replace my edits" runs exactly what was asked about (`TuneToMelodyDoor.confirmedRun`).
+    /// nil for the preset doors. It rides along: the gate decides as it does for the preset.
+    public let melody: MelodyTuning?
 
     public init(clipID: UUID, clipName: String, preset: PitchCorrectionPreset,
-                settings: PitchPresetReplaceSettings = .none) {
+                settings: PitchPresetReplaceSettings = .none, melody: MelodyTuning? = nil) {
         self.clipID = clipID
         self.clipName = clipName
         self.preset = preset
         self.settings = settings
+        self.melody = melody
     }
 }
 
 /// W7-NTU (W7-D2's item 3) — WHAT A PRESET DOES TO THE THREE SETTINGS OF THE
 /// HEADER GROUP "Sound like the singer", read from the clip's set at the click.
 ///
-/// ⚠️ **WHY THE CARD NEEDS THIS.** The gate's one signal
-/// (`hasHandEditsSinceAutoCorrect`) is a stamp over the WHOLE set, so a
-/// set-level pick made after a preset (a voice size, a Consonants switch, a
-/// Slides step) moves it exactly as a moved note does, and the card asks.
+/// ⚠️ **WHY THE CARD NEEDS THIS.** Until 2026-10-04 the gate's one signal was
+/// a stamp over the WHOLE set, so a set-level pick made after a preset (a
+/// voice size, a Consonants switch, a Slides step) moved it exactly as a moved
+/// note does, and the card asked. Since W7-NTU's ruling 1 the signal
+/// (`hasHandEditsARerunWouldReplace`) folds the two picks a preset KEEPS, so a
+/// voice size or a consonant choice alone no longer asks; a Slides step still
+/// does (a preset replaces it), and so does any pick beside a hand edit, and
+/// any vocal saved before that day (no replaceable stamp: one question, then
+/// the preset stamps it).
 /// W7-D2 made one more pick journaled (a consonant OFF on an OFF nobody
 /// chose). In that case nothing on the note list was made by hand, and the
 /// card's old sentence ("including the notes you moved…") was false. The
@@ -171,11 +184,18 @@ public final class PitchPresetReplaceGate {
     ///
     /// `current` is the clip's stored set AT THE CLICK. A clip with no set
     /// (never tuned, or tuning removed) has nothing to lose.
+    ///
+    /// `melody` (Tune to Melody, W7-TTM3) only rides on the held request. The question is the
+    /// preset's, unchanged: a melody pass runs the preset's own options (its strength aside,
+    /// which the question does not read), so what a re-run would replace is the same.
     public func request(_ preset: PitchCorrectionPreset, clipID: UUID, clipName: String,
-                        current: PitchEditSet?) -> Decision {
-        guard current?.hasHandEditsSinceAutoCorrect == true else { return .applyNow }
+                        current: PitchEditSet?, melody: MelodyTuning? = nil) -> Decision {
+        // W7-NTU ruling 1 — the question a RE-RUN of this preset asks: a
+        // change only to a setting the preset keeps is nothing to lose.
+        guard current?.hasHandEditsARerunWouldReplace(preset.options()) == true else { return .applyNow }
         pending = PitchPresetReplaceRequest(clipID: clipID, clipName: clipName, preset: preset,
-                                            settings: PitchPresetReplaceSettings(current: current))
+                                            settings: PitchPresetReplaceSettings(current: current),
+                                            melody: melody)
         return .askFirst
     }
 
@@ -239,7 +259,10 @@ public struct PitchPresetReplaceCopy: Equatable, Sendable {
         let clip = request.clipName.isEmpty ? "this clip" : "“\(request.clipName)”"
         title = "Replace your hand edits?"
         let settings = Self.settingsSentence(request.settings)
-        body = "\(request.preset.displayName) tunes all of \(clip) from scratch. "
+        // Tune to Melody (W7-TTM3) names the action the person pressed, not the chip.
+        let action = request.melody == nil ? request.preset.displayName
+                                           : TuneToMelodyCopy.actionName
+        body = "\(action) tunes all of \(clip) from scratch. "
             + "This replaces the tuning already on this clip, including \(Self.handEdits)."
             + (settings.isEmpty ? "" : " " + settings)
         undoNote = "Changed your mind afterwards? Undo (⌘Z) brings your edits back."

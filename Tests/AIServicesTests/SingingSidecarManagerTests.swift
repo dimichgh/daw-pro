@@ -50,6 +50,11 @@ private func testConfiguration(
         stopTimeoutSeconds: 5)
     config.testExtraEnvironment = ["SING_USE_STUB": "1", "SING_TEST_HOOKS": "1"]
         .merging(extraEnvironment) { _, new in new }
+    // FIX NOW #6 (architect review): every manager test gets a scripted, always-false pressure
+    // reader by default, so NONE of them accidentally own a real `MemoryPressureObserver`
+    // exposed to genuine system memory pressure — a test that specifically wants pressure
+    // behavior (e.g. `pressureKillsDuringLoadBeforeHealthy`) overrides this explicitly afterward.
+    config.watchdogReadMemoryPressureCritical = { false }
     return config
 }
 
@@ -304,13 +309,24 @@ struct SingingSidecarManagerWatchdogTests {
                 if classification != nil { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
-            guard case .watchdog(let detail)? = classification else {
-                Issue.record("expected .watchdog(detail:), got \(String(describing: classification))")
+            guard case .watchdog(let trigger, let detail)? = classification else {
+                Issue.record("expected .watchdog(trigger:detail:), got \(String(describing: classification))")
                 _ = try? await manager.stop()
                 return
             }
             #expect(detail.localizedCaseInsensitiveContains("cap"), "got: \(detail)")
             #expect(detail.localizedCaseInsensitiveContains("footprint"), "got: \(detail)")
+            // FIX NOW #8 (architect review): assert the STRUCTURED trigger, not just substrings
+            // of the formatted message — `watchdogKillsOverCap` stayed green under the lane's
+            // own `>` -> `<` plant because the OLD message-only assertion could not tell a
+            // genuine over-cap kill from one that fired on the baseline footprint.
+            guard case .footprint(let bytes, let capBytes) = trigger else {
+                Issue.record("expected .footprint(bytes:capBytes:), got \(trigger)")
+                _ = try? await manager.stop()
+                return
+            }
+            #expect(capBytes == 512 * 1_048_576, "the cap this test configured")
+            #expect(bytes > capBytes, "the measured footprint must be OVER the cap, not merely present")
             #expect(kill(pid, 0) != 0, "the tree must actually be dead, not just classified as killed")
         } catch {
             _ = try? await manager.stop()
@@ -341,6 +357,12 @@ struct SingingSidecarManagerWatchdogTests {
             try await Task.sleep(nanoseconds: 600_000_000)
             let classification = await manager.lastStopClassification()
             #expect(classification == nil, "an under-cap footprint must never classify a kill")
+            // FIX NOW #6: proves the loop actually RAN -- without this, "never kills" would pass
+            // vacuously even if the watchdog never sampled at all. `disarmBeforeFirstSamplePrevents
+            // Sampling` is the existing control at the OTHER end (0 samples when disarmed before the
+            // first poll); this is its counterpart, not a duplicate of it.
+            let samplesTaken = await manager.watchdogSamplesTaken()
+            #expect(samplesTaken > 0, "the watchdog must have actually sampled, not just never killed")
             let status = await manager.status()
             #expect(status.state == .healthy, "the sidecar must still be up")
             try await manager.stop()
@@ -348,5 +370,38 @@ struct SingingSidecarManagerWatchdogTests {
             _ = try? await manager.stop()
             throw error
         }
+    }
+
+    @Test("FIX NOW #3(b): armed at SPAWN, a pressure kill fires DURING the load window, before .healthy")
+    func pressureKillsDuringLoadBeforeHealthy() async throws {
+        // `SING_STUB_LOAD_S=5`: the stub answers "loading" for 5 s before it would ever reach
+        // healthy — long enough for 2 consecutive Critical samples at a 0.1 s poll to land well
+        // before that, IF (architect FIX-NOW #3) the watchdog is armed at spawn rather than only
+        // once `.healthy` is reached.
+        let dir = try makeTempRuntimeDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let port = try StubACEStepServer.unusedLoopbackPort()
+        var config = testConfiguration(
+            port: port, runtimeDir: dir, scriptsDir: try testScriptsDir(),
+            extraEnvironment: ["SING_STUB_LOAD_S": "5"])
+        config.watchdogPollIntervalSeconds = 0.1
+        config.watchdogReadMemoryPressureCritical = { true }
+        config.startupTimeoutSeconds = 10
+
+        let manager = SingingSidecarManager(configuration: config)
+        do {
+            _ = try await manager.start()
+            Issue.record("expected start() to throw -- the watchdog should kill the tree mid-load")
+            _ = try? await manager.stop()
+            return
+        } catch {
+            // Expected: the process exited during startup (SIGKILLed by the watchdog).
+        }
+        let classification = await manager.lastStopClassification()
+        guard case .watchdog(let trigger, _)? = classification else {
+            Issue.record("expected .watchdog(trigger:detail:), got \(String(describing: classification))")
+            return
+        }
+        #expect(trigger == .pressure)
     }
 }

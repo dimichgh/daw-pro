@@ -1,0 +1,30 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "pop-band",
+  "name": "Pop Band",
+  "summary": "A full pop band with its drums grouped on their own bus and one shared reverb that every part can send to.",
+  "songForm": "pop",
+  "genres": ["pop"],
+  "tracks": [
+    { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 1.12, "output": "drum-bus",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 0, "bankMSB": 120, "bankLSB": 0 } },
+      "sends": [ { "bus": "reverb", "level": 0.15 } ] },
+    { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.47, "mixerPreset": "bass-tight",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 33 } } },
+    { "key": "piano", "name": "Piano", "kind": "instrument", "volume": 1.4,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 0 } },
+      "sends": [ { "bus": "reverb", "level": 0.25 } ] },
+    { "key": "pad", "name": "Synth Pad", "kind": "instrument", "volume": 0.33, "mixerPreset": "warm-keys",
+      "instrument": { "kind": "polySynth", "waveform": "saw", "attack": 0.6, "decay": 1, "sustain": 0.8,
+                      "release": 1.5, "cutoffHz": 2400, "unisonVoices": 3, "unisonDetuneCents": 12,
+                      "unisonStereoSpread": 0.6 },
+      "sends": [ { "bus": "reverb", "level": 0.35 } ] },
+    { "key": "vocal", "name": "Lead Vocal", "kind": "audio", "mixerPreset": "vocal-presence",
+      "sends": [ { "bus": "reverb", "level": 0.2 } ] },
+    { "key": "drum-bus", "name": "Drum Bus", "kind": "bus", "mixerPreset": "drum-bus-glue" },
+    { "key": "reverb", "name": "Reverb", "kind": "bus",
+      "inserts": [ { "kind": "hallReverb", "params": { "mix": 1, "sizeMeters": 20, "decaySeconds": 2 } } ] }
+  ]
+}

@@ -39,6 +39,10 @@ extension ProjectStore {
     /// A looper layer on a track this would move is refused: the looper keeps
     /// its own copy of each layer's notes and would put the old key back on
     /// its next pass (`materializeDeckLayers`).
+    ///
+    /// **Warns** (round 3 (d)) about every AI fix still being made from audio
+    /// this moves (`pendingFixWillBeRefused`), in a preview too: it will be
+    /// refused as out of date when it arrives.
     @discardableResult
     public func transposeProject(semitones: Int, excludeTrackIds: Set<UUID> = [],
                                  dryRun: Bool = false) throws -> TransposeReport {
@@ -50,13 +54,18 @@ extension ProjectStore {
         // Not `performEdit` for a preview or a no-op: it marks the project
         // dirty unconditionally, and a preview that raised "unsaved changes"
         // would be a write in all but name.
-        guard !dryRun, plan.changesAnything else { return plan.report }
+        // Round 3 (d): the in-flight AI fixes this makes stale, from the store,
+        // which the pure planner never sees. Before the guard, so a preview says it.
+        var report = plan.report
+        report.warnings += ProjectTranspose.pendingFixWarnings(
+            Array(pendingClipFixes.values), before: tracks, after: plan.tracks)
+        guard !dryRun, plan.changesAnything else { return report }
         performEdit(ProjectTranspose.undoLabel(semitones: semitones)) {
             tracks = plan.tracks
             // Notes and clip shifts are ClipKey-affecting edits: the same one
             // restart seam `setClipNotes` and `setClipStretch` ride.
             engine?.tracksDidChange(tracks)
         }
-        return plan.report
+        return report
     }
 }

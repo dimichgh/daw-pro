@@ -219,7 +219,7 @@ NT-C C2 close, 2026-09-25) — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**256 commands** — re-measured 2026-09-27 at W7-WIRE2 (mcp-integration-engineer):
+(**263 commands** — re-measured 2026-09-27 at W7-WIRE2 (mcp-integration-engineer):
 headline moved 255 -> 256, ONE verb (`clip.setNoteShapes`, the BATCH twin of
 `clip.setNoteShape` over the SAME `ProjectStore.setClipNoteShapes` the single
 verb already calls), placed
@@ -231,7 +231,16 @@ files** — the SAME shape as the prior census (only the target number moved;
 no pin site was added or removed this close). The same close also gave
 `clip.autoCorrectPitch` an optional `formantCorrection` argument and
 `clip.getPitchEdits` a new `consonantsOffByChoice` boolean — neither is a new
-verb, so neither moves this count. Previously re-measured 2026-09-27 at X4 (mcp-integration-engineer):
+verb, so neither moves this count. 2026-10-04 (Tune to Melody M2, W7-TTM2; W7-PK):
+`clip.autoCorrectPitch` gained `melodyClipId` | `melodyTrackId` (exactly one;
+both is an error) and `octaveMatch` (`"nearestOctave"` default | `"exact"`), all
+in `rejectUnknownKeys`, with a `melody{}` reply block (`sourceName`,
+`notesUsed`, `matchedParts`, `unmatchedParts`, `unsungNotes`, `cutsAdded`,
+`chordsReduced`, `octaveFolded`, `farMoves`); and `keptDetuneCents` /
+`keptDetuneNotice` when Auto-Tune runs on a clip transposed by a fractional
+amount (the fraction is kept as a deliberate detune). Mirrored on
+`clip_auto_correct_pitch`. Parameters on an EXISTING command: 256 / 261
+unchanged (`doc-count-drift.mjs` + `tools/list`, measured 2026-10-04). Previously re-measured 2026-09-27 at X4 (mcp-integration-engineer):
 headline moved 254 -> 255, ONE verb (`clip.upgradeNaturalTuning`, natural
 tuning's ONE upgrade path over `ProjectStore.upgradeToNaturalTuning`), placed
 next to `clip.setNoteShape` in the same per-note pitch-editor door cluster,

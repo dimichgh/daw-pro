@@ -57,6 +57,11 @@ enum SingingInstallerFixture {
         guard let scriptsDir = try? testScriptsDir() else {
             return .failure(.buildFailed("scripts/sing could not be resolved"))
         }
+        // FIX NOW #5 hygiene: sweep any PREVIOUS process's dead mirror build before adding ours —
+        // see `sweepDeadSingInstallerRoots`'s doc. This is the "leaks one mirror build every run"
+        // leak the architect named; there is no `defer` for a `static let` shared for the whole
+        // test PROCESS's lifetime, so the NEXT process is what cleans this one up.
+        sweepDeadSingInstallerRoots()
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("sing-installer-fixture-\(UUID().uuidString)", isDirectory: true)
         let mirrorDir = tmp.appendingPathComponent("mirror", isDirectory: true)
@@ -66,6 +71,7 @@ enum SingingInstallerFixture {
         } catch {
             return .failure(.buildFailed("could not create the fixture temp dir: \(error)"))
         }
+        markOwner(of: tmp)
         let script = """
             import sys, json
             sys.path.insert(0, \(pythonLiteral(scriptsDir.appendingPathComponent("tests").path)))
@@ -125,16 +131,51 @@ private func pythonLiteral(_ s: String) -> String {
     "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
 }
 
+// MARK: - `sing-installer-*` temp-dir hygiene (FIX NOW #5, registered while #5 is edited)
+//
+// Every `sing-installer-fixture-*`/`sing-installer-test-*` root this file creates writes its
+// OWN pid into an `owner.pid` marker right after creation — the project's own pidfile idiom,
+// restated for a /tmp root instead of a runtime dir. A LATER test process sweeps any root whose
+// marked owner is no longer alive (`kill(pid,0)` reports ESRCH) before creating its own. This
+// catches BOTH the common case (a normal test run leaks its root — caller `defer`s it away
+// immediately below) AND the crash case (this suite has produced real signal-6 aborts; neither
+// `defer` nor `atexit` fires on a trapped signal, so a crashed run's leftovers wait for the NEXT
+// process to sweep them, rather than accumulating forever). A root with NO marker yet is never
+// touched — it may be an in-flight build from a racing process (unlikely under this project's
+// one-heavy-slot convention, but the marker check costs nothing to keep anyway).
+private func markOwner(of root: URL) {
+    try? Data(String(getpid()).utf8).write(to: root.appendingPathComponent("owner.pid"))
+}
+
+private func sweepDeadSingInstallerRoots() {
+    let tmp = FileManager.default.temporaryDirectory
+    guard let entries = try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)
+    else { return }
+    for entry in entries where entry.lastPathComponent.hasPrefix("sing-installer-") {
+        guard let data = try? Data(contentsOf: entry.appendingPathComponent("owner.pid")),
+              let pid = Int32(String(decoding: data, as: UTF8.self))
+        else { continue }
+        if kill(pid, 0) != 0 {
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+}
+
 /// A runtime dir WITH A SPACE in the path — `.../runtime <tag>/App Support/DAWPro/SingingEngine`
 /// — SB's own F14 requirement (design §8): "Application Support" has a space in every real
 /// install, and install.sh is documented QUOTED throughout specifically because of it.
-private func testRuntimeDir(tag: String) throws -> URL {
-    let dir = FileManager.default.temporaryDirectory
+/// Returns `root` alongside `dir` so a caller can `defer { removeItem(at: root) }` — `dir` is
+/// several components BELOW `root` and removing it alone would not reclaim the UUID-named parent.
+private func testRuntimeDir(tag: String) throws -> (dir: URL, root: URL) {
+    sweepDeadSingInstallerRoots()
+    let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("sing-installer-test-\(UUID().uuidString)", isDirectory: true)
+    let dir = root
         .appendingPathComponent("runtime \(tag)", isDirectory: true)
         .appendingPathComponent("App Support/DAWPro/SingingEngine", isDirectory: true)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    return dir
+    markOwner(of: root)
+    return (dir: dir, root: root)
 }
 
 private final class ProgressCollector: @unchecked Sendable {
@@ -364,6 +405,50 @@ struct SingingEngineInstallerClassifyTests {
         let outcome = SingingEngineInstaller.classify(exitCode: -1, lines: [], stderrTail: "")
         #expect(outcome == .crashed(exitCode: -1, stderrTail: ""))
     }
+
+    // MARK: FIX NOW #5 (architect review Q6) — `terminationReason == .uncaughtSignal` means
+    // `exitCode` is actually a SIGNAL NUMBER, read before the exit-code switch above, never
+    // folded into one of the five documented exit codes.
+
+    @Test("uncaught SIGHUP (1), no cancel requested -> .crashed(1), never misread as exit code 1 (.failed)")
+    func uncaughtSighupNeverMisreadsAsFailed() {
+        let outcome = SingingEngineInstaller.classify(
+            exitCode: SIGHUP, lines: [], stderrTail: "", terminationReason: .uncaughtSignal,
+            cancelRequested: false)
+        #expect(outcome == .crashed(exitCode: SIGHUP, stderrTail: ""))
+    }
+
+    @Test("uncaught SIGINT (2), no cancel requested -> .crashed(2), never misread as exit code 2 (.badUsage)")
+    func uncaughtSigintWithoutCancelNeverMisreadsAsBadUsage() {
+        let outcome = SingingEngineInstaller.classify(
+            exitCode: SIGINT, lines: [], stderrTail: "", terminationReason: .uncaughtSignal,
+            cancelRequested: false)
+        #expect(outcome == .crashed(exitCode: SIGINT, stderrTail: ""))
+    }
+
+    @Test("uncaught SIGTERM (15), cancel WAS requested -> .cancelled(step: nil) -- the pre-trap-install window")
+    func uncaughtSigtermWithCancelRequestedIsCancelled() {
+        let outcome = SingingEngineInstaller.classify(
+            exitCode: SIGTERM, lines: [], stderrTail: "", terminationReason: .uncaughtSignal,
+            cancelRequested: true)
+        #expect(outcome == .cancelled(step: nil))
+    }
+
+    @Test("uncaught SIGTERM (15), NO cancel requested -> .crashed(15), an external kill, not ours")
+    func uncaughtSigtermWithoutCancelRequestedCrashes() {
+        let outcome = SingingEngineInstaller.classify(
+            exitCode: SIGTERM, lines: [], stderrTail: "", terminationReason: .uncaughtSignal,
+            cancelRequested: false)
+        #expect(outcome == .crashed(exitCode: SIGTERM, stderrTail: ""))
+    }
+
+    @Test("uncaught SIGINT (2), cancel WAS requested -> .cancelled(step: nil), same rule as SIGTERM")
+    func uncaughtSigintWithCancelRequestedIsCancelled() {
+        let outcome = SingingEngineInstaller.classify(
+            exitCode: SIGINT, lines: [], stderrTail: "", terminationReason: .uncaughtSignal,
+            cancelRequested: true)
+        #expect(outcome == .cancelled(step: nil))
+    }
 }
 
 // MARK: - Real install, against the local fixture mirror
@@ -378,7 +463,8 @@ struct SingingEngineInstallerRealInstallTests {
         .enabled(if: SingingInstallerFixture.machineHasFixtureInputs))
     func fullInstallSucceeds() async throws {
         let fixture = try SingingInstallerFixture.requirePaths()
-        let runtimeDir = try testRuntimeDir(tag: "A")
+        let (runtimeDir, runtimeRoot) = try testRuntimeDir(tag: "A")
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
         let installer = SingingEngineInstaller(configuration: .init(
             scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
             installSource: fixture.mirror, pinsFile: fixture.pins))
@@ -414,7 +500,8 @@ struct SingingEngineInstallerRealInstallTests {
         .enabled(if: SingingInstallerFixture.machineHasFixtureInputs))
     func reRunIsIdempotent() async throws {
         let fixture = try SingingInstallerFixture.requirePaths()
-        let runtimeDir = try testRuntimeDir(tag: "B")
+        let (runtimeDir, runtimeRoot) = try testRuntimeDir(tag: "B")
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
         let installer = SingingEngineInstaller(configuration: .init(
             scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
             installSource: fixture.mirror, pinsFile: fixture.pins))
@@ -445,7 +532,8 @@ struct SingingEngineInstallerRealInstallTests {
         .enabled(if: SingingInstallerFixture.machineHasFixtureInputs))
     func cancelMidDownloadLeavesNothingInstalled() async throws {
         let fixture = try SingingInstallerFixture.requirePaths()
-        let runtimeDir = try testRuntimeDir(tag: "C")
+        let (runtimeDir, runtimeRoot) = try testRuntimeDir(tag: "C")
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
         let installer = SingingEngineInstaller(configuration: .init(
             scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
             installSource: fixture.mirror, pinsFile: fixture.pins,
@@ -478,6 +566,42 @@ struct SingingEngineInstallerRealInstallTests {
         #expect(after.isEmpty, "a process is still mentioning the runtime dir after cancel: \(after)")
     }
 
+    @Test(
+        """
+        FIX NOW #5. A cancel requested BEFORE install.sh ever launches -> .cancelled(step: nil): \
+        no progress ticks, no install.json, no staging, and an empty process census
+        """,
+        .enabled(if: SingingInstallerFixture.machineHasFixtureInputs))
+    func cancelBeforeLaunchNeverSpawns() async throws {
+        let fixture = try SingingInstallerFixture.requirePaths()
+        let (runtimeDir, runtimeRoot) = try testRuntimeDir(tag: "G")
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
+        let installer = SingingEngineInstaller(configuration: .init(
+            scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
+            installSource: fixture.mirror, pinsFile: fixture.pins))
+        let collector = ProgressCollector()
+
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await installer.install(progress: { collector.record($0) })
+        }
+        let outcome = await task.value
+
+        guard case .cancelled(let step) = outcome else {
+            Issue.record("expected .cancelled, got \(outcome)")
+            return
+        }
+        #expect(step == nil)
+        #expect(collector.ticks.isEmpty)
+        #expect(!FileManager.default.fileExists(
+            atPath: runtimeDir.appendingPathComponent("install.json").path))
+        let staging = (try? FileManager.default.contentsOfDirectory(atPath: runtimeDir.path))?
+            .filter { $0.hasPrefix(".staging-") } ?? []
+        #expect(staging.isEmpty)
+        let census = Self.processesM(mentioning: runtimeDir.path)
+        #expect(census.isEmpty, "a process is mentioning the runtime dir despite a pre-launch cancel: \(census)")
+    }
+
     private static func processesM(mentioning needle: String) -> [String] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
@@ -499,8 +623,10 @@ struct SingingEngineInstallerRealInstallTests {
 struct SingingEngineInstallerFailureShapeTests {
     @Test("a nil scriptsDir -> .cannotLaunch, nothing spawned")
     func nilScriptsDirCannotLaunch() async throws {
+        let (runtimeDir, runtimeRoot) = try testRuntimeDir(tag: "D")
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
         let installer = SingingEngineInstaller(configuration: .init(
-            scriptsDir: nil, runtimeDir: try testRuntimeDir(tag: "D")))
+            scriptsDir: nil, runtimeDir: runtimeDir))
         let outcome = await installer.install(progress: { _ in })
         guard case .cannotLaunch = outcome else {
             Issue.record("expected .cannotLaunch, got \(outcome)")
@@ -510,8 +636,10 @@ struct SingingEngineInstallerFailureShapeTests {
 
     @Test("installSource set without pinsFile (or vice versa) -> .cannotLaunch naming 'together'")
     func mismatchedFixturePairCannotLaunch() async throws {
+        let (runtimeDir, runtimeRoot) = try testRuntimeDir(tag: "E")
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
         let installer = SingingEngineInstaller(configuration: .init(
-            scriptsDir: try testScriptsDir(), runtimeDir: try testRuntimeDir(tag: "E"),
+            scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
             installSource: URL(fileURLWithPath: "/tmp/nonexistent-mirror"), pinsFile: nil))
         let outcome = await installer.install(progress: { _ in })
         guard case .cannotLaunch(let reason) = outcome else {
@@ -526,7 +654,8 @@ struct SingingEngineInstallerFailureShapeTests {
         .enabled(if: SingingInstallerFixture.machineHasFixtureInputs))
     func badPinsLineIsBadUsage() async throws {
         let fixture = try SingingInstallerFixture.requirePaths()
-        let runtimeDir = try testRuntimeDir(tag: "F")
+        let (runtimeDir, runtimeRoot) = try testRuntimeDir(tag: "F")
+        defer { try? FileManager.default.removeItem(at: runtimeRoot) }
         let badPins = runtimeDir.deletingLastPathComponent().appendingPathComponent("bad-pins.env")
         // A single line with '$' and '(' -- outside install.sh's PIN_RE character classes for an
         // unquoted value, so `load_pins` refuses it on line 1, before any real work.

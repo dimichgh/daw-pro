@@ -1248,4 +1248,29 @@ struct PitchEditorInteractionSiteTests {
         #expect(debug.contains("\"renderCaption\": .string(chrome.renderCaptionText)"))
         #expect(debug.contains("\"renderPoll\": pitchEditorRenderPollJSON()"))
     }
+
+    /// W7-NTU ruling 4 (2026-10-04). The decision is driven with real `NSEvent`s
+    /// in `PitchEditorVoiceToolTests.clickCountFromRealEvents`; this pins that
+    /// the live chord reaches it, and reads `clickCount` nowhere else.
+    /// Planted and seen red (W7-NTU P-clicks-site): `current` reading
+    /// `event.clickCount` directly again.
+    @Test("the live chord takes its click count from the tested decision, off the event being handled, and reads `clickCount` nowhere else")
+    func theLiveChordUsesTheTestedClickDecision() {
+        let view = Self.code(Self.viewPath)
+        guard let current = Self.block(after: "static var current: PitchEditorChord", in: view) else {
+            Issue.record("PitchEditorChord.current not found")
+            return
+        }
+        #expect(current.contains("let event = NSApp.currentEvent"))
+        #expect(current.contains("PitchEditorChord.clickCount(eventType: event.map { UInt($0.type.rawValue) },"))
+        #expect(current.contains("readClickCount: { event?.clickCount ?? 1 })"))
+        #expect(current.contains("clickCount: clicks)"))
+        // Outside `current`, the only `.clickCount` is the chord's own, handed
+        // to the release.
+        #expect(view.contains("clickCount: chord.clickCount)"), "the release no longer takes the chord's count")
+        let elsewhere = view.replacingOccurrences(of: current, with: "")
+            .replacingOccurrences(of: "chord.clickCount", with: "")
+        #expect(!elsewhere.contains(".clickCount"),
+                "the view reads an event's click count outside the tested decision")
+    }
 }

@@ -899,10 +899,8 @@ struct SliceToSamplerCommandTests {
         // REAL: the pitched part moved, so the key change ran.
         #expect(store.tracks.first { $0.id == keys.id }?.clips.first?.notes?.map(\.pitch) == [63])
         #expect(report.tracks.first { $0.trackId == keys.id }?.outcome == .moved)
-        withKnownIssue("PK-F2: SamplerParams.sliceKit is not stored until the marker patch lands, so the chop reads as a pitched sampler and moves") {
-            #expect(store.tracks.first { $0.id == kitID }?.clips.first?.notes?.map(\.pitch) == [36, 37, 38])
-            #expect(report.tracks.first { $0.trackId == kitID }?.outcome == .skippedSliceKit)
-        }
+        #expect(store.tracks.first { $0.id == kitID }?.clips.first?.notes?.map(\.pitch) == [36, 37, 38])
+        #expect(report.tracks.first { $0.trackId == kitID }?.outcome == .skippedSliceKit)
     }
 
     @Test("PK-F2: the slice-kit marker survives a wire sampler edit and save → open; a plain sampler is never marked")
@@ -954,9 +952,7 @@ struct SliceToSamplerCommandTests {
         #expect(reopenedPlain.zones.count == 1)
         #expect(!reopenedPlain.isSliceKit)
 
-        withKnownIssue("PK-F2: SamplerParams.sliceKit is not stored until the marker patch lands") {
-            #expect(afterEdit.isSliceKit)
-            #expect(reopenedKit.isSliceKit)
-        }
+        #expect(afterEdit.isSliceKit)
+        #expect(reopenedKit.isSliceKit)
     }
 }

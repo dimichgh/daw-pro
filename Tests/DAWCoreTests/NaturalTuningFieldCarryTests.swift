@@ -30,6 +30,8 @@ struct NaturalTuningFieldCarryTests {
     /// computed on/off reading, so it is no longer a stored label.
     static let setLevelCensus: Set<String> = [
         "analysisVersion", "segments", "retuneMs", "autoCorrectStamp",
+        // W7-NTU (2026-10-04): what a preset would REPLACE, stamped beside it.
+        "autoCorrectReplaceableStamp",
         "formantCorrection", "consonantProtection", "transitionSlopeCentsPerSecond",
     ]
 
@@ -54,6 +56,7 @@ struct NaturalTuningFieldCarryTests {
         out.analysisVersion = 7
         out.retuneMs = 80
         out.autoCorrectStamp = "0123456789abcdef"
+        out.autoCorrectReplaceableStamp = "fedcba9876543210"
         out.formantCorrection = 0.25
         out.keepsConsonantsUntuned = true
         out.transitionSlopeCentsPerSecond = 7000

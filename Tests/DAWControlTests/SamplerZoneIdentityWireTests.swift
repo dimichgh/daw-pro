@@ -1268,7 +1268,8 @@ struct SamplerZoneIdentityWireTests {
     // which ACCEPTED and STORED a global the engine never reads and replied
     // success without a word. The write is deliberately unchanged (a later zone
     // edit can make the global heard again); what changed is that the reply now
-    // carries describeSampler's OWN sentence for the globals this call named.
+    // carries describeSampler's OWN sentence for the globals this call named or
+    // made inert.
 
     /// Seeds a two-zone sampler over the wire whose zones BOTH carry
     /// `field: value`, or — with `inheritingSecond` — only the first does (the
@@ -1289,8 +1290,14 @@ struct SamplerZoneIdentityWireTests {
                          .object(second),
                      ])])]))
         #expect(seeded.ok, "seed \(field): \(seeded.error ?? "")")
-        // A zones-only write names no global, so it can never warn.
-        #expect(seeded.result?["warnings"] == nil)
+        // A seed whose second zone still inherits makes nothing inert, so it
+        // stays quiet. Since round 2, a seed where BOTH zones override DOES
+        // warn, because that zones write is what makes the global inert;
+        // `setterWarnsWhenAZonesWriteMakesAGlobalInert` pins that sentence.
+        if inheritingSecond {
+            #expect(seeded.result?["warnings"] == nil,
+                    "seed \(field): \(stringArray(seeded.result?["warnings"]))")
+        }
         return trackID
     }
 
@@ -1392,8 +1399,9 @@ struct SamplerZoneIdentityWireTests {
     /// The NON-INERT CONTROL: one zone still inherits the global, so the value
     /// written is genuinely heard, and the reply must stay exactly as it was
     /// before W7-SMP — no `warnings`, no `effectiveGlobals`. Then, on the SAME
-    /// track, the last inheriting zone gets its own release and the very same
-    /// write warns: the silence above was a verdict, not a blind spot.
+    /// track, the last inheriting zone gets its own release. That patch warns
+    /// (round 2: it is the write that MAKES release inert), and the very same
+    /// global write warns: the silence above was a verdict, not a blind spot.
     @Test("W7-SMP control: a global one zone still inherits is live — no warnings, no effectiveGlobals — until that zone overrides it too")
     func setterStaysQuietWhileTheGlobalIsLive() async throws {
         let (router, store) = makeRouter()
@@ -1412,7 +1420,9 @@ struct SamplerZoneIdentityWireTests {
             .object(["id": .string(secondZone.uuidString), "release": .number(0.5)]),
         ])])
         #expect(patch.ok)
-        #expect(patch.result?["warnings"] == nil, "a zone-only write names no global")
+        let patchWarnings = stringArray(patch.result?["warnings"])
+        #expect(patchWarnings.count == 1 && patchWarnings.first?.hasPrefix("release:") == true,
+                "the patch that takes the last inheriting zone makes release inert: \(patchWarnings)")
         let inert = await setSamplerGlobal(router, trackID, ["release": .number(2)])
         #expect(stringArray(inert.result?["warnings"]).count == 1,
                 "positive control: the same write on the now all-overriding sampler warns")
@@ -1489,5 +1499,174 @@ struct SamplerZoneIdentityWireTests {
         #expect(warnings.first?.contains("CC11") == true, "the controller warning comes first")
         #expect(warnings.last?.hasPrefix("release:") == true, "then the inert-global warning")
         #expect(set.result?["effectiveGlobals"]?["release"]?["globalIsInert"]?.boolValue == true)
+    }
+
+    // MARK: - W7-SMP round 2: the echo, and two writes that used to reply in silence
+
+    /// Item 2. m34-o made the sampler's GLOBAL `decay`/`sustain` settable, but
+    /// the setter's reply and `project.snapshot` (both built by
+    /// `instrumentJSON`) never echoed them, so a caller could not read back
+    /// what it had just set. They now ride only when SET, so a sampler that
+    /// never set them keeps its wire shape.
+    @Test("W7-SMP r2: the setter's reply and project.snapshot echo the global decay and sustain once set, and omit them until then")
+    func setterAndSnapshotEchoGlobalDecaySustain() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        let plain = await router.handle(ControlRequest(
+            id: "plain", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["zones": .array([
+                         .object(["path": .string(Self.pingPath)]),
+                     ])])]))
+        #expect(plain.ok, "\(plain.error ?? "")")
+        #expect(plain.result?["sampler"]?["decay"] == nil, "never set: no key")
+        #expect(plain.result?["sampler"]?["sustain"] == nil, "never set: no key")
+
+        let set = await setSamplerGlobal(router, trackID,
+                                         ["decay": .number(2.5), "sustain": .number(0.3)])
+        #expect(set.ok, "\(set.error ?? "")")
+        #expect(set.result?["sampler"]?["decay"]?.doubleValue == 2.5)
+        #expect(set.result?["sampler"]?["sustain"]?.doubleValue == 0.3)
+        let stored = store.tracks.first { $0.id.uuidString == trackID }?.instrument?.sampler
+        #expect(stored?.decay == 2.5 && stored?.sustain == 0.3,
+                "the echo reports what the store holds")
+
+        let snapshot = await router.handle(ControlRequest(id: "snap", command: "project.snapshot"))
+        #expect(snapshot.ok)
+        let snapTracks = try #require(snapshot.result?["tracks"]?.arrayValue)
+        let snapTrack = try #require(snapTracks.first { $0["id"]?.stringValue == trackID })
+        #expect(snapTrack["instrument"]?["sampler"]?["decay"]?.doubleValue == 2.5)
+        #expect(snapTrack["instrument"]?["sampler"]?["sustain"]?.doubleValue == 0.3)
+
+        // An unrelated write keeps them (the sampler object overlays onto the
+        // current one), and the echo shows that too.
+        let gain = await setSamplerGlobal(router, trackID, ["gain": .number(0.5)])
+        #expect(gain.result?["sampler"]?["decay"]?.doubleValue == 2.5)
+        #expect(gain.result?["sampler"]?["sustain"]?.doubleValue == 0.3)
+    }
+
+    /// Item 3a. Round 1 warned only about a global the payload NAMED. A `zones`
+    /// write where every zone sets its own value makes that global inert just
+    /// as surely, and used to reply in silence. It now warns, in
+    /// describeSampler's own sentence, about the global it made inert.
+    @Test("W7-SMP r2: a zones write that leaves no zone inheriting a global warns about THAT global, in describeSampler's words")
+    func setterWarnsWhenAZonesWriteMakesAGlobalInert() async throws {
+        let census: [(field: String, zone: JSONValue)] = [
+            ("attack", .number(0.3)), ("decay", .number(1.5)), ("sustain", .number(0.25)),
+            ("release", .number(0.5)), ("oneShot", .bool(true)),
+        ]
+        for entry in census {
+            let (router, store) = makeRouter()
+            let trackID = store.addTrack(kind: .instrument).id.uuidString
+            let seeded = await router.handle(ControlRequest(
+                id: "seed", command: "track.setInstrument",
+                params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                         "sampler": .object(["zones": .array([
+                             .object(["path": .string(Self.pingPath), "maxPitch": .number(59),
+                                      entry.field: entry.zone]),
+                             .object(["path": .string(Self.pingPath), "minPitch": .number(60),
+                                      entry.field: entry.zone]),
+                         ])])]))
+            #expect(seeded.ok, "\(entry.field): \(seeded.error ?? "")")
+            let warnings = stringArray(seeded.result?["warnings"])
+            let describe = await describeSampler(router, trackID)
+            let own = stringArray(describe.result?["warnings"])
+                .first { $0.hasPrefix("\(entry.field):") }
+            #expect(own != nil, "\(entry.field): describeSampler did not call it inert")
+            #expect(warnings == [own ?? "<describe had none>"],
+                    "\(entry.field): the zones write's warning is not describeSampler's sentence")
+            #expect(seeded.result?["effectiveGlobals"]?[entry.field]?["globalIsInert"]?.boolValue
+                    == true, "\(entry.field)")
+        }
+    }
+
+    /// Item 3a, the patch path. The zonePatches write that takes the LAST
+    /// inheriting zone is the one that makes the global inert, so it is the one
+    /// that warns. Later zone writes on the already-inert sampler do not repeat
+    /// it (the noise rule), and a write that hands a zone back stays quiet.
+    @Test("W7-SMP r2: patching the LAST inheriting zone warns once; a later patch, and a write that hands a zone back, stay quiet")
+    func setterWarnsWhenAPatchTakesTheLastInheritingZone() async throws {
+        let (router, store) = makeRouter()
+        let trackID = try await seedOverriding(router, store, field: "release",
+                                               value: .number(0.5), inheritingSecond: true)
+        let secondZone = try #require(
+            store.tracks.first { $0.id.uuidString == trackID }?.instrument?.sampler?.zones.last?.id)
+        let patch = await setSamplerGlobal(router, trackID, ["zonePatches": .array([
+            .object(["id": .string(secondZone.uuidString), "release": .number(0.5)]),
+        ])])
+        #expect(patch.ok, "\(patch.error ?? "")")
+        let warnings = stringArray(patch.result?["warnings"])
+        let describe = await describeSampler(router, trackID)
+        let describeRelease = stringArray(describe.result?["warnings"])
+            .filter { $0.hasPrefix("release:") }
+        #expect(describeRelease.count == 1)
+        #expect(warnings == describeRelease, "the patch's warning is not describeSampler's sentence")
+        #expect(patch.result?["effectiveGlobals"]?["release"]?["globalIsInert"]?.boolValue == true)
+
+        // NOISE: release was ALREADY inert before this patch, so it does not repeat.
+        let again = await setSamplerGlobal(router, trackID, ["zonePatches": .array([
+            .object(["id": .string(secondZone.uuidString), "release": .number(0.7)]),
+        ])])
+        #expect(again.ok)
+        #expect(again.result?["warnings"] == nil, "\(stringArray(again.result?["warnings"]))")
+        #expect(again.result?["effectiveGlobals"] == nil)
+
+        // A zones write that hands zone two back to the global makes release LIVE.
+        let handBack = await setSamplerGlobal(router, trackID, ["zones": .array([
+            .object(["path": .string(Self.pingPath), "maxPitch": .number(59),
+                     "release": .number(0.5)]),
+            .object(["path": .string(Self.pingPath), "minPitch": .number(60)]),
+        ])])
+        #expect(handBack.ok)
+        #expect(handBack.result?["warnings"] == nil, "\(stringArray(handBack.result?["warnings"]))")
+    }
+
+    /// Item 3b. describeSampler has warned since m34-t that a glide on a POLY
+    /// sampler is ignored, while the setter that STORED that glide replied in
+    /// silence. The setter now warns when its payload names `glideTime` or
+    /// `voiceMode`, the two fields that can put a stored glide under poly, in
+    /// describe's own sentence, from the one function both verbs call.
+    @Test("W7-SMP r2: the setter warns about a glide it stores under poly, in describeSampler's words, only when the write named the glide or the voice mode")
+    func setterWarnsAboutAGlideStoredUnderPoly() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        let set = await router.handle(ControlRequest(
+            id: "glide", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object([
+                         "zones": .array([.object(["path": .string(Self.pingPath)])]),
+                         "glideTime": .number(0.3),
+                     ])]))
+        #expect(set.ok, "\(set.error ?? "")")
+        #expect(set.result?["sampler"]?["glideTime"]?.doubleValue == 0.3, "the write is unchanged")
+        let warnings = stringArray(set.result?["warnings"])
+        let describe = await describeSampler(router, trackID)
+        let describeGlide = stringArray(describe.result?["warnings"])
+            .filter { $0.hasPrefix("glideTime is") }
+        #expect(describeGlide.count == 1)
+        #expect(warnings == describeGlide, "the setter's glide sentence is not describeSampler's")
+        // A glide is not a zone-overridable global: no effectiveGlobals rides with it.
+        #expect(set.result?["effectiveGlobals"] == nil)
+
+        // CONTROL: legato makes the glide heard, and that write is quiet.
+        let legato = await setSamplerGlobal(router, trackID, ["voiceMode": .string("legato")])
+        #expect(legato.ok)
+        #expect(legato.result?["warnings"] == nil, "\(stringArray(legato.result?["warnings"]))")
+        // Back to poly: the write that makes the stored glide inert warns again.
+        let poly = await setSamplerGlobal(router, trackID, ["voiceMode": .string("poly")])
+        #expect(stringArray(poly.result?["warnings"]) == describeGlide)
+        // NOISE: a write that names neither field does not repeat it.
+        let gain = await setSamplerGlobal(router, trackID, ["gain": .number(0.5)])
+        #expect(gain.result?["warnings"] == nil, "\(stringArray(gain.result?["warnings"]))")
+
+        // Not gated on zones, because describe's warning is not: a zoneless
+        // sampler's poly glide is just as inert.
+        let bareID = store.addTrack(kind: .instrument).id.uuidString
+        let bare = await router.handle(ControlRequest(
+            id: "bare", command: "track.setInstrument",
+            params: ["trackId": .string(bareID), "kind": .string("sampler"),
+                     "sampler": .object(["glideTime": .number(0.3)])]))
+        #expect(bare.ok, "\(bare.error ?? "")")
+        #expect(stringArray(bare.result?["warnings"]) == describeGlide)
     }
 }

@@ -347,7 +347,7 @@ struct VoiceReferenceLabelerTests {
         // defect `placeGaps` fixed: "shortest 0.016 s" was the second miss). It now grades poor on the melody itself:
         // the DTW shape distance is above the pre-registered 1.30 by at least the pinned margin.
         #expect(labels.verdict == .poor)
-        #expect(labels.message == "I couldn't follow your recording closely (did you sing the same words?). Your voice will still work, but it may sound less like you.")
+        #expect(labels.message == "I couldn't follow your recording closely. Did you sing the guide's tune and words? Your voice will still work, but it may sound less like you.")
         #expect(labels.quality.dtwMeanLocalCost >= VoiceReferenceLabeler.poorAboveMeanCost + Self.melodyMargin,
                 "shape distance \(labels.quality.dtwMeanLocalCost)")
     }

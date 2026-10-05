@@ -503,10 +503,8 @@ public final class PadGridModel {
                 oneShot: @escaping () -> Bool? = { nil },
                 setOneShot: @escaping (Bool) -> String? = { _ in nil },
                 setZones: @escaping ([SamplerZone]) -> String? = { _ in nil },
-                chopAction: @escaping (UUID, SliceToSamplerSettings, Bool) async throws
-                    -> SliceToSamplerResult = { _, _, _ in
-                        throw ProjectError.engineUnavailable
-                    }) {
+                chopAction: ((UUID, SliceToSamplerSettings, Bool) async throws
+                    -> SliceToSamplerResult)? = nil) {
         self.typing = typing
         self.zonesProvider = zones
         self.targetNameProvider = targetName
@@ -516,7 +514,13 @@ public final class PadGridModel {
         self.oneShotProvider = oneShot
         self.setOneShotAction = setOneShot
         self.setZonesAction = setZones
-        self.chopAction = chopAction
+        // `nil` = the inert refusal, supplied HERE and never as the default argument: Swift 6.3.3
+        // re-emits an async default-argument closure in every module that omits the argument
+        // (two `DAWApp` call sites do), with a different async context size under one weak
+        // symbol, and the link can pair them wrongly. Gate: `scripts/gates/async-default-dup.py`.
+        self.chopAction = chopAction ?? { _, _, _ in
+            throw ProjectError.engineUnavailable
+        }
     }
 
     /// Points an inert model at the live app.

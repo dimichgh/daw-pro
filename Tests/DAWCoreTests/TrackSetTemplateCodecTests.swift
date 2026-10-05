@@ -642,7 +642,7 @@ struct TrackSetTemplateCodecTests {
         }
     }
 
-    @Test("instruments resolve from the factory values; a sampler object is refused until TPL-5")
+    @Test("instruments resolve from the factory values; a sampler object is read since TPL-5b")
     func instrumentsResolve() throws {
         func instrument(_ json: String) throws -> InstrumentDescriptor? {
             let tracks = "[{\"key\": \"a\", \"name\": \"A\", \"kind\": \"instrument\", \"instrument\": \(json)}]"
@@ -665,8 +665,14 @@ struct TrackSetTemplateCodecTests {
                 == InstrumentDescriptor(kind: .drumSynth, drumKit: dialled), "preset first, then the kit")
         #expect(try instrument(#"{"kind": "testTone"}"#) == InstrumentDescriptor(kind: .testTone))
         #expect(try instrument(#"{"kind": "sampler"}"#) == InstrumentDescriptor(kind: .sampler))
-        let sampler = Self.refusal(Self.file(#"[{"key": "a", "name": "A", "kind": "instrument", "instrument": {"kind": "sampler", "sampler": {"zones": []}}}]"#))
-        #expect(sampler?.code == .notSupported && sampler?.path == "tracks[0].instrument.sampler")
+        // m39-tpl-5b: the `sampler` object is READ (it was refused, `notSupported`,
+        // until then); `TemplateSamplerCodecTests` holds the grammar.
+        #expect(try instrument(#"{"kind": "sampler", "sampler": {"zones": []}}"#)
+                == InstrumentDescriptor(kind: .sampler, sampler: SamplerParams()))
+        let zone = try #require(try instrument(#"{"kind": "sampler", "sampler": {"zones": [{"path": "/x/a.wav", "rootPitch": 48}]}}"#)?
+            .sampler?.zones.first)
+        #expect(zone.rootPitch == 48 && zone.audioFileURL == URL(fileURLWithPath: "/x/a.wav"))
+        #expect(TemplateReader.isSamplerZonePlaceholder(zone.id))
         let unit = try #require(try instrument(#"{"kind": "audioUnit", "audioUnit": {"subType": "abcd", "manufacturer": "wxyz", "state": "AQID"}}"#))
         #expect(unit.audioUnit?.component == AudioUnitComponentID(type: "aumu", subType: "abcd",
                                                                    manufacturer: "wxyz"))
@@ -740,7 +746,7 @@ struct TrackSetTemplateCodecTests {
         #expect(lenient.template.summary?.count == Codec.maxSummaryLength)
         #expect(lenient.warnings.contains { $0.code == .valueClamped && $0.path == "summary" })
         let longName = String(repeating: "n", count: Codec.maxNameLength + 1)
-        let named = Self.refusal(Self.inline(tracks).tpl1ReplacingName(with: longName))
+        let named = Self.refusal(Self.inline(tracks).tpl1ReplacingName(with: longName), .inline)
         #expect(named?.code == .outOfRange && named?.path == "name", "\(String(describing: named))")
         #expect(Codec.maxSummaryLength == 200 && Codec.maxNameLength == 40)
     }

@@ -373,6 +373,13 @@ public final class CommandRouter {
         // construction, so only the explicit count pins move. NOTE: no quoted
         // string in this comment, deliberately (the m25-d rule).
         "playbox.generate",
+        "template.list",
+        "template.describe",
+        "template.apply",
+        "template.save",
+        "template.remove",
+        "template.import",
+        "template.export",
         "automation.addLane",
         "automation.removeLane",
         "automation.setPoints",
@@ -1058,6 +1065,15 @@ public final class CommandRouter {
         if let beyond = TimelineCeiling.problem(in: params, command: request.command) {
             throw ControlError(beyond)
         }
+        // W7-WNM: a second pre-pass, AFTER the timeline ceiling (so a beat or
+        // bar keeps its own "past the timeline limit" words) — refuses any
+        // OTHER wire number of 2^53 or more in magnitude, anywhere in params.
+        // About 40 places below this point convert a wire Double straight to
+        // Int with no range check, and Int(_:) traps the whole process on a
+        // Double of 2^63 or more (`WireNumberCeiling`).
+        if let tooLarge = WireNumberCeiling.problem(in: params, command: request.command) {
+            throw ControlError(tooLarge)
+        }
         switch request.command {
         case "transport.play":
             // No params (m16-e, audit F5 survey: closes the zero-param gap).
@@ -1699,9 +1715,12 @@ public final class CommandRouter {
             // overrides (attack/decay/sustain/release/oneShot — the engine reads
             // a zone's own value first), the write still lands and the reply
             // adds `warnings` (describeSampler's own sentence, only for the
-            // globals this call named) plus `effectiveGlobals` (describeSampler's
-            // shape). Both keys are absent otherwise. See the block at the end
-            // of this case.
+            // globals this call named, or — round 2 — made inert with a
+            // `zones`/`zonePatches` write) plus `effectiveGlobals`
+            // (describeSampler's shape). Round 2 also warns, in describe's
+            // sentence, when a call naming `glideTime` or `voiceMode` leaves a
+            // glide stored under poly. These keys are absent otherwise. See the
+            // block at the end of this case.
             //
             // m30-a: a zone `path` accepts a BUNDLED SAMPLE NAME as well as a
             // filesystem path — `builtin:test-tone-a4`, a 0.35 s A4 one-shot
@@ -1939,25 +1958,49 @@ public final class CommandRouter {
             // reached a sampler whose every zone releases in 0.5 s. The warning
             // is `samplerEffectiveGlobalsJSON`'s own sentence — the function
             // `instrument.describeSampler` calls, ONE home — filtered to the
-            // globals THIS payload named (the m27-b noise rule above: warn about
-            // what the caller touched, never about every inert global the track
-            // happens to carry). `effectiveGlobals` rides along ONLY when such a
-            // warning fires: the sentence points at it, and its `note` carries
-            // the per-zone remedy. A zoneless sampler is skipped, as describe
-            // skips it — no inheritance, nothing to warn about.
+            // globals THIS payload named or MADE inert (round 2, below) — the
+            // m27-b noise rule above: warn about what the caller touched, never
+            // about every inert global the track happens to carry.
+            // `effectiveGlobals` rides along ONLY when such a warning fires: the
+            // sentence points at it, and its `note` carries the per-zone remedy.
+            // A zoneless sampler is skipped, as describe skips it — no
+            // inheritance, nothing to warn about.
             var instSamplerWarnings: [String] = []
             if case .object(let instSamplerPayload)? = params["sampler"],
-               let instWritten = descriptor.sampler, !instWritten.zones.isEmpty {
-                let (effectiveGlobals, warnings) = Self.samplerEffectiveGlobalsJSON(
-                    instWritten, warningFields: Set(instSamplerPayload.keys))
-                if !warnings.isEmpty, case .object(var instObj) = instPayload {
-                    instObj["effectiveGlobals"] = effectiveGlobals
-                    instPayload = .object(instObj)
-                    instSamplerWarnings = warnings
+               let instWritten = descriptor.sampler {
+                let instPayloadKeys = Set(instSamplerPayload.keys)
+                if !instWritten.zones.isEmpty {
+                    // W7-SMP round 2 (3a): a `zones`/`zonePatches` write can
+                    // MAKE a global inert without naming it, by giving the last
+                    // zone that still inherited it a value of its own. That
+                    // write warns too, about exactly the globals it made inert
+                    // (inert now, live before), so later writes on an
+                    // already-inert sampler do not repeat it.
+                    let instMadeInert = Self.samplerInertGlobalNames(instWritten)
+                        .subtracting(Self.samplerInertGlobalNames(
+                            instCurrentSampler ?? SamplerParams()))
+                    let (effectiveGlobals, warnings) = Self.samplerEffectiveGlobalsJSON(
+                        instWritten, warningFields: instPayloadKeys.union(instMadeInert))
+                    if !warnings.isEmpty, case .object(var instObj) = instPayload {
+                        instObj["effectiveGlobals"] = effectiveGlobals
+                        instPayload = .object(instObj)
+                        instSamplerWarnings = warnings
+                    }
+                }
+                // W7-SMP round 2 (3b): a glide stored under poly is ignored, as
+                // describeSampler has said since m34-t. The setter that stores
+                // it now says so too, in the same sentence (ONE home,
+                // `samplerInertGlideWarning`), when this write named one of the
+                // two fields that decide it. Not gated on zones, as describe's
+                // warning is not.
+                if instPayloadKeys.contains("glideTime") || instPayloadKeys.contains("voiceMode"),
+                   let instGlideWarning = Self.samplerInertGlideWarning(instWritten) {
+                    instSamplerWarnings.append(instGlideWarning)
                 }
             }
             // ONE `warnings` array for both sources — controller lanes first,
-            // then inert sampler globals — assigned once, only when non-empty.
+            // then inert sampler globals and a poly-ignored glide — assigned
+            // once, only when non-empty.
             let instAllWarnings = instWarnings.map(\.message) + instSamplerWarnings
             if !instAllWarnings.isEmpty, case .object(var instObj) = instPayload {
                 instObj["warnings"] = .array(instAllWarnings.map { .string($0) })
@@ -2238,14 +2281,11 @@ public final class CommandRouter {
             // exists to end. It is NOT gated on `zones` (the block above is,
             // because an inert global is a fact about zones); a zoneless
             // sampler with a poly glide is just as wrong and just as invisible.
-            if describeSamplerParams.effectiveGlideTime > 0,
-               !describeSamplerParams.glideIsEffective {
-                describeSamplerWarnings.append(
-                    "glideTime is \(describeSamplerParams.effectiveGlideTime) s but voiceMode is "
-                    + "\(describeSamplerParams.effectiveVoiceMode.rawValue), and GLIDE IS "
-                    + "IGNORED under poly — there is no single previous note to slide from. Set "
-                    + "voiceMode to 'legato' (slide with no new attack, the real slur) or 'mono' "
-                    + "(the new note attacks but starts at the previous pitch) to hear it")
+            // W7-SMP round 2: the condition and the sentence moved, verbatim,
+            // into `samplerInertGlideWarning`, which `track.setInstrument` now
+            // calls too, so the two verbs cannot word it differently.
+            if let glideWarning = Self.samplerInertGlideWarning(describeSamplerParams) {
+                describeSamplerWarnings.append(glideWarning)
             }
             // m34-w: the OTHER way this pair can be stored-but-inert — a mode
             // chosen with no time to scale. Same honest-light rule: a setting
@@ -3996,7 +4036,11 @@ public final class CommandRouter {
             // params: genre (required — a SongSkeletonCatalog kebab name),
             // tempoBPM? (20-400; default = genre's), sections? (array of
             // {name, bars} — default = genre's layout), tracks? (array of
-            // {name, kind, mixerPreset?} — default = genre's roster).
+            // {name, kind, mixerPreset?} — default = genre's roster),
+            // template? (m39-tpl-6, design §6.2 — a template id or a whole
+            // template object; the roster IS the template, `tracks` beside it
+            // is refused), dryRun? (m39-tpl-6 — plans the whole call and
+            // reports what it would create, with no ids, changing nothing).
             // Scaffolds the whole
             // session (tempo, a genre track roster with mixer presets applied,
             // an "Arrangement" guide track of named empty MIDI clips, a real
@@ -4024,7 +4068,8 @@ public final class CommandRouter {
             // `genre` stays REQUIRED even with a full roster override — it
             // supplies the default tempo and keeps the enum discoverable.
             try params.rejectUnknownKeys(
-                ["genre", "tempoBPM", "sections", "tracks"], verb: "macro.songSkeleton")
+                ["genre", "tempoBPM", "sections", "tracks", "template", "dryRun"],
+                verb: "macro.songSkeleton")
             guard let genre = params["genre"]?.stringValue else {
                 let valid = SongSkeletonCatalog.names.joined(separator: ", ")
                 throw ControlError("missing or invalid required param 'genre' — valid: \(valid)")
@@ -4032,10 +4077,24 @@ public final class CommandRouter {
             let skeletonTempo = params["tempoBPM"]?.doubleValue
             let skeletonSections = try parseSkeletonSections(params["sections"])
             let skeletonTracks = try parseSkeletonTracks(params["tracks"])
+            // m39-tpl-6: `template` is an id or a whole object, read by the SAME
+            // codec a saved file is (`parseOptionalTemplateParam`). The
+            // `template`+`tracks` conflict, every builder/resource refusal and
+            // the recording guard are the STORE's job (`planSongSkeleton`),
+            // which this wire call is a thin parse-and-reply shell over.
+            let skeletonTemplateParam = try parseOptionalTemplateParam(params["template"])
+            let skeletonDryRun = params["dryRun"]?.boolValue ?? false
+            if skeletonDryRun {
+                let plan = try store.planSongSkeleton(
+                    genre: genre, tempoBPM: skeletonTempo, sections: skeletonSections,
+                    tracks: skeletonTracks, template: skeletonTemplateParam?.template)
+                return .success(request.id, songSkeletonPlanResult(plan))
+            }
             let skeleton = try store.applySongSkeleton(
                 genre: genre, tempoBPM: skeletonTempo, sections: skeletonSections,
-                tracks: skeletonTracks)
-            return .success(request.id, songSkeletonResult(skeleton))
+                tracks: skeletonTracks, template: skeletonTemplateParam?.template)
+            return .success(request.id,
+                            songSkeletonResult(skeleton, extraWarnings: skeletonTemplateParam?.warnings ?? []))
 
         case "automation.addLane":
             // params: trackId (required — a track UUID, or the "master"
@@ -5388,7 +5447,8 @@ public final class CommandRouter {
             // as before this flag existed.
             try params.rejectUnknownKeys(
                 ["clipId", "preset", "tonicPitchClass", "mode",
-                 "strength", "retuneMs", "preserveVibrato", "replaceExisting", "formantCorrection"],
+                 "strength", "retuneMs", "preserveVibrato", "replaceExisting", "formantCorrection",
+                 "melodyClipId", "melodyTrackId", "octaveMatch"],
                 verb: "clip.autoCorrectPitch")
             let acClipID = try params.requireClipID()
             let acReplaceExisting = try Self.optionalBool(
@@ -5455,6 +5515,64 @@ public final class CommandRouter {
                 }
                 acOptions.formantCorrection = formantAmount
             }
+            // Tune to Melody (M2, W7-TTM2; design
+            // `2026-09-24-unpitched-notes-presets-midi-targets.md` §3.2-§3.4):
+            // melodyClipId? | melodyTrackId? — EXACTLY one; both is an error —
+            // names the MIDI melody each sung note is tuned to (one MIDI clip,
+            // or every MIDI clip on one track). octaveMatch? ("nearestOctave",
+            // the default: the melody's note in the octave nearest what was
+            // sung, so a low voice can follow a high lead | "exact") is
+            // refused without a melody key, because alone it would do nothing.
+            // A sung note where the melody rests goes to the scale exactly
+            // when this request named one (tonicPitchClass or mode), and
+            // otherwise stays as sung (§3.3 row 1). The pass runs at strength
+            // 1 unless `strength` was sent (rule 5: the STORE owns it, and
+            // `appliedOptions` echoes what ran). The store refuses, in words,
+            // a melody with no note under the vocal (naming both spans), an
+            // unknown or non-MIDI source, and strength 0.
+            // Response: the usual shape plus `melody{source:{kind, clipId |
+            // trackId, name}, octaveMatch, unmatched, notesConsidered,
+            // notesUsed, matchedParts, unmatchedParts:[segmentId],
+            // unsungNotes/outvotedNotes/chordsReduced:[{clipId, noteId, pitch,
+            // startBeat (clip-relative)}], cutsAdded:[{seconds,
+            // melodyBoundarySeconds, placement, segmentIds}], octaveFolded:
+            // [{segmentId, octaves}], farMoves:[{segmentId, cents}]}`, present
+            // ONLY when a melody key was sent: a request without one answers
+            // exactly as before (additive).
+            let acMelodyClipRaw = try Self.optionalString(params["melodyClipId"], "'melodyClipId'")
+            let acMelodyTrackRaw = try Self.optionalString(params["melodyTrackId"], "'melodyTrackId'")
+            let acOctaveRaw = try Self.optionalString(params["octaveMatch"], "'octaveMatch'")
+            if acMelodyClipRaw != nil, acMelodyTrackRaw != nil {
+                throw ControlError(
+                    "Send 'melodyClipId' or 'melodyTrackId', not both: the melody is one MIDI "
+                    + "clip, or every MIDI clip on one track.")
+            }
+            var acOctave = PitchMelodyTarget.OctaveMatch.nearestOctave
+            if let acOctaveRaw {
+                guard let parsedOctave = PitchMelodyTarget.OctaveMatch(rawValue: acOctaveRaw) else {
+                    throw ControlError(
+                        "'octaveMatch' must be one of nearestOctave, exact — got \"\(acOctaveRaw)\"")
+                }
+                acOctave = parsedOctave
+            }
+            var acMelody: MelodyTuning?
+            if acMelodyClipRaw != nil || acMelodyTrackRaw != nil {
+                let acMelodySource: MelodySource
+                if acMelodyClipRaw != nil {
+                    acMelodySource = .clip(try params.requireUUID("melodyClipId"))
+                } else {
+                    acMelodySource = .track(try params.requireUUID("melodyTrackId"))
+                }
+                let acScaleSent = params["tonicPitchClass"] != nil || params["mode"] != nil
+                acMelody = MelodyTuning(
+                    source: acMelodySource, octaveMatch: acOctave,
+                    unmatched: acScaleSent ? .toScale : .asSung,
+                    strength: params["strength"] != nil ? acOptions.strength : nil)
+            } else if acOctaveRaw != nil {
+                throw ControlError(
+                    "'octaveMatch' only applies when tuning to a melody: send it with "
+                    + "'melodyClipId' or 'melodyTrackId'.")
+            }
             // UB-2: the Report variant, not the plain `autoCorrectClipPitch`
             // this case called before — it is the ONE path that can also
             // report what the unpitched finder decided while building the
@@ -5462,7 +5580,8 @@ public final class CommandRouter {
             // `autoCorrectClipPitch` itself has no way to hand back (it
             // returns only the stored `Clip`).
             let acReport = try await store.autoCorrectClipPitchReport(
-                clipId: acClipID, options: acOptions, replaceExisting: acReplaceExisting)
+                clipId: acClipID, options: acOptions, replaceExisting: acReplaceExisting,
+                melody: acMelody)
             var acExtra: [String: JSONValue] = [
                 // ALWAYS present (the segments-array convention this response
                 // already follows): counted off the STORED set
@@ -5479,8 +5598,75 @@ public final class CommandRouter {
             if let skipped = acReport.unpitched?.skipped {
                 acExtra["unpitchedSkippedReason"] = .string(skipped.rawValue)
             }
+            // PK-F1 (the 10-04 ruling): a clip's FRACTIONAL pitch shift is a
+            // detune Auto-Correct keeps (`PitchAutoCorrect.splitClipShift`), so
+            // each corrected note plays that many cents off the scale. Both
+            // keys are OMITTED, not null, when nothing was kept (a whole-
+            // semitone shift, or no note corrected): the
+            // `unpitchedSkippedReason` idiom just above.
+            if let kept = acReport.keptDetuneCents {
+                acExtra["keptDetuneCents"] = .number(kept)
+            }
+            if let notice = acReport.keptDetuneNotice {
+                acExtra["keptDetuneNotice"] = .string(notice)
+            }
+            // Tune to Melody's report (the shape is in the comment above).
+            if let acMelodyReport = acReport.melody {
+                func noteRefs(_ refs: [PitchMelodyReport.NoteRef]) -> JSONValue {
+                    .array(refs.map { ref -> JSONValue in
+                        .object(["clipId": .string(ref.clipId.uuidString),
+                                 "noteId": .string(ref.noteId.uuidString),
+                                 "pitch": .number(Double(ref.pitch)),
+                                 "startBeat": .number(ref.startBeat)])
+                    })
+                }
+                func segmentIds(_ ids: [UUID]) -> JSONValue {
+                    .array(ids.map { .string($0.uuidString) })
+                }
+                var acSource: [String: JSONValue] = ["name": .string(acMelodyReport.sourceName)]
+                switch acMelodyReport.source {
+                case .clip(let id):
+                    acSource["kind"] = .string("clip")
+                    acSource["clipId"] = .string(id.uuidString)
+                case .track(let id):
+                    acSource["kind"] = .string("track")
+                    acSource["trackId"] = .string(id.uuidString)
+                }
+                let acCuts: [JSONValue] = acMelodyReport.cutsAdded.map { cut -> JSONValue in
+                    .object(["seconds": .number(cut.seconds),
+                             "melodyBoundarySeconds": .number(cut.melodyBoundarySeconds),
+                             "placement": .string(cut.placement.rawValue),
+                             "segmentIds": segmentIds(cut.segmentIds)])
+                }
+                let acFolds: [JSONValue] = acMelodyReport.octaveFolded.map { fold -> JSONValue in
+                    .object(["segmentId": .string(fold.segmentId.uuidString),
+                             "octaves": .number(Double(fold.octaves))])
+                }
+                let acFar: [JSONValue] = acMelodyReport.farMoves.map { move -> JSONValue in
+                    .object(["segmentId": .string(move.segmentId.uuidString),
+                             "cents": .number(move.cents)])
+                }
+                var acMelodyJSON: [String: JSONValue] = [:]
+                acMelodyJSON["source"] = .object(acSource)
+                acMelodyJSON["octaveMatch"] = .string(acMelodyReport.octaveMatch.rawValue)
+                acMelodyJSON["unmatched"] = .string(acMelodyReport.unmatched.rawValue)
+                acMelodyJSON["notesConsidered"] = .number(Double(acMelodyReport.notesConsidered))
+                acMelodyJSON["notesUsed"] = .number(Double(acMelodyReport.notesUsed))
+                acMelodyJSON["matchedParts"] = .number(Double(acMelodyReport.matchedParts))
+                acMelodyJSON["unmatchedParts"] = segmentIds(acMelodyReport.unmatchedParts)
+                acMelodyJSON["unsungNotes"] = noteRefs(acMelodyReport.unsungNotes)
+                acMelodyJSON["outvotedNotes"] = noteRefs(acMelodyReport.outvotedNotes)
+                acMelodyJSON["cutsAdded"] = .array(acCuts)
+                acMelodyJSON["chordsReduced"] = noteRefs(acMelodyReport.chordsReduced)
+                acMelodyJSON["octaveFolded"] = .array(acFolds)
+                acMelodyJSON["farMoves"] = .array(acFar)
+                acExtra["melody"] = .object(acMelodyJSON)
+            }
+            // `appliedOptions` is what the pass RAN with (the report's own):
+            // without a melody that is `acOptions` exactly, as before; with
+            // one, rule 5's strength.
             return .success(request.id, Self.pitchEditsResponse(
-                clip: acReport.clip, appliedOptions: acOptions, extra: acExtra))
+                clip: acReport.clip, appliedOptions: acReport.appliedOptions, extra: acExtra))
 
         case "clip.clearPitchEdits":
             // params: clipId (required). Removes clip.pitchEdits entirely —
@@ -7234,7 +7420,15 @@ public final class CommandRouter {
             try params.rejectUnknownKeys(
                 ["atBar", "count"], verb: "arrange.insertBars")
             let insAtBar = Int(try params.require("atBar", \.doubleValue))
-            let insCount = Int(try params.require("count", \.doubleValue))
+            let insCountRaw = try params.require("count", \.doubleValue)
+            guard Self.isInteger(insCountRaw) else {
+                // W7-WNM: `Int(2.7)` is 2, silently — the MCP schema already
+                // says `.int()`; the wire now says so too, rather than
+                // inserting a different number of bars than asked.
+                throw ControlError(
+                    "'count' must be a whole number of bars to insert, got \(insCountRaw)")
+            }
+            let insCount = Int(insCountRaw)
             let insResult = try store.insertBars(atBar: insAtBar, count: insCount)
             return .success(request.id, .object([
                 "atBeat": .number(insResult.atBeat),
@@ -7258,7 +7452,13 @@ public final class CommandRouter {
             try params.rejectUnknownKeys(
                 ["fromBar", "count"], verb: "arrange.deleteBars")
             let delFromBar = Int(try params.require("fromBar", \.doubleValue))
-            let delCount = Int(try params.require("count", \.doubleValue))
+            let delCountRaw = try params.require("count", \.doubleValue)
+            guard Self.isInteger(delCountRaw) else {
+                // W7-WNM: same law as arrange.insertBars — see its comment.
+                throw ControlError(
+                    "'count' must be a whole number of bars to delete, got \(delCountRaw)")
+            }
+            let delCount = Int(delCountRaw)
             let delResult = try store.deleteBars(fromBar: delFromBar, count: delCount)
             return .success(request.id, .object([
                 "fromBeat": .number(delResult.fromBeat),
@@ -8124,6 +8324,118 @@ public final class CommandRouter {
                 playboxResponse["reason"] = .string(reason)
             }
             return .success(request.id, .object(playboxResponse))
+
+        case "template.list":
+            // m39-tpl-6 (design §6.1). No params. Every template on offer —
+            // built-ins plus saved files — never throws: a problem with one
+            // file, or with the library folder itself, is listed under
+            // `unreadable`, never silently skipped.
+            try params.rejectUnknownKeys([], verb: "template.list")
+            return .success(request.id, templateListResult())
+
+        case "template.describe":
+            // m39-tpl-6 (design §6.1). params: template (required — an id from
+            // template.list, or a whole template object). Read-only: changes
+            // nothing. Refuses an unknown id or any codec/builder refusal.
+            try params.rejectUnknownKeys(["template"], verb: "template.describe")
+            return .success(request.id, try templateDescribeResult(params["template"]))
+
+        case "template.apply":
+            // m39-tpl-6 (design §6.1, §5.4). params: template (required — an id
+            // or a whole object), dryRun? (default false). Adds the template's
+            // tracks to the song as ONE undo step; additive (twice adds twice),
+            // changes nothing on any refusal. A dry run stops before the edit
+            // and reports what it would do, with no ids.
+            try params.rejectUnknownKeys(["template", "dryRun"], verb: "template.apply")
+            let parsedApplyTemplate = try requireTemplateParam(params["template"])
+            let applyDryRun = params["dryRun"]?.boolValue ?? false
+            let appliedTemplate = try store.applyTemplate(parsedApplyTemplate.template, dryRun: applyDryRun)
+            return .success(request.id,
+                            Self.templateApplyResultJSON(appliedTemplate, extraWarnings: parsedApplyTemplate.warnings))
+
+        case "template.save":
+            // m39-tpl-6 (design §6.1, §5.7, §7.2). params: name (required,
+            // 1-40 chars), trackIds (required — the tracks to save, plus every
+            // bus they play or send into, added automatically), summary?,
+            // songForm?, genres?, replaceId? (overwrites one of the caller's
+            // own saved templates in place; a built-in's id is refused).
+            // Writes a file, makes NO undo entry, never changes the song.
+            try params.rejectUnknownKeys(
+                ["name", "trackIds", "summary", "songForm", "genres", "replaceId"],
+                verb: "template.save")
+            guard let saveTemplateName = params["name"]?.stringValue else {
+                throw ControlError("missing or invalid required param 'name'")
+            }
+            let saveTemplateTrackIDs = try parseTemplateTrackIDs(params["trackIds"])
+            let saveTemplateSummary = params["summary"]?.stringValue
+            let saveTemplateSongForm = params["songForm"]?.stringValue
+            let saveTemplateGenres = try params["genres"]
+                .map { try parseStringList($0, field: "genres", requirement: "") } ?? []
+            let saveTemplateReplaceID = params["replaceId"]?.stringValue
+            let savedTemplate = try store.saveTemplate(
+                name: saveTemplateName, trackIDs: saveTemplateTrackIDs, summary: saveTemplateSummary,
+                songForm: saveTemplateSongForm, genres: saveTemplateGenres, replaceID: saveTemplateReplaceID)
+            return .success(request.id, .object([
+                "id": .string(savedTemplate.id),
+                "name": .string(savedTemplate.name),
+                "template": try JSONDecoder().decode(
+                    JSONValue.self, from: TemplateCapture.canonicalJSON(savedTemplate.template)),
+                "warnings": .array(savedTemplate.warnings.map(Self.templateWarningJSON)),
+            ]))
+
+        case "template.remove":
+            // m39-tpl-6 (design §6.1, §7.2). params: id (required). Deletes a
+            // saved template's file; a built-in id is refused ("Built-in
+            // templates can't be removed."). No undo entry, never touches the
+            // song.
+            try params.rejectUnknownKeys(["id"], verb: "template.remove")
+            guard let removeTemplateID = params["id"]?.stringValue else {
+                throw ControlError("missing or invalid required param 'id'")
+            }
+            let removedTemplateID = try store.removeTemplate(id: removeTemplateID)
+            return .success(request.id, .object(["removed": .string(removedTemplateID)]))
+
+        case "template.import":
+            // m39-tpl-6 (design §6.1, §7.3). params: path (required — absolute
+            // or ~-prefixed). Copies a `.dawtemplate` file into the library;
+            // its id is kept unless it is missing, a built-in's, or already
+            // taken (then a fresh id, with a warning). No undo entry. The
+            // absolute-path policy is enforced once, in `TemplateLibrary.
+            // absoluteURL` (DAWCore) — the SAME tilde-expand-then-require-"/"
+            // rule `project.exportMIDI`'s `requireAbsolutePath` applies, so this
+            // wire case does not duplicate it.
+            try params.rejectUnknownKeys(["path"], verb: "template.import")
+            guard let importTemplatePath = params["path"]?.stringValue else {
+                throw ControlError("missing or invalid required param 'path'")
+            }
+            let importedTemplate = try store.importTemplate(from: importTemplatePath)
+            return .success(request.id, .object([
+                "id": .string(importedTemplate.id),
+                "name": .string(importedTemplate.name),
+                "warnings": .array(importedTemplate.warnings.map(Self.templateWarningJSON)),
+            ]))
+
+        case "template.export":
+            // m39-tpl-6 (design §6.1, §7.3). params: id (required), path
+            // (required — absolute or ~-prefixed), overwrite? (default false).
+            // Writes a built-in's or a saved template's CANONICAL form to
+            // `path`. No undo entry. Same absolute-path policy note as
+            // template.import above — `TemplateLibrary.export`'s own
+            // `absoluteURL` call is the one home.
+            try params.rejectUnknownKeys(["id", "path", "overwrite"], verb: "template.export")
+            guard let exportTemplateID = params["id"]?.stringValue else {
+                throw ControlError("missing or invalid required param 'id'")
+            }
+            guard let exportTemplatePath = params["path"]?.stringValue else {
+                throw ControlError("missing or invalid required param 'path'")
+            }
+            let exportTemplateOverwrite = params["overwrite"]?.boolValue ?? false
+            let exportedTemplate = try store.exportTemplate(
+                id: exportTemplateID, to: exportTemplatePath, overwrite: exportTemplateOverwrite)
+            return .success(request.id, .object([
+                "path": .string(exportedTemplate.path),
+                "bytes": .number(Double(exportedTemplate.bytes)),
+            ]))
 
         case "ai.generateSong":
             // Submits an async song-generation job to the local ACE-Step
@@ -12939,8 +13251,13 @@ public final class CommandRouter {
     /// — which returns the whole project's markers, so it also carries any that
     /// pre-dated this call. The per-marker shape routes through the SAME
     /// `markerJSON` the marker verbs use, so the two can never drift.
-    private func songSkeletonResult(_ result: SongSkeletonResult) -> JSONValue {
-        .object([
+    /// `extraWarnings` (m39-tpl-6, additive): whatever resolving the wire's
+    /// `template` param itself worked around (e.g. a saved file written by a
+    /// newer version) — prepended to the store's own `result.warnings`. Empty
+    /// without a template, like `result.templateKeys`/`result.warnings` themselves.
+    private func songSkeletonResult(_ result: SongSkeletonResult,
+                                    extraWarnings: [TemplateWarning] = []) -> JSONValue {
+        var object: [String: JSONValue] = [
             "genre": .string(result.genre),
             "tempoBPM": .number(result.tempoBPM),
             "tracks": .array(result.tracks.map { .object([
@@ -12958,7 +13275,17 @@ public final class CommandRouter {
             "loopStart": .number(result.loopStart),
             "loopEnd": .number(result.loopEnd),
             "arrangementTrackId": .string(result.arrangementTrackID.uuidString),
-        ])
+            // m39-tpl-6 (additive, design §6.2): ALWAYS present, like
+            // `template.apply`'s own `warnings` — empty without a template.
+            "warnings": .array((extraWarnings + result.warnings).map(Self.templateWarningJSON)),
+        ]
+        // m39-tpl-6 (additive, design §6.2): "the reply gains `templateKeys`
+        // ... when a template was used" — omitted, not an empty object, when
+        // one was not (the roster/genre path leaves `result.templateKeys` empty).
+        if !result.templateKeys.isEmpty {
+            object["templateKeys"] = .object(result.templateKeys.mapValues { .string($0.uuidString) })
+        }
+        return .object(object)
     }
 
     /// Resolved wire JSON for one track's insert chain: `[{id, kind,
@@ -14345,7 +14672,28 @@ public final class CommandRouter {
         }
         var specs: [SongSkeletonTrack] = []
         specs.reserveCapacity(array.count)
+        // m39-tpl-6 D2: a track list can only ever name/kind/preset — it is a
+        // roster, not a sound-selection surface. An unrecognized key used to be
+        // silently ignored (the agent asked for something and nothing happened,
+        // this tree's characteristic failure); now it is named, with a dedicated
+        // teaching sentence for `program` specifically, since that is the exact
+        // miscommunication a caller reaching for an instrument program here would
+        // make (design §6.2).
+        let skeletonTrackAllowedKeys: Set<String> = ["name", "kind", "mixerPreset"]
         for (i, element) in array.enumerated() {
+            let elementKeys = Set((element.objectValue ?? [:]).keys)
+            let unknownTrackKeys = elementKeys.subtracting(skeletonTrackAllowedKeys).sorted()
+            if !unknownTrackKeys.isEmpty {
+                if unknownTrackKeys.contains("program") {
+                    throw ControlError(
+                        "tracks[\(i)].program: A track list can't pick sounds. To choose instruments, "
+                        + "pass a template.")
+                }
+                let named = unknownTrackKeys.map { "'\($0)'" }.joined(separator: ", ")
+                throw ControlError(
+                    "tracks[\(i)]: unknown parameter\(unknownTrackKeys.count > 1 ? "s" : "") \(named) — "
+                    + "valid keys are 'kind', 'mixerPreset', 'name'")
+            }
             guard let name = element["name"]?.stringValue else {
                 throw ControlError("tracks[\(i)].name must be a string")
             }
@@ -14374,6 +14722,294 @@ public final class CommandRouter {
             specs.append(SongSkeletonTrack(name: name, kind: kind, mixerPreset: preset))
         }
         return specs
+    }
+
+    // MARK: - m39-tpl-6: templates (design §6.1-§6.5)
+    //
+    // The seven `template.*` verbs and `macro.songSkeleton`'s `template`/`dryRun`
+    // params. The wire always reads a template id from `TemplateLibrary.standard`
+    // (design §6.1); every mutation (`applyTemplate`, `saveTemplate`, `removeTemplate`,
+    // `importTemplate`, `exportTemplate`) and every pure read (`TemplateBuilder.plan`,
+    // `TemplateCapture.canonicalJSON`) is already built — this file only parses the
+    // wire shape and renders the reply. `TemplateRefusal` and `TemplateLibraryError`
+    // both conform to `LocalizedError` with a non-nil `errorDescription`, so every
+    // store/library throw surfaces through `handle(_:)`'s existing catch-all with no
+    // extra mapping needed here.
+
+    /// `{code, path, message}` — the one JSON shape every `TemplateWarning` gets,
+    /// hand-built (not `JSONValue(encoding:)`) to match this file's own convention
+    /// for every other warning/error array.
+    private static func templateWarningJSON(_ warning: TemplateWarning) -> JSONValue {
+        .object([
+            "code": .string(warning.code.rawValue),
+            "path": .string(warning.path),
+            "message": .string(warning.message),
+        ])
+    }
+
+    /// `template.describe`'s one-sentence, novice-readable answer to "what does
+    /// this track play" (§6.1's `sound` field) — also reused by `macro.songSkeleton
+    /// {dryRun:true}`'s per-track detail (§6.2). A NEW, bounded surface (nothing
+    /// else in this file reduces an instrument to one sentence for a track that may
+    /// not exist yet); kept small and defensible rather than exhaustive.
+    ///
+    /// `instrument.soundBank?.displayName` is read DIRECTLY and is never empty for a
+    /// successfully-decoded template: `TrackSetTemplateCodecInstruments.readSoundBank`
+    /// derives it via `soundBankDisplayName` at DECODE time (every return path there
+    /// is non-empty: a GM program name, "General MIDI · P<n>", or "<file> · P<n>"),
+    /// and `TemplateBuilder.build` reuses that SAME decoded descriptor rather than
+    /// re-resolving it — read in source before writing this, not assumed.
+    private static func templateTrackSoundSentence(kind: TrackKind,
+                                                    instrument: InstrumentDescriptor?) -> String {
+        switch kind {
+        case .bus:
+            return "A bus that mixes other tracks together."
+        case .audio:
+            return "An audio track, ready to record or play audio."
+        case .instrument:
+            guard let instrument else { return "The built-in synthesizer (Poly Synth)." }
+            switch instrument.kind {
+            case .testTone:
+                return "A test tone, for engine testing only."
+            case .polySynth:
+                return "The built-in synthesizer (Poly Synth)."
+            case .sampler:
+                let sampler = instrument.resolvedSampler
+                if let name = sampler.displayName, !name.isEmpty {
+                    return "A Sampler playing '\(name)'."
+                }
+                if !sampler.zones.isEmpty {
+                    return "A Sampler with its own sound."
+                }
+                return "A Sampler with no sound loaded yet."
+            case .audioUnit:
+                if let unit = instrument.audioUnit, !unit.name.isEmpty {
+                    return "Plays the '\(unit.name)' plug-in."
+                }
+                return "A plug-in instrument (none chosen yet)."
+            case .soundBank:
+                if let bank = instrument.soundBank, !bank.displayName.isEmpty {
+                    return "Plays \(bank.displayName)."
+                }
+                return "A sound-bank instrument (no sound chosen yet)."
+            case .drumSynth:
+                if instrument.resolvedDrumKit.noteLayout == .gm {
+                    return "Our drum machine, mapped to General MIDI drum notes."
+                }
+                return "Our drum machine (the 808/909-style kit)."
+            }
+        }
+    }
+
+    /// A decoded template, by id or inline, plus whatever the codec worked around
+    /// to produce it (§6.1). `TrackSetTemplateCodec.decode` is the SAME codec a
+    /// saved `.dawtemplate` file is read by — an inline object's misspelled key is
+    /// refused with its exact path, never silently dropped (the design's whole
+    /// reason for a `z.record` MCP schema rather than a `z.object`, mirrored here
+    /// on the wire side: this file already receives the full, unfiltered JSON for
+    /// any object-valued param).
+    private struct ParsedTemplateParam {
+        var template: TrackSetTemplate
+        var warnings: [TemplateWarning]
+    }
+
+    /// `value` must already be non-nil (the caller decides whether absence is
+    /// legal). `.string` resolves an id through `TemplateLibrary.standard` (§6.1:
+    /// "the wire always uses `TemplateLibrary.standard`"); `.object` decodes
+    /// inline, origin `.inline`, exactly as a wire `template.describe`/`apply` call
+    /// with a whole object is documented to.
+    private func decodeTemplateParam(_ value: JSONValue, field: String) throws -> ParsedTemplateParam {
+        switch value {
+        case .string(let id):
+            let entry = try TemplateLibrary.standard.entry(id: id)
+            return ParsedTemplateParam(template: entry.template, warnings: entry.warnings)
+        case .object:
+            let data = try JSONEncoder().encode(value)
+            let decoded = try TrackSetTemplateCodec.decode(data, origin: .inline)
+            return ParsedTemplateParam(template: decoded.template, warnings: decoded.warnings)
+        default:
+            throw ControlError(
+                "'\(field)' must be a template id (text, from template.list) or a whole template object")
+        }
+    }
+
+    /// Required form, for `template.describe`/`template.apply`.
+    private func requireTemplateParam(_ value: JSONValue?, field: String = "template") throws
+        -> ParsedTemplateParam {
+        guard let value else {
+            throw ControlError(
+                "missing required param '\(field)': pass a template's id (text, from template.list) or a "
+                + "whole template object")
+        }
+        return try decodeTemplateParam(value, field: field)
+    }
+
+    /// Optional form, for `macro.songSkeleton`'s `template` param — absence is
+    /// legal (the genre's own roster, or a `tracks` override, is used instead).
+    private func parseOptionalTemplateParam(_ value: JSONValue?, field: String = "template") throws
+        -> ParsedTemplateParam? {
+        guard let value else { return nil }
+        return try decodeTemplateParam(value, field: field)
+    }
+
+    /// `template.save`'s required `trackIds` — at least one, each a real UUID,
+    /// per-index errors naming the offending element. Deliberately NOT
+    /// `parseClipIDs`: that helper's hardcoded wording says "clip id strings",
+    /// which would misname a TRACK id as a clip id.
+    private func parseTemplateTrackIDs(_ value: JSONValue?) throws -> [UUID] {
+        guard let array = value?.arrayValue, !array.isEmpty else {
+            throw ControlError(
+                "'trackIds' must be a non-empty array of track id strings — the tracks to save as a template")
+        }
+        var ids: [UUID] = []
+        ids.reserveCapacity(array.count)
+        for (i, element) in array.enumerated() {
+            guard let raw = element.stringValue, let id = UUID(uuidString: raw) else {
+                throw ControlError("trackIds[\(i)] is not a valid UUID")
+            }
+            ids.append(id)
+        }
+        return ids
+    }
+
+    /// `template.list`'s reply (§6.1). `hasRouting`/`hasAudioUnits`/`instruments`
+    /// are read straight off the DECODED template's own tracks — never through
+    /// `TemplateBuilder.plan` — so a template whose files are missing on THIS Mac
+    /// still lists cleanly (listing is not applying).
+    private func templateListResult() -> JSONValue {
+        let listing = store.listTemplates()
+        let templates: [JSONValue] = listing.templates.map { entry in
+            let template = entry.template
+            let hasRouting = template.tracks.contains { track in
+                track.output != nil || !track.sends.isEmpty
+                    || track.inserts.contains { $0.sidechainSource != nil }
+            }
+            let hasAudioUnits = template.tracks.contains { track in
+                track.instrument?.kind == .audioUnit || track.inserts.contains { $0.kind == .audioUnit }
+            }
+            let instruments = template.tracks.compactMap {
+                $0.kind == .instrument ? $0.instrument?.kind.rawValue : nil
+            }
+            return .object([
+                "id": .string(entry.id),
+                "name": .string(entry.name),
+                "summary": template.summary.map(JSONValue.string) ?? .null,
+                "source": .string(entry.source.rawValue),
+                "genres": .array(template.genres.map(JSONValue.string)),
+                "songForm": template.songForm.map(JSONValue.string) ?? .null,
+                "trackCount": .number(Double(template.tracks.count)),
+                "instruments": .array(instruments.map(JSONValue.string)),
+                "hasRouting": .bool(hasRouting),
+                "hasAudioUnits": .bool(hasAudioUnits),
+            ])
+        }
+        let unreadable: [JSONValue] = listing.unreadable.map {
+            .object(["file": .string($0.file), "message": .string($0.message)])
+        }
+        return .object(["templates": .array(templates), "unreadable": .array(unreadable)])
+    }
+
+    /// `template.describe`'s reply (§6.1): the canonical JSON `TemplateCapture`
+    /// writes (the SAME bytes `template.save`/`template.export` would produce),
+    /// plus a per-track plain-English `sound` sentence and the builder's own
+    /// `slotsUsed`/`hasRouting`. Throws for an unknown id or any codec/builder
+    /// refusal — unchanged, nothing is applied.
+    private func templateDescribeResult(_ value: JSONValue?) throws -> JSONValue {
+        let parsed = try requireTemplateParam(value)
+        let plan = try TemplateBuilder.plan(parsed.template)
+        let canonicalData = try TemplateCapture.canonicalJSON(parsed.template)
+        let canonicalJSON = try JSONDecoder().decode(JSONValue.self, from: canonicalData)
+        let tracks: [JSONValue] = parsed.template.tracks.map { track in
+            .object([
+                "key": .string(track.key),
+                "name": .string(track.name),
+                "kind": .string(track.kind.rawValue),
+                "sound": .string(Self.templateTrackSoundSentence(kind: track.kind, instrument: track.instrument)),
+            ])
+        }
+        return .object([
+            "template": canonicalJSON,
+            "tracks": .array(tracks),
+            "slotsUsed": .object(plan.slotsUsed.mapValues { .number(Double($0)) }),
+            "hasRouting": .bool(plan.hasRouting),
+            "warnings": .array((parsed.warnings + plan.warnings).map(Self.templateWarningJSON)),
+        ])
+    }
+
+    /// `template.apply`'s reply (§6.1), from `TemplateApplyResult` plus any
+    /// warnings `requireTemplateParam` already surfaced while resolving the
+    /// template itself (e.g. a saved file written by a newer version).
+    private static func templateApplyResultJSON(_ result: TemplateApplyResult,
+                                                extraWarnings: [TemplateWarning]) -> JSONValue {
+        .object([
+            "applied": .bool(result.applied),
+            "name": .string(result.name),
+            "tracks": .array(result.tracks.map { track in
+                var object: [String: JSONValue] = [
+                    "key": .string(track.key),
+                    "name": .string(track.name),
+                    "kind": .string(track.kind.rawValue),
+                ]
+                if let id = track.id { object["id"] = .string(id.uuidString) }
+                return .object(object)
+            }),
+            "warnings": .array((extraWarnings + result.warnings).map(Self.templateWarningJSON)),
+            "duplicateTrackNames": .array(result.duplicateTrackNames.map(JSONValue.string)),
+            "undoLabel": .string(result.undoLabel),
+            "hasRouting": .bool(result.hasRouting),
+            "slotsUsed": .object(result.slotsUsed.mapValues { .number(Double($0)) }),
+        ])
+    }
+
+    /// `macro.songSkeleton {dryRun: true}`'s reply (§6.2): everything a real call
+    /// would create — names, kinds, instruments, insert chains, the sections —
+    /// with `applied: false` and NO ids anywhere (not even as `null`: the id keys
+    /// are simply absent), so it cannot be mistaken for a real result. Built from
+    /// the SAME `SongSkeletonPlan` `applySongSkeleton` turns into the real tracks,
+    /// so a dry run cannot drift from what it predicts.
+    private func songSkeletonPlanResult(_ plan: SongSkeletonPlan) -> JSONValue {
+        .object([
+            "applied": .bool(false),
+            "genre": .string(plan.genre),
+            "tempoBPM": .number(plan.tempoBPM),
+            "undoLabel": .string(plan.undoLabel),
+            "tracks": .array(plan.tracks.map { track in
+                .object([
+                    "name": .string(track.name),
+                    "kind": .string(track.kind.rawValue),
+                    // The SAME one-sentence vocabulary `template.describe` uses
+                    // (`Self.templateTrackSoundSentence`), not `instrumentJSON`:
+                    // that helper's STATIC form (no real trackID exists yet on a
+                    // dry run) omits the "soundBank"/"audioUnit" sub-object
+                    // entirely [R Commands.swift's own `instrumentJSON(_:)` vs
+                    // `instrumentJSON(_:trackID:)` split], which would hide
+                    // exactly which GM program or plug-in a track plays — the
+                    // one thing "instruments" in the design's own wording means.
+                    "sound": .string(
+                        Self.templateTrackSoundSentence(kind: track.kind, instrument: track.instrument)),
+                    "inserts": .array(track.effects.map { effect in
+                        .object([
+                            "kind": .string(effect.kind.rawValue),
+                            "isBypassed": .bool(effect.isBypassed),
+                            "params": Self.effectParamsJSON(effect),
+                        ])
+                    }),
+                ])
+            }),
+            "sectionClips": .array(plan.sectionClips.map { .object([
+                "name": .string($0.name),
+                "startBeat": .number($0.startBeat),
+                "lengthBeats": .number($0.lengthBeats),
+            ]) }),
+            "markers": .array(plan.markers.map { .object([
+                "name": .string($0.name), "beat": .number($0.beat),
+            ]) }),
+            "loopStart": .number(plan.loopStart),
+            "loopEnd": .number(plan.loopEnd),
+            "templateName": plan.templateName.map(JSONValue.string) ?? .null,
+            "hasRouting": .bool(plan.hasRouting),
+            "warnings": .array(plan.warnings.map(Self.templateWarningJSON)),
+        ])
     }
 
     /// Parses the optional `trackIds` param (`render.stems`) into `[UUID]?` —
@@ -15636,7 +16272,13 @@ public final class CommandRouter {
             // rule as every field above, and the same REFUSE-don't-clamp rule
             // an unrecognised voiceMode gets.
             glideMode: try Self.optionalSamplerGlideMode(obj["glideMode"])
-                ?? fallback.glideMode
+                ?? fallback.glideMode,
+            // PK-F2: the slice-kit marker is SET BY THE CHOP and never read off
+            // the wire — provenance, like `sourcePath` above (m26-h), so it
+            // rides through a partial update or a wholesale zone edit unchanged.
+            // Without this line the defaulted init parameter would silently
+            // clear it on EVERY sampler edit.
+            sliceKit: fallback.sliceKit
         )
     }
 
@@ -16850,6 +17492,18 @@ public final class CommandRouter {
         if let pedalHoldLimit = sampler.pedalHoldLimit {
             samplerObject["pedalHoldLimit"] = .number(Double(pedalHoldLimit))
         }
+        // W7-SMP round 2: the m34-o GLOBAL decay/sustain, same only-when-SET
+        // rule. `parseSampler` has read both since m34-o, but nothing echoed
+        // them, so a caller that set them could not read them back from the
+        // setter's reply or from project.snapshot (only describeSampler's
+        // `effectiveGlobals` showed them). nil stays absent, so a sampler that
+        // never set them keeps its wire shape.
+        if let decay = sampler.decay {
+            samplerObject["decay"] = .number(decay)
+        }
+        if let sustain = sampler.sustain {
+            samplerObject["sustain"] = .number(sustain)
+        }
         if let sourcePath = sampler.sourcePath {
             samplerObject["sourcePath"] = .string(sourcePath)
         }
@@ -17371,9 +18025,10 @@ public final class CommandRouter {
     /// `warningFields` (W7-SMP): nil — `instrument.describeSampler`'s call —
     /// warns about EVERY inert global; a set warns only about the globals it
     /// names. `track.setInstrument` passes the keys its `sampler` payload
-    /// carried, so its reply warns about the global the caller just WROTE, in
-    /// THIS function's sentence (one home, never a second wording). The JSON
-    /// is identical either way.
+    /// carried, plus (round 2) the globals that write MADE inert, so its reply
+    /// warns about the global the caller just WROTE or just silenced, in THIS
+    /// function's sentence (one home, never a second wording). The JSON is
+    /// identical either way.
     private static func samplerEffectiveGlobalsJSON(
         _ params: SamplerParams, warningFields: Set<String>? = nil
     ) -> (json: JSONValue, warnings: [String]) {
@@ -17487,6 +18142,32 @@ public final class CommandRouter {
             "oneShot": .object(oneShot),
         ])
         return (json, warnings)
+    }
+
+    /// W7-SMP round 2 (3a): the globals `samplerEffectiveGlobalsJSON` flags
+    /// INERT, read straight off its own JSON, so the list of zone-overridable
+    /// names keeps ONE home (that builder). `track.setInstrument` compares this
+    /// set before and after a write to find the globals the write MADE inert.
+    private static func samplerInertGlobalNames(_ params: SamplerParams) -> Set<String> {
+        guard case .object(let globals) = samplerEffectiveGlobalsJSON(
+            params, warningFields: []).json else { return [] }
+        return Set(globals.compactMap {
+            $0.value["globalIsInert"]?.boolValue == true ? $0.key : nil
+        })
+    }
+
+    /// m34-t's glide-under-poly sentence, ONE home since W7-SMP round 2 (3b).
+    /// `instrument.describeSampler` emits it whenever it applies;
+    /// `track.setInstrument` emits it when its payload names `glideTime` or
+    /// `voiceMode`, the two fields that can put a stored glide under poly. nil
+    /// when there is no glide, or the glide is heard.
+    private static func samplerInertGlideWarning(_ params: SamplerParams) -> String? {
+        guard params.effectiveGlideTime > 0, !params.glideIsEffective else { return nil }
+        return "glideTime is \(params.effectiveGlideTime) s but voiceMode is "
+            + "\(params.effectiveVoiceMode.rawValue), and GLIDE IS "
+            + "IGNORED under poly — there is no single previous note to slide from. Set "
+            + "voiceMode to 'legato' (slide with no new attack, the real slur) or 'mono' "
+            + "(the new note attacks but starts at the previous pitch) to hear it"
     }
 
     /// The JSON shaping for one coverage envelope. The COMPUTATION moved to

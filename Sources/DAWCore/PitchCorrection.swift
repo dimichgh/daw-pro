@@ -1174,6 +1174,23 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
     /// from the payload when nil, so a legacy set re-saves byte-identically.
     public var autoCorrectStamp: String?
 
+    /// **What the LAST auto-correct pass wrote that a preset would REPLACE**,
+    /// as a content stamp (W7-NTU, 2026-10-04): the stamp of that output with
+    /// the two settings a preset KEEPS folded away (`replaceableContentStamp`),
+    /// or nil when no pass wrote this set or the set predates the field.
+    ///
+    /// It exists for ONE question, `hasHandEditsARerunWouldReplace(_:)`: a
+    /// voice size or a consonant choice changed after a preset is not lost by
+    /// the next preset (the store carries both), so the card must not ask
+    /// about it. Written only by `stampedAsAutoCorrectOutput()`, beside
+    /// `autoCorrectStamp`. ⭐ ABSENT is today's behaviour: the predicate falls
+    /// back to `hasHandEditsSinceAutoCorrect` (a set saved before the field
+    /// asks once, and the preset that follows stamps it). Not render material,
+    /// absent from `PitchEditSetDigest.hex` like `autoCorrectStamp`, and
+    /// omitted from the payload when nil, so every saved set re-saves
+    /// byte-identically.
+    public var autoCorrectReplaceableStamp: String?
+
     // ───────────────────────────────────────────────────────────────────────
     // Natural tuning (m23-nt, design `docs/design/2026-09-25-natural-tuning.md`).
     // THREE SET-LEVEL FIELDS, ONE RULE FOR EACH OF THEM:
@@ -1442,6 +1459,7 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case analysisVersion, segments, retuneMs, autoCorrectStamp
+        case autoCorrectReplaceableStamp
         case formantCorrection, keepsConsonantsUntuned
         case transitionSlopeCentsPerSecond = "transitionSlope"
     }
@@ -1467,6 +1485,10 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
         // Absent (every set saved before C-F3) stays nil, which reads as "may
         // carry hand edits" — the CONFIRM answer, never the silent one.
         self.autoCorrectStamp = try c.decodeIfPresent(String.self, forKey: .autoCorrectStamp)
+        // W7-NTU: absent (every set saved before 2026-10-04) stays nil, which
+        // the replace question reads as today's whole-set rule.
+        self.autoCorrectReplaceableStamp = try c.decodeIfPresent(
+            String.self, forKey: .autoCorrectReplaceableStamp)
     }
 
     /// `retuneMs` is omitted at the floor and `autoCorrectStamp` when nil, the
@@ -1483,6 +1505,9 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
         try c.encode(segments, forKey: .segments)
         if retuneMs != Self.engineMinimumRetuneMs { try c.encode(retuneMs, forKey: .retuneMs) }
         if let autoCorrectStamp { try c.encode(autoCorrectStamp, forKey: .autoCorrectStamp) }
+        if let autoCorrectReplaceableStamp {
+            try c.encode(autoCorrectReplaceableStamp, forKey: .autoCorrectReplaceableStamp)
+        }
         if let formantCorrection { try c.encode(formantCorrection, forKey: .formantCorrection) }
         switch consonantProtection {
         case .offByDefault: break
@@ -3617,6 +3642,16 @@ public enum PitchAutoCorrect {
     /// (`PitchWobbleDetectorTests`, measured 2026-09-24).
     public static let slideShape: PitchSlideShape = .slideKeptNoteLocked
 
+    /// A clip's pitch shift, split for Auto-Correct (PK-F1 and the 2026-10-04
+    /// ruling on fractional shifts): the WHOLE semitones, the nearest whole
+    /// number (ties away from zero), which the scale is applied through; and
+    /// the FRACTION left over, a deliberate detune that Auto-Correct keeps.
+    /// `whole + fraction` is the shift; shift 0 splits into (0, 0).
+    public static func splitClipShift(_ shift: Double) -> (whole: Double, fraction: Double) {
+        let whole = shift.rounded(.toNearestOrAwayFromZero)
+        return (whole, shift - whole)
+    }
+
     /// **THE POLICY.** Detected contour + options ⇒ a populated `PitchEditSet`.
     ///
     /// `strength == 0` returns `PitchEditSet.empty` — no segments, no offsets,
@@ -3652,14 +3687,18 @@ public enum PitchAutoCorrect {
     ///
     /// - Parameter slideShape: THE policy constant `slideShape` by default; every
     ///   production caller leaves it there. A test passes each case.
+    /// - Parameter melody: Tune to Melody's target; `nil` (the default) is the
+    ///   table above. See `build(contour:…)`.
     public static func editSet(contour frames: [ClipPitchFrame],
                                frameRateHz: Double,
                                options: PitchAutoCorrectOptions,
                                analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
-                               slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
+                               slideShape: PitchSlideShape = PitchAutoCorrect.slideShape,
+                               melody: PitchMelodyTarget.Request? = nil)
     -> PitchEditSet {
         build(contour: frames, frameRateHz: frameRateHz, options: options,
-              analysisVersion: analysisVersion, slideShape: slideShape).editSet
+              analysisVersion: analysisVersion, slideShape: slideShape,
+              melody: melody).editSet
     }
 
     /// `editSet(contour:…)` plus what the unpitched finder decided (U-A,
@@ -3677,11 +3716,31 @@ public enum PitchAutoCorrect {
     /// the editor reads as "couldn't analyse". Untouched, it does not enter
     /// the curve (`NoteSegment.entersPitchCurve`), so every preset renders
     /// exactly as it did before sounds existed.
+    ///
+    /// ⭐ **THE SCALE APPLIES TO WHAT PLAYS (PK-F1).** `clipShiftSemitones` is
+    /// the clip's pitch shift. A note is snapped at `sung + whole`, the shift's
+    /// whole semitones (`splitClipShift`), and its correction is stored
+    /// relative to the recording, as the editor stores a drag
+    /// (`PitchEditorGeometry.storedOffsetCents`). So a clip moved +3 by a key
+    /// change and then corrected to the song's new key plays on that key. The
+    /// shift's FRACTION is kept, not corrected away: a clip shifted +3.3 plays
+    /// each note 30 cents sharp of the new key's scale, as its shift asks.
+    /// 0 (the default) is the old arithmetic bit for bit; a CHROMATIC
+    /// correction never depends on the shift, and no correction depends on
+    /// the shift's fraction or on an octave.
+    ///
+    /// ⭐ **TUNE TO MELODY (`melody`).** `nil`, the default, is everything
+    /// above, untouched. A request tunes each sung note to the melody note it
+    /// overlaps most, and may cut a note the melody changes under
+    /// (`PitchMelodyTarget`, design §3.2); that branch is `melodyBuild`, and
+    /// the result's `melody` carries its plan.
     public static func build(contour frames: [ClipPitchFrame],
                              frameRateHz: Double,
                              options: PitchAutoCorrectOptions,
                              analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
-                             slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
+                             slideShape: PitchSlideShape = PitchAutoCorrect.slideShape,
+                             clipShiftSemitones: Double = 0,
+                             melody: PitchMelodyTarget.Request? = nil)
     -> PitchNoteTableBuild {
         guard options.strength > 0 else {
             return PitchNoteTableBuild(editSet: .empty, unpitched: nil)
@@ -3690,6 +3749,12 @@ public enum PitchAutoCorrect {
         // (design §12 item 3), so no onsets are passed.
         let parts = PitchNoteSplitter.parts(in: frames, frameRateHz: frameRateHz,
                                             onsetSeconds: [])
+        if let melody {
+            return melodyBuild(frames: frames, frameRateHz: frameRateHz, parts: parts,
+                               options: options, analysisVersion: analysisVersion,
+                               slideShape: slideShape, clipShiftSemitones: clipShiftSemitones,
+                               melody: melody)
+        }
         // Run even with no parts, so the report names the reason (`noNotes`,
         // or a guard that fired first) rather than going quiet.
         let unpitched = PitchUnpitchedFinder.sounds(
@@ -3710,7 +3775,8 @@ public enum PitchAutoCorrect {
 
         let notes = parts.indices.map { index -> NoteSegment in
             segment(forPart: index, of: parts, options: options,
-                    shapeScale: shapeScale, slideShape: slideShape)
+                    shapeScale: shapeScale, slideShape: slideShape,
+                    clipShiftSemitones: clipShiftSemitones)
         }
         let sounds = unpitched.sounds.map(segment(forSound:))
         return PitchNoteTableBuild(
@@ -3723,8 +3789,9 @@ public enum PitchAutoCorrect {
     /// the voice size the options NAME (§1(e), `formantCorrectionOverride`)
     /// over the seed's. Both of `build`'s tables come through here, so an
     /// empty one and a full one cannot disagree about it. With no override
-    /// this is exactly the seed, byte for byte.
-    private static func newSet(segments: [NoteSegment], options: PitchAutoCorrectOptions,
+    /// this is exactly the seed, byte for byte. Internal, not private: the melody
+    /// branch (`melodyBuild`, `PitchMelodyTarget.swift`) makes its set here too.
+    static func newSet(segments: [NoteSegment], options: PitchAutoCorrectOptions,
                                analysisVersion: Int) -> PitchEditSet {
         var set = PitchEditSet.seeded(analysisVersion: analysisVersion, segments: segments,
                                       retuneMs: options.retuneMs, partKinds: [:],
@@ -3765,10 +3832,13 @@ public enum PitchAutoCorrect {
         }
     }
 
-    /// One part's segment: the table on `editSet`, and nothing else.
-    private static func segment(forPart index: Int, of parts: [NotePart],
+    /// One part's segment: the table on `editSet`, and nothing else. Internal, not
+    /// private: the melody branch (`melodyBuild`) uses it for slides and for a part
+    /// under a melody rest that goes to the scale.
+    static func segment(forPart index: Int, of parts: [NotePart],
                                 options: PitchAutoCorrectOptions, shapeScale: Double,
-                                slideShape: PitchSlideShape) -> NoteSegment {
+                                slideShape: PitchSlideShape,
+                                clipShiftSemitones: Double = 0) -> NoteSegment {
         let part = parts[index]
         // UA-2: the part's own kind, in every preset and every shape, whichever
         // branch below builds the segment (a slide can be locked or as sung).
@@ -3778,8 +3848,15 @@ public enum PitchAutoCorrect {
         // expression, what this function computed per run before p2-seg.
         func locked(aimingAt aimHz: Double) -> NoteSegment {
             let detectedMidi = PitchCorrectionMath.midi(fromHz: part.centreHz)
+            // PK-F1: the scale applies to what PLAYS. The sung pitch plus the
+            // shift's WHOLE semitones goes to the scale, and the target comes
+            // back to the RECORDING, which `pitchOffsetCents` is measured from.
+            // The shift's FRACTION is never snapped: it is a deliberate detune,
+            // so the note still plays that many cents off the scale (the 10-04
+            // ruling). Shift 0 is the old arithmetic exactly (`x + 0`, `x - 0`).
+            let whole = PitchAutoCorrect.splitClipShift(clipShiftSemitones).whole
             let targetMidi = options.scale.nearestAllowedMidi(
-                to: PitchCorrectionMath.midi(fromHz: aimHz))
+                to: PitchCorrectionMath.midi(fromHz: aimHz) + whole) - whole
             let offset = options.strength * (targetMidi - detectedMidi) * 100
             return NoteSegment(
                 startSeconds: part.startSeconds,
@@ -3849,10 +3926,12 @@ public enum PitchAutoCorrect {
     public static func editSet(from result: PitchDetectionResult,
                                options: PitchAutoCorrectOptions,
                                analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
-                               slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
+                               slideShape: PitchSlideShape = PitchAutoCorrect.slideShape,
+                               melody: PitchMelodyTarget.Request? = nil)
     -> PitchEditSet {
         editSet(contour: result.frames, frameRateHz: result.frameRateHz,
-                options: options, analysisVersion: analysisVersion, slideShape: slideShape)
+                options: options, analysisVersion: analysisVersion, slideShape: slideShape,
+                melody: melody)
     }
 
     /// `build(contour:…)` over a whole `clip.detectPitch` response, at the
@@ -3860,10 +3939,13 @@ public enum PitchAutoCorrect {
     public static func build(from result: PitchDetectionResult,
                              options: PitchAutoCorrectOptions,
                              analysisVersion: Int = PitchEditSet.currentAnalysisVersion,
-                             slideShape: PitchSlideShape = PitchAutoCorrect.slideShape)
+                             slideShape: PitchSlideShape = PitchAutoCorrect.slideShape,
+                             clipShiftSemitones: Double = 0,
+                             melody: PitchMelodyTarget.Request? = nil)
     -> PitchNoteTableBuild {
         build(contour: result.frames, frameRateHz: result.frameRateHz,
-              options: options, analysisVersion: analysisVersion, slideShape: slideShape)
+              options: options, analysisVersion: analysisVersion, slideShape: slideShape,
+              clipShiftSemitones: clipShiftSemitones, melody: melody)
     }
 }
 
@@ -3879,10 +3961,15 @@ public struct PitchNoteTableBuild: Sendable, Equatable {
     /// never ran it (a zero-strength pass, which returns `PitchEditSet.empty`
     /// before looking at a frame).
     public let unpitched: PitchUnpitchedFinder.Result?
+    /// What a melody pass applied (Tune to Melody, `PitchMelodyTarget`): its plan and the
+    /// segment id of each row. `nil` for every pass without a melody.
+    public let melody: PitchMelodyTarget.Applied?
 
-    public init(editSet: PitchEditSet, unpitched: PitchUnpitchedFinder.Result?) {
+    public init(editSet: PitchEditSet, unpitched: PitchUnpitchedFinder.Result?,
+                melody: PitchMelodyTarget.Applied? = nil) {
         self.editSet = editSet
         self.unpitched = unpitched
+        self.melody = melody
     }
 }
 

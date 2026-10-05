@@ -91,8 +91,13 @@ let package = Package(
         // directory, so the file loads at `BundledSamples/…` inside
         // `daw-pro_DAWCore.bundle` (see `BundledSamples.url(for:)`, which
         // resolves it WITHOUT `Bundle.module` and documents why).
+        //
+        // m39-tpl-3: the ten built-in templates (`Resources/Templates/*.dawtemplate`,
+        // read by `BuiltInTemplateCatalog`). `.copy` for the same reason: they are
+        // the exact bytes the template codec reads, and the catalog-integrity test
+        // checks those bytes, not a processed copy.
         .target(name: "DAWCore",
-                resources: [.copy("Resources/BundledSamples")]),
+                resources: [.copy("Resources/BundledSamples"), .copy("Resources/Templates")]),
         // C11 stdatomic shim for render-thread-shared state (Swift 6 on the
         // macOS 14 floor has no RT-safe atomics in the SDK). DAWCore must NOT
         // depend on this — the domain stays dependency-free.

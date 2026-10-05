@@ -1,7 +1,7 @@
 # Vendored third-party code
 
 Header-only C++ vendored verbatim (headers + LICENSE files, nothing else) for
-the offline time-stretch/pitch-shift facade (M5 ii-b), **EXCEPT THREE LOCAL
+the offline time-stretch/pitch-shift facade (M5 ii-b), **EXCEPT FOUR LOCAL
 PATCHES** to `signalsmith-stretch.h` (below; 0002 and 0003 ship together or
 not at all). Upstream repo layout is preserved so relative includes
 (`include/` wrappers, `./platform/*`) resolve unchanged. Only the Accelerate platform backends are vendored — we always
@@ -10,7 +10,7 @@ preprocessor-dead on this build and were omitted.
 
 | Library | Upstream | Commit | Fetched | License |
 |---|---|---|---|---|
-| signalsmith-stretch (v1.3.2) + local patches 0001-0003 | https://github.com/Signalsmith-Audio/signalsmith-stretch | `57b93f4e9206a089a45387eaa39bdc9f310d3308` | 2026-07-05 | MIT (`vendor/signalsmith-stretch/LICENSE.txt`) |
+| signalsmith-stretch (v1.3.2) + local patches 0001-0004 | https://github.com/Signalsmith-Audio/signalsmith-stretch | `57b93f4e9206a089a45387eaa39bdc9f310d3308` | 2026-07-05 | MIT (`vendor/signalsmith-stretch/LICENSE.txt`) |
 | signalsmith-linear | https://github.com/Signalsmith-Audio/linear | `7f53cdd1ccd52b409dacf2af24e7ff838c5580cd` | 2026-07-05 | MIT (`vendor/signalsmith-linear/LICENSE.txt`) |
 
 ## Local patches
@@ -158,33 +158,131 @@ whole gate plus the architect harness, not just the patch.
 coupling, transposed near-unity: < 0.05 c; 0002 alone up to 1.13 c), and G1+
 (the near-unity 0-st digests captured on the 0001-only header must differ).
 
-### Applying all three, and the gate
+### 0004 — formant envelope through the harmonic peaks, explicit base only (`patches/0004-formant-envelope-through-harmonic-peaks.patch`, NT-F220)
+
+**What it fixes.** With formant compensation on, `updateFormants` builds each
+block's spectral envelope by spreading every band's energy outwards with a
+per-band decay of 1 − 1/(f/2 + 1) (f = the harmonic spacing in bands), then
+shrinking it back with the inverse. Over one spacing the spread falls about
+e^−2 (−8.7 dB). So between two strong harmonics the envelope sags about 4.3 dB,
+and a harmonic more than about 8.7 dB below a neighbour reads that
+neighbour's skirt instead of its own level. The shrink pass is a no-op on a
+spread array: deleting it changes the output by rounding only. The
+compensation divides the target envelope by this one, so natural tuning's
+c = 1 over-corrected down-shifts: 220 Hz −5 st read +63.2 c against a 50 c
+bound, G2's pinned render residual (NT-E1b). Substituting the input's TRUE
+envelope for the estimate, with nothing else changed, brings every harmonic
+within ±0.1 dB. The compensation arithmetic is right; the envelope estimate
+is the error. 0004 replaces both passes, when the caller sets a base, with an
+envelope through the harmonic peaks. A band is a peak when no strictly larger
+band lies within half a spacing either side and it is strictly above its left
+neighbour. Peaks are joined log-linearly and held flat outwards. The pass is
+O(bands) (monotonic stacks), and its buffers are sized in `configure`.
+
+**Explicit base only.** With no base (`css_set_formant_preserve`, the clip
+flag) upstream's code runs unchanged. Upstream's own f0 estimate returns 0 or
+a multiple of f0 on steady vowels. Measured on the product voice AND on
+upstream's repro vowel: 147 Hz gives 2×; 196, 294, 330 and 440 Hz give 0. The
+new envelope needs the true spacing. So a legacy render keeps its bytes AND
+its key. That estimator failure is NOT fixed here. It costs the flag-on path
+12.9–44.2 dB per-harmonic RMS at 196/294/440 Hz in upstream's repro, and up
+to 29 dB in the product harness (down-shifts at 196–440 Hz: 6.8–29.1 dB). It
+is a follow-up, and a fix there moves flag-on bytes, which `pv:` keys.
+
+**Measured effect.** First in the W7-F220 harness (a byte copy of `shim.cpp`
+with the product test build's flags, the render loop and meters ported and
+matched against a real NT-E1 test log line for line), then REPRODUCED on the
+product's own test build (W7-F220I, 2026-09-27: every G line verbatim, both
+72-cell maps equal cell for cell). 72 cells: f0 110–440 Hz × ±100…±700 c,
+c = 1:
+- per-harmonic level error vs the ideal (RMS, 250–2500 Hz): 3.94 → 2.63 dB
+  mean, better in 63/72 cells, worse by > 1 dB in none;
+- G2's cepstral meter: 51 → 69/72 cells within 50 c; 220 Hz −5 st 63.2 →
+  16.5 c. One cell crosses the bound the other way: 147 Hz −7 st, −44.9 →
+  −51.1 c. The 80 Hz −7 st meter-artefact pin reads −55.3 → −65.7 c, while
+  LPC moves closer to the source (F2 1269 → 1247 against 1226);
+- 2.5–5 kHz, partials 55–85 dB below the strongest (the render floor
+  dominates; W7-F220 harness only): 5.49 → 4.39 dB mean, worse by > 1 dB in
+  6/72 cells (up to +2.6 dB);
+- byte-identical: every render with no base (flag on), the formant stage
+  withheld, and an engaged render at 0 st (6/6 f0s each; a −1 c control
+  differs 6/6). NOT byte-identical: c = 0 (an engaged amount; the formant
+  curve follows the pitch) differs at float rounding on synthetic tones (max
+  2.2e-6, ≤ −111 dB re peak) and by up to 4.2e-4 (−66 dB re peak) on a sung
+  excerpt; fRV re-keys it anyway;
+- hostile input (silence, a 1e-20 signal, sine, noise, impulse, full-scale
+  square; bases ×0.5/×2/50 Hz/20 kHz): no NaN, Inf or subnormal, and silence
+  stays silence;
+- a wrong base: ×1.5 reads as ×1. ×0.75 holds on average but 330 Hz degrades.
+  ×0.5 and ×2 break it (×2 breaks upstream too). The product's base is each
+  note's measured f0 (50 Hz floor), so only an octave-wrong note detection
+  reaches the broken range. A 0.6-spacing window also holds at ×0.75 and
+  gives the same totals (69/72 cells, 2.63 dB mean; the cells differ
+  slightly: 220 Hz −5 st 17.3 c against 16.5), but on a sung excerpt it put
+  one note's F2 (LPC) 170 c from the source against 18 c at 0.5, so 0.5
+  ships (ruled 2026-10-04).
+- Cost (W7-F220 harness, not re-measured on the product): an engaged render
+  is 6.7 % CHEAPER at -O2 (-1.4 % at -O0), and the formant stage alone is
+  23 % cheaper (medians of 9 interleaved pairs of 60 s renders, CPU time,
+  under timing.lock).
+
+**Cache:** `PitchEditSet.formantRenderVersion` 2 → 3 (digest slot 7). This
+re-keys exactly the engaged sets, the only renders whose bytes move (16
+engaged digests moved, 43 others did not, among them the Hard Tune render
+key). `pv:` stays 4, because a render with no base is byte-identical.
+
+**Re-apply** (after 0001–0003):
+`patch -p1 < patches/0004-formant-envelope-through-harmonic-peaks.patch`.
+
+**The tripwires** (each planted on the shipped tree, 2026-10-04):
+`NaturalTuningFormantEnvelopeTests` F220-1 (mean per-harmonic error
+≤ 3.5 dB on six down-shifts; the 0001–0003 header reads 5.42 dB) and G2's
+220 Hz −5 st plain bound (63.2 c on that header). `legacyProductGoldens`
+"flag on whole" and "flag on window" (an UNGATED 0004 moves them: the auto
+path must stay upstream's). The version: leaving `formantRenderVersion` at 2
+fails F220-1's version check, the digest pins (`NaturalTuningDigest`,
+`ConsonantChoiceDigest`, `NaturalTuningConsonantDigest`), `FormantCorrectionModel`
+and NoteShape's "rich" capture.
+
+**Upstream status.** v1.3.2 has the defect. The report (the fix and a
+single-file public-API repro, cross-referencing #31–#33) was APPROVED for
+filing by the user on 2026-09-27. FILED UPSTREAM 2026-10-04 as #34
+(https://github.com/Signalsmith-Audio/signalsmith-stretch/issues/34), against
+upstream main `a670068` (the diff `git apply --check`ed clean on a fresh clone
+first; the posted body is byte-for-byte the reviewed draft).
+
+### Applying all four, and the gate
 
 From `Sources/CSignalsmithStretch`, in order:
 
     patch -p1 < patches/0001-fractional-prevInput-rotation.patch
     patch -p1 < patches/0002-peak-position-and-flat-lobe-map.patch
     patch -p1 < patches/0003-exact-previous-hop.patch
+    patch -p1 < patches/0004-formant-envelope-through-harmonic-peaks.patch
 
-Against upstream v1.3.2 (`57b93f4e…`) the result is byte-identical to the
-shipped header: sha256 `80d11216b5d0d64dc7378fd589b13cb223341f678f272d3113e2e1a0624bf8af`
-(0001 alone `2de8f20b…`, 0001+0002 `ed1356bc…`). Then run
-`./scripts/test.sh --filter TransposeFractionalRead`. The gates, not source
-markers, are what guard the patches.
+Against upstream v1.3.2 (`57b93f4e…`, sha256 `11886679…`) the result is
+byte-identical to the shipped header: sha256
+`1a11a07fd337c19cbe89709e448c03549a639d19dfcaf4ee2a995760e940c136`
+(0001 alone `2de8f20b…`, 0001+0002 `ed1356bc…`, 0001–0003 `80d11216…`;
+the chain re-run 2026-10-04). Then run
+`./scripts/test.sh --filter "TransposeFractionalRead|NaturalTuning"`. The
+gates, not source markers, are what guard the patches.
 
-**Upstream status.** v1.3.2 on `main` (as of `a670068`, 2026-09-25) has all
-three defects; a vendor bump fixes none of them. FILED UPSTREAM on the
+**Upstream status (0001–0003; 0004's is in its own section).** v1.3.2 on
+`main` (as of `a670068`, 2026-09-25) has all three defects; a vendor bump
+fixes none of them. FILED UPSTREAM on the
 user's word (2026-09-27): #31 (0001, the fractional `prevInput` read), #32
 (0002, peak position and the lobe map) and #33 (0003, the exact previous hop).
 Each carries its fix and a single-file public-API repro.
 
-**Cache:** all three patches are keyed by
+**Cache:** 0001–0003 are keyed by
 `StretchRenderCache.transposeEngineVersion` (the `pv:` field), not by
 `stretchEngineVersion`. `pv:` is appended to transposing renders, pitch-edited
 renders, and — since 0003 — 0-st renders within ±5 % of ratio 1
 (`StretchRenderCache.nearUnityRatioBand`: a sample-rate-free band covering
 0003's ≤ 2.6/H window with ≥ 2× margin at every source rate ≥ 4 kHz). Every
-other 0-st, edit-free render is byte-identical and keeps its key.
+other 0-st, edit-free render is byte-identical and keeps its key. 0004 is
+keyed by `PitchEditSet.formantRenderVersion` instead (its section, above).
 
 ## To update
 

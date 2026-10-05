@@ -1,0 +1,88 @@
+{
+  "masterVolume" : 0.9,
+  "name" : "Simple",
+  "savedAt" : "2026-09-21T14:13:20Z",
+  "schemaVersion" : 1,
+  "tracks" : [
+    {
+      "clips" : [
+        {
+          "id" : "00000000-0000-0000-0000-000000000511",
+          "isAIGenerated" : false,
+          "lengthBeats" : 8,
+          "media" : "media\/riff.wav",
+          "name" : "Riff",
+          "startBeat" : 0
+        }
+      ],
+      "id" : "00000000-0000-0000-0000-000000000501",
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "audio",
+      "name" : "Guitar",
+      "pan" : 0,
+      "volume" : 1
+    },
+    {
+      "clips" : [
+        {
+          "id" : "00000000-0000-0000-0000-000000000512",
+          "isAIGenerated" : false,
+          "lengthBeats" : 4,
+          "media" : null,
+          "name" : "Chords",
+          "notes" : [
+            {
+              "id" : "00000000-0000-0000-0000-000000000521",
+              "lengthBeats" : 4,
+              "pitch" : 48,
+              "startBeat" : 0,
+              "velocity" : 100
+            }
+          ],
+          "startBeat" : 0
+        }
+      ],
+      "id" : "00000000-0000-0000-0000-000000000502",
+      "instrument" : {
+        "kind" : "polySynth",
+        "polySynth" : {
+          "attack" : 0.005,
+          "cutoffHz" : 8000,
+          "decay" : 0.08,
+          "gain" : 0.8,
+          "release" : 0.15,
+          "resonance" : 0.1,
+          "sustain" : 0.7,
+          "waveform" : "saw"
+        }
+      },
+      "isAIGenerated" : false,
+      "isArmed" : false,
+      "isMuted" : false,
+      "isSoloed" : false,
+      "kind" : "instrument",
+      "name" : "Pad",
+      "pan" : 0,
+      "volume" : 1
+    }
+  ],
+  "transport" : {
+    "countInBars" : 1,
+    "isLoopEnabled" : false,
+    "isMetronomeEnabled" : false,
+    "isPunchEnabled" : false,
+    "loopEndBeat" : 16,
+    "loopStartBeat" : 0,
+    "positionBeats" : 0,
+    "punchInBeat" : 0,
+    "punchOutBeat" : 4,
+    "tempoBPM" : 120,
+    "timeSignature" : {
+      "beatUnit" : 4,
+      "beatsPerBar" : 4
+    }
+  }
+}

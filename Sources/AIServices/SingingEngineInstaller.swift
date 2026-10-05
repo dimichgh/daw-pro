@@ -386,21 +386,51 @@ public struct SingingEngineInstaller: Sendable {
             stderrTailBox.withLock { $0 = text }
         }
 
-        let exitCode: Int32 = await withTaskCancellationHandler {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
-                process.terminationHandler = { p in continuation.resume(returning: p.terminationStatus) }
+        // FIX NOW #5 (architect review Q6): a cancel requested before `process.run()` actually
+        // executes was previously LOST — `withTaskCancellationHandler`'s documented semantics run
+        // `onCancel` immediately if the task is ALREADY cancelled when the handler installs, so
+        // `onCancel` would see `process.isRunning == false` and do nothing, and the operation
+        // would then call `process.run()` anyway, oblivious. This lock is the shared state that
+        // lets whichever side (the operation, right after `run()` succeeds, or a concurrent
+        // `onCancel`) runs SECOND be the one responsible for `terminate()` — a double-checked
+        // handoff, not a race.
+        let launch = OSAllocatedUnfairLock(initialState: (cancelled: false, launched: false))
+
+        let rawExit: RawExit = await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<RawExit, Never>) in
+                process.terminationHandler = { p in
+                    let wasCancelRequested = launch.withLock { $0.cancelled }
+                    continuation.resume(returning: .exited(
+                        status: p.terminationStatus, reason: p.terminationReason,
+                        cancelRequested: wasCancelRequested))
+                }
+                guard launch.withLock({ !$0.cancelled }) else {
+                    // Cancelled before we ever got here — nothing spawned, nothing to clean up.
+                    continuation.resume(returning: .cancelledBeforeLaunch)
+                    return
+                }
                 do {
                     try process.run()
                 } catch {
                     // `terminationHandler` was already assigned but the process never started, so
-                    // it will never fire on its own — resume here, once, with a sentinel outside
-                    // every real exit code install.sh (0/1/2/75/143) or a raw signal death could
-                    // ever produce.
-                    continuation.resume(returning: Int32.min)
+                    // it will never fire on its own.
+                    continuation.resume(returning: .cannotLaunch)
+                    return
+                }
+                if launch.withLock({ s -> Bool in s.launched = true; return s.cancelled }),
+                   process.isRunning {
+                    // `onCancel` landed in the gap between the guard above and here and saw
+                    // `launched == false`, so it did not terminate — we must.
+                    process.terminate()
                 }
             }
         } onCancel: {
-            if process.isRunning { process.terminate() }
+            if launch.withLock({ s -> Bool in s.cancelled = true; return s.launched }),
+               process.isRunning {
+                // The operation already marked itself launched (and, at that moment, saw
+                // `cancelled == false`, so it did not terminate) — we must, here.
+                process.terminate()
+            }
         }
 
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
@@ -408,19 +438,44 @@ public struct SingingEngineInstaller: Sendable {
         try? stdoutPipe.fileHandleForReading.close()
         try? stderrPipe.fileHandleForReading.close()
 
-        if exitCode == Int32.min {
+        switch rawExit {
+        case .cancelledBeforeLaunch:
+            return .cancelled(step: nil)
+        case .cannotLaunch:
             let tail = stderrTailBox.withLock { $0 }
             return .cannotLaunch(
                 reason: tail.isEmpty ? "install.sh could not be launched." : tail)
+        case .exited(let status, let reason, let cancelRequested):
+            return Self.classify(
+                exitCode: status, lines: atLinesBox.withLock { $0 },
+                stderrTail: stderrTailBox.withLock { $0 },
+                terminationReason: reason, cancelRequested: cancelRequested)
         }
-        return Self.classify(
-            exitCode: exitCode, lines: atLinesBox.withLock { $0 },
-            stderrTail: stderrTailBox.withLock { $0 })
+    }
+
+    /// The continuation's own result, before anything reads `atLinesBox`/`stderrTailBox` — three
+    /// shapes, not a reused `Int32` sentinel pair (`Int32.min` for "never launched" did double
+    /// duty with real exit codes before #5; this retires that magic number entirely).
+    private enum RawExit: Sendable {
+        case cancelledBeforeLaunch
+        case cannotLaunch
+        case exited(status: Int32, reason: Process.TerminationReason, cancelRequested: Bool)
     }
 
     /// PURE. The exit-code-plus-`@@`-vocabulary classification the type doc promises.
+    ///
+    /// `terminationReason`/`cancelRequested` are FIX NOW #5's addition (architect review Q6):
+    /// when `terminationReason == .uncaughtSignal`, Foundation puts the SIGNAL NUMBER in
+    /// `exitCode`, not a real exit code, so it must be read BEFORE the exit-code switch below —
+    /// otherwise an uncaught SIGINT (2) misreads as exit code 2 (`.badUsage`) and an uncaught
+    /// SIGHUP (1) misreads as exit code 1 (`.failed`). The rule (architect's own wording): an
+    /// uncaught SIGTERM or SIGINT while a cancel was REQUESTED is `.cancelled(step: nil)` (there
+    /// is nothing to clean up — this is exactly what `terminate()` landing in install.sh's first
+    /// milliseconds, before its own trap installs at line 139, produces); any other uncaught
+    /// signal is `.crashed(signal)`, never silently folded into one of the five documented codes.
     static func classify(
-        exitCode: Int32, lines: [SingingEngineInstallLine], stderrTail: String
+        exitCode: Int32, lines: [SingingEngineInstallLine], stderrTail: String,
+        terminationReason: Process.TerminationReason = .exit, cancelRequested: Bool = false
     ) -> SingingEngineInstallOutcome {
         func lastError() -> (step: String, message: String)? {
             for line in lines.reversed() {
@@ -429,6 +484,13 @@ public struct SingingEngineInstaller: Sendable {
             return nil
         }
         let trimmedStderrTail = stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if terminationReason == .uncaughtSignal {
+            let signal = exitCode
+            if cancelRequested, signal == SIGTERM || signal == SIGINT {
+                return .cancelled(step: nil)
+            }
+            return .crashed(exitCode: signal, stderrTail: trimmedStderrTail)
+        }
         switch exitCode {
         case 0:
             for line in lines.reversed() {

@@ -1,0 +1,33 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "lofi-chill",
+  "name": "Lo-Fi Chill",
+  "summary": "Dusty drums, a warm electric piano and a round bass, in a small, worn-tape room.",
+  "songForm": "lo-fi",
+  "genres": ["lo-fi"],
+  "tracks": [
+    { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 0.64,
+      "instrument": { "kind": "drumSynth", "drumPreset": "lofi", "drumKit": { "noteLayout": "gm" } },
+      "inserts": [ { "kind": "saturator", "params": { "driveDb": 4 } } ],
+      "sends": [ { "bus": "room", "level": 0.2 } ] },
+    { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.43, "mixerPreset": "bass-round",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 33 } } },
+    { "key": "keys", "name": "Keys", "kind": "instrument", "volume": 2.0, "output": "duck", "mixerPreset": "warm-keys",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 4 } },
+      "inserts": [ { "key": "tone", "kind": "djFilter", "params": { "position": -0.25 } },
+                   { "kind": "chorus" } ],
+      "sends": [ { "bus": "room", "level": 0.3 } ],
+      "modulation": {
+        "sources": [ { "key": "breathe", "kind": "lfo", "params": { "waveform": "sine", "rateHz": 0.25 } } ],
+        "routes": [ { "source": "breathe", "depth": 0.018,
+                      "target": { "type": "effectParam", "insert": "tone", "param": "position" } } ] } },
+    { "key": "vinyl", "name": "Vinyl FX", "kind": "audio", "mixerPreset": "lofi-tape" },
+    { "key": "duck", "name": "Keys Duck", "kind": "bus", "volume": 1.6,
+      "inserts": [ { "kind": "compressor", "sidechainSource": "drums",
+                     "params": { "thresholdDb": -16.5, "ratio": 3, "attackMs": 5, "releaseMs": 180 } } ] },
+    { "key": "room", "name": "Tape Room", "kind": "bus",
+      "inserts": [ { "kind": "hallReverb", "params": { "mix": 1, "sizeMeters": 12, "decaySeconds": 1.2 } } ] }
+  ]
+}

@@ -35,7 +35,8 @@ public enum PitchCorrectionPreset: String, Codable, Sendable, CaseIterable, Iden
     case natural
     /// Notes arrive in tune immediately. The modern pop lead sound.
     case tight
-    /// The pitch is replaced, not corrected. The robot effect.
+    /// Each note held in tune with its vibrato thinned (measured: about half on a real
+    /// vocal, see `offeredInUI`), not merely nudged. The robot effect.
     case hardTune
 
     public var id: String { rawValue }
@@ -62,7 +63,7 @@ public enum PitchCorrectionPreset: String, Codable, Sendable, CaseIterable, Iden
         case .tight:
             return "Notes snap into tune the moment they start."
         case .hardTune:
-            return "Replaces your pitch with the exact note. The robot effect."
+            return "Holds each note in tune, with less vibrato. The robot effect."
         }
     }
 

@@ -239,6 +239,10 @@ struct TimelineLanesView: View {
     /// Opens the note editor pane on the named clip. See `ClipBlock`'s copy for
     /// why this exists as its own seam rather than reusing the tune callbacks.
     var onOpenPitchEditor: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the **Tune to Melody** card on the named clip (M3, W7-TTM3; Tune Vocal ▸ Tune to
+    /// Melody…), via `AppModel.openTuneToMelody(clipID:)`. Whether the item is live is decided
+    /// from this view's own `tracks` and `tempoMap` (`TuneToMelodyMenu.availability`).
+    var onTuneToMelody: (_ clip: Clip) -> Void = { _ in }
     /// Opens the **Convert Voice…** panel (m24-m leg B, Pro clip menu; sp-c).
     /// UI-only — routes to `openVoiceConvert(clipIDs:)`, whose panel rides the
     /// SAME store seam as the wire's `vc.convertClips`. The COMMAND (title +
@@ -1308,6 +1312,11 @@ struct TimelineLanesView: View {
                     onTuneVocal: { preset in onTuneVocal(clip, preset) },
                     onClearPitchEdits: { onClearPitchEdits(clip) },
                     onOpenPitchEditor: { onOpenPitchEditor(clip) },
+                    tuneToMelodyAvailability: {
+                        TuneToMelodyMenu.availability(vocal: clip, tracks: tracks,
+                                                      tempoMap: tempoMap)
+                    },
+                    onTuneToMelody: { onTuneToMelody(clip) },
                     voiceConvertCommand: VoiceConvertMenuPolicy.clipContextCommand(
                         clickedClipID: clip.id,
                         clickedClipIsAudio: !clip.isMIDI && clip.audioFileURL != nil,
@@ -3058,6 +3067,15 @@ private struct ClipBlock: View {
     /// reach is indistinguishable from one that was never built**, and it
     /// would have read as "the editor is not done" in every later summary.
     var onOpenPitchEditor: () -> Void = {}
+    /// Tune to Melody (M3, W7-TTM3): whether Tune Vocal ▸ Tune to Melody… is live for THIS
+    /// clip. A closure, asked when the menu is built (`TuneToMelodyMenuItem`), so the block's
+    /// playhead-rate rebuilds never pay for it. The lanes view answers with
+    /// `TuneToMelodyMenu.availability`, the store's own per-note test.
+    var tuneToMelodyAvailability: () -> TuneToMelodyMenu.Availability = {
+        TuneToMelodyMenu.Availability(isEnabled: false, help: TuneToMelodyCopy.noMelodyUnderVocal)
+    }
+    /// Opens the Tune to Melody card on THIS clip (`AppModel.openTuneToMelody`).
+    var onTuneToMelody: () -> Void = {}
 
     // MARK: Convert to voice (m10-p-5)
 
@@ -4102,6 +4120,15 @@ private struct ClipBlock: View {
                 // stale. It is also the ONE thing on screen that says the tuning
                 // took at all, until the note view lands.
                 Divider()
+                // Tune to Melody (M3, W7-TTM3; design §3.4): each sung note tuned to the
+                // MIDI melody under it. SHOWN AND GREYED when no MIDI note plays under this
+                // vocal, with the reason drawn under it (`TuneToMelodyMenuItem`), never
+                // hidden: the person learns the operation exists and what it wants first.
+                // Live exactly when the store would accept a melody
+                // (`TuneToMelodyMenu.availability` asks the store's own
+                // `MelodyTuning.notes(of:under:tempoMap:)`).
+                TuneToMelodyMenuItem(availability: tuneToMelodyAvailability,
+                                     action: onTuneToMelody)
                 // The way in to the note editor. Worded for someone who has
                 // never used one: "Note Editor" names the thing, the ellipsis
                 // is AppKit's promise that a surface opens rather than

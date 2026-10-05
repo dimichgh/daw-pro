@@ -949,7 +949,8 @@ public protocol AudioEngineControlling: AnyObject {
 
     /// The full-session per-strip compensation targets EXACTLY as the offline
     /// renderer's automatic plan would apply them (M5 iv-b, spec §5): a
-    /// planning pass prepares the session's AUs (hosted latency), reconciles
+    /// planning pass prepares the session's hosted INSERT effects (their
+    /// latency; a hosted instrument is never plan input, AUR-1), reconciles
     /// an offline graph, runs one parameter pass WITHOUT rendering, and reads
     /// the resulting plan — parity with a real render pass by construction.
     /// Stem export (iv-c) forces these into every per-stem subset pass so the

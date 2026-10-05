@@ -34,8 +34,10 @@ extension EffectChainStoreTests {
             // track is missing, whatever the target), so its lines repeat by
             // design; every other line must identify its case.
             let identified = lines.filter { !$0.hasPrefix("missing-track ") }
-            #expect(Set(identified).count == identified.count || name == "budget",
-                    "table \(name) repeats a case line, so a case is not identified by its line")
+            // Bools, not the tables: a failing `#expect` prints what it captured.
+            let distinct = Set(identified).count
+            let unique = distinct == identified.count || name == "budget"
+            #expect(unique, "table \(name) repeats a case line (\(identified.count) lines, \(distinct) distinct), so a case is not identified by its line")
         }
         if let dir = ProcessInfo.processInfo.environment["TPL1_GOLDEN_DIR"], !dir.isEmpty {
             try FileManager.default.createDirectory(

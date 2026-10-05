@@ -123,7 +123,7 @@ public struct ClipRenderSignature: Equatable, Sendable {
     /// A pitch-edit set compared the way the render key compares it; see
     /// "How the tuning is compared" in the type's doc.
     struct Tuning: Equatable, Sendable {
-        /// The set with `segments` emptied and `autoCorrectStamp` cleared.
+        /// The set with `segments` emptied and both auto-correct stamps cleared.
         let everythingButTheNotes: PitchEditSet
         let notes: [NoteSegment]
 
@@ -131,6 +131,7 @@ public struct ClipRenderSignature: Equatable, Sendable {
             var rest = set
             rest.segments = []
             rest.autoCorrectStamp = nil
+            rest.autoCorrectReplaceableStamp = nil   // W7-NTU: provenance too, not render material
             everythingButTheNotes = rest
             notes = set.segments
         }

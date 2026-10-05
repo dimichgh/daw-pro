@@ -11,6 +11,16 @@ import Foundation
 // The result is RESOLVED into the model's own `InstrumentDescriptor`, starting
 // from the factory values: an instrument has no identity, so one resolved
 // value can be applied any number of times.
+//
+// m39-tpl-5b — the Sampler (saved templates only, §2.2, §4.5, §7.2): the
+// `sampler` object `track.setInstrument` takes, read here and WRITTEN here
+// (`samplerObject`), zones by absolute path. A Sampler ZONE does have an
+// identity (`ProjectDocument` keys each zone's sample file by zone id, one
+// project-wide map), so a template carries none: the codec gives each zone a
+// PLACEHOLDER id (`samplerZoneID`) and `TemplateBuilder` replaces every one
+// with a fresh id from `makeID`. One departure from "no file system" in this
+// codec: a `builtin:<name>` zone path resolves through `BundledSamples` (a
+// lookup in the app's own resource bundle), exactly as the wire resolves it.
 
 extension TemplateReader {
     /// The blocks an instrument can carry besides `kind`, per kind.
@@ -104,17 +114,9 @@ extension TemplateReader {
             return InstrumentDescriptor(kind: .soundBank,
                                         soundBank: try readSoundBank(raw, Self.join(path, "soundBank")))
         case .sampler:
-            if object["sampler"] != nil {
-                // TODO(TPL-5): read the `sampler` object — the same object
-                // `track.setInstrument` takes — with a parity test against the
-                // wire's `parseSampler`, exactly as the drum kit has one against
-                // `parseDrumKit`. Until then it is refused, never half-read.
-                throw TemplateRefusal(
-                    code: .notSupported, path: Self.join(path, "sampler"),
-                    message: "templates can't hold a Sampler's sound files yet. Leave out "
-                        + "\"sampler\" to add an empty Sampler you can fill later.")
-            }
-            return InstrumentDescriptor(kind: .sampler)
+            guard let raw = object["sampler"] else { return InstrumentDescriptor(kind: .sampler) }
+            return InstrumentDescriptor(kind: .sampler,
+                                        sampler: try readSampler(raw, Self.join(path, "sampler")))
         case .audioUnit:
             guard let raw = object["audioUnit"] else {
                 throw Self.missing(Self.join(path, "audioUnit"),
@@ -421,5 +423,514 @@ extension TemplateReader {
             component: AudioUnitComponentID(type: type, subType: subType,
                                             manufacturer: manufacturer),
             stateData: state)
+    }
+}
+
+// MARK: - Sampler (m39-tpl-5b)
+
+extension TemplateReader {
+    /// The keys of a template's `sampler` object: everything the wire's
+    /// `parseSampler` (`track.setInstrument`'s `sampler` object) writes. Not
+    /// here, on purpose: `zonePatches` (refused in words: it edits zones a track
+    /// already has, and a template's track has none yet) and the wire's
+    /// read-only provenance echoes `sourcePath` and `name`, which are unknown
+    /// keys to a template. `TemplateSamplerCodecTests` compares this list with
+    /// `SamplerParams`' stored properties minus the provenance trio
+    /// (`sourcePath`, `displayName`, `sliceKit`: the wire reads none of them), so
+    /// a new field cannot arrive unread.
+    static let samplerKeys = ["zones", "oneShot", "attack", "release", "gain",
+                              "expressionModDepth", "expressionFilterDepth",
+                              "expressionFilterCC", "bendRangeSemitones", "voiceMode", "decay",
+                              "sustain", "pedalHoldLimit", "glideTime", "glideMode"]
+
+    /// One zone's keys: every `SamplerZone` field but its `id`, with
+    /// `audioFileURL` spelled `path`, as the wire spells it.
+    static let samplerZoneKeys = ["path", "rootPitch", "minPitch", "maxPitch", "gain",
+                                  "minVelocity", "maxVelocity", "group", "seqLength",
+                                  "seqPosition", "randMin", "randMax", "tuneCents", "pan",
+                                  "ampVelTrack", "oneShot", "startFrame", "endFrame", "attack",
+                                  "decay", "sustain", "release", "loopMode", "loopStart",
+                                  "loopEnd", "crossfade", "reverse", "chokeGroup"]
+
+    /// A zone's `crossfade` object: every `SamplerCrossfade` field, raw MIDI
+    /// values (`SamplerCrossfade.init` clamps each to 0…127).
+    static let samplerCrossfadeKeys = ["controller", "ccInLo", "ccInHi", "ccOutLo", "ccOutHi",
+                                       "velInLo", "velInHi", "velOutLo", "velOutHi"]
+
+    // MARK: Zone identity
+
+    /// Every placeholder zone id starts with this.
+    static let samplerZoneIDPrefix = "7E3D5A11-0000-4000-8000-"
+
+    /// The PLACEHOLDER id a template gives zone `index` of a Sampler. A template
+    /// carries no zone identity: `ProjectDocument` keys every zone's sample file
+    /// by zone id in ONE project-wide map (`SamplerDocument.init(from:mediaRefs:)`,
+    /// filled by `ProjectBundle.planMedia`), so a copy that shared its source's
+    /// ids would make one file stand in for both on the next save. The codec and
+    /// the canonical form use these, so the same file reads as the same value;
+    /// `TemplateBuilder` replaces every one with a fresh id from `makeID`.
+    static func samplerZoneID(_ index: Int) -> UUID {
+        let suffix = String(format: "%012llX", UInt64(truncatingIfNeeded: index) & 0xFFFF_FFFF_FFFF)
+        return UUID(uuidString: samplerZoneIDPrefix + suffix) ?? UUID()
+    }
+
+    static func isSamplerZonePlaceholder(_ id: UUID) -> Bool {
+        id.uuidString.hasPrefix(samplerZoneIDPrefix)
+    }
+
+    /// `zone` under another id (and, for the canonical form, its file URL
+    /// rebuilt from its path), every other field copied. The ONE place a
+    /// template re-identifies a zone: the codec's placeholders, the canonical
+    /// form and the builder's fresh ids all come through here.
+    ///
+    /// ⚠️ An explicit initialiser call, so a field added to `SamplerZone` and not
+    /// named here would silently fall to its nil default.
+    /// `TemplateSamplerCodecTests` fills EVERY field of a fixture (checked by
+    /// `Mirror`, not by eye) and compares the copy with it.
+    static func samplerZone(_ zone: SamplerZone, id: UUID, audioFileURL: URL? = nil) -> SamplerZone {
+        SamplerZone(
+            id: id, audioFileURL: audioFileURL ?? zone.audioFileURL, rootPitch: zone.rootPitch,
+            minPitch: zone.minPitch, maxPitch: zone.maxPitch, gain: zone.gain,
+            minVelocity: zone.minVelocity, maxVelocity: zone.maxVelocity, group: zone.group,
+            seqLength: zone.seqLength, seqPosition: zone.seqPosition, randMin: zone.randMin,
+            randMax: zone.randMax, tuneCents: zone.tuneCents, pan: zone.pan,
+            ampVelTrack: zone.ampVelTrack, oneShot: zone.oneShot, startFrame: zone.startFrame,
+            endFrame: zone.endFrame, attack: zone.attack, decay: zone.decay, sustain: zone.sustain,
+            release: zone.release, loopMode: zone.loopMode, loopStart: zone.loopStart,
+            loopEnd: zone.loopEnd, crossfade: zone.crossfade, reverse: zone.reverse,
+            chokeGroup: zone.chokeGroup)
+    }
+
+    // MARK: Reading
+
+    /// A `sampler` object over a fresh `SamplerParams()`, the base a track with
+    /// no Sampler yet gives the wire. Every number is range-checked (REFUSED
+    /// out of range from a same-version file, where the wire clamps most of
+    /// them), and every number READS BACK from the built value as written, so a
+    /// span written upside down (the model swaps it), an end frame at or before
+    /// its start (the model raises it), a round-robin position past its length
+    /// or a crossfade that can never change a gain (the model drops it) is
+    /// refused rather than stored as something else.
+    mutating func readSampler(_ json: TemplateJSON, _ path: String) throws -> SamplerParams {
+        var object = try self.object(json, path)
+        // A key the wire KNOWS, so it is refused in words in every version, never
+        // skipped as unknown (skipping it would drop the zones it carries).
+        if object["zonePatches"] != nil {
+            throw TemplateRefusal(
+                code: .invalidValue, path: Self.join(path, "zonePatches"),
+                message: "a template holds a Sampler's whole zone map as \"zones\". \"zonePatches\" "
+                    + "changes zones a track already has, and a template's track has none yet.")
+        }
+        object = try knownKeys(object, Self.samplerKeys, path, "A Sampler setup")
+        var zones: [SamplerZone] = []
+        if let raw = object["zones"] {
+            let zonesPath = Self.join(path, "zones")
+            for (position, entry) in try array(raw, zonesPath).enumerated() {
+                zones.append(try readSamplerZone(entry, Self.index(zonesPath, position),
+                                                 index: position))
+            }
+        }
+        var written: [String: Double] = [:]
+        let fresh = SamplerParams()
+        let oneShot = try object["oneShot"].map { try bool($0, Self.join(path, "oneShot")) }
+        let attack = try samplerNumber(object, "attack", SamplerParams.attackRange, path, &written)
+        let release = try samplerNumber(object, "release", SamplerParams.releaseRange, path,
+                                        &written)
+        let gain = try samplerNumber(object, "gain", SamplerParams.gainRange, path, &written)
+        let modDepth = try samplerNumber(object, "expressionModDepth",
+                                         SamplerParams.expressionModDepthRange, path, &written)
+        let filterDepth = try samplerNumber(object, "expressionFilterDepth",
+                                            SamplerParams.expressionFilterDepthRange, path,
+                                            &written)
+        let filterCC = try samplerInteger(object, "expressionFilterCC",
+                                          MIDIControllerType.cc(controller: 0).valueRange, path,
+                                          &written)
+        let bend = try samplerNumber(object, "bendRangeSemitones",
+                                     SamplerParams.bendRangeSemitonesRange, path, &written)
+        let voiceMode = try samplerVoiceMode(object["voiceMode"], Self.join(path, "voiceMode"))
+        let decay = try samplerNumber(object, "decay", SamplerZone.decayRange, path, &written)
+        let sustain = try samplerNumber(object, "sustain", SamplerZone.sustainRange, path,
+                                        &written)
+        let pedalHoldLimit = try samplerInteger(object, "pedalHoldLimit",
+                                                SamplerParams.pedalHoldLimitRange, path, &written)
+        let glideTime = try samplerNumber(object, "glideTime", SamplerParams.glideTimeRange, path,
+                                          &written)
+        let glideMode = try samplerGlideMode(object["glideMode"], Self.join(path, "glideMode"))
+        let sampler = SamplerParams(
+            zones: zones, oneShot: oneShot ?? fresh.oneShot, attack: attack ?? fresh.attack,
+            release: release ?? fresh.release, gain: gain ?? fresh.gain,
+            expressionModDepth: modDepth, expressionFilterDepth: filterDepth,
+            expressionFilterCC: filterCC, bendRangeSemitones: bend, voiceMode: voiceMode,
+            decay: decay, sustain: sustain, pedalHoldLimit: pedalHoldLimit, glideTime: glideTime,
+            glideMode: glideMode)
+        try samplerReadBack(written, path) { Self.samplerReading(sampler, $0) }
+        return sampler
+    }
+
+    /// One zone. Its id is the placeholder for `index` (see `samplerZoneID`).
+    mutating func readSamplerZone(_ json: TemplateJSON, _ path: String,
+                                  index: Int) throws -> SamplerZone {
+        var object = try self.object(json, path)
+        // The wire honours a zone id only when it already names a zone on THAT
+        // track; a template's track is new, so an id could never be kept.
+        if object["id"] != nil {
+            throw TemplateRefusal(
+                code: .invalidValue, path: Self.join(path, "id"),
+                message: "a template's Sampler zones get new ids every time the template is "
+                    + "added, so a zone can't keep one. Leave out \"id\".")
+        }
+        object = try knownKeys(object, Self.samplerZoneKeys, path, "A Sampler zone")
+        guard let rawPath = object["path"] else {
+            throw Self.missing(Self.join(path, "path"),
+                               "the zone's sound file, by its full path, like "
+                                + "\"/Users/me/Samples/kick.wav\"")
+        }
+        let file = try samplerFile(rawPath, Self.join(path, "path"))
+        var written: [String: Double] = [:]
+        let pitch = SamplerZone.pitchRange
+        let velocity = SamplerZone.velocityRange
+        let rootPitch = try samplerInteger(object, "rootPitch", pitch, path, &written)
+        let minPitch = try samplerInteger(object, "minPitch", pitch, path, &written)
+        let maxPitch = try samplerInteger(object, "maxPitch", pitch, path, &written)
+        let gain = try samplerNumber(object, "gain", SamplerZone.gainRange, path, &written)
+        let minVelocity = try samplerInteger(object, "minVelocity", velocity, path, &written)
+        let maxVelocity = try samplerInteger(object, "maxVelocity", velocity, path, &written)
+        let group = try samplerCount(object, "group", minimum: 0, path, &written)
+        let seqLength = try samplerCount(object, "seqLength", minimum: 1, path, &written)
+        let seqPosition = try samplerCount(object, "seqPosition", minimum: 1, path, &written)
+        let randMin = try samplerNumber(object, "randMin", SamplerZone.randRange, path, &written)
+        let randMax = try samplerNumber(object, "randMax", SamplerZone.randRange, path, &written)
+        let tuneCents = try samplerNumber(object, "tuneCents", SamplerZone.tuneCentsRange, path,
+                                          &written)
+        let pan = try samplerNumber(object, "pan", SamplerZone.panRange, path, &written)
+        let ampVelTrack = try samplerNumber(object, "ampVelTrack", SamplerZone.ampVelTrackRange,
+                                            path, &written)
+        let oneShot = try object["oneShot"].map { try bool($0, Self.join(path, "oneShot")) }
+        let startFrame = try samplerCount(object, "startFrame", minimum: 0, path, &written)
+        let endFrame = try samplerCount(object, "endFrame", minimum: 0, path, &written)
+        let attack = try samplerNumber(object, "attack", SamplerParams.attackRange, path, &written)
+        let decay = try samplerNumber(object, "decay", SamplerZone.decayRange, path, &written)
+        let sustain = try samplerNumber(object, "sustain", SamplerZone.sustainRange, path,
+                                        &written)
+        let release = try samplerNumber(object, "release", SamplerParams.releaseRange, path,
+                                        &written)
+        let loopMode = try samplerLoopMode(object["loopMode"], Self.join(path, "loopMode"))
+        let loopStart = try samplerCount(object, "loopStart", minimum: 0, path, &written)
+        let loopEnd = try samplerCount(object, "loopEnd", minimum: 0, path, &written)
+        var crossfadeWritten: [String: Double] = [:]
+        let crossfade = try object["crossfade"].map {
+            try readSamplerCrossfade($0, Self.join(path, "crossfade"), &crossfadeWritten)
+        }
+        let reverse = try object["reverse"].map { try bool($0, Self.join(path, "reverse")) }
+        let chokeGroup = try samplerInteger(object, "chokeGroup", SamplerZone.chokeGroupRange,
+                                            path, &written)
+        let fresh = SamplerZone(audioFileURL: URL(fileURLWithPath: file))
+        let zone = SamplerZone(
+            id: Self.samplerZoneID(index), audioFileURL: URL(fileURLWithPath: file),
+            rootPitch: rootPitch ?? fresh.rootPitch, minPitch: minPitch ?? fresh.minPitch,
+            maxPitch: maxPitch ?? fresh.maxPitch, gain: gain ?? fresh.gain,
+            minVelocity: minVelocity, maxVelocity: maxVelocity, group: group,
+            seqLength: seqLength, seqPosition: seqPosition, randMin: randMin, randMax: randMax,
+            tuneCents: tuneCents, pan: pan, ampVelTrack: ampVelTrack, oneShot: oneShot,
+            startFrame: startFrame, endFrame: endFrame, attack: attack, decay: decay,
+            sustain: sustain, release: release, loopMode: loopMode, loopStart: loopStart,
+            loopEnd: loopEnd, crossfade: crossfade, reverse: reverse, chokeGroup: chokeGroup)
+        try samplerReadBack(written, path) { Self.samplerZoneReading(zone, $0) }
+        try samplerReadBack(crossfadeWritten, Self.join(path, "crossfade")) { key in
+            Self.samplerCrossfadeReading(zone.crossfade, key).map { .number(Double($0)) }
+        }
+        return zone
+    }
+
+    /// A zone's `crossfade` object. Its written members are recorded for the
+    /// zone's read-back: a crossfade that can never change a gain (a CC bound
+    /// with no controller) is DROPPED by the model, and that is refused.
+    mutating func readSamplerCrossfade(_ json: TemplateJSON, _ path: String,
+                                       _ written: inout [String: Double]) throws -> SamplerCrossfade {
+        var object = try self.object(json, path)
+        object = try knownKeys(object, Self.samplerCrossfadeKeys, path, "A zone's crossfade")
+        var values: [String: Int] = [:]
+        for key in Self.samplerCrossfadeKeys {
+            values[key] = try samplerInteger(object, key, SamplerZone.velocityRange, path, &written)
+        }
+        return SamplerCrossfade(
+            controller: values["controller"], ccInLo: values["ccInLo"], ccInHi: values["ccInHi"],
+            ccOutLo: values["ccOutLo"], ccOutHi: values["ccOutHi"], velInLo: values["velInLo"],
+            velInHi: values["velInHi"], velOutLo: values["velOutLo"], velOutHi: values["velOutHi"])
+    }
+
+    /// A zone's sound file: a full path (`/…`), a path from the home folder
+    /// (`~/…`, expanded as the wire expands it), or a sample the app ships
+    /// (`builtin:<name>`, resolved by `BundledSamples`, the wire's own resolver).
+    /// A relative path is refused: the wire would read it against the app's
+    /// working folder. Whether the FILE exists is the store's question at apply
+    /// time — a missing one refuses, naming it — never the codec's.
+    func samplerFile(_ json: TemplateJSON, _ path: String) throws -> String {
+        let text = try string(json, path)
+        if BundledSamples.isBundledName(text) {
+            guard let entry = BundledSamples.entry(named: text) else {
+                throw TemplateRefusal(
+                    code: .invalidValue, path: path,
+                    message: "there is no sample called '\(text)' in DAW Pro. The samples it comes "
+                        + "with are: \(BundledSamples.knownNames.joined(separator: ", ")).")
+            }
+            guard let url = try? BundledSamples.resolve(entry.wireName) else {
+                throw TemplateRefusal(
+                    code: .invalidValue, path: path,
+                    message: "the sample '\(entry.wireName)' is missing from this copy of DAW Pro.")
+            }
+            return url.path
+        }
+        let expanded = (text as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else {
+            throw TemplateRefusal(
+                code: .invalidValue, path: path,
+                message: "a Sampler zone names its sound file by its full path, starting with \"/\" "
+                    + "(or \"~/\" for your home folder); '\(text)' is not one.")
+        }
+        return expanded
+    }
+
+    /// An optional number under `key`, in `range`; remembered for the read-back.
+    mutating func samplerNumber(_ object: [String: TemplateJSON], _ key: String,
+                                _ range: ClosedRange<Double>, _ path: String,
+                                _ written: inout [String: Double]) throws -> Double? {
+        guard let raw = object[key] else { return nil }
+        let keyPath = Self.join(path, key)
+        let value = try ranged(try number(raw, keyPath), range, keyPath, key)
+        written[key] = value
+        return value
+    }
+
+    /// An optional whole number under `key`, in `range`; remembered for the
+    /// read-back. A fraction is refused (the wire refuses one too).
+    mutating func samplerInteger(_ object: [String: TemplateJSON], _ key: String,
+                                 _ range: ClosedRange<Int>, _ path: String,
+                                 _ written: inout [String: Double]) throws -> Int? {
+        guard let raw = object[key] else { return nil }
+        let keyPath = Self.join(path, key)
+        let value = try ranged(try integer(raw, keyPath), range, keyPath, key)
+        written[key] = Double(value)
+        return value
+    }
+
+    /// An optional whole number with only a FLOOR (a group, a frame, a
+    /// round-robin count); remembered for the read-back.
+    mutating func samplerCount(_ object: [String: TemplateJSON], _ key: String, minimum: Int,
+                               _ path: String, _ written: inout [String: Double]) throws -> Int? {
+        guard let raw = object[key] else { return nil }
+        let keyPath = Self.join(path, key)
+        var value = try integer(raw, keyPath)
+        if value < minimum {
+            try refuseOrSkip(
+                TemplateRefusal(code: .outOfRange, path: keyPath,
+                                message: "\(key) is a whole number from \(minimum) up; \(value) "
+                                    + "would become \(minimum)."),
+                .valueClamped,
+                "\(key) was \(value), below \(minimum), so it was set to \(minimum).")
+            value = minimum
+        }
+        written[key] = Double(value)
+        return value
+    }
+
+    /// §5.3's read-back over every number written: `reading` gives what the
+    /// built value holds under each key.
+    mutating func samplerReadBack(_ written: [String: Double], _ path: String,
+                                  reading: (String) -> TemplateJSON?) throws {
+        for key in written.keys.sorted() {
+            guard let value = written[key] else { continue }
+            var read: Double?
+            if case .number(let number)? = reading(key) { read = number }
+            _ = try readBack(written: value, read: read, Self.join(path, key), key)
+        }
+    }
+
+    /// `"poly"`, `"mono"` or `"legato"`, any case, as the wire takes it; null
+    /// means "not set", as on the wire.
+    mutating func samplerVoiceMode(_ json: TemplateJSON?, _ path: String) throws -> SamplerVoiceMode? {
+        guard let json else { return nil }
+        if case .null = json { return nil }
+        let text = try string(json, path)
+        if let mode = SamplerVoiceMode(rawValue: text.lowercased()) { return mode }
+        let known = SamplerVoiceMode.allCases.map(\.rawValue).joined(separator: ", ")
+        try refuseOrSkip(
+            TemplateRefusal(code: .unknownSetting, path: path,
+                            message: "a Sampler's voice mode is one of: \(known); '\(text)' is not "
+                                + "one."),
+            .unknownSettingSkipped,
+            "the voice mode '\(text)' comes from a newer version of DAW Pro, so the Sampler "
+                + "keeps its default.")
+        return nil
+    }
+
+    /// `"constantTime"` or `"constantRate"`, any case, as the wire takes it;
+    /// null means "not set".
+    mutating func samplerGlideMode(_ json: TemplateJSON?, _ path: String) throws -> SamplerGlideMode? {
+        guard let json else { return nil }
+        if case .null = json { return nil }
+        let text = try string(json, path)
+        if let mode = SamplerGlideMode.allCases.first(where: {
+            $0.rawValue.lowercased() == text.lowercased()
+        }) { return mode }
+        let known = SamplerGlideMode.allCases.map(\.rawValue).joined(separator: ", ")
+        try refuseOrSkip(
+            TemplateRefusal(code: .unknownSetting, path: path,
+                            message: "a Sampler's glide mode is one of: \(known); '\(text)' is not "
+                                + "one."),
+            .unknownSettingSkipped,
+            "the glide mode '\(text)' comes from a newer version of DAW Pro, so the Sampler "
+                + "keeps its default.")
+        return nil
+    }
+
+    /// `"sustain"` or `"continuous"`, exactly, as the wire takes it.
+    mutating func samplerLoopMode(_ json: TemplateJSON?, _ path: String) throws -> SamplerLoopMode? {
+        guard let json else { return nil }
+        let text = try string(json, path)
+        if let mode = SamplerLoopMode(rawValue: text) { return mode }
+        try refuseOrSkip(
+            TemplateRefusal(code: .unknownSetting, path: path,
+                            message: "a zone's loop mode is \"sustain\" or \"continuous\"; '\(text)' "
+                                + "is not one."),
+            .unknownSettingSkipped,
+            "the loop mode '\(text)' comes from a newer version of DAW Pro, so that zone does "
+                + "not loop.")
+        return nil
+    }
+
+    // MARK: Writing, and the one table the read-back shares
+
+    /// What `sampler` holds under `key`, as the JSON a template writes; nil
+    /// when the field is unset. The writer and the reader's read-back both use
+    /// this ONE table.
+    static func samplerReading(_ sampler: SamplerParams, _ key: String) -> TemplateJSON? {
+        func number(_ value: Double?) -> TemplateJSON? { value.map { .number($0) } }
+        func whole(_ value: Int?) -> TemplateJSON? { value.map { .number(Double($0)) } }
+        switch key {
+        case "zones":
+            return sampler.zones.isEmpty ? nil : .array(sampler.zones.map(samplerZoneObject))
+        case "oneShot": return .bool(sampler.oneShot)
+        case "attack": return .number(sampler.attack)
+        case "release": return .number(sampler.release)
+        case "gain": return .number(sampler.gain)
+        case "expressionModDepth": return number(sampler.expressionModDepth)
+        case "expressionFilterDepth": return number(sampler.expressionFilterDepth)
+        case "expressionFilterCC": return whole(sampler.expressionFilterCC)
+        case "bendRangeSemitones": return number(sampler.bendRangeSemitones)
+        case "voiceMode": return sampler.voiceMode.map { .string($0.rawValue) }
+        case "decay": return number(sampler.decay)
+        case "sustain": return number(sampler.sustain)
+        case "pedalHoldLimit": return whole(sampler.pedalHoldLimit)
+        case "glideTime": return number(sampler.glideTime)
+        case "glideMode": return sampler.glideMode.map { .string($0.rawValue) }
+        default: return nil
+        }
+    }
+
+    /// What `zone` holds under `key` (see `samplerReading`).
+    static func samplerZoneReading(_ zone: SamplerZone, _ key: String) -> TemplateJSON? {
+        func number(_ value: Double?) -> TemplateJSON? { value.map { .number($0) } }
+        func whole(_ value: Int?) -> TemplateJSON? { value.map { .number(Double($0)) } }
+        func flag(_ value: Bool?) -> TemplateJSON? { value.map { .bool($0) } }
+        switch key {
+        case "path": return .string(samplerPathText(zone.audioFileURL))
+        case "rootPitch": return whole(zone.rootPitch)
+        case "minPitch": return whole(zone.minPitch)
+        case "maxPitch": return whole(zone.maxPitch)
+        case "gain": return number(zone.gain)
+        case "minVelocity": return whole(zone.minVelocity)
+        case "maxVelocity": return whole(zone.maxVelocity)
+        case "group": return whole(zone.group)
+        case "seqLength": return whole(zone.seqLength)
+        case "seqPosition": return whole(zone.seqPosition)
+        case "randMin": return number(zone.randMin)
+        case "randMax": return number(zone.randMax)
+        case "tuneCents": return number(zone.tuneCents)
+        case "pan": return number(zone.pan)
+        case "ampVelTrack": return number(zone.ampVelTrack)
+        case "oneShot": return flag(zone.oneShot)
+        case "startFrame": return whole(zone.startFrame)
+        case "endFrame": return whole(zone.endFrame)
+        case "attack": return number(zone.attack)
+        case "decay": return number(zone.decay)
+        case "sustain": return number(zone.sustain)
+        case "release": return number(zone.release)
+        case "loopMode": return zone.loopMode.map { .string($0.rawValue) }
+        case "loopStart": return whole(zone.loopStart)
+        case "loopEnd": return whole(zone.loopEnd)
+        case "crossfade":
+            guard let crossfade = zone.crossfade else { return nil }
+            var members: [String: TemplateJSON] = [:]
+            for member in samplerCrossfadeKeys {
+                if let value = samplerCrossfadeReading(crossfade, member) {
+                    members[member] = .number(Double(value))
+                }
+            }
+            return .object(members)
+        case "reverse": return flag(zone.reverse)
+        case "chokeGroup": return whole(zone.chokeGroup)
+        default: return nil
+        }
+    }
+
+    /// What a zone's crossfade holds under `key`.
+    static func samplerCrossfadeReading(_ crossfade: SamplerCrossfade?, _ key: String) -> Int? {
+        guard let crossfade else { return nil }
+        switch key {
+        case "controller": return crossfade.controller
+        case "ccInLo": return crossfade.ccInLo
+        case "ccInHi": return crossfade.ccInHi
+        case "ccOutLo": return crossfade.ccOutLo
+        case "ccOutHi": return crossfade.ccOutHi
+        case "velInLo": return crossfade.velInLo
+        case "velInHi": return crossfade.velInHi
+        case "velOutLo": return crossfade.velOutLo
+        case "velOutHi": return crossfade.velOutHi
+        default: return nil
+        }
+    }
+
+    /// A Sampler as the template writes it: each setting whose reading differs
+    /// from a fresh `SamplerParams()`'s, and every zone. Never written: zone ids
+    /// and the provenance trio (`sourcePath`, `displayName`, `sliceKit`).
+    static func samplerObject(_ sampler: SamplerParams) -> TemplateJSON {
+        let fresh = SamplerParams()
+        var object: [String: TemplateJSON] = [:]
+        for key in samplerKeys {
+            guard let value = samplerReading(sampler, key),
+                  value != samplerReading(fresh, key) else { continue }
+            object[key] = value
+        }
+        return .object(object)
+    }
+
+    /// One zone as the template writes it: its file, and each field whose
+    /// reading differs from a zone made with the wire's defaults (root 60,
+    /// span 0…127, gain 1, every optional unset). An optional set to its
+    /// "neutral" value is still written: `pan` 0 is the −3 dB centre, not the
+    /// unset dual-mono of `nil`.
+    static func samplerZoneObject(_ zone: SamplerZone) -> TemplateJSON {
+        let fresh = SamplerZone(id: zone.id, audioFileURL: zone.audioFileURL)
+        var object: [String: TemplateJSON] = [:]
+        for key in samplerZoneKeys {
+            guard let value = samplerZoneReading(zone, key) else { continue }
+            if key != "path", value == samplerZoneReading(fresh, key) { continue }
+            object[key] = value
+        }
+        return .object(object)
+    }
+
+    /// A zone's file as a template writes it: `builtin:<name>` for a sample the
+    /// app ships (so the template works wherever the app is installed), else
+    /// the full path.
+    static func samplerPathText(_ url: URL) -> String {
+        let path = url.path
+        for entry in BundledSamples.catalog {
+            if let bundled = try? BundledSamples.resolve(entry.wireName), bundled.path == path {
+                return entry.wireName
+            }
+        }
+        return path
     }
 }

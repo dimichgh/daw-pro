@@ -1502,3 +1502,163 @@ alternatives: `docs/design/2026-09-27-multi-instrument-templates.md`).**
   add-track control's name (TPL-8); the agent allowlist split (TPL-9).
 - **Not done, by the brief:** no build, no test, no render, no app, no model run. Nothing in this document has been
   executed.
+
+---
+
+## Errata 2026-10-05 (W7-TPL2)
+
+Appended after TPL-2 was built and its plants run. Nothing above this heading was edited. Each item says how it was
+established: [M] measured, [R] read in source.
+
+**(a) §8.6's second plant has a different symptom from the one the design states.** The design says an apply that
+validates resources inside the edit would leave "a refusal [with] an undo entry". That cannot happen: `performEdit`
+runs `let result = try body()` and only then `journal.recordEdit(...)`, so a body that throws records no undo entry at
+all [R `ProjectStore.swift`, `performEdit`]. Measured with that plant in place (the resource check moved inside the
+edit, after the tracks are appended): the undo depth and `canUndo` stayed unchanged, and the project BYTES changed. The
+template's tracks stayed in the song with no undo step that could take them out, which is worse than the stated
+symptom [M: `SongSkeletonTests/tpl2RefusalChangesNothing` was the only red test, failing only on its bytes check for the
+missing sound-bank and missing sample cases, and on their dry runs, which then succeeded]. The §8.6 row should read:
+*"an apply that validates resources inside the edit (a refusal leaves the template's tracks in the song with no undo
+step to remove them): the bytes check after a refusal fails."* A refusal test must therefore check the project bytes,
+not only `canUndo` and the undo depth.
+
+**(b) Line references that had drifted by the time TPL-2 read them** [M, `grep -n` on the file before TPL-2's edits →
+after them]:
+
+| What | This document says | Before TPL-2 | After TPL-2 |
+|---|---|---|---|
+| `validateSoundBank` | `ProjectStore.swift:4276` | :3877 | :3868 |
+| `validateSamplerZones` | :4294 | :3895 | :3888 |
+| `performEdit`, its "Module-internal" doc sentence and its signature | :7836-7845 (and :7843-7845) | :7460, :7464 | :7453, :7457 |
+| `requireRoutingMutationAllowed` | :3087-3092 | :3087 | :3090 |
+| `setTrackOutput` | :3203-3217 | :3203 | :3208 |
+| `addSend` | :3225-3243 | :3225 | :3224 |
+| `setInstrument` (§18) | :4085-4255 | :3686 | :3676 |
+| `applyEffectParam` (§5.2, §18) | :3711 | gone: TPL-1 moved it to `EffectDescriptor.applySetting` in `EffectSettingRules.swift` | same |
+| the skeleton's one `performEdit` and its `tracksDidChange` | `SongSkeleton.swift:935-942` | :935, :941 | unchanged |
+
+Cite these by function name; the numbers move with every edit to the shared file.
+
+**(c) `RoutingRules` did not exist after TPL-1.** §5.2's fourth row (a bus outputs only to the master, a bus has no
+sends, one send per source per bus) was not moved by TPL-1, which had no grant for `setTrackOutput` and `addSend`
+[R: TPL-1's lane record; M: `grep -rln "RoutingRules" Sources Tests` returned nothing, while the same command found
+`SidechainRules` in 5 files]. TPL-2 created `Sources/DAWCore/RoutingRules.swift` (`checkOutput(of:to:in:)`,
+`checkSend(from:to:in:)`), and in its second round re-pointed both store verbs to it and deleted their inline guards.
+It is now the ONE home: the store and the template builder both call it [R]. A plant that removed the duplicate-send
+guard from it failed both store-path tests (`BusRoutingStoreTests/addSendRefusesDuplicateDestination`,
+`tpl2StoreRefusesEveryRoutingCase`) and both builder-path tests (`TemplateBuilderTests/stepFourRefusesRoutingTheRulesForbid`,
+`RoutingRulesTests/outputAndSendRulesInTheStoresOrder`), and nothing else [M]. Every refusal sentence is the one the
+store always threw; a test pins them as literals [M].
+
+**(d) A read-back proves nothing unless the write went through the live verb's clamp.** `EffectDescriptor.applySetting`
+(formerly `applyEffectParam`) is documented to take "an already-clamped parameter", and it STORES an out-of-range value
+exactly as given; `paramValue` reads that value straight back [R]. `fx.setParam` clamps to the spec's range before
+calling it. TPL-2's first builder draft did not, so a compressor ratio ten times its maximum was written, read back
+unchanged, and passed the §5.3 read-back rule [M: the planted-clamp row of
+`TemplateBuilderTests/readBackRefusesAPlantedSnapOrClamp` was planned instead of refused, then refused once the builder
+clamped first]. **Warning for TPL-5 (`TemplateCapture`) and for anyone who calls `applySetting` outside the store:** clamp
+to `EffectParamSpec.specs(for:)`'s range first, exactly as `fx.setParam` does, or the "the reading is the proof" rule
+silently proves nothing.
+
+## Errata 2026-10-05 (W7-TPL2B, the engine batch test, §5.6 / §8.7)
+
+Appended by the orchestrator from W7-TPL2B's report; verified by the orchestrator's own run (38 tests, 0 failed,
+2026-10-05 09:25). No line above was edited. Test file: `Tests/DAWEngineTests/TemplateBatchEngineTests.swift`
+(an extension of `BusRoutingRenderTests`). [M] = measured, [R] = read, [I] = inferred.
+
+1. **§5.6 "[A] a batch this size has been exercised" is now MEASURED.** A 6-strip routed template (2 buses, 3 sends,
+   1 output into a bus, 1 sidechain key, 1 LFO route), applied through `ProjectStore.applyTemplate`, reached the
+   engine in ONE `tracksDidChange` and was wired by ONE `reconcile` onto a graph that already held a strip. Both buses
+   received their feeds at exactly their send levels (gains 1.3 / 1.4 / 1.5 within 2e-5), clearing −60 dBFS by at
+   least 29 dB; with every send at 0 the send-fed bus was exactly silent [M]. The premise needs a correction [R, and
+   the plants]: since m13-a, every routing edit on an engine that has run cold-builds ALL strips in one reconcile
+   (`AudioEngine.rebuildEngine`), as every bounce does. Two reconcile plants turned 12 existing tests red, so batches
+   were already exercised indirectly. What was new: every routing kind plus an LFO in one pass onto existing strips,
+   with the store's single call proven.
+2. **§8.7 "the key ducks" is MEASURED.** Attack 1 ms, release 50 ms, ratio 4, threshold −24 dB: 8.969 dB of reduction
+   10–20 ms after each key burst (the formula gives 8.9691), and the engine's published meter read 8.969 dB within
+   20 ms. The audio was back under 0.021 dB 300 ms after each burst, and the meter read 0 again before the next one
+   [M]. Those times follow from the attack/release settings and the meter's fall rate, not from the batch [I].
+3. **§5.6 "[A] the modulation snapshot is rebuilt for strips created in the same pass" is MEASURED:** an LFO route on
+   a strip created by the batch moved its gain between 0.5002 and 1.4998 (expected 0.5–1.5) [M].
+4. **§5.6 "[A] what a listener hears during playback" is PARTLY measured.** Any template with a bus, an audio track or
+   any routing takes the whole-engine rebuild path, the same interruption that adding an audio track causes; a single
+   routing-free instrument track attaches live with no rebuild [M]; an all-instrument template likely does too [I].
+   The interruption resumes at the position wall-clock time has reached [R]. Its LENGTH cannot be measured offline:
+   a manual-rendering engine has no wall clock. It needs a device: TPL-8's dogfood step "Add to my song while it plays".
+5. **For TPL-4:** an `applyTemplate` render compared byte-for-byte with a cold bounce can differ by one float step
+   (1.19e-7 measured). The likely cause is the main mixer summing its inputs in a different order [I]. Compare like
+   with like, or allow 1e-6.
+
+## Errata 2026-10-05 (W7-TPL3 and W7-TPL5, the orchestrator)
+
+- **D3's symptom (§1.3, §0) was stated wrongly in the TPL-3 brief, not in this document:** rock's Drums and Bass were
+  not silent. A track with no instrument falls back to `InstrumentDescriptor.default`, whose kind is `.polySynth`
+  [R `Model.swift:1926`], so both played a synth tone. The CHANGELOG says so.
+- **§7.1, reggae-riddim:** the table gave its Room bus no feed. The catalog-integrity test (§8.1) refuses a bus nothing
+  plays into, so W7-TPL3 fed it from Skank Guitar and Organ. Pans and volumes the table left open were chosen by
+  TPL-3 as placeholders for TPL-4.
+- **§5.5:** the skeleton's dry run is `planSongSkeleton(...)`; `SongSkeletonResult` gained `templateKeys` and
+  `warnings`. Without a template the skeleton still checks no sound-bank file, as before (a new check would change
+  what it refuses where the golden gate cannot see it); with one, the order is plan → files → recording guard, as
+  `applyTemplate`. `checkTemplateResources` lost `private` so both paths share it.
+- **§8.3, plant 1 as worded is inert in this tree** [M, W7-TPL5]: for every setting, the spec default and a fresh
+  effect's reading agree (0 differ), and no built-in uses a clipper. The plant that does lose a legacy clipper's 4 is
+  "fresh" taken as an effect with no params; it reddens `legacyClipperKeepsItsFour` and the random round trip.
+- **§4.6, keys:** the canonical form re-keys tracks from their names, because built-in keys need not match names
+  (`sub-bass` for "808 Bass"); without it §8.3 cannot hold [M].
+- **§5.7:** `capture` returns a `Result` struct, not a tuple; a gate's dropped sidechain gets its own sentence ("so it
+  will not open and close with it").
+- **§4.8, the 2 MB bound is kept** [M on 25 Apple Audio Units]: default states 159–1,290 B; AUSampler holding the
+  General MIDI drum kit 49,239 B as a plist, 65,652 B as base64. 24 such tracks ≈ 1.58 MB [I]. Third-party states
+  were not measured.
+- **§7.2 is NOT yet true for samplers:** the codec refuses a `sampler` block, so `template.save` refuses a track that
+  plays a Sampler with its own files, in a plain sentence. `TemplateBuilder` also copies a Sampler's zone ids, which
+  would share ids between a source track and its copy (unreachable while no file can carry one). Filed as TPL-5b,
+  before TPL-6 ships `template.save`.
+- **§6.1 `template.import`:** the new-id warning uses the existing `valueChanged` code (path `id`) until an
+  `idReplaced` code is added (TPL-5b).
+
+## Errata 2026-10-05 (W7-TPL5B, samplers in templates)
+
+- **§7.2 is now true for samplers** [M]: a template carries a Sampler's zones by absolute path, `~/` path or
+  `builtin:<name>`. Zone ids are never written (placeholders in the canonical form) and the builder mints new ones from
+  `makeID`, so a copy never shares ids with its source. The previous erratum's "NOT yet true for samplers" is retired.
+- **§4.7, no version bump** [M]: a reader from before this change refuses the whole file at
+  `tracks[0].instrument.sampler` as `notSupported`; it never drops the block, so it can never build a silent track.
+- **§5.1, one departure:** the codec reads the app bundle to resolve `builtin:` sample names, so it is no longer free
+  of the file system.
+- **§6.4:** the warning-code list gains `idReplaced` (import's new id), replacing the `valueChanged` stopgap.
+- The codec is stricter than `parseSampler` on purpose: of 117 pinned rows, 28 are values the wire silently clamps,
+  swaps or drops; a version-1 template refuses them by the §5.3 read-back rule.
+
+## Errata 2026-10-05 (W7-TPL4, §8.8 measured)
+
+- **Every [A] in §8.8 is replaced by a measurement** [M]: part heard > −45 dBFS RMS; a drum note lands at spectral
+  correlation ≥ 0.9 with decay ratio 0.8–1.2 (20 wrong-voice checks per template must not land); a bus ≥ −60 dBFS and
+  ≥ 20 dB over all-silent; a duck ≥ 3 dB within 20 ms of each kick, key-removed control ≤ 0.5 dB; an LFO r ≥ 0.8 and a
+  follower r ≥ 0.6, route-off swing < 1/3 and the route-off repeat identical; band −20 to −12 LUFS integrated, true
+  peak ≤ −1 dBTP, every part's sample peak < 1.0. The shipped values meet tighter margins: band −19 to −14 LUFS at
+  ≤ −2.0 dBTP.
+- **Determinism is not an assumption any more** [M]: every instrument in all ten built-ins renders bit-identically
+  across two applies and across two processes; no part needs the spectral fallback.
+- **The "existing tracks unchanged" leg was blind as first written** [M]: a whole-mix byte compare missed a planted
+  re-wire through house-club's pump bus, which passes a signal at unity while its key is silent. The leg now also
+  renders each pre-existing track as its own stem before and after; each must be bit-identical, and an after-render
+  that cannot produce one is red.
+- **The gate is a script, not a test suite**, and it lives in scratch (`$S/w7/TPL4/gate/`); TPL-10 needs it moved into
+  `scripts/gates/`.
+- **Q2 (§12):** published as four versions differing only in the drum instrument, each drum track's volume set so the
+  drums alone match within 1.7 LU (the unmatched set spread 6.5 LU, which would have made the Mac's kit lose on level).
+- Limits values cannot fix: the drum machine's peak-to-loudness ratio (13–20 dB) holds pop, house and hip-hop near
+  −18 LUFS at the true-peak limit (a drum-bus limiter is the follow-up); two GM guitars and the GM kit sit quiet at the
+  fader's 2.0 cap.
+
+## Errata 2026-10-05 (Q2 answered)
+
+- **§7.1 / §12 Q2: Pop Band's drums are the General MIDI Standard Drum Kit, by the user's pick** (volume 1.12, as the
+  user heard it). Lines that say Pop Band uses the drum machine are superseded; three built-ins (House Club, Hip-Hop
+  808, Lo-Fi Chill) now use the drum machine, so §8.8's drum-note leg covers three, not four.
+- **Why the drum machine read "too quiet" to the user while measuring louder** [M]: its hi-hats sit ~24 dB under the
+  GM kit's, and the kick is 77–86% of what the loudness meter counts in our kits (48% in the GM kit). Values cannot fix
+  it; a new drum-machine hi-hat gain is filed (`dm-hat-gain`), with saved projects keeping today's sound.

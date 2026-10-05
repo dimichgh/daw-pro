@@ -32,9 +32,9 @@ private final class ScriptedValues<T: Sendable>: @unchecked Sendable {
 }
 
 private final class CallRecorder: @unchecked Sendable {
-    private let lock = OSAllocatedUnfairLock<[(Int32, String)]>(initialState: [])
-    func record(_ pid: Int32, _ reason: String) { lock.withLock { $0.append((pid, reason)) } }
-    var calls: [(Int32, String)] { lock.withLock { $0 } }
+    private let lock = OSAllocatedUnfairLock<[(Int32, SidecarStop.Identity)]>(initialState: [])
+    func record(_ pid: Int32, _ identity: SidecarStop.Identity) { lock.withLock { $0.append((pid, identity)) } }
+    var calls: [(Int32, SidecarStop.Identity)] { lock.withLock { $0 } }
 }
 
 // MARK: - The pure decision table
@@ -52,12 +52,13 @@ struct SingingSidecarWatchdogDecideTests {
     func overCapKillsOnOneSample() {
         let action = SingingSidecarWatchdog.decide(
             footprintBytes: 600 * 1_048_576, capBytes: 512 * 1_048_576, recentCritical: [])
-        guard case .kill(let reason) = action else {
+        guard case .kill(let trigger, let reason) = action else {
             Issue.record("expected .kill, got \(action)")
             return
         }
         #expect(reason.localizedCaseInsensitiveContains("cap"))
         #expect(reason.localizedCaseInsensitiveContains("footprint"))
+        #expect(trigger == .footprint(bytes: 600 * 1_048_576, capBytes: 512 * 1_048_576))
     }
 
     @Test("exactly at the cap (not over) -> .ok — the comparison is strictly greater-than")
@@ -85,12 +86,13 @@ struct SingingSidecarWatchdogDecideTests {
     func twoConsecutiveCriticalKills() {
         let action = SingingSidecarWatchdog.decide(
             footprintBytes: 10 * 1_048_576, capBytes: 512 * 1_048_576, recentCritical: [true, true])
-        guard case .kill(let reason) = action else {
+        guard case .kill(let trigger, let reason) = action else {
             Issue.record("expected .kill, got \(action)")
             return
         }
         #expect(reason.localizedCaseInsensitiveContains("pressure")
                 || reason.localizedCaseInsensitiveContains("critical"))
+        #expect(trigger == .pressure)
     }
 
     @Test("Critical, then NOT critical, then Critical again -> .ok — not consecutive, never kills")
@@ -131,7 +133,12 @@ struct SingingSidecarWatchdogLoopTests {
             pollIntervalSeconds: 0.01,
             sampleFootprintBytes: { _ in values.next() },
             readMemoryPressureCritical: { criticalValues?.next() ?? false },
-            kill: { pid, reason in recorder.record(pid, reason) }))
+            // `rootPid()` below (999_999) is deliberately never a real process -- the REAL
+            // liveness default (`kill(pid, 0) == 0`) would report it dead on the very first
+            // sample. This suite is about decide/arm/disarm/samplesTaken, not the liveness
+            // feature (FIX NOW #4), which gets its own real-process tests.
+            pidIsAlive: { _ in true },
+            kill: { pid, identity in recorder.record(pid, identity); return true }))
     }
 
     /// Polls `condition` until it is true, or `timeoutSeconds` elapses — the same shape every
@@ -194,7 +201,8 @@ struct SingingSidecarWatchdogLoopTests {
         let watchdog = SingingSidecarWatchdog(configuration: .init(
             capBytes: 1, pollIntervalSeconds: 5,   // cap of 1 byte -- would kill INSTANTLY if ever sampled
             sampleFootprintBytes: { _ in 1_048_576 },
-            kill: { pid, reason in recorder.record(pid, reason) }))
+            pidIsAlive: { _ in true },
+            kill: { pid, identity in recorder.record(pid, identity); return true }))
         await watchdog.arm(rootPid: rootPid())
         await watchdog.disarm()
 
@@ -235,9 +243,12 @@ struct SingingSidecarWatchdogLoopTests {
         let watchdog = SingingSidecarWatchdog(configuration: .init(
             capBytes: 1, pollIntervalSeconds: 0.01,
             sampleFootprintBytes: { _ in 1_048_576 },
-            kill: { pid, reason in recorder.record(pid, reason) }))
+            pidIsAlive: { _ in true },
+            kill: { pid, identity in recorder.record(pid, identity); return true }))
         await watchdog.arm(rootPid: 111)
-        // Re-arm immediately, before the first poll interval elapses, with a DIFFERENT pid.
+        // Re-arm immediately, before the first poll interval elapses, with a DIFFERENT pid --
+        // this is NOT the FIX NOW #3 idempotent case (same pid); a genuinely different pid must
+        // still get the full revoke-and-reset treatment.
         await watchdog.arm(rootPid: 222)
 
         let killed = await waitUntil { !recorder.calls.isEmpty }
@@ -268,5 +279,119 @@ struct SingingSidecarWatchdogLoopTests {
         let reason = await watchdog.lastKillReason
         #expect(reason?.localizedCaseInsensitiveContains("pressure") == true
                 || reason?.localizedCaseInsensitiveContains("critical") == true)
+        let trigger = await watchdog.lastKillTrigger
+        #expect(trigger == .pressure)
+    }
+
+    // MARK: - FIX NOW #3(a) (architect review): arm is idempotent for the SAME pid
+
+    @Test("FIX NOW #3(a): re-arming the SAME pid every 10 ms for 1 s at a 50 ms poll does not restart the loop — samples still land, and a Critical kill still fires")
+    func idempotentRearmSurvivesAStormAndStillKills() async throws {
+        let recorder = CallRecorder()
+        let watchdog = SingingSidecarWatchdog(configuration: .init(
+            capBytes: 512 * 1_048_576,
+            pollIntervalSeconds: 0.05,
+            sampleFootprintBytes: { _ in 10 * 1_048_576 },   // always under cap -- isolates from footprint kills
+            readMemoryPressureCritical: { true },             // every sample that lands reads Critical
+            pidIsAlive: { _ in true },
+            kill: { pid, identity in recorder.record(pid, identity); return true }))
+        await watchdog.arm(rootPid: rootPid())
+        // The re-arm storm: faster than the poll interval (10 ms vs 50 ms), simulating a caller
+        // polling `status()` well above the rate the architect's Q3 finding named as sufficient
+        // to defeat both kill rules under the OLD (always-revoke) `arm`.
+        for _ in 0..<100 {
+            await watchdog.arm(rootPid: rootPid())
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        // Coordinator-measured (2026-10-05): a 2s wall-clock bound intermittently undershoots a
+        // real system stall this suite has independently measured at ~3.3-3.5s elsewhere this
+        // session. Widened to 10s -- pure safety margin, costs nothing on the happy path since
+        // `waitUntil` returns the instant its condition is met.
+        let sampledDuringOrAfterStorm = await waitUntil(timeoutSeconds: 10) {
+            await watchdog.samplesTaken >= 10
+        }
+        #expect(sampledDuringOrAfterStorm, "idempotent re-arming must not have restarted the loop's debounce window")
+        let killed = await waitUntil(timeoutSeconds: 10) { !recorder.calls.isEmpty }
+        #expect(killed, "2 consecutive Critical samples must still kill despite the re-arm storm")
+    }
+
+    // MARK: - FIX NOW #4(a) (architect review): the loop stops owning a pid it has lost
+
+    @Test("FIX NOW #4(a): once the tracked pid is gone (ESRCH), the loop disarms WITHOUT calling kill")
+    func disarmsWithoutKillingWhenPidIsGone() async throws {
+        let recorder = CallRecorder()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["0.2"]
+        try process.run()
+        let pid = process.processIdentifier
+
+        let watchdog = SingingSidecarWatchdog(configuration: .init(
+            capBytes: 512 * 1_048_576,
+            // The FIRST poll fires well after the 0.2 s sleep has already exited.
+            pollIntervalSeconds: 0.4,
+            sampleFootprintBytes: { _ in 10 * 1_048_576 },
+            readMemoryPressureCritical: { true },   // would WANT to kill, if it ever got to sample
+            // `pidIsAlive` left at its REAL default (`Darwin.kill(pid, 0) == 0`) — this IS the
+            // mechanism under test, not a spy.
+            kill: { killedPid, identity in recorder.record(killedPid, identity); return true }))
+        await watchdog.arm(rootPid: pid)
+        process.waitUntilExit()   // confirm the sleep is really gone before the loop's first poll
+
+        // Coordinator-measured (2026-10-05, orchestrator verify): intermittent at 2s under a
+        // system stall this suite has independently measured at ~3.3-3.5s elsewhere this
+        // session. Widened to 10s -- pure safety margin, costs nothing on the happy path.
+        let disarmed = await waitUntil(timeoutSeconds: 10) { await watchdog.isArmed == false }
+        #expect(disarmed, "the loop must disarm itself once it finds the tracked pid gone")
+        #expect(recorder.calls.isEmpty, "a pid that is already gone must never be reported to kill")
+    }
+
+    // MARK: - FIX NOW #4(b) (architect review): killTree re-checks identity before signalling
+
+    @Test("FIX NOW #4(b): killTree refuses to signal a pid that is alive but is NOT the sidecar")
+    func killTreeRefusesANonSidecarPid() async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        // Coordinator-measured (2026-10-05): a short fixed lifetime here is a SECOND, DISTINCT
+        // bug from the one `waitUntil` fixes -- under severe load the suite has been measured
+        // taking 8-9s, which would EXCEED a 5s sleep regardless of anything the watchdog does,
+        // making the fixture die of old age and misread as a wrongful kill. 120s comfortably
+        // exceeds the 10s poll bound plus any plausible stall; the test's own `defer` below kills
+        // it pid-exact long before that regardless of outcome.
+        process.arguments = ["120"]
+        try process.run()
+        let pid = process.processIdentifier
+        defer {
+            // The test's own cleanup: kill its own sleep, pid-exact, regardless of outcome.
+            if kill(pid, 0) == 0 { kill(pid, SIGTERM) }
+        }
+
+        let sidecarIdentity = SidecarStop.Identity(
+            argsPattern: #"(^|/)sing/(server|stub_server)\.py(\s|$)"#)
+        let watchdog = SingingSidecarWatchdog(configuration: .init(
+            capBytes: 1,   // 1 byte -- the injected footprint below is instantly over the cap
+            pollIntervalSeconds: 0.05,
+            sampleFootprintBytes: { _ in 1_048_576 },
+            identity: sidecarIdentity
+            // `kill` left at its REAL default (`SingingSidecarWatchdog.killTree`) — this IS the
+            // mechanism under test, not a spy.
+        ))
+        await watchdog.arm(rootPid: pid)
+        // Coordinator-directed fix (2026-10-05, orchestrator verify): a FIXED wall-clock sleep
+        // here was the root cause of an intermittent failure, MEASURED (not guessed) via a
+        // forced-race diagnostic -- the loop's `.kill` case sets `lastKillReason` (inside
+        // `recordSample`, a pure bookkeeping side effect) BEFORE it calls `config.kill(...)` and,
+        // if refused, clears it again; that gap is normally nanoseconds wide, but a severe system
+        // stall can delay the loop's OWN progress enough that a fixed-time test wakes up WHILE
+        // the gap is still open, reading the transient non-nil value. The diagnostic (41/41
+        // samples, real `killTree`, real identity check) confirmed the target is ALWAYS still
+        // alive during that window -- never a wrongful kill, purely a stale read. Fix: wait on
+        // the loop's OWN completion signal (`isArmed == false`, which is only set true AFTER the
+        // kill case, including any refusal-clearing, has fully finished) instead of wall time.
+        let disarmed = await waitUntil(timeoutSeconds: 10) { await watchdog.isArmed == false }
+        #expect(disarmed, "the loop must have reached and fully finished processing its kill decision")
+        #expect(kill(pid, 0) == 0, "a `/bin/sleep`, not the sidecar, must survive the kill decision")
+        let reason = await watchdog.lastKillReason
+        #expect(reason == nil, "a kill the identity check REFUSED must not be recorded as a kill -- lastKillReason must stay nil")
     }
 }

@@ -1,0 +1,28 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "jazz-combo",
+  "name": "Jazz Combo",
+  "summary": "A small jazz band spread from left to right, all playing in the sound of one small club room.",
+  "songForm": "jazz",
+  "genres": ["jazz"],
+  "tracks": [
+    { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 1.09,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 0, "bankMSB": 120, "bankLSB": 0 } },
+      "sends": [ { "bus": "club-room", "level": 0.2 } ] },
+    { "key": "bass", "name": "Upright Bass", "kind": "instrument", "volume": 1.32, "mixerPreset": "bass-round",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 32 } } },
+    { "key": "piano", "name": "Piano", "kind": "instrument", "volume": 1.46, "pan": -0.4,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 0 } },
+      "sends": [ { "bus": "club-room", "level": 0.25 } ] },
+    { "key": "trumpet", "name": "Trumpet", "kind": "instrument", "volume": 1.0, "pan": 0.4, "mixerPreset": "horn-section",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 56 } },
+      "sends": [ { "bus": "club-room", "level": 0.25 } ] },
+    { "key": "guitar", "name": "Jazz Guitar", "kind": "instrument", "volume": 0.96, "pan": 0.2,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 26 } },
+      "sends": [ { "bus": "club-room", "level": 0.2 } ] },
+    { "key": "club-room", "name": "Club Room", "kind": "bus",
+      "inserts": [ { "kind": "reverb", "params": { "mix": 1, "roomSize": 0.3 } } ] }
+  ]
+}

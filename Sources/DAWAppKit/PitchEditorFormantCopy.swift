@@ -174,6 +174,14 @@ public enum PitchEditorFormantCopy {
     /// amber (amber means "the render could not apply this", R22).
     public static let voiceTooShort = "Too short to change the voice of this note alone"
 
+    /// §1(f) item 4's far-move hint, in R26's wording (the row is "Keep voice
+    /// size", not item 4's older "Keep voice natural"). Drawn in the palette
+    /// after a pitch drag leaves a note 3 semitones or more from where it was
+    /// sung on a vocal that keeps under half its voice size
+    /// (`PitchEditorFarMoveHint`). Advice, not a refusal: secondary ink, never
+    /// amber, since nothing was refused.
+    public static let farMoveHint = "Big jump: turn up Keep voice size so it doesn't sound squeaky."
+
     /// A press on a SOUND (a breath or a consonant, `NoteOrigin.unpitched`): the
     /// store refuses its Voice (it has no sung voice to reshape), so the tool
     /// refuses the press first, in a novice's words, not the store's (which

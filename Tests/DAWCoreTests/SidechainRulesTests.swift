@@ -47,7 +47,10 @@ extension SidechainCoreTests {
               + "\(disagreements.count) disagreements")
         #expect(cases >= 100 && accepted > 5 && accepted < cases,
                 "positive control: both verdicts must occur")
-        #expect(disagreements.isEmpty, "\(disagreements.prefix(3))")
+        // A Bool, not the array: a failing `#expect` prints every value it
+        // captured in full, and this table holds over a hundred cases.
+        let agree = disagreements.isEmpty
+        #expect(agree, "\(disagreements.count) disagreements, first: \(disagreements.first ?? "")")
     }
 
     @Test("m39-tpl-1: only the store refuses while recording; the rule's verdict is the same as when idle")

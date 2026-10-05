@@ -1,0 +1,29 @@
+{
+  "format": "dawpro.template",
+  "formatVersion": 1,
+  "minReaderVersion": 1,
+  "id": "acoustic-folk",
+  "name": "Acoustic Folk",
+  "summary": "Acoustic guitars, a fiddle, a round bass and a soft drum kit, all playing together in one shared room.",
+  "songForm": "folk",
+  "genres": ["folk", "country"],
+  "tracks": [
+    { "key": "acoustic-guitar", "name": "Acoustic Guitar", "kind": "instrument", "volume": 1.79, "mixerPreset": "acoustic-sparkle",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 25 } },
+      "sends": [ { "bus": "room", "level": 0.25 } ] },
+    { "key": "twang-guitar", "name": "Twang Guitar", "kind": "instrument", "volume": 2.0, "pan": 0.4,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 27 } },
+      "sends": [ { "bus": "room", "level": 0.2 } ] },
+    { "key": "fiddle", "name": "Fiddle", "kind": "instrument", "volume": 1.08, "pan": -0.4,
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 40 } },
+      "sends": [ { "bus": "room", "level": 0.3 } ] },
+    { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.42, "mixerPreset": "bass-round",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 32 } } },
+    { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 1.43, "mixerPreset": "drum-room",
+      "instrument": { "kind": "soundBank", "soundBank": { "source": "gm", "program": 0, "bankMSB": 120, "bankLSB": 0 } } },
+    { "key": "vocal", "name": "Lead Vocal", "kind": "audio", "mixerPreset": "vocal-presence",
+      "sends": [ { "bus": "room", "level": 0.2 } ] },
+    { "key": "room", "name": "Room", "kind": "bus",
+      "inserts": [ { "kind": "hallReverb", "params": { "mix": 1, "sizeMeters": 8, "decaySeconds": 1.4 } } ] }
+  ]
+}

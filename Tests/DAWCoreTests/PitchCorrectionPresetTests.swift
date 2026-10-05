@@ -135,7 +135,7 @@ struct PitchCorrectionPresetTests {
         #expect(needsContour == [.hardTune])
         // And a Hard Tune pass DOES ask the render for the contour — the thing
         // the render now supplies. If the policy stopped asking, the label
-        // "replaces your pitch" would be false again.
+        // "with less vibrato" would be false again.
         let frames = (0..<40).map { i in
             ClipPitchFrame(timeSeconds: Double(i) * 0.016,
                            frequencyHz: 224 * pow(2, 40 * sin(Double(i) * 0.55) / 1200),

@@ -47,6 +47,8 @@ struct AppDirectoriesTests {
             .singingEngine: "SingingEngine",
             .singingVoices: "SingingVoices",
             .singingCache: "SingingCache",
+            // m39-tpl-5: saved multi-instrument templates (user content).
+            .templates: "Templates",
         ]
         // Closed set: a NEW category must be added to the pin above, so it can
         // never be introduced without someone reading this table.

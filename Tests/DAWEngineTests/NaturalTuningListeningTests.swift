@@ -90,8 +90,15 @@ struct NaturalTuningListeningTests {
     static let e1Move = 400.0
     static let e3Move = -500.0
     static let l2Move = 400.0
-    /// NT-E1b's pinned residual at 220 Hz −500 c, c = 1 (ROADMAP: "+63.6 c").
-    static let pinnedResidual220 = 63.6
+    /// The synthetic P+ cell's residual at 220 Hz −500 c, c = 1 (the formant
+    /// suite's G2 fixture), ± 1.0 c. Was 63.6 (NT-E1b's pin, ROADMAP "+63.6 c"):
+    /// the library's formant envelope sagged between harmonics. RE-PINNED
+    /// 2026-10-04 by W7-F220I (the orchestrator's ruling): vendored patch 0004
+    /// (the envelope through the harmonic peaks, explicit base only) is the
+    /// mechanism, and this harness reads 16.55 c with it (MEASURED on e6f7a27).
+    /// Without 0004 the cell reads 63.2 c, and `NaturalTuningFormantEnvelopeTests`
+    /// F220-1 and the formant suite's G2 go red (planted 2026-10-04).
+    static let pinnedResidual220 = 16.55
 
     // MARK: - Small helpers
 

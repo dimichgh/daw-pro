@@ -241,4 +241,175 @@ struct ProjectTransposeRenderTests {
         #expect(Self.bitPatterns(try Self.render(up.tracks[0].clips[0], source))
                 != Self.bitPatterns(original))
     }
+
+    // MARK: - PK-F1 (round 3): Auto-Correct snaps what PLAYS
+
+    /// THE REAL CORRECTOR at a clip shift: `PitchAutoCorrect.build(…,
+    /// clipShiftSemitones:)`, the call `autoCorrectClipPitch` makes with the
+    /// clip's own shift (the store side is pinned in `UndoRoundTripTests`).
+    static func autoCorrected(to scale: PitchCorrectionScale, clipShift: Double,
+                              preserveVibrato: Bool = true) throws -> PitchEditSet {
+        let options = PitchAutoCorrectOptions(scale: scale, strength: 1, retuneMs: 30,
+                                              preserveVibrato: preserveVibrato)
+        let set = PitchAutoCorrect.build(contour: contour(), frameRateHz: frameRateHz,
+                                         options: options, clipShiftSemitones: clipShift).editSet
+        try #require(set.segments.filter { $0.origin != .unpitched }.count == 3)
+        return set
+    }
+
+    static func pitchClass(_ midi: Double) -> Int { ((Int(midi.rounded()) % 12) + 12) % 12 }
+    /// The notes only: the frozen oracle predates the identity `.unpitched`
+    /// sounds (its own `notesOnly`, `PrePitchNoteSplitReference`).
+    static func notesOnly(_ set: PitchEditSet) -> PitchEditSet {
+        set.withSegments(set.segments.filter { $0.origin != .unpitched })
+    }
+    static func noteOffsetBits(_ set: PitchEditSet) -> [UInt64] {
+        set.segments.filter { $0.origin != .unpitched }.map(\.pitchOffsetCents.bitPattern)
+    }
+
+    @Test("PK-F1: a clip moved +3, then Auto-Corrected to the song's key (E-flat major), plays every held note ON E-flat major")
+    func autoCorrectAfterAKeyChangeLandsOnTheSongsKey() throws {
+        let clip = Self.vocal(try Self.autoCorrected(to: Self.eFlatMajor, clipShift: 3), shift: 3).clips[0]
+        let played = Self.heldMidi(try Self.render(clip, Self.source()))
+        // sung + 3 = 59.65 / 62.3 / 64.6 -> the nearest E-flat-major notes C4 / D4 / F4.
+        for (value, intended) in zip(played, [60.0, 62, 65]) {
+            #expect(abs(Self.cents(value, from: intended)) < Self.toleranceCents,
+                    "played \(value), intended \(intended)")
+            #expect(Self.eFlatMajor.allowedPitchClasses.contains(Self.pitchClass(value)),
+                    "played \(value), off E-flat major")
+        }
+        // Correcting AFTER the key change agrees with correcting BEFORE it (C
+        // major, then +3): E-flat major at +3 IS C major at 0, correction for
+        // correction.
+        #expect(Self.noteOffsetBits(try Self.autoCorrected(to: Self.eFlatMajor, clipShift: 3))
+                == Self.noteOffsetBits(try Self.tuned(to: PitchCorrectionScale(tonicPitchClass: 0, mode: .major))))
+    }
+
+    @Test("PK-F1 NEGATIVE CONTROL: the old arithmetic (the recording snapped, the shift ignored) plays B3, OFF E-flat major")
+    func recordedDomainSnapPlaysOffTheKey() throws {
+        // What `autoCorrectClipPitch` built before PK-F1: the shift was never passed.
+        let clip = Self.vocal(try Self.autoCorrected(to: Self.eFlatMajor, clipShift: 0), shift: 3).clips[0]
+        let played = Self.heldMidi(try Self.render(clip, Self.source()))
+        #expect(abs(Self.cents(played[0], from: 59)) < Self.toleranceCents, "played \(played[0])")
+        #expect(!Self.eFlatMajor.allowedPitchClasses.contains(Self.pitchClass(played[0])))
+        // ...and a note that is ON the scale but wrong: E-flat4 where D4 was meant.
+        #expect(abs(Self.cents(played[1], from: 63)) < Self.toleranceCents, "played \(played[1])")
+        #expect(abs(Self.cents(played[1], from: 62)) > 90)
+    }
+
+    @Test("PK-F1 INVARIANCE: shift 0 is the frozen old arithmetic; no shift changes a CHROMATIC correction; an octave or a shift's fraction never changes any")
+    func autoCorrectShiftInvariance() throws {
+        let cMajor = PitchCorrectionScale(tonicPitchClass: 0, mode: .major)
+        for preserveVibrato in [true, false] {
+            // Shift 0 against the FROZEN copy of the pre-change policy, every
+            // stored field but `id` (the oracle's own comparison).
+            for scale in [PitchCorrectionScale.chromatic, cMajor, Self.eFlatMajor] {
+                let options = PitchAutoCorrectOptions(scale: scale, strength: 1, retuneMs: 30,
+                                                      preserveVibrato: preserveVibrato)
+                let frozen = PrePitchNoteSplitReference.editSet(contour: Self.contour(),
+                                                                frameRateHz: Self.frameRateHz, options: options)
+                let atZero = try Self.autoCorrected(to: scale, clipShift: 0, preserveVibrato: preserveVibrato)
+                let difference = PrePitchNoteSplitReference.firstDifference(Self.notesOnly(atZero), frozen)
+                #expect(difference == nil, "\(scale), shift 0: \(difference ?? "")")
+            }
+            // Chromatic: every whole shift from -12 to +12 builds the same table.
+            let chromatic = try Self.autoCorrected(to: .chromatic, clipShift: 0, preserveVibrato: preserveVibrato)
+            for k in -12...12 {
+                let moved = try Self.autoCorrected(to: .chromatic, clipShift: Double(k),
+                                                   preserveVibrato: preserveVibrato)
+                let difference = PrePitchNoteSplitReference.firstDifference(moved, chromatic)
+                #expect(difference == nil, "chromatic, shift \(k): \(difference ?? "")")
+            }
+            // An octave never changes a scale's correction.
+            for scale in [cMajor, Self.eFlatMajor] {
+                let zero = try Self.autoCorrected(to: scale, clipShift: 0, preserveVibrato: preserveVibrato)
+                for k in [-12.0, 12] {
+                    let moved = try Self.autoCorrected(to: scale, clipShift: k, preserveVibrato: preserveVibrato)
+                    let difference = PrePitchNoteSplitReference.firstDifference(moved, zero)
+                    #expect(difference == nil, "\(scale), shift \(k): \(difference ?? "")")
+                }
+            }
+            // The 10-04 ruling: a shift's FRACTION is kept as a detune and never
+            // changes a table, so a fractional shift builds its whole part's
+            // table, and a chromatic table never depends on the shift at all.
+            for (scale, whole, shift) in [(Self.eFlatMajor, 3.0, 3.3), (cMajor, 0.0, 0.08),
+                                          (cMajor, 1.0, 0.5), (cMajor, -1.0, -0.5),
+                                          (PitchCorrectionScale.chromatic, 0.0, 2.7)] {
+                let atWhole = try Self.autoCorrected(to: scale, clipShift: whole, preserveVibrato: preserveVibrato)
+                let moved = try Self.autoCorrected(to: scale, clipShift: shift, preserveVibrato: preserveVibrato)
+                let difference = PrePitchNoteSplitReference.firstDifference(moved, atWhole)
+                #expect(difference == nil, "\(scale), shift \(shift) vs \(whole): \(difference ?? "")")
+            }
+        }
+        // CONTROL: a scale at a non-octave shift DOES change the stored correction.
+        #expect(Self.noteOffsetBits(try Self.autoCorrected(to: Self.eFlatMajor, clipShift: 3))
+                != Self.noteOffsetBits(try Self.autoCorrected(to: Self.eFlatMajor, clipShift: 0)))
+    }
+
+    @Test("PK-F1 ruling (10-04): a FRACTIONAL shift is a detune Auto-Correct KEEPS; every held note plays that far off the scale, by tracked pitch")
+    func autoCorrectKeepsTheDetune() throws {
+        let cMajor = PitchCorrectionScale(tonicPitchClass: 0, mode: .major)
+        // Pre-registered (round3r/predictions-ruling.md) before the first run:
+        // the clip's shift, the scale, and the MIDI each held note must PLAY.
+        // Whole part = nearest whole semitone, ties away from zero.
+        let cases: [(shift: Double, scale: PitchCorrectionScale, played: [Double])] = [
+            (3, Self.eFlatMajor, [60, 62, 65]),
+            (3.3, Self.eFlatMajor, [60.3, 62.3, 65.3]),
+            (0.5, cMajor, [56.5, 59.5, 61.5]),
+            (-0.5, cMajor, [55.5, 59.5, 60.5]),
+            (0.08, cMajor, [57.08, 59.08, 62.08]),
+        ]
+        for c in cases {
+            let clip = Self.vocal(try Self.autoCorrected(to: c.scale, clipShift: c.shift), shift: c.shift).clips[0]
+            let played = Self.heldMidi(try Self.render(clip, Self.source()))
+            let fraction = PitchAutoCorrect.splitClipShift(c.shift).fraction
+            #expect(played.count == 3)
+            for (value, intended) in zip(played, c.played) {
+                #expect(abs(Self.cents(value, from: intended)) < Self.toleranceCents,
+                        "shift \(c.shift): played \(value), intended \(intended)")
+                // Take the kept detune back off: what is left sits ON the scale.
+                #expect(c.scale.allowedPitchClasses.contains(Self.pitchClass(value - fraction)),
+                        "shift \(c.shift): played \(value) is off the scale once the detune is removed")
+            }
+        }
+    }
+
+    @Test("PK-F1 ruling, measured as a DIFFERENCE: +3.3 plays 30 c above +3 and +8 c plays 8 c above 0, where correcting the detune away reads 0")
+    func keptDetuneIsTheShiftsFraction() throws {
+        let cMajor = PitchCorrectionScale(tonicPitchClass: 0, mode: .major)
+        func held(_ edits: PitchEditSet, _ shift: Double) throws -> [Double] {
+            Self.heldMidi(try Self.render(Self.vocal(edits, shift: shift).clips[0], Self.source()))
+        }
+        // Pre-registered bound: each note within 4 c of the shift's fraction.
+        for (scale, base, shift, cents) in [(Self.eFlatMajor, 3.0, 3.3, 30.0), (cMajor, 0.0, 0.08, 8.0)] {
+            let below = try held(try Self.autoCorrected(to: scale, clipShift: base), base)
+            let above = try held(try Self.autoCorrected(to: scale, clipShift: shift), shift)
+            #expect(below.count == 3 && above.count == 3)
+            // The 4 c bound's margin, printed once per case (the 10-04 ask).
+            print("[measured] PK-F1 kept detune \(shift) over \(base): "
+                  + zip(below, above).map { String(format: "%.2f", Self.cents($1, from: $0)) }
+                    .joined(separator: " / ") + " c (expected \(cents), bound 4)")
+            for (x, y) in zip(below, above) {
+                #expect(abs(Self.cents(y, from: x) - cents) < 4,
+                        "shift \(shift) over \(base): \(Self.cents(y, from: x)) c, expected \(cents)")
+            }
+        }
+        // MEASUREMENT CONTROL: the detune corrected AWAY (the 09-27 design, built
+        // by hand: each note's offset lowered by the 8 c fraction) reads ~0 over
+        // shift 0, so the 4 c bound can tell keeping the detune from losing it.
+        let kept = try Self.autoCorrected(to: cMajor, clipShift: 0.08)
+        let lost = kept.withSegments(kept.segments.map { segment in
+            var moved = segment
+            if moved.origin != .unpitched { moved.pitchOffsetCents -= 8 }
+            return moved
+        })
+        let zero = try held(try Self.autoCorrected(to: cMajor, clipShift: 0), 0)
+        let away = try held(lost, 0.08)
+        print("[measured] PK-F1 detune corrected away, 0.08 over 0: "
+              + zip(zero, away).map { String(format: "%.2f", Self.cents($1, from: $0)) }
+                .joined(separator: " / ") + " c (expected 0, bound 4)")
+        for (x, y) in zip(zero, away) {
+            #expect(abs(Self.cents(y, from: x)) < 4, "corrected away: \(Self.cents(y, from: x)) c")
+        }
+    }
 }

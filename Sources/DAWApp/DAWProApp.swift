@@ -2548,6 +2548,9 @@ final class AppModel {
             // left the mode behind it and the card stayed up — the backstop,
             // unblocked, took `.exitMaximize` and consumed the key.
             || pitchPresetReplaceGate.pending != nil
+            // W7-TTM3 — the Tune to Melody card: a scrimmed centred modal over an AUDIO clip,
+            // where an unguarded ⌫ would delete the vocal it is about to tune.
+            || tuneToMelodyDoor.card != nil
             // m23-ap I1 UI hooks, item 8 (found by I7b-2) — THE CRASH-RECOVERY
             // OFFER, the OUTERMOST scrimmed modal (`RecoveryOfferView`), was
             // never listed either: Escape with it up went to the editor behind it
@@ -3510,6 +3513,11 @@ final class AppModel {
     /// (the clip menu and the note editor's chips), because both reach
     /// `tuneVocalFromContextMenu`. Behaviour in `PitchCorrectionStaging.swift`.
     let pitchPresetReplaceGate = PitchPresetReplaceGate()
+
+    /// Tune to Melody (M3, W7-TTM3): the clip menu's Tune Vocal ▸ Tune to Melody… card, and
+    /// the one store call it makes. Behaviour in DAWAppKit's `TuneToMelodyDoor`; wiring in
+    /// `TuneToMelodyStaging.swift`.
+    let tuneToMelodyDoor = TuneToMelodyDoor()
 
     /// p2-ren Stage B″(c) — what the pitch editor's clip is PLAYING, polled
     /// while the pane is open (`pollPitchEditorRenderAudible`), keyed by the

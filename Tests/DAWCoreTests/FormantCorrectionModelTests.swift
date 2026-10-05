@@ -319,7 +319,9 @@ struct FormantCorrectionModelTests {
     /// short notes under a long retune (the normaliser), a moved sound, a
     /// hole, and a `-0.0` clip transpose. No generator, so no `sin` in the
     /// hash: the only libm call on the path is `cents`' `log2`.
-    static func pitchGoldenCurve(formant: Bool) -> PitchCorrectionCurve {
+    static func pitchGoldenCurve(formant: Bool,
+                                 separator: PitchCorrectionCurve.Separator = .production)
+        -> PitchCorrectionCurve {
         var frames: [ClipPitchFrame] = []
         for k in 0..<140 {
             let phase = k % 16
@@ -338,7 +340,7 @@ struct FormantCorrectionModelTests {
                                formantCorrection: formant ? 0.75 : nil)
         return PitchCorrectionCurve.make(editSet: set, contour: frames,
                                          contourValueOffsetSeconds: 0.008,
-                                         clipPitchShiftSemitones: -0.0)
+                                         clipPitchShiftSemitones: -0.0, separator: separator)
     }
 
     /// FNV-1a over the bit patterns of `semitones` on a dense sweep.
@@ -367,7 +369,22 @@ struct FormantCorrectionModelTests {
     /// shipped curve equals a SEARCH-FREE evaluation (each point read from a
     /// curve built from only the spans open there). Pre-p2-span:
     /// 10_344_288_514_428_929_922.
-    static let pitchGolden: UInt64 = 12_426_807_464_652_067_473
+    ///
+    /// ⚠️ RE-PINNED 2026-10-04 by W7-F220I (the orchestrator's ruling): a
+    /// deliberate move made by ANOTHER item, W7-C3's v2 drift/vibrato
+    /// separator (`PitchCorrectionCurve.Separator.production`, natural tuning
+    /// §3b). A note whose drift and vibrato scales DIFFER (this fixture's
+    /// `shaped`, 0.5 / 0.25) now takes `triangularAverage` over
+    /// `separatedDriftWindowSeconds` instead of v1's `movingAverage`, so the
+    /// pitch curve moved here and nowhere `semitones` itself changed. MEASURED:
+    /// under `.v1Everywhere` (C3's negative control) the fixture still hashes
+    /// to the pre-C3 value bit for bit (asserted below, so the separator is
+    /// the only cause); under `.production` it hashes to the value below, read
+    /// from this test's own failure message on the 2026-10-04 tree.
+    static let pitchGolden: UInt64 = 17_205_962_154_084_783_241
+    /// The pre-C3 golden (2026-09-25 to W7-C3): the fixture under
+    /// `.v1Everywhere` must keep it.
+    static let pitchGoldenV1Separator: UInt64 = 12_426_807_464_652_067_473
 
     @Test("bytes: semitones() is bit-identical on a rich fixture, and formant fields never touch it")
     func pitchCurveBitsDidNotMove() {
@@ -375,6 +392,12 @@ struct FormantCorrectionModelTests {
         let engaged = Self.pitchGoldenCurve(formant: true)
         #expect(legacy.unresolvedShapingSegmentIDs.isEmpty, "the shaping resolved")
         #expect(Self.pitchHash(legacy) == Self.pitchGolden, "got \(Self.pitchHash(legacy))")
+        // W7-C3's separator is the ONLY thing that moved the golden: under the
+        // v1 separator the fixture keeps the pre-C3 value, and the control
+        // shows the fixture does reach the separator (an unequal-scale note).
+        let v1 = Self.pitchHash(Self.pitchGoldenCurve(formant: false, separator: .v1Everywhere))
+        #expect(v1 == Self.pitchGoldenV1Separator, "v1 separator: got \(v1)")
+        #expect(v1 != Self.pitchGolden, "control: the two separators must differ on this fixture")
         // An amount and a Voice offset change F, and not one pitch bit.
         #expect(Self.pitchHash(engaged) == Self.pitchHash(legacy))
         #expect(engaged.formantSemitones(atSourceSecond: 1.0, formantPreserve: false)

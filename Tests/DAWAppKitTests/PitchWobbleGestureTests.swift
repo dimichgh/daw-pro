@@ -301,7 +301,8 @@ extension PitchWobbleGestureTests {
         #expect(PitchWobbleGesture.classify(segment: sound, sung: Self.wobble40, basis: .render)
                 == .refused("No pitch here, so there is no wobble to change."))
 
-        // An unmeasurable wobble refuses the handoff, in §18.3's words.
+        // An unmeasurable wobble refuses the handoff, in §18.3's words
+        // (shortened by W7-NTU 2026-10-04 to fit the palette at 1208 pt).
         var uneven = try Self.session(plain, .own(sung: .unmeasurable(.tooUneven)))
         uneven.update(travel: PitchWobbleTravel(speed: 30, width: 0), fine: false) { _ in
             Self.emptyLine
@@ -309,7 +310,7 @@ extension PitchWobbleGestureTests {
         #expect(uneven.phase == .own)
         #expect(uneven.draft == plain)
         #expect(uneven.readout(played: nil).text
-                == "To change its speed, first drag down to smooth it flat, then drag sideways to add a new wobble.")
+                == "To change its speed, drag down to smooth it flat, then sideways to add a new wobble.")
     }
 }
 
@@ -1183,8 +1184,10 @@ extension PitchWobbleGestureTests {
         #expect(PitchWobbleCopy.tooUnevenToMeasure
                 == "This note's pitch slides around rather than wobbling evenly. Drag down to smooth it.")
         #expect(PitchWobbleCopy.cannotWiden == "As you sang it. This note is too short to make its wobble wider.")
+        // W7-NTU (2026-10-04): shortened to fit the palette at the 1208 pt
+        // floor (`PitchEditorPaletteFitTests.wobbleHelpFitsAtTheFloor`).
         #expect(PitchWobbleCopy.handoffRefused
-                == "To change its speed, first drag down to smooth it flat, then drag sideways to add a new wobble.")
+                == "To change its speed, drag down to smooth it flat, then sideways to add a new wobble.")
         #expect(PitchWobbleCopy.noWobbleToMeasure == "No wobble the app can measure. Drag up to add one.")
         #expect(PitchWobbleCopy.yourWobble(heardRateHz: 5.5, depthCents: nil) == "Your wobble: about 5.5 per second")
         #expect(PitchWobbleCopy.yourWobble(heardRateHz: 5.46, depthCents: 41)

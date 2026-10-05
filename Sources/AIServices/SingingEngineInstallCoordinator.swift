@@ -18,6 +18,27 @@ public enum SingingEngineInstallState: String, Sendable, Equatable, Codable {
     case cancelled
 }
 
+/// A structured install failure kind (FIX NOW #9, architect review Q5), additive alongside
+/// `errorMessage` — there is no wire consumer yet, but the wire must map by CASE, never by
+/// matching `errorMessage`'s free-form text (the coordinator's own former doc admitted doing
+/// exactly that to tell `singDiskFull` from `singUnsupportedMac` apart, "less legibly" than a
+/// real case would). Mirrors `SingingEngineInstallOutcome`'s failure shapes one-to-one, minus the
+/// two SUCCESS/CANCEL shapes that never reach `SingingEngineInstallStatus.failure` at all.
+public enum SingingEngineInstallFailure: Sendable, Equatable, Codable {
+    /// install.sh's own `@@error <step> <message>` — `name` is the step, including "preflight".
+    case step(name: String)
+    /// Exit 75 — another install.sh is already running. `pid`, when install.sh's message was
+    /// parseable, is that process's. NOT only "a stale run from a previous launch, or a bug" —
+    /// two app instances on the SAME profile share the runtime directory, so this is a live path.
+    case alreadyRunning(pid: Int32?)
+    /// Exit 2 — bad usage/config, caught before anything ran.
+    case badUsage
+    /// An exit code install.sh's own contract does not document.
+    case crashed(exitCode: Int32)
+    /// install.sh itself (or the `scriptsDir` that should contain it) could not be found.
+    case cannotLaunch
+}
+
 /// The one payload every install verb returns — start, poll and cancel all hand back the SAME
 /// shape (the `WhisperModelInstallStatus`/`SoundBankDownloadStatus` decision, restated a third
 /// time here on purpose: it is the house rule, not a coincidence twice).
@@ -33,17 +54,20 @@ public struct SingingEngineInstallStatus: Sendable, Equatable, Codable {
     public var installedBytes: Int64?
     /// Present only on `.failed` / `.cancelled`.
     public var errorMessage: String?
+    /// Present only on `.failed` — the structured counterpart to `errorMessage` (FIX NOW #9).
+    public var failure: SingingEngineInstallFailure?
 
     public init(
         state: SingingEngineInstallState, cancelRequested: Bool = false,
         progress: SingingEngineInstallProgress? = nil, installedBytes: Int64? = nil,
-        errorMessage: String? = nil
+        errorMessage: String? = nil, failure: SingingEngineInstallFailure? = nil
     ) {
         self.state = state
         self.cancelRequested = cancelRequested
         self.progress = progress
         self.installedBytes = installedBytes
         self.errorMessage = errorMessage
+        self.failure = failure
     }
 
     /// Nothing has ever been started on this coordinator.
@@ -195,19 +219,23 @@ public actor SingingEngineInstallCoordinator {
         case .failed(let step, let message):
             lastTerminal = SingingEngineInstallStatus(
                 state: .failed, progress: progress,
-                errorMessage: "step '\(step)' failed: \(message)")
+                errorMessage: "step '\(step)' failed: \(message)",
+                failure: .step(name: step))
         case .alreadyRunning(let pid):
-            // Only reachable if something OUTSIDE this coordinator started install.sh directly
-            // (a stale run from a previous launch, or a bug) — this coordinator's OWN guard above
-            // already refuses a second `start()` before a second install.sh is ever spawned.
+            // NOT only "a stale run from a previous launch, or a bug" (this comment's own former
+            // wording) — this coordinator's single-flight guard refuses a second `start()` from
+            // WITHIN this app, but two app instances on the SAME profile share the runtime
+            // directory, so a foreign install.sh from the OTHER instance is a live path, not an
+            // edge case.
             lastTerminal = SingingEngineInstallStatus(
                 state: .failed, progress: progress,
                 errorMessage: pid.map {
                     "another install.sh is already running outside this app (pid \($0))."
-                } ?? "another install.sh is already running outside this app.")
+                } ?? "another install.sh is already running outside this app.",
+                failure: .alreadyRunning(pid: pid))
         case .badUsage(let message):
             lastTerminal = SingingEngineInstallStatus(
-                state: .failed, progress: progress, errorMessage: message)
+                state: .failed, progress: progress, errorMessage: message, failure: .badUsage)
         case .cancelled(let step):
             lastTerminal = SingingEngineInstallStatus(
                 state: .cancelled, progress: progress,
@@ -216,10 +244,11 @@ public actor SingingEngineInstallCoordinator {
             lastTerminal = SingingEngineInstallStatus(
                 state: .failed, progress: progress,
                 errorMessage: "install.sh exited with code \(exitCode), which is not one of its "
-                    + "documented outcomes: \(stderrTail)")
+                    + "documented outcomes: \(stderrTail)",
+                failure: .crashed(exitCode: exitCode))
         case .cannotLaunch(let reason):
             lastTerminal = SingingEngineInstallStatus(
-                state: .failed, progress: progress, errorMessage: reason)
+                state: .failed, progress: progress, errorMessage: reason, failure: .cannotLaunch)
         }
     }
 

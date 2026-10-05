@@ -1573,6 +1573,62 @@ struct PolySynthEditorModelTests {
         #expect(f.model.globalIsInert("sustain"))
     }
 
+    /// W7-SMP round 2, item 1. Since m34-o a zone that leaves `decay`/`sustain`
+    /// unset plays the sampler's GLOBAL pair: `SamplerInstrument` stores the
+    /// nil as its `-1` sentinel and resolves it to `params.effectiveDecay`/
+    /// `effectiveSustain` at trigger. The knob read the literals 0 s / 100 %,
+    /// so a global decay set over the wire played a fade the knob never
+    /// showed. The globals reach the store here through `store.setInstrument`,
+    /// the call `track.setInstrument` makes. This target cannot import
+    /// DAWControl; the wire's own echo of the pair is pinned in
+    /// SamplerZoneIdentityWireTests.
+    @Test("W7-SMP r2: an unset zone's Decay and Sustain knobs show the sampler's GLOBAL pair, the one the engine plays, not 0 s / 100 %")
+    func samplerUnsetZoneKnobShowsGlobalDecaySustain() throws {
+        let inheriting = SamplerZone(audioFileURL: Self.ping, maxPitch: 59)
+        let own = SamplerZone(audioFileURL: Self.tink, minPitch: 60, decay: 0.4, sustain: 0.8)
+        let f = try Self.samplerFixture(
+            SamplerParams(zones: [inheriting, own], decay: 2.5, sustain: 0.3))
+        let stored = try #require(Self.storedSampler(f.store, f.trackID))
+        #expect(stored.decay == 2.5 && stored.sustain == 0.3, "the store kept the globals")
+
+        f.model.select(zoneID: inheriting.id)
+        #expect(f.model.zoneParamIsUnset("decay"))
+        #expect(f.model.zoneParamIsUnset("sustain"))
+        #expect(f.model.zoneValue(for: Self.samplerZoneSpec("decay")) == 2.5)
+        #expect(f.model.zoneValue(for: Self.samplerZoneSpec("sustain")) == 0.3)
+
+        // CONTROL: a zone with its own pair shows its own; the global does not leak in.
+        f.model.select(zoneID: own.id)
+        #expect(f.model.zoneValue(for: Self.samplerZoneSpec("decay")) == 0.4)
+        #expect(f.model.zoneValue(for: Self.samplerZoneSpec("sustain")) == 0.8)
+
+        // CONTROL: a sampler that never set the globals still shows the legacy pair.
+        let plain = SamplerZone(audioFileURL: Self.ping)
+        let g = try Self.samplerFixture(SamplerParams(zones: [plain]))
+        g.model.select(zoneID: plain.id)
+        #expect(g.model.zoneValue(for: Self.samplerZoneSpec("decay")) == SamplerParams.defaultDecay)
+        #expect(g.model.zoneValue(for: Self.samplerZoneSpec("sustain")) == SamplerParams.defaultSustain)
+    }
+
+    /// W7-SMP round 2, item 4. "Set per zone" sends a reader to the zone rows,
+    /// and the zone rows have no One Shot control, so for One Shot alone the
+    /// note says the card cannot change it.
+    @Test("W7-SMP r2: One Shot alone says 'not this card', because the zone rows have no One Shot control to send a reader to")
+    func samplerLoneOneShotNoteSaysNotThisCard() throws {
+        let f = try Self.samplerFixture(Self.overridingParams("oneShot"))
+        #expect(f.model.inertGlobalLabels == ["One Shot"])
+        let note = try #require(f.model.inertGlobalsNote)
+        #expect(note == "One Shot does nothing: zones set it, not this card.")
+        #expect(!note.contains("set per zone"), "the zone rows carry no One Shot control")
+        // The reason for the wording, read off the card's own table.
+        #expect(!SamplerEditorModel.zoneSpecs.contains { $0.name == "oneShot" })
+
+        // CONTROL: a control the zone rows DO carry keeps the per-zone advice.
+        let r = try Self.samplerFixture(Self.overridingParams("release"))
+        #expect(r.model.inertGlobalsNote == "Release does nothing: set per zone.")
+        #expect(SamplerEditorModel.zoneSpecs.contains { $0.name == "release" })
+    }
+
     @Test("W7-SMP: the inert-globals note fits ONE line in every combination — m34-u's budget, measured")
     func samplerInertGlobalsNoteFitsOneLine() throws {
         // The line the note draws in: the card's 308 pt interior (340 − 2 × 16)

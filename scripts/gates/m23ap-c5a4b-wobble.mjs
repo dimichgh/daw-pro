@@ -58,6 +58,36 @@ import {
 } from "./_pitch-editor-look.mjs";
 
 const GATE = "m23ap-c5a4b";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE PALETTE (W7-NTU, 2026-10-04). Four slots since the Voice tool landed
+// (W7-NTU U3), in the order drawn (`PitchEditorTool.allCases`, which the pane
+// both draws and echoes as `interaction.paletteLabels`). This gate pinned three
+// until then, so it read red on the real palette.
+//   node scripts/gates/m23ap-c5a4b-wobble.mjs --self-test-palette
+// runs ONLY the check below on a planted echo, without staging: the real
+// palette must pass, and a palette without "Voice" (or the old three) must not.
+// ═══════════════════════════════════════════════════════════════════════════
+const PALETTE = ["Move", "Split", "Wobble", "Voice"];
+const paletteIsTheToolSet = (labels) => JSON.stringify(labels) === JSON.stringify(PALETTE);
+if (process.argv.includes("--self-test-palette")) {
+  const rows = [
+    { labels: ["Move", "Split", "Wobble", "Voice"], want: true },
+    { labels: ["Move", "Split", "Wobble"], want: false },          // Voice removed (the old pin)
+    { labels: ["Move", "Split", "Voice"], want: false },           // Wobble removed
+    { labels: ["Move", "Split", "Voice", "Wobble"], want: false }, // order changed
+    { labels: undefined, want: false },                            // no echo field
+  ];
+  let bad = 0;
+  for (const r of rows) {
+    const got = paletteIsTheToolSet(r.labels);
+    if (got !== r.want) bad += 1;
+    console.log(`  ${got === r.want ? "ok  " : "!!  "} ${JSON.stringify(r.labels)} -> ${got} (want ${r.want})`);
+  }
+  console.log(bad === 0 ? "palette self-test: GREEN" : `palette self-test: RED (${bad})`);
+  process.exit(bad === 0 ? 0 : 1);
+}
+
 const OUT = process.env.M23AP_C5A4B_OUT || "/tmp/m23ap-c5a4b";
 mkdirSync(OUT, { recursive: true });
 
@@ -216,8 +246,8 @@ try {
   await stage({ act: "tool", tool: "wobble" });
   await stage({ act: "hover", ...bodyOf(mid) });
   const hovered = await echo();
-  check("the palette offers Move, Split and Wobble, and the Wobble slot is engaged",
-    JSON.stringify(hovered.interaction.paletteLabels) === JSON.stringify(["Move", "Split", "Wobble"])
+  check("the palette offers Move, Split, Wobble and Voice, and the Wobble slot is engaged",
+    paletteIsTheToolSet(hovered.interaction.paletteLabels)
       && hovered.tool === "wobble" && hovered.wobble.engaged === true,
     `labels ${JSON.stringify(hovered.interaction.paletteLabels)}; tool ${hovered.tool}`);
   check("⭐ a hovered sung note in the Wobble tool shows THE DOT at its top centre, and the palette reads it",

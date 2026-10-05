@@ -456,6 +456,10 @@ struct ContentView: View {
                 onChop: { model.runChopToPads() }
             )
         }
+        // TUNE TO MELODY (M3, W7-TTM3): the clip menu's Tune Vocal ▸ Tune to Melody… card.
+        // HERE, in the builder `body` mounts BEFORE `.presetReplaceConfirmOverlay(model)`, so
+        // the "Replace your hand edits?" card its Apply can raise draws ON TOP of it.
+        TuneToMelodyCardMount(model: model)
         // AU-effect picker (m13-g, audit F6): opened by a Pro channel/bus strip's
         // insert add-menu "Audio Units…" item; UI-only — Add routes through the SAME
         // `store.addEffect(kind:.audioUnit)` the wire uses. Never opened for master.
@@ -1316,6 +1320,9 @@ struct ContentView: View {
                 model.clearClipTuningFromContextMenu(clipID: clip.id)
             },
             onOpenPitchEditor: { clip in model.openPitchEditor(clipID: clip.id) },
+            // Tune to Melody… (M3, W7-TTM3): opens the card on the clip. Thin on purpose: the
+            // behaviour is `TuneToMelodyStaging.swift` and DAWAppKit's `TuneToMelodyDoor`.
+            onTuneToMelody: { clip in model.openTuneToMelody(clipID: clip.id) },
             // Convert Voice… (m24-m leg B, Pro clip menu): opens the panel on
             // the ids the menu's own title named, which ride the SAME store
             // seam as the wire's vc.convertClips.

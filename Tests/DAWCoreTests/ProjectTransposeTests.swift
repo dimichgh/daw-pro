@@ -470,11 +470,9 @@ struct ProjectTransposeTests {
         // The production default, end to end through the planner.
         let plan = try ProjectTranspose.plan(tracks: [onSampler, unmarked], semitones: 3)
         #expect(plan.report.tracks[1].outcome == .moved)
-        withKnownIssue("PK-F2: SamplerParams.sliceKit is not stored until the marker patch lands") {
-            #expect(marked.isSliceKit)
-            #expect(ProjectTranspose.isSliceKitTrack(onSampler))
-            #expect(plan.report.tracks[0].outcome == .skippedSliceKit)
-        }
+        #expect(marked.isSliceKit)
+        #expect(ProjectTranspose.isSliceKitTrack(onSampler))
+        #expect(plan.report.tracks[0].outcome == .skippedSliceKit)
     }
 
     @Test("The marker is in the save format: a chopped sampler writes it, an unchopped one writes no key")
@@ -498,10 +496,8 @@ struct ProjectTransposeTests {
         var marked = Self.chopParams
         marked.markSliceKit()
         let kit = try saved(marked)
-        withKnownIssue("PK-F2: SamplerParams.sliceKit is not stored until the marker patch lands") {
-            #expect(kit.keys.contains("sliceKit"))
-            #expect(kit.reopened?.isSliceKit == true)
-        }
+        #expect(kit.keys.contains("sliceKit"))
+        #expect(kit.reopened?.isSliceKit == true)
     }
 
     // MARK: - Refusals (nothing is planned)
@@ -720,5 +716,222 @@ struct ProjectTransposeTests {
         #expect(applied.summary.contains("Skipped 1 drum track."))
         #expect(ProjectTranspose.undoLabel(semitones: 3) == "Move Song Up 3 Semitones")
         #expect(ProjectTranspose.undoLabel(semitones: -1) == "Move Song Down 1 Semitone")
+    }
+
+    // MARK: - PK-F1, the 2026-10-04 ruling: the shift's FRACTION is a detune Auto-Correct keeps
+
+    struct DetuneCase: Sendable {
+        let shift: Double
+        let scale: PitchCorrectionScale
+        let stored: [Double]   // cents, per note
+        let played: [Double]   // MIDI, per note
+        let keptCents: Double
+    }
+
+    /// Pre-registered (round3r/predictions-ruling.md) before the first run.
+    /// Sung: 56.65 / 59.3 / 61.6. Whole part: nearest, ties away from zero.
+    static let detuneCases: [DetuneCase] = {
+        let cMajor = PitchCorrectionScale(tonicPitchClass: 0, mode: .major)
+        return [
+            DetuneCase(shift: 3, scale: PKF1Fixture.eFlatMajor, stored: [35, -30, 40],
+                       played: [60, 62, 65], keptCents: 0),
+            DetuneCase(shift: 3.3, scale: PKF1Fixture.eFlatMajor, stored: [35, -30, 40],
+                       played: [60.3, 62.3, 65.3], keptCents: 30),
+            DetuneCase(shift: 0.5, scale: cMajor, stored: [-65, -30, -60],
+                       played: [56.5, 59.5, 61.5], keptCents: -50),
+            DetuneCase(shift: -0.5, scale: cMajor, stored: [-65, 70, -60],
+                       played: [55.5, 59.5, 60.5], keptCents: 50),
+            DetuneCase(shift: 0.08, scale: cMajor, stored: [35, -30, 40],
+                       played: [57.08, 59.08, 62.08], keptCents: 8),
+        ]
+    }()
+
+    @Test("PK-F1 ruling: Auto-Correct snaps through the shift's WHOLE semitones (ties away from zero) and keeps its fraction as a detune")
+    func autoCorrectKeepsTheClipsDetune() throws {
+        for c in Self.detuneCases {
+            let options = PitchAutoCorrectOptions(scale: c.scale, strength: 1, retuneMs: 30,
+                                                  preserveVibrato: true)
+            let set = PitchAutoCorrect.build(from: PKF1Fixture.result(), options: options,
+                                             clipShiftSemitones: c.shift).editSet
+            let notes = set.segments.filter { $0.origin != .unpitched }
+            try #require(notes.count == 3, "shift \(c.shift)")
+            let split = PitchAutoCorrect.splitClipShift(c.shift)
+            #expect(abs(split.fraction * 100 - c.keptCents) < 1e-9, "shift \(c.shift): fraction \(split.fraction)")
+            for (i, note) in notes.enumerated() {
+                #expect(abs(note.pitchOffsetCents - c.stored[i]) < 1e-6,
+                        "shift \(c.shift), note \(i): stored \(note.pitchOffsetCents), expected \(c.stored[i])")
+                let played = PitchCorrectionMath.midi(fromHz: note.detectedHz) + note.pitchOffsetCents / 100 + c.shift
+                #expect(abs(played - c.played[i]) < 1e-9, "shift \(c.shift), note \(i): plays \(played)")
+                // The detune taken back off lands ON the scale, exactly.
+                let onGrid = played - split.fraction
+                #expect(abs(onGrid - onGrid.rounded()) < 1e-9, "shift \(c.shift), note \(i): \(onGrid)")
+                #expect(c.scale.allowedPitchClasses.contains(((Int(onGrid.rounded()) % 12) + 12) % 12))
+            }
+            // The table IS the whole part's table, bit for bit.
+            let atWhole = PitchAutoCorrect.build(from: PKF1Fixture.result(), options: options,
+                                                 clipShiftSemitones: split.whole).editSet
+            #expect(PKF1Fixture.noteOffsets(set).map(\.bitPattern)
+                    == PKF1Fixture.noteOffsets(atWhole).map(\.bitPattern), "shift \(c.shift)")
+        }
+        // Chromatic: no shift, whole or fractional, changes the table.
+        let chromatic = PitchAutoCorrectOptions(scale: .chromatic, strength: 1, retuneMs: 30,
+                                                preserveVibrato: true)
+        let atZero = PKF1Fixture.noteOffsets(
+            PitchAutoCorrect.build(from: PKF1Fixture.result(), options: chromatic).editSet)
+        for shift in [0.3, 0.5, -0.5, 2.7, -3.4, 11.5] {
+            let moved = PitchAutoCorrect.build(from: PKF1Fixture.result(), options: chromatic,
+                                               clipShiftSemitones: shift).editSet
+            #expect(PKF1Fixture.noteOffsets(moved).map(\.bitPattern) == atZero.map(\.bitPattern),
+                    "chromatic, shift \(shift)")
+        }
+        // CONTROL: snapping through the FULL shift (the 09-27 design) would pick a
+        // different NOTE at +3.3: the second note plays near 62.6, nearer E-flat4.
+        #expect(PKF1Fixture.eFlatMajor.nearestAllowedMidi(to: 59.3 + 3.3) == 63)
+        #expect(PKF1Fixture.eFlatMajor.nearestAllowedMidi(to: 59.3 + 3) == 62)
+    }
+
+    // MARK: - Round 3 (d): in-flight AI fixes are named before the key moves
+
+    static func pendingFix(_ jobID: String, track: Track, target: PendingFixTarget,
+                           submitted: Double, frozenLanePitch: [UUID: Double] = [:]) -> PendingClipFix {
+        PendingClipFix(jobID: jobID, trackID: track.id, target: target,
+                       windowStartBeat: 0, windowLengthBeats: 4, regionStartBeat: 0, regionEndBeat: 4,
+                       mapRevision: 0, regionBPM: 120,
+                       submittedAt: Date(timeIntervalSince1970: submitted),
+                       frozenLanePitch: frozenLanePitch)
+    }
+
+    @Test("(d) a key change names every AI fix still being made from audio it moves, in submit order, and only those")
+    func pendingFixesThisMovesAreNamed() throws {
+        let verse = Self.audioClip("Verse", shift: 0)
+        let laneA = TakeLane(name: "Take 1", clip: Self.audioClip("Take 1", shift: 0))
+        let laneB = TakeLane(name: "Take 2", clip: Self.audioClip("Take 2", shift: 1))
+        let group = TakeGroup(name: "Vox takes", lanes: [laneA, laneB], comp: [
+            CompSegment(laneID: laneA.id, startBeat: 0, endBeat: 2),
+            CompSegment(laneID: laneB.id, startBeat: 2, endBeat: 4)])
+        var vocals = Self.vocals(clips: [])
+        vocals.takeGroups = [group]
+        vocals.clips = CompFlattener.flatten(group, tempoMap: TempoMap(constantBPM: 120)) + [verse]
+        let members = vocals.clips.filter { $0.takeGroupID == group.id }.map(\.id)
+        try #require(members.count == 2)
+        let riff = Self.audioClip("Riff", shift: 0)
+        let guitar = Self.vocals("Guitar", clips: [riff])
+        let tracks = [vocals, guitar]
+        let fixes = [
+            Self.pendingFix("verse", track: vocals,
+                            target: .clip(id: verse.id, fingerprint: ClipGeometryFingerprint(of: verse)),
+                            submitted: 2),
+            Self.pendingFix("group", track: vocals,
+                            target: .group(id: group.id, frozenRangeStart: 0, frozenRangeEnd: 4),
+                            submitted: 1, frozenLanePitch: [laneA.id: 0, laneB.id: 1]),
+            Self.pendingFix("riff", track: guitar,
+                            target: .clip(id: riff.id, fingerprint: ClipGeometryFingerprint(of: riff)),
+                            submitted: 3),
+        ]
+        // Guitar is left out of the key change: its fix stays good and is not named.
+        let plan = try ProjectTranspose.plan(tracks: tracks, semitones: 2, excludeTrackIds: [guitar.id])
+        let named = ProjectTranspose.pendingFixWarnings(fixes, before: tracks, after: plan.tracks)
+        #expect(named.map(\.code) == [.pendingFixWillBeRefused, .pendingFixWillBeRefused])
+        #expect(named.map(\.clipIds) == [members, [verse.id]], "submit order: the group's fix first")
+        #expect(named.allSatisfy { $0.trackId == vocals.id && $0.trackName == "Vocals" })
+        #expect(named.allSatisfy { $0.message.contains("'Vocals'") && $0.message.contains("ask for the fix again") })
+        // CONTROL: the same fixes against a plan that moves nothing name nothing.
+        #expect(ProjectTranspose.pendingFixWarnings(fixes, before: tracks, after: tracks).isEmpty)
+        let everything = try ProjectTranspose.plan(tracks: tracks, semitones: -1)
+        #expect(ProjectTranspose.pendingFixWarnings(fixes, before: tracks, after: everything.tracks).count == 3)
+    }
+}
+
+// MARK: - PK-F1 fixtures (round 3), shared with `UndoRoundTripTests`
+
+/// The round-1 physics recording AS THE DETECTOR REPORTS IT: three steady notes
+/// sung off the C-major pitches they aim at (A3 −35 c, B3 +30 c, D4 −40 c),
+/// with unvoiced holes between them — `ProjectTransposeRenderTests`' contour,
+/// restated here because the two test targets share no support module.
+enum PKF1Fixture {
+    static let frameRateHz = 62.5
+    static let durationSeconds = 3.2
+    static let sung: [(start: Double, end: Double, midi: Double)] = [
+        (0.2, 1.0, 56.65), (1.2, 2.0, 59.3), (2.2, 3.0, 61.6),
+    ]
+    static let eFlatMajor = PitchCorrectionScale(tonicPitchClass: 3, mode: .major)
+
+    static func hz(midi: Double) -> Double { 440 * pow(2, (midi - 69) / 12) }
+
+    static func contour() -> [ClipPitchFrame] {
+        let period = 1 / frameRateHz
+        let count = Int((durationSeconds / period).rounded())
+        return (0..<count).map { i in
+            let t = Double(i) * period
+            if let note = sung.first(where: { t >= $0.start && t < $0.end }) {
+                return ClipPitchFrame(timeSeconds: t, frequencyHz: hz(midi: note.midi),
+                                      confidence: 0.97, levelDbfs: -18, absence: nil)
+            }
+            return ClipPitchFrame(timeSeconds: t, frequencyHz: nil, confidence: 0.2,
+                                  levelDbfs: -54, absence: .belowConfidence)
+        }
+    }
+
+    static func result() -> PitchDetectionResult {
+        let frames = contour()
+        let voiced = frames.filter { $0.frequencyHz != nil }.count
+        return PitchDetectionResult(
+            frames: frames, frameCount: frames.count, voicedFrameCount: voiced,
+            voicedFraction: Double(voiced) / Double(frames.count), frameRateHz: frameRateHz,
+            analysisSampleRateHz: 16_000, sourceSampleRateHz: 48_000,
+            windowStartSeconds: 0, windowDurationSeconds: durationSeconds,
+            confidenceThreshold: 0.9, silenceFloorDbfs: -75,
+            minFrequencyHz: 46.875, maxFrequencyHz: 2_093.75)
+    }
+
+    /// The NOTE segments' offsets (a sound's segment is identity everywhere).
+    static func noteOffsets(_ set: PitchEditSet?) -> [Double] {
+        (set?.segments ?? []).filter { $0.origin != .unpitched }.map(\.pitchOffsetCents)
+    }
+}
+
+/// A pitch detector that answers `PKF1Fixture.result()`, and runs `onDetect`
+/// once WHILE detecting, so a test can change the clip under the await.
+@MainActor
+final class PKF1PitchEngine: AudioEngineControlling {
+    var isRunning = false
+    var meteringHandler: ((MeterFrame) -> Void)?
+    var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
+    var playheadHandler: ((Double) -> Void)?
+    var recordPermission: RecordPermission = .granted
+    var onDetect: (@MainActor () -> Void)?
+    private(set) var detectCalls = 0
+
+    func detectPitch(inFileAt url: URL, fromSeconds: Double, durationSeconds: Double,
+                     confidenceThreshold: Double,
+                     silenceFloorDbfs: Double) async throws -> PitchDetectionResult {
+        detectCalls += 1
+        let hook = onDetect
+        onDetect = nil
+        hook?()
+        return PKF1Fixture.result()
+    }
+
+    func prepare() throws { isRunning = true }
+    func shutdown() { isRunning = false }
+    func tracksDidChange(_ tracks: [Track]) {}
+    func startPlayback(_ transport: TransportState) {}
+    func stopPlayback() {}
+    func seek(_ transport: TransportState) {}
+    func setTempo(_ transport: TransportState) {}
+    func loopChanged(_ transport: TransportState) {}
+    func masterVolumeChanged(_ volume: Double) {}
+    func requestRecordPermission(_ completion: @escaping @MainActor (Bool) -> Void) {}
+    func availableInputDevices() -> [AudioInputDevice] { [] }
+    func setInputDevice(uid: String?) throws {}
+    func startRecording(_ transport: TransportState, to url: URL,
+                        completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {}
+    func stopRecording() {}
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL) async throws -> AudioFileInfo {
+        AudioFileInfo(durationSeconds: durationSeconds, sampleRate: 48_000, channelCount: 2)
     }
 }

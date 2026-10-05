@@ -6405,3 +6405,162 @@ extension PitchEditorModelTests {
         #expect(rig.undoDepth == depth + 1)
     }
 }
+
+// MARK: - W7-NTU §1(f) item 4 — the far-move hint (2026-10-04)
+//
+// The pane half: a pitch drag made with the pane's own calls, written through
+// a REAL store and resynced from the clip as the pane does, then the hint read
+// back. The rule and the words are pinned headless in
+// `PitchEditorVoiceToolTests.farMoveHintRule` (nonisolated).
+//
+// ⚠️ An EXTENSION of the existing `@MainActor` suite, never a new `@Suite`:
+// `MainActorOccupancySiteTests` bounds the suites.
+@MainActor
+extension PitchEditorModelTests {
+
+    /// C-0's three-note fixture, unstretched, in the Move tool, with
+    /// `table(f.set)` stored, wired to a REAL store: a pitch drag's commit
+    /// through `setClipNotePitchOffset`, anything else through
+    /// `PitchEditorSingerWrite`, and resynced from the clip.
+    private func farMoveRig(_ table: (PitchEditSet) -> PitchEditSet?) async -> SingerRig {
+        let f = PitchEditorPlayedLineTests.fixture(shift: 0)
+        var clip = f.clip
+        clip.stretchRatio = 1
+        clip.pitchEdits = table(f.set)
+        let fixture = PitchEditorPlayedLineTests.Fixture(a: f.a, b: f.b, c: f.c, clip: clip)
+        let store = ProjectStore(tracks: [Track(name: "Vocals", kind: .audio, clips: [clip])])
+        let (model, _) = await PitchEditorPlayedLineTests.loadedModel(fixture, contour: nil)
+        model.tool = .pointer
+        let rig = SingerRig(clip: clip, store: store, model: model)
+        model.onCommit = { [unowned rig] commit in
+            rig.commits.append(commit)
+            do {
+                if case .notePitch(let id, let cents) = commit.kind {
+                    _ = try store.setClipNotePitchOffset(clipId: clip.id, segmentId: id, offsetCents: cents,
+                                                         seedIfAbsent: commit.seedIfAbsent)
+                    rig.writes.append(true)
+                } else {
+                    rig.writes.append(try PitchEditorSingerWrite.commit(commit.kind, clipID: clip.id,
+                                                                        seedIfAbsent: commit.seedIfAbsent,
+                                                                        to: store))
+                }
+            } catch {
+                rig.refusals.append("\(error)")
+            }
+            model.syncStoredNoteTable(store.tracks[0].clips[0].pitchEdits)
+        }
+        return rig
+    }
+
+    /// ONE pitch drag on note `id`, `rows` rows up with ⌥ held (free, so the
+    /// note lands where the pointer does), with the pane's calls in order.
+    private func pitchPress(_ model: PitchEditorModel, _ id: UUID, rows: Double) {
+        let start = bodyPoint(model, id)
+        let dy = -CGFloat(rows) * model.geometry.rowHeight
+        let end = CGPoint(x: start.x, y: start.y + dy)
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        let tick = model.trackPress(start: start, location: end, modifiers: .none)
+        if tick.didPromote, let blob = model.blobs.first(where: { $0.id == id }) {
+            _ = model.beginSelectionPitchDrag(on: blob)
+        }
+        model.updatePitchDrag(translationHeight: dy, free: true)
+        _ = model.releasePress(start: start, location: end, modifiers: .none, snapBypassed: true)
+        _ = model.endPitchDrag()
+    }
+
+    /// The fixture's own set, updated, keeping NONE of its voice size.
+    private static func keepsNothing(_ set: PitchEditSet) -> PitchEditSet? {
+        var updated = set.upgradedToNaturalTuning()
+        updated.formantCorrection = 0
+        return updated
+    }
+
+    /// Planted and seen red (W7-NTU P-far-model): `endPitchDrag` not recording
+    /// the note it moved.
+    @Test("W7-NTU §1(f) item 4 — a drag that leaves a note 3+ semitones from where it was sung, on a vocal keeping none of its voice size, shows the hint once the store holds it; turning the amount up to half or undoing the move takes it away, redo brings it back, and the next press puts it away")
+    func farMoveHintAfterADrag() async throws {
+        let rig = await farMoveRig(Self.keepsNothing)
+        let model = rig.model
+        let notes = try #require(rig.stored?.segments)
+        let a = notes[0].id
+        let b = notes[1].id
+        #expect(notes[0].pitchOffsetCents == 0)
+        #expect(model.farMoveHint(formantPreserve: false) == nil)
+
+        pitchPress(model, a, rows: 3.2)
+        #expect(rig.refusals.isEmpty)
+        #expect(rig.writes == [true])
+        let moved = try #require(rig.stored?.segments.first { $0.id == a }).pitchOffsetCents
+        #expect(moved >= 300 && moved < 400, "the drag moved \(moved) cents")
+        #expect(model.farMoveNoteIDs == [a])
+        #expect(model.farMoveHint(formantPreserve: false) == PitchEditorFormantCopy.farMoveHint)
+        // The vocal's own amount (0) wins over the clip's flag.
+        #expect(model.farMoveHint(formantPreserve: true) == PitchEditorFormantCopy.farMoveHint)
+
+        // Half the voice size kept: no hint. Undone back to none: the hint.
+        _ = try rig.store.setClipFormantCorrection(clipId: rig.clip.id, amount: 0.5)
+        model.syncStoredNoteTable(rig.stored)
+        #expect(model.farMoveHint(formantPreserve: false) == nil)
+        _ = try rig.store.undo()
+        model.syncStoredNoteTable(rig.stored)
+        #expect(rig.stored?.formantCorrection == 0)
+        #expect(model.farMoveHint(formantPreserve: false) == PitchEditorFormantCopy.farMoveHint)
+
+        // The move undone: the note sits where it was sung. Redo: back.
+        _ = try rig.store.undo()
+        model.syncStoredNoteTable(rig.stored)
+        #expect(rig.stored?.segments.first { $0.id == a }?.pitchOffsetCents == 0)
+        #expect(model.farMoveHint(formantPreserve: false) == nil)
+        _ = try rig.store.redo()
+        model.syncStoredNoteTable(rig.stored)
+        #expect(model.farMoveHint(formantPreserve: false) == PitchEditorFormantCopy.farMoveHint)
+
+        // The next press, of any kind, puts it away: a click on another note.
+        let start = bodyPoint(model, b)
+        _ = model.trackPress(start: start, location: start, modifiers: .none)
+        #expect(model.farMoveNoteIDs.isEmpty)
+        #expect(model.farMoveHint(formantPreserve: false) == nil)
+        _ = model.releasePress(start: start, location: start, modifiers: .none)
+    }
+
+    @Test("W7-NTU §1(f) item 4 — a move under 3 semitones asks nothing; on an OLD vocal the move itself updates it to keep all of its voice size (D4-1 (b)), so no hint, where the same move without the update would have asked")
+    func farMoveHintStaysQuiet() async throws {
+        // Under 3 semitones, on a vocal keeping none.
+        do {
+            let rig = await farMoveRig(Self.keepsNothing)
+            let model = rig.model
+            let a = try #require(rig.stored?.segments.first).id
+            pitchPress(model, a, rows: 2.6)
+            let moved = try #require(rig.stored?.segments.first { $0.id == a }).pitchOffsetCents
+            #expect(moved > 200 && moved < 300, "the drag moved \(moved) cents")
+            #expect(model.farMoveNoteIDs == [a])
+            #expect(model.farMoveHint(formantPreserve: false) == nil)
+        }
+        // An old vocal (no amount of its own) on a clip whose flag keeps nothing.
+        do {
+            let rig = await farMoveRig { $0 }
+            let model = rig.model
+            let before = try #require(rig.stored)
+            #expect(before.predatesNaturalTuning)
+            let a = try #require(before.segments.first).id
+            pitchPress(model, a, rows: 3.2)
+            let after = try #require(rig.stored)
+            let moved = try #require(after.segments.first { $0.id == a }).pitchOffsetCents
+            #expect(moved >= 300 && moved < 400, "the drag moved \(moved) cents")
+            #expect(model.farMoveNoteIDs == [a])
+            if PitchEditSet.handEditUpgradesLegacyVocal {
+                #expect(after.formantCorrection == PitchEditSet.newSetFormantCorrection,
+                        "(b) is on, and the move did not update the old vocal")
+                #expect(model.farMoveHint(formantPreserve: false) == nil)
+            }
+            // CONTROL — the same move on the table as it was, NOT updated, asks:
+            // so the quiet above is the update's doing, not a rule that cannot fire.
+            var notUpdated = before
+            if let index = notUpdated.segments.firstIndex(where: { $0.id == a }) {
+                notUpdated.segments[index].pitchOffsetCents = moved
+            }
+            #expect(PitchEditorFarMoveHint.line(movedNoteIDs: [a], table: notUpdated, formantPreserve: false)
+                    == PitchEditorFormantCopy.farMoveHint)
+        }
+    }
+}

@@ -62,6 +62,14 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
     /// Codable IS the disk shape). v1 invariants (volume target only, one lane)
     /// are SANITIZED on load, not trusted from disk.
     public var masterAutomation: [AutomationLane]?
+    /// MASTER modulation (m39-e; persisted since W7-MODP, 2026-10-04) — the `masterAutomation` twin, and the
+    /// strip an agent reaches with `trackId: "master"`. Additive and optional, nil when the master strip has
+    /// none (the key is omitted on encode — the `masterEffects` omit-when-empty rule, so a project without
+    /// master modulation stays byte-identical, no schemaVersion bump). Reuses the model types directly (no
+    /// media: their Codable IS the disk shape). Restored through `runtimeMasterModulation`, which clamps the
+    /// counts to `ModulationLimits` (the render side preallocates to those caps).
+    public var masterModulationSources: [ModulationSource]? = nil
+    public var masterModulationRoutes: [ModulationRoute]? = nil
     /// Persisted copilot conversations (chat-persist design, 2026-07-19).
     /// Additive and optional; nil when there are none (omit-when-empty — the
     /// `grooveTemplates` rule, no schemaVersion bump). Decoded LOSSILY: a
@@ -90,6 +98,7 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         case tempoMap, meterChanges, tempoMapRevision
         case masterEffects
         case masterAutomation
+        case masterModulationSources, masterModulationRoutes
         case copilotChats
         case reference
     }
@@ -110,7 +119,9 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         masterEffects: [EffectDescriptor] = [],
         masterAutomation: [AutomationLane] = [],
         copilotChats: [CopilotChatDocument] = [],
-        reference: ReferenceSlot? = nil
+        reference: ReferenceSlot? = nil,
+        masterModulationSources: [ModulationSource] = [],
+        masterModulationRoutes: [ModulationRoute] = []
     ) {
         self.schemaVersion = ProjectBundle.currentSchemaVersion
         self.savedAt = Date()
@@ -144,6 +155,10 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // synthesized `encodeIfPresent` omits the key and pre-m15-c saves stay
         // byte-identical (the masterEffects rule).
         self.masterAutomation = masterAutomation.isEmpty ? nil : masterAutomation
+        // Master modulation (m39-e, W7-MODP): empty persists as nil → the key is omitted (the masterAutomation
+        // rule).
+        self.masterModulationSources = masterModulationSources.isEmpty ? nil : masterModulationSources
+        self.masterModulationRoutes = masterModulationRoutes.isEmpty ? nil : masterModulationRoutes
         // Copilot chats (chat-persist design): empty persists as nil → the
         // key is omitted and a pre-chat project stays byte-identical (the
         // grooveTemplates rule, no schemaVersion bump).
@@ -187,6 +202,11 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         // (canonical point order, clamped beats); v1 invariants sanitize in
         // `runtimeState`.
         masterAutomation = try c.decodeIfPresent([AutomationLane].self, forKey: .masterAutomation)
+        // Additive optional (m39-e, W7-MODP): a project saved without master modulation has neither key.
+        masterModulationSources = try c.decodeIfPresent([ModulationSource].self,
+                                                        forKey: .masterModulationSources)
+        masterModulationRoutes = try c.decodeIfPresent([ModulationRoute].self,
+                                                       forKey: .masterModulationRoutes)
         // Additive optional (chat-persist design): a pre-chat project has no
         // key → nil. Decoded LOSSILY — a corrupt chat ELEMENT is skipped and
         // counted (one corrupt chat never fails a whole project open); the
@@ -341,7 +361,11 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                 // made from.
                 voiceProvenance: td.voiceProvenance,
                 // p2-sing-d2: the same fact-not-binding rule, verbatim.
-                sungVocalProvenance: td.sungVocalProvenance
+                sungVocalProvenance: td.sungVocalProvenance,
+                // m39-e (W7-MODP): restored verbatim; `Track.init` clamps the counts to `ModulationLimits`.
+                // A route whose target no longer resolves is inert — the automation-lane rule above.
+                modulationSources: td.modulationSources ?? [],
+                modulationRoutes: td.modulationRoutes ?? []
             )
         }
         // Attach the non-trivial tempo/meter maps (m12-d) onto the runtime
@@ -428,6 +452,16 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         }
         return (runtimeTracks, runtimeTransport, masterVolume, runtimeMasterEffects,
                 runtimeMasterAutomation, runtimeReference, warnings)
+    }
+
+    /// The master strip's modulation as the store restores it on open and on crash recovery (m39-e,
+    /// W7-MODP): EMPTY when the file carries none — which is what replaces, rather than keeps, whatever the
+    /// previous session's master strip held. Counts are clamped to `ModulationLimits`, exactly as `Track.init`
+    /// clamps a track's (the render side preallocates to those caps); routes otherwise round-trip verbatim (an
+    /// orphaned route is inert, the automation-lane rule).
+    public var runtimeMasterModulation: (sources: [ModulationSource], routes: [ModulationRoute]) {
+        (Array((masterModulationSources ?? []).prefix(ModulationLimits.maxSources)),
+         Array((masterModulationRoutes ?? []).prefix(ModulationLimits.maxRoutes)))
     }
 
     /// Resolves one persisted media reference to a runtime URL. Returns the URL
@@ -617,12 +651,26 @@ public struct TrackDocument: Codable, Sendable, Equatable {
     /// `voiceProvenance` rule exactly: nil (key omitted) on every track no
     /// sing job made, and `SungVocalProvenance`'s Codable IS the disk shape.
     public var sungVocalProvenance: SungVocalProvenance?
+    /// Modulation sources and routes on this strip (m39-e). Additive and optional, the `sends`/`automation`
+    /// rule: an EMPTY array is stored as nil, so the key is omitted on encode and a project without modulation
+    /// stays byte-identical (no schemaVersion bump). `ModulationSource`/`ModulationRoute` persist directly (the
+    /// `automation` precedent: no media, no URLs, so their Codable IS the disk shape), under `Track`'s own key
+    /// names, so the wire, the snapshot and the file agree.
+    ///
+    /// ⛔ m39-e shipped WITHOUT these two fields (W7-MODP, 2026-10-04; design §16). `Track` carried the arrays
+    /// and encoded them in its OWN Codable, every §7.6 test exercised that Codable, and this DTO — the actual
+    /// save format — never mentioned them, so every save dropped every LFO, step sequencer, follower and macro.
+    /// `ProjectDocumentFidelityTests` now classifies every stored property of `Track` by `Mirror`, so the next
+    /// field added to `Track` and not threaded here fails BY NAME instead of vanishing on save.
+    public var modulationSources: [ModulationSource]? = nil
+    public var modulationRoutes: [ModulationRoute]? = nil
 
     private enum CodingKeys: String, CodingKey {
         case id, name, kind, volume, pan, isMuted, isSoloed, isArmed, isAIGenerated, clips, instrument
         case outputBusId, sends, effects, automation, takeGroups
         case voiceProvenance
         case sungVocalProvenance
+        case modulationSources, modulationRoutes
     }
 
     init(from track: Track, mediaRefs: [UUID: String?]) {
@@ -658,6 +706,10 @@ public struct TrackDocument: Codable, Sendable, Equatable {
         // synthesized encodeIfPresent omits the key entirely.
         voiceProvenance = track.voiceProvenance
         sungVocalProvenance = track.sungVocalProvenance
+        // m39-e (W7-MODP): empty persists as nil (the `sends` rule) → the synthesized `encodeIfPresent` omits
+        // the key, keeping a project without modulation byte-identical.
+        modulationSources = track.modulationSources.isEmpty ? nil : track.modulationSources
+        modulationRoutes = track.modulationRoutes.isEmpty ? nil : track.modulationRoutes
     }
 
     public init(from decoder: any Decoder) throws {
@@ -687,6 +739,9 @@ public struct TrackDocument: Codable, Sendable, Equatable {
         voiceProvenance = try c.decodeIfPresent(VoiceProvenance.self, forKey: .voiceProvenance)
         // Additive optional (p2-sing-d2): a pre-sing track has no key.
         sungVocalProvenance = try c.decodeIfPresent(SungVocalProvenance.self, forKey: .sungVocalProvenance)
+        // Additive optional (m39-e, W7-MODP): a track saved without modulation has neither key.
+        modulationSources = try c.decodeIfPresent([ModulationSource].self, forKey: .modulationSources)
+        modulationRoutes = try c.decodeIfPresent([ModulationRoute].self, forKey: .modulationRoutes)
     }
 }
 
@@ -1086,7 +1141,10 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                                  // older build with a wrong SOUND rather than
                                  // an unopenable file.
                                  glideMode: s.glideMode
-                                     .flatMap(SamplerGlideMode.init(rawValue:)))
+                                     .flatMap(SamplerGlideMode.init(rawValue:)),
+                                 // PK-F2: absent (every un-chopped sampler, every
+                                 // pre-PK-F2 project) → nil → not a slice kit.
+                                 sliceKit: s.sliceKit)
         }
         // The AU config round-trips intact even when the component isn't
         // installed on this machine — the engine reports `.missing` and
@@ -1199,6 +1257,13 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
     /// keeps a document shape byte-identical to pre-m34-w.
     public var glideMode: String?
 
+    /// PK-F2. `SamplerParams.sliceKit`, verbatim. nil never encodes (the
+    /// synthesized encoder's `encodeIfPresent`), so an un-chopped sampler keeps
+    /// a document shape byte-identical to pre-PK-F2. A kit saved by an OLDER
+    /// build has no key and opens as "not a kit": a key change moves it, which
+    /// is what that build did.
+    public var sliceKit: Bool?
+
     private enum CodingKeys: String, CodingKey {
         case zones, oneShot, attack, release, gain, sourcePath, displayName
         case expressionModDepth, expressionFilterDepth, expressionFilterCC
@@ -1211,6 +1276,8 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         case glideTime
         // m34-w.
         case glideMode
+        // PK-F2.
+        case sliceKit
     }
 
     init(from s: SamplerParams, mediaRefs: [UUID: String?]) {
@@ -1233,6 +1300,7 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         glideTime = s.glideTime
         // The enum's rawValue, per the voiceMode precedent above.
         glideMode = s.glideMode?.rawValue
+        sliceKit = s.sliceKit
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1255,6 +1323,7 @@ public struct SamplerDocument: Codable, Sendable, Equatable {
         sustain = try c.decodeIfPresent(Double.self, forKey: .sustain)
         glideTime = try c.decodeIfPresent(Double.self, forKey: .glideTime)
         glideMode = try c.decodeIfPresent(String.self, forKey: .glideMode)
+        sliceKit = try c.decodeIfPresent(Bool.self, forKey: .sliceKit)
     }
 }
 

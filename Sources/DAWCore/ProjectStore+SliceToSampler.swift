@@ -342,8 +342,6 @@ extension ProjectStore {
             // change (`project.transpose`) leaves these notes alone: each one
             // picks a slice, and moving it would play a different slice. Set
             // here and nowhere else, because this is the one place that knows.
-            // ⚠️ Inert until `SamplerParams.sliceKit` is stored (see
-            // `SamplerParams.markSliceKit`).
             sampler.markSliceKit()
             // Provenance belongs to importSampleLibrary alone (m26-h): a chop
             // did not come from an .sfz, so it must not claim one.

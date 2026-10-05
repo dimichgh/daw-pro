@@ -1226,10 +1226,14 @@ public enum PitchEditorTool: String, Sendable, Equatable, CaseIterable, Identifi
     /// SF Symbol. `scissors` is the frames' own glyph for this slot;
     /// `waveform.path` is the reference frames' glyph for the wobble tool (§4.1).
     /// W7-NTU U3 — `mouth` is §1(f) item 2's pick for the Voice slot. The design
-    /// asks for it to be checked on macOS 14 (else `person.wave.2`): it is an
-    /// SF Symbols 3 glyph (macOS 12), from memory, NOT measured, because this
-    /// machine runs a later macOS. `PitchEditorPaletteFitTests.measuringIsReal`
-    /// proves only that it loads HERE.
+    /// asks for it to be checked on macOS 14 (else `person.wave.2`). MEASURED
+    /// 2026-10-04 in Apple's own table (CoreGlyphs' `name_availability.plist`):
+    /// `mouth` is a 2020 symbol, first in macOS 11.0, so the app's macOS 14
+    /// floor has it. (An earlier note here said "SF Symbols 3, macOS 12, from
+    /// memory": the memory was one release off.)
+    /// `PitchEditorPaletteFitTests.everyGlyphExistsOnTheFloorOS` reads the same
+    /// table for every slot; `measuringIsReal` proves only that each loads on
+    /// the machine running the tests.
     public var symbolName: String {
         switch self {
         case .pointer: return "cursorarrow"
@@ -2033,6 +2037,13 @@ public final class PitchEditorModel {
     /// A tool that refused and a tool that did nothing must not look the same.
     public private(set) var refusal: String?
 
+    /// W7-NTU §1(f) item 4 — the notes the last pitch drag COMMITTED, for the
+    /// far-move hint (`farMoveHint(formantPreserve:)`), in table order. Set
+    /// only when a pitch drag emits its commit; emptied by the next press of
+    /// any kind and by a clip switch. It names notes, never distances: how far
+    /// each sits is read from the stored table when the hint is asked.
+    public private(set) var farMoveNoteIDs: [UUID] = []
+
     /// UE-1 — the line about the last "Find sounds with no pitch" press
     /// (`PitchEditorFindSounds`): working while the pitch is read, then the
     /// answer in words — sounds added, none to add, or why nothing was added.
@@ -2755,6 +2766,7 @@ public final class PitchEditorModel {
         brush = nil
         voiceDrag = nil   // W7-NTU U3
         wobbleTipNoteID = nil
+        farMoveNoteIDs = []   // W7-NTU §1(f) item 4
         draftPlayedLine = nil
         draftEditSet = nil
         refusal = nil
@@ -3045,6 +3057,8 @@ public final class PitchEditorModel {
         }
         guard !draft.isNoOp else { return nil }
         guard !draft.members.isEmpty else {
+            // W7-NTU §1(f) item 4 — the hint asks about the note this drag moved.
+            farMoveNoteIDs = [draft.segmentID]
             return emit(.notePitch(segmentID: draft.segmentID, offsetCents: draft.offsetCents))
         }
         // m23-ap I4 — a GROUP drag: ONE commit carrying every moved note's
@@ -3057,6 +3071,8 @@ public final class PitchEditorModel {
         let ordered = offsets.sorted {
             (order[$0.segmentId] ?? Int.max) < (order[$1.segmentId] ?? Int.max)
         }
+        // W7-NTU §1(f) item 4 — and about every note a group drag moved.
+        farMoveNoteIDs = ordered.map(\.segmentId)
         return emit(.notePitches(offsets: ordered, selectionToken: selectionToken))
     }
 
@@ -3793,6 +3809,8 @@ public final class PitchEditorModel {
         // later tick can act on it (`beginWobble`).
         if tick.isFirst {
             wobbleTipNoteID = nil
+            // W7-NTU §1(f) item 4 — a new press puts the far-move hint away.
+            if !farMoveNoteIDs.isEmpty { farMoveNoteIDs = [] }
             if case .wobble(let id, let door) = tick.kind {
                 beginWobble(segmentID: id, door: door, origin: start)
             }
@@ -4813,6 +4831,18 @@ public final class PitchEditorModel {
     public var voiceSizeDraft: Double? {
         if case .drag(let amount) = voiceSizePress { return amount }
         return nil
+    }
+
+    /// W7-NTU §1(f) item 4 — the far-move hint's words, or nil: after a pitch
+    /// drag that left a note 3 semitones or more from where it was sung, on a
+    /// vocal that keeps under half its voice size (`PitchEditorFarMoveHint`).
+    /// `formantPreserve` is the clip's STORED whole-clip flag, which decides
+    /// the amount on a vocal with none of its own. Read from the table as it
+    /// is NOW, so it appears once the store holds the move and goes when the
+    /// move is undone or the amount turned up.
+    public func farMoveHint(formantPreserve: Bool) -> String? {
+        PitchEditorFarMoveHint.line(movedNoteIDs: farMoveNoteIDs, table: noteTable,
+                                    formantPreserve: formantPreserve)
     }
 
     /// The group's faces for this clip. `stretchRatio` and `clipSemitones` are

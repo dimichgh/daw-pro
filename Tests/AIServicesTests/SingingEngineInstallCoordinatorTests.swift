@@ -170,22 +170,28 @@ struct SingingEngineInstallCoordinatorProgressTests {
 struct SingingEngineInstallCoordinatorOutcomeMappingTests {
     static let cases: [(
         outcome: SingingEngineInstallOutcome, expectedState: SingingEngineInstallState,
-        mustContain: [String]
+        mustContain: [String], expectedFailure: SingingEngineInstallFailure?
     )] = [
-        (.succeeded(installedBytes: 100), .succeeded, []),
-        (.succeeded(installedBytes: nil), .succeeded, []),
-        (.failed(step: "voice", message: "bad hash"), .failed, ["voice", "bad hash"]),
-        (.alreadyRunning(pid: 555), .failed, ["555"]),
-        (.alreadyRunning(pid: nil), .failed, []),
-        (.badUsage(message: "bad config"), .failed, ["bad config"]),
-        (.cancelled(step: "weights"), .cancelled, ["weights"]),
-        (.cancelled(step: nil), .cancelled, []),
-        (.crashed(exitCode: 137, stderrTail: "killed"), .failed, ["137"]),
+        (.succeeded(installedBytes: 100), .succeeded, [], nil),
+        (.succeeded(installedBytes: nil), .succeeded, [], nil),
+        (.failed(step: "voice", message: "bad hash"), .failed, ["voice", "bad hash"], .step(name: "voice")),
+        // FIX NOW #9's own named proof: `.alreadyRunning(pid:)` ROUND-TRIPS — the pid install.sh
+        // reported comes back out exactly, not just folded into free-form `errorMessage` text.
+        (.alreadyRunning(pid: 555), .failed, ["555"], .alreadyRunning(pid: 555)),
+        (.alreadyRunning(pid: nil), .failed, [], .alreadyRunning(pid: nil)),
+        (.badUsage(message: "bad config"), .failed, ["bad config"], .badUsage),
+        (.cancelled(step: "weights"), .cancelled, ["weights"], nil),
+        (.cancelled(step: nil), .cancelled, [], nil),
+        (.crashed(exitCode: 137, stderrTail: "killed"), .failed, ["137"], .crashed(exitCode: 137)),
+        (.cannotLaunch(reason: "install.sh not found"), .failed, ["not found"], .cannotLaunch),
     ]
 
-    @Test("every SingingEngineInstallOutcome maps to its right terminal state and message", arguments: cases)
+    @Test("every SingingEngineInstallOutcome maps to its right terminal state, message AND structured failure", arguments: cases)
     func outcomeMapsToTerminalState(
-        testCase: (outcome: SingingEngineInstallOutcome, expectedState: SingingEngineInstallState, mustContain: [String])
+        testCase: (
+            outcome: SingingEngineInstallOutcome, expectedState: SingingEngineInstallState,
+            mustContain: [String], expectedFailure: SingingEngineInstallFailure?
+        )
     ) async throws {
         let scripted = ScriptedInstall(afterTicks: .returnOutcome(testCase.outcome))
         let coordinator = SingingEngineInstallCoordinator(installFunction: scripted.asFunction())
@@ -202,6 +208,9 @@ struct SingingEngineInstallCoordinatorOutcomeMappingTests {
                 status.errorMessage?.contains(substring) == true,
                 "expected '\(substring)' in \(status.errorMessage ?? "nil") for outcome \(testCase.outcome)")
         }
+        #expect(
+            status.failure == testCase.expectedFailure,
+            "outcome \(testCase.outcome): expected failure \(String(describing: testCase.expectedFailure)), got \(String(describing: status.failure))")
     }
 }
 

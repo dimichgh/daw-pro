@@ -1,6 +1,34 @@
 # Changelog
 
-## Unreleased (after 2026-09-25's commit)
+## Unreleased (after 2026-09-27's commit, e6f7a27)
+
+1. **Tune to Melody: tune a sung vocal to a MIDI melody.**
+   - **How:** right-click a vocal clip, then **Tune Vocal ▸ Tune to Melody…**. Pick the MIDI melody under it (a track named “Lead” comes first), a style, and whether to match the octave you sang in, then Apply. Each sung note is tuned to the melody note under it, as one Undo step. A line then says how many notes were tuned, how many had no melody note under them (those stay as you sang them), and warns when a note had to move a long way, since a big move can change how a voice sounds.
+   - **When it's greyed:** no MIDI note sits under the vocal. The menu says so, and it decides that with the same check the command itself uses, so the two never disagree.
+   - **The styles, measured:** in Tune to Melody every style tunes each note fully onto the melody. Gentle, Natural and Tight differ only where one note runs straight into the next (Gentle lets a little more of your own singing through there); Hard Tune also reduces vibrato.
+   - **Accuracy:** in a playback test every note landed within a tenth of a semitone of its melody note. The pitch reader itself can be a few cents off on some voices, so we say “tuned to the melody”, never “exactly on it”.
+   - **For agents:** `clip_auto_correct_pitch` (wire `clip.autoCorrectPitch`) takes `melodyClipId` or `melodyTrackId` (one of them) and `octaveMatch` (`nearestOctave` by default, or `exact`), and its reply carries a `melody` report. No new command, so the count stays 256.
+2. **Pulse and wobble effects are saved now.**
+   - **Before:** tremolo, auto-pan, the chopped “trance gate” and anything else made with the modulation tools, on a track or the master channel, played but was gone after saving and reopening. The project file had no place for it. This was in every build since 2026-09-19.
+   - **Now:** they are saved, reopened, recovered after a crash, and undone correctly, and a check fails if any future setting is left out of the project file. A project already saved without them cannot get them back.
+3. **Auto-Tune on a vocal moved to a new key snaps to the new key's notes.**
+   - **Before:** it snapped to the old key's notes.
+   - **Now:** the new key's notes. A small deliberate detune (a few cents, say, to match another recording) is kept, not tuned away; the reply reports it (`keptDetuneCents`).
+4. **Applying a preset asks less often.** It no longer asks “replace your edits?” when the only thing you changed is a setting the preset keeps anyway, such as voice size.
+5. **Hard Tune's description is corrected.** It said “Replaces your pitch with the exact note”. Measured, a held note keeps about two thirds of its vibrato. It now says “Holds each note in tune, with less vibrato. The robot effect.”
+6. **The sampler card shows the sound you actually hear.**
+   - **Decay and Sustain:** a sample that has no setting of its own now shows the instrument-wide value it plays with. Before, it showed 0 s and 100 %, whatever was really playing.
+   - **One Shot:** when the samples set it themselves, the card's switch says “One Shot does nothing: zones set it, not this card.” instead of looking like it works.
+   - **For agents:** a setting the engine will never use, such as an instrument-wide release that every sample overrides, is still stored (a later sample edit can make it heard again), but the reply now says so in `warnings`, once, on the write that caused it. That includes a glide stored while the instrument plays chords, where glide does nothing. `track.setInstrument`'s reply and `project.snapshot` now show the instrument-wide decay and sustain once they are set. This is the quiet success behind the sax tester's 3.4-second release (2026-08-20).
+
+7. **For agents: an absurdly large number can no longer crash the app.**
+   - **Before:** a whole number of about 9.2 quintillion (2^63) or more, such as `1e20`, sent in a numeric field of about 40 commands (`track.reorder`, `fx.add`, `clip.repeatNotes`, the generators' seeds, MIDI export, and others) crashed the app.
+   - **Now:** any number of 2^53 (9,007,199,254,740,992) or more, anywhere in a command's fields, is refused with a message naming the field, for example `params.notes[3].pitch is too large: wire numbers must be below 9007199254740992`. Positions keep their own "past the timeline limit" message. Paging values that large in `au.describeParams` and `instrument.describeSampler`, which used to be quietly clamped, are refused too.
+   - `arrange.insertBars` and `arrange.deleteBars` refuse a fractional bar `count` (2.7 used to become 2).
+8. **A new Rock song skeleton has real drums and bass.** Its Drums and Bass tracks had no instrument, so they played the built-in synth's plain tone. They now use the General MIDI Standard Drum Kit and Electric Bass (finger), the same as the other band genres. Only new skeletons change: a saved project keeps the tracks it has.
+**Behind the scenes:** the song skeleton now builds its tracks with the same code that will build band templates. Recorded projects for all 14 genres, with and without your own track list (28 in all), came out byte-for-byte the same before and after; the only change is the Rock fix above. Ten built-in band templates (Pop Band, Piano Ballad, Rock Band, House Club, Hip-Hop 808, Lo-Fi Chill, Jazz Combo, Acoustic Folk, Soul & Blues Band, Reggae Riddim) now ship inside the app with a check that every one loads and follows the rules, but nothing can open them yet. Chopping a clip into pads with an impossibly fine grid can no longer freeze or crash the app; the values that did it were already out of reach of the app and the wire, so this guards against a future caller. The drum-note rule the agents follow now has its own test, and four rule tests report which case failed instead of a bare “false”. The full test suite passes again (11,134 tests): it had been freezing for about 100 seconds and failing 16–22 tests that passed on their own. The cause was the test runner starting every test at once; it now runs as many at a time as the Mac has cores. That freeze was also hiding a crash: a Swift 6.3.3 compiler bug miscompiles an async closure used as a default value when another module relies on it. Five such closures moved into the code that uses them, and a new check (`scripts/gates/async-default-dup.py`) reads every build for the problem. Measured: the app built on 27 September never had it.
+
+## 2026-09-27 (e6f7a27)
 
 1. **Pitch moves now land where you ask, from small corrections to two-octave jumps.**
    - **Before:** moving a note, correcting pitch, or transposing a clip landed a little off: about 10 cents on a mid-range note, and up to about 40 cents on low bass notes (a −25 cent correction came out near −15). Octave jumps on low notes could be off by up to about 44 cents. And a clip stretched by a hair (say, a long clip's edge dragged by one 1/16) played up to about 1 cent off, even with no pitch change at all.
@@ -12,6 +40,10 @@
      - **Two sounds very close in pitch** (within about 15 Hz of each other) move as one when shifted. The quieter one was already tens of cents off there (in one measured case, about 21 cents; now about 33).
      - Transposing takes a little longer to prepare, roughly a sixth longer than the last release. It never happens while audio plays.
    - **What you'll notice:** clips you had already transposed or tuned re-render once, the first time they play. So do plain time-stretched clips stretched by less than 5 % either way, because those were the slightly-off ones. Every other plain time-stretched clip is untouched.
+
+2. **Exporting stems or bouncing a track no longer loads your instruments just to plan the timing.** *(Shipped in this commit; added to these notes on 2026-10-05.)*
+   - **Before:** to line up delays between tracks, export first loaded every plug-in on the session, instruments included, though only effects add delay. Loading a sample library can take many seconds (once 28.7 s, measured while the full test suite was running).
+   - **Now:** the planning step loads only the effects it needs to measure. Measured: the same stems and bounces come out byte-for-byte identical (11 of 11 files). This removes one difference between exporting and a normal mixdown; it is not yet proven to be the cause of the sax tester's slow export.
 
 ## 2026-09-25 — Hear the note you're editing
 

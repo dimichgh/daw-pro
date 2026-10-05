@@ -569,4 +569,123 @@ struct ClipVoiceConversionTests {
         }
         #expect(engine.renderCalls.isEmpty)
     }
+
+    // MARK: - The stale-key rule (lane W7-PK round 3)
+    //
+    // The extraction BAKES the clip's pitch shift and the converted clip lands
+    // at shift 0, so a key change during the minutes a conversion takes used to
+    // land a voice in the OLD key with nothing said. The rule: record the baked
+    // shift, and at landing refuse in words if a source clip moved.
+
+    @Test("extraction records the pitch shift it baked")
+    func extractionRecordsTheBakedShift() async throws {
+        let (store, engine) = makeStore()
+        let clip = Clip(name: "chorus", startBeat: 0, lengthBeats: 8,
+                        audioFileURL: sourceFile, pitchShiftSemitones: -3)
+        _ = install(store, [clip])
+
+        let source = try await store.extractClipAudioForConversion(clipId: clip.id)
+
+        #expect(source.pitchShiftSemitones == -3)
+        let rendered = try #require(engine.renderCalls.first?.tracks.first?.clips.first)
+        #expect(rendered.pitchShiftSemitones == source.pitchShiftSemitones)
+    }
+
+    @Test("a key change while converting REFUSES in words and lands nothing; the key change stands")
+    func keyChangeMidConversionRefuses() async throws {
+        let (store, _) = makeStore()
+        let a = Clip(name: "verse", startBeat: 0, lengthBeats: 4, audioFileURL: sourceFile)
+        let b = Clip(name: "chorus", startBeat: 8, lengthBeats: 4, audioFileURL: sourceFile,
+                     pitchShiftSemitones: 2)
+        _ = install(store, [a, b])
+        let before = store.tracks.count
+        let calls = Counter()
+
+        var thrown: ProjectError?
+        do {
+            _ = try await store.convertClipsToVoice(
+                clipIds: [a.id, b.id], trackName: "Voice: ada"
+            ) { _, _ in
+                calls.value += 1
+                // The song changes key (the real `project.transpose`, +3) while
+                // the SECOND clip converts; both were extracted before it.
+                if calls.value == 2 { _ = try store.transposeProject(semitones: 3) }
+                return try self.makeConverterOutput()
+            }
+            Issue.record("expected a conversion that straddled a key change to be refused")
+        } catch let error as ProjectError {
+            thrown = error
+        }
+        guard case .invalidClipEdit(let message) = thrown else {
+            Issue.record("expected invalidClipEdit, got \(String(describing: thrown))")
+            return
+        }
+        #expect(message.contains("(every clip moved up 3 semitones, as a key change does)"),
+                "\(message)")
+        #expect(message.contains("nothing landed; convert again"), "\(message)")
+        #expect(calls.value == 2)
+        #expect(store.tracks.count == before, "no converted track")
+        #expect(store.tracks[0].clips.map(\.pitchShiftSemitones) == [3, 5],
+                "the key change itself stands")
+    }
+
+    @Test("a clip re-pitched while a LATER clip converts is refused at landing, naming only it")
+    func repitchWhileALaterClipConvertsRefuses() async throws {
+        let (store, _) = makeStore()
+        let a = Clip(name: "verse", startBeat: 0, lengthBeats: 4, audioFileURL: sourceFile)
+        let b = Clip(name: "chorus", startBeat: 8, lengthBeats: 4, audioFileURL: sourceFile)
+        let trackID = install(store, [a, b])
+        let before = store.tracks.count
+        let calls = Counter()
+
+        var thrown: ProjectError?
+        do {
+            _ = try await store.convertClipsToVoice(
+                clipIds: [a.id, b.id], trackName: "Voice: ada"
+            ) { _, _ in
+                calls.value += 1
+                // "verse" has had its own turn; while "chorus" converts, "verse"
+                // is moved down 2 by hand. Only a check AT LANDING can see it.
+                if calls.value == 2 {
+                    let t = store.tracks.firstIndex(where: { $0.id == trackID })!
+                    store.tracks[t].clips[0].pitchShiftSemitones = -2
+                }
+                return try self.makeConverterOutput()
+            }
+            Issue.record("expected a clip re-pitched mid-conversion to be refused")
+        } catch let error as ProjectError {
+            thrown = error
+        }
+        guard case .invalidClipEdit(let message) = thrown else {
+            Issue.record("expected invalidClipEdit, got \(String(describing: thrown))")
+            return
+        }
+        #expect(message.contains("(\"verse\" 0 → -2 semitones)"), "\(message)")
+        #expect(!message.contains("chorus"), "\(message)")
+        #expect(store.tracks.count == before, "no converted track")
+    }
+
+    @Test("a key change undone before landing is NOT stale: a float round trip is not a change")
+    func keyChangeUndoneBeforeLandingLands() async throws {
+        let (store, _) = makeStore()
+        // 0.1 + 3 - 3 is 0.10000000000000009, so an exact comparison would refuse.
+        let a = Clip(name: "verse", startBeat: 0, lengthBeats: 4, audioFileURL: sourceFile,
+                     pitchShiftSemitones: 0.1)
+        _ = install(store, [a])
+        let before = store.tracks.count
+
+        let result = try await store.convertClipsToVoice(
+            clipIds: [a.id], trackName: "Voice: ada"
+        ) { _, _ in
+            _ = try store.transposeProject(semitones: 3)
+            _ = try store.transposeProject(semitones: -3)
+            return try self.makeConverterOutput()
+        }
+
+        let now = store.tracks[0].clips[0].pitchShiftSemitones
+        #expect(now != 0.1, "the round trip must NOT be bit-exact, or this leg proves nothing")
+        #expect(abs(now - 0.1) < 1e-12)
+        #expect(store.tracks.count == before + 1)
+        #expect(result.warnings.isEmpty)
+    }
 }
