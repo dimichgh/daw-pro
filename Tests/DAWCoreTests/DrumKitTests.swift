@@ -22,13 +22,13 @@ struct DrumKitTests {
     /// whatever the table happens to contain.
     private static let expectedCounts: [String: Int] = [
         "kick": 10, "snare": 10, "closedHat": 8, "openHat": 8,
-        "clap": 9, "tom": 9, "rim": 8, "cymbal": 9, "kit": 4,
-    ]
+        "clap": 9, "tom": 9, "rim": 8, "cymbal": 9, "kit": 6,
+    ]  // kit: 4 + W8-HAT's two appended level trims
 
-    @Test("The table carries exactly 75 names, in the designed per-scope split")
+    @Test("The table carries exactly 77 names, in the designed per-scope split")
     func tableIsSeventyFiveNames() {
-        #expect(DrumKitParams.paramSpecs.count == 75)
-        #expect(Self.expectedCounts.values.reduce(0, +) == 75)
+        #expect(DrumKitParams.paramSpecs.count == 77)
+        #expect(Self.expectedCounts.values.reduce(0, +) == 77)
         for (scope, expected) in Self.expectedCounts {
             let actual = DrumKitParams.paramSpecs.filter {
                 ($0.voice?.rawValue ?? "kit") == scope
@@ -69,7 +69,11 @@ struct DrumKitTests {
 
     @Test("Every default sits inside its own range, and a fresh kit reads it back")
     func defaultsAreInRangeAndLive() {
-        let kit = DrumKitParams()
+        // W9-DRUMDEF: the table's defaults are what a NEW drum machine starts
+        // at (`newDrumMachineKit`, hats +23.4 / cymbals +5.7). `DrumKitParams()`
+        // is the factory/saved kit and keeps both trims at 0, so the "fresh kit"
+        // here is the new drum machine's.
+        let kit = DrumKitParams.newDrumMachineKit
         for spec in DrumKitParams.paramSpecs {
             #expect(spec.range.contains(spec.defaultValue),
                     "\(spec.name) default \(spec.defaultValue) outside \(spec.range)")
@@ -222,7 +226,17 @@ struct DrumKitTests {
         // parameter is covered the day it is added.
         for spec in DrumKitParams.paramSpecs
         where spec.name != "kick.tune" && spec.name != "snare.decay" {
-            #expect(kit.value(forParamName: spec.name) == spec.defaultValue,
+            // ⛔ The two level trims are the exception, and on purpose: a kit
+            // saved before they existed (or saved at 0, which omits the key)
+            // must keep its sound, so an ABSENT trim decodes to the saved-kit
+            // neutral 0 — never to the +23.4 / +5.7 a NEW drum machine starts at.
+            // W9-HEAD: so is `kit.gain`. Its default is the 0.7 a NEW drum machine
+            // starts at (headroom), but an ABSENT gain decodes to the factory 1.0,
+            // the level every kit saved before played at.
+            let expected = spec.leaf.isLevelTrim ? DrumKitParams.savedKitLevelTrimDb
+                : spec.leaf == .gain ? 1.0
+                : spec.defaultValue
+            #expect(kit.value(forParamName: spec.name) == expected,
                     "\(spec.name) did not decode to its default")
         }
     }

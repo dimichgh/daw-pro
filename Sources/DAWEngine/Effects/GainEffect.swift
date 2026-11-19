@@ -179,6 +179,21 @@ final class GainEffect: EffectRendering, @unchecked Sendable {
         setGainTarget(Self.signedTarget(overlay.effective), exact: false)
     }
 
+    /// m39-d CR-1 (`docs/design/2026-10-07-effect-control-rate.md` §5.3): the
+    /// automated values stored at this control cell's entry still stand. Adopt
+    /// FIRST, so a knob publish waiting in the slot is seen now, as a store
+    /// would see it (then `overlay.hold()` answers false and the renderer
+    /// re-stores). Render thread; no allocation, no lock.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): deliberately a no-op — class (b): its own ~5 ms (240-frame)
+    /// retarget ramp already carries across calls, and a hold (unlike a re-store) never restarts it
+    /// — that restart is the reason the hold exists.
+    func beginControlCell(frames: Int) {}
+
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
         adoptPendingParams()
         // Automation lane(s) vanished (republish without this effect, or

@@ -423,6 +423,177 @@ extension MacroSkeletonCommandTests {
         #expect(store3.tracks.isEmpty)
     }
 
+    // MARK: - W8-T67R: dryRun == real for every genre; every refusal changes nothing
+
+    /// The bytes a refusal must leave untouched: the whole project snapshot, encoded
+    /// with sorted keys so equal state is equal bytes.
+    private func tpl67ProjectBytes(_ store: ProjectStore) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(store.snapshot())
+    }
+
+    @Test("m39-tpl-6 §8.2: macro.songSkeleton dryRun predicts the real call field for field, for all 14 genres and for every built-in template")
+    func tpl67SkeletonDryRunEqualsRealForEveryGenreAndTemplate() async throws {
+        var cases: [(label: String, params: [String: JSONValue])] = SongSkeletonCatalog.names.map {
+            ("genre \($0)", ["genre": .string($0)])
+        }
+        for id in BuiltInTemplateCatalog.ids {
+            cases.append(("template \(id)", ["genre": .string("pop"), "template": .string(id)]))
+        }
+        #expect(SongSkeletonCatalog.names.count == 14, "the gate is documented for all 14 genres")
+        var comparedEffectChains = 0
+        for (label, params) in cases {
+            let (router, store) = makeRouter2()
+            var dryParams = params
+            dryParams["dryRun"] = .bool(true)
+            let beforeBytes = try tpl67ProjectBytes(store)
+            let dry = await router.handle(ControlRequest(id: "d", command: "macro.songSkeleton", params: dryParams))
+            #expect(dry.ok, "\(label): dryRun failed: \(dry.error ?? "")")
+            #expect(dry.result?["applied"]?.boolValue == false, "\(label)")
+            #expect(try tpl67ProjectBytes(store) == beforeBytes, "\(label): a dry run changed the project")
+            #expect(!store.canUndo, "\(label): a dry run left an undo step")
+            let dryTracks = try #require(dry.result?["tracks"]?.arrayValue, "\(label)")
+            for track in dryTracks {
+                #expect(track["id"] == nil, "\(label): a dry run must carry no ids")
+            }
+
+            let real = await router.handle(ControlRequest(id: "r", command: "macro.songSkeleton", params: params))
+            #expect(real.ok, "\(label): real call failed: \(real.error ?? "")")
+
+            #expect(dry.result?["genre"] == real.result?["genre"], "\(label)")
+            #expect(dry.result?["tempoBPM"] == real.result?["tempoBPM"], "\(label)")
+            #expect(dry.result?["sectionClips"] == real.result?["sectionClips"], "\(label)")
+            #expect(dry.result?["loopStart"] == real.result?["loopStart"], "\(label)")
+            #expect(dry.result?["loopEnd"] == real.result?["loopEnd"], "\(label)")
+            #expect(dry.result?["warnings"] == real.result?["warnings"], "\(label)")
+            #expect(dry.result?["undoLabel"]?.stringValue == store.undoLabel,
+                    "\(label): the dry run's undoLabel must be the real step's label")
+            // markers: the plan names and positions them, the real call also mints ids.
+            let dryMarkers = (dry.result?["markers"]?.arrayValue ?? []).map { "\($0["name"]?.stringValue ?? "?")@\($0["beat"]?.doubleValue ?? -1)" }
+            let realMarkers = (real.result?["markers"]?.arrayValue ?? []).map { "\($0["name"]?.stringValue ?? "?")@\($0["beat"]?.doubleValue ?? -1)" }
+            #expect(dryMarkers == realMarkers, "\(label): markers differ")
+            // tracks: names, kinds and the insert chain, read off the REAL store by the
+            // ids the real reply returned.
+            let realTracks = try #require(real.result?["tracks"]?.arrayValue, "\(label)")
+            #expect(dryTracks.count == realTracks.count, "\(label): track count differs")
+            for (dryTrack, realTrack) in zip(dryTracks, realTracks) {
+                #expect(dryTrack["name"] == realTrack["name"], "\(label)")
+                let id = try #require(realTrack["id"]?.stringValue.flatMap(UUID.init(uuidString:)), "\(label)")
+                let built = try #require(store.tracks.first { $0.id == id }, "\(label)")
+                #expect(dryTrack["kind"]?.stringValue == built.kind.rawValue, "\(label)/\(built.name): kind")
+                let dryKinds = (dryTrack["inserts"]?.arrayValue ?? []).compactMap { $0["kind"]?.stringValue }
+                #expect(dryKinds == built.effects.map { $0.kind.rawValue },
+                        "\(label)/\(built.name): the dry run's insert chain differs from what was built")
+                if !dryKinds.isEmpty { comparedEffectChains += 1 }
+            }
+        }
+        #expect(comparedEffectChains > 0, "no case had an insert chain: the comparison had no teeth")
+    }
+
+    @Test("m39-tpl-6: every refusal on the template verbs and the skeleton leaves the project's bytes and its undo state unchanged")
+    func tpl67EveryRefusalChangesNothing() async throws {
+        let (router, store) = makeRouter2()
+        // A non-trivial song, so "unchanged" is not "still empty".
+        let seed = await router.handle(ControlRequest(
+            id: "seed", command: "template.apply", params: ["template": .string("lofi-chill")]))
+        #expect(seed.ok, "seed failed: \(seed.error ?? "")")
+        let seededTrackID = try #require(
+            seed.result?["tracks"]?.arrayValue?.first?["id"]?.stringValue, "seed carried no track id")
+        let typo: JSONValue = .object([
+            "formatVersion": .number(1), "name": .string("Typo"),
+            "tracks": .array([.object([
+                "key": .string("k"), "name": .string("K"), "kind": .string("instrument"),
+                "instrumnet": .object(["kind": .string("polySynth")]),
+            ])]),
+        ])
+        let refusals: [(String, String, [String: JSONValue])] = [
+            ("apply: unknown id", "template.apply", ["template": .string("no-such-template")]),
+            ("apply: typo'd inline key", "template.apply", ["template": typo]),
+            ("apply: wrong type", "template.apply", ["template": .number(3)]),
+            ("apply: missing template", "template.apply", [:]),
+            ("apply: unknown top-level key", "template.apply",
+             ["template": .string("lofi-chill"), "dryrun": .bool(true)]),
+            ("describe: unknown id", "template.describe", ["template": .string("no-such-template")]),
+            ("describe: typo'd inline key", "template.describe", ["template": typo]),
+            ("save: unknown track id", "template.save",
+             ["name": .string("X"), "trackIds": .array([.string(UUID().uuidString)])]),
+            ("save: no tracks", "template.save", ["name": .string("X"), "trackIds": .array([])]),
+            ("save: name too long", "template.save",
+             ["name": .string(String(repeating: "x", count: 41)),
+              "trackIds": .array([.string(seededTrackID)])]),
+            ("remove: a built-in", "template.remove", ["id": .string("lofi-chill")]),
+            ("remove: unknown id", "template.remove", ["id": .string("user-nope")]),
+            ("import: relative path", "template.import", ["path": .string("relative/band.dawtemplate")]),
+            ("export: relative path", "template.export",
+             ["id": .string("lofi-chill"), "path": .string("relative/band.dawtemplate")]),
+            ("skeleton: template and tracks", "macro.songSkeleton",
+             ["genre": .string("pop"), "template": .string("lofi-chill"),
+              "tracks": .array([.object(["name": .string("L"), "kind": .string("instrument")])])]),
+            ("skeleton: unknown template id", "macro.songSkeleton",
+             ["genre": .string("pop"), "template": .string("no-such-template")]),
+            ("skeleton: unknown template id, dry run", "macro.songSkeleton",
+             ["genre": .string("pop"), "template": .string("no-such-template"), "dryRun": .bool(true)]),
+            ("skeleton: tracks[0].program", "macro.songSkeleton",
+             ["genre": .string("pop"), "tracks": .array([.object([
+                 "name": .string("L"), "kind": .string("instrument"), "program": .number(5)])])]),
+            ("skeleton: tracks[0] unknown key", "macro.songSkeleton",
+             ["genre": .string("pop"), "tracks": .array([.object([
+                 "name": .string("L"), "kind": .string("instrument"), "velocity": .number(9)])])]),
+            ("skeleton: unknown top-level key", "macro.songSkeleton",
+             ["genre": .string("pop"), "dryrun": .bool(true)]),
+        ]
+        let bytes = try tpl67ProjectBytes(store)
+        let canUndo = store.canUndo
+        let undoLabel = store.undoLabel
+        #expect(canUndo, "the seed must have left an undo step, or the comparison has no teeth")
+        for (label, command, params) in refusals {
+            let response = await router.handle(ControlRequest(id: label, command: command, params: params))
+            #expect(!response.ok, "\(label): expected a refusal")
+            #expect(!(response.error ?? "").isEmpty, "\(label): a refusal must say why")
+            #expect(try tpl67ProjectBytes(store) == bytes, "\(label): the refusal changed the project")
+            #expect(store.canUndo == canUndo, "\(label): the refusal changed canUndo")
+            #expect(store.undoLabel == undoLabel, "\(label): the refusal changed the undo label")
+        }
+    }
+
+    @Test("m39-tpl-6 §6.2: a warning from resolving the template shows on the dry run exactly as on the real call")
+    func tpl67SkeletonDryRunShowsTemplateResolutionWarnings() async throws {
+        // A template written by a NEWER format version with a key this build does not know:
+        // the codec skips the key with `unknownKeySkipped` (a warning, not a refusal).
+        let newer: JSONValue = .object([
+            "formatVersion": .number(Double(TrackSetTemplate.currentFormatVersion + 1)),
+            "name": .string("Newer band"),
+            "futureKey": .string("from the future"),
+            "tracks": .array([.object([
+                "key": .string("keys"), "name": .string("Keys"), "kind": .string("instrument"),
+            ])]),
+        ])
+        let (router, store) = makeRouter2()
+        let dry = await router.handle(ControlRequest(
+            id: "d", command: "macro.songSkeleton",
+            params: ["genre": .string("pop"), "template": newer, "dryRun": .bool(true)]))
+        #expect(dry.ok, "dry run failed: \(dry.error ?? "")")
+        let dryWarnings = try #require(dry.result?["warnings"]?.arrayValue)
+        #expect(dryWarnings.contains { $0["code"]?.stringValue == "unknownKeySkipped" },
+                "the dry run hid the template's own resolution warning: \(dryWarnings)")
+        #expect(store.tracks.isEmpty)
+        let real = await router.handle(ControlRequest(
+            id: "r", command: "macro.songSkeleton",
+            params: ["genre": .string("pop"), "template": newer]))
+        #expect(real.ok, "real call failed: \(real.error ?? "")")
+        #expect(dry.result?["warnings"] == real.result?["warnings"],
+                "the dry run's warnings must equal the real call's")
+        // Same on template.apply, both paths (the shape this fix mirrors).
+        let (router2, _) = makeRouter2()
+        let applyDry = await router2.handle(ControlRequest(
+            id: "ad", command: "template.apply", params: ["template": newer, "dryRun": .bool(true)]))
+        let applyReal = await router2.handle(ControlRequest(
+            id: "ar", command: "template.apply", params: ["template": newer]))
+        #expect(applyDry.result?["warnings"] == applyReal.result?["warnings"])
+        #expect((applyReal.result?["warnings"]?.arrayValue ?? []).isEmpty == false)
+    }
+
     // MARK: - Tail placement (P2's prediction)
 
     @Test("m39-tpl-6: the 7 template verbs are registered right after playbox.generate, NOT at the tail")
@@ -437,6 +608,6 @@ extension MacroSkeletonCommandTests {
         let actual = Array(all[(playboxIndex + 1)..<(playboxIndex + 1 + expected.count)])
         #expect(actual == expected)
         #expect(all.last != "template.export", "a tail append would break every dropLast(N) pin in this file")
-        #expect(all.count == 263)
+        #expect(all.count == 288)   // 286 -> 288 at m39-w4-10 (pattern.list + clip.addDrumPattern, W9-PAT, placed right after clip.addMIDI, NOT at the tail)  <- 285 -> 286 at m27-f (fx.getParams, W8-M27F)  <- 280 at p2-sing-e (+17 singing verbs: the sing.* family, clip.setLyrics/getLyrics and project.transpose, placed right after template.export, NOT at the tail) <- 263 at m39-tpl-6 -> 285 at p2-sing-x7 part A (+5 verbs: clip.setNoteWord, clip.setSingStyle, clip.getSingStyle, sing.proposeHarmony, sing.capabilities, placed right after project.transpose at the end of the singing block, NOT at the tail)
     }
 }

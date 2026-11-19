@@ -2,6 +2,10 @@
 
 A professional, AI-native digital audio workstation for macOS. Logic-class ambitions, a glass-cockpit interface a beginner can read, and **full AI control via MCP** — agents can compose, arrange, and mix through the same command surface the UI uses.
 
+![DAW Pro: four tracks in the arrange view, the lead melody open in the piano roll, and the built-in singer turning those notes into a sung vocal](docs/images/daw-pro-arrange-singing.png)
+
+*Drums, bass, chords and a lead melody laid out across the song, the melody's notes open below, and the built-in singer singing them (bottom right). Taken from our Voice film.*
+
 > Project vision: [docs/VISION.md](docs/VISION.md) · Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md) · User Guide: [docs/USER-GUIDE.md](docs/USER-GUIDE.md) · Features: [docs/FEATURES.md](docs/FEATURES.md)
 
 ## Status

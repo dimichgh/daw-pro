@@ -288,6 +288,13 @@ final class ClipperEffect: EffectRendering, @unchecked Sendable {
             while index < preparedChannels { cursor[index] = 0; index += 1 }
         }
         needsPrime = true
+        // m39-d CR-2: a reset drops the ramp in flight (`needsPrime` re-seats
+        // the values); the cell geometry is the renderer's and stays.
+        rampFramesLeft = 0
+        rampDriveDelta = 0
+        rampCeilingDelta = 0
+        rampMixDelta = 0
+        rampOutDelta = 0
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — the retire bin
@@ -327,6 +334,7 @@ final class ClipperEffect: EffectRendering, @unchecked Sendable {
         // THROUGH THE LAWS in DAWCore, never a second copy of the snapping.
         soft = ClipperParams.mode(at: p.mode) == .soft
         oversampler.setFactor(ClipperParams.oversamplingFactor(at: p.oversampling))
+        rampPending = true  // m39-d CR-2: the next `process` starts a ramp
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). ⛔ SLOT ORDER IS
@@ -349,6 +357,45 @@ final class ClipperEffect: EffectRendering, @unchecked Sendable {
         default: overlay.effective.outputDb = value
         }
         deriveRenderParams(overlay.effective)
+    }
+
+    // MARK: - m39-d CR-2: the control cell (docs/design/2026-10-07-effect-control-rate.md §5.4)
+    //
+    // Render-thread only. A ramp starts in the `process` call after a derive
+    // (`rampPending`). On the control grid (`cellFramesLeft` covers the whole
+    // call) it spans the REST OF THE CELL and carries across calls; off it,
+    // it spans the call, exactly as before the grid. A ramp in flight that
+    // would end INSIDE a call is re-spanned over that call, so no ramp ever
+    // ends mid-call and the per-sample loop is untouched. In a 512 bounce the
+    // cell is the call: the same delta expression, run the same number of
+    // times (G1 byte gate).
+    /// Frames from the next `process` call to the next control-cell line
+    /// (0 = off the grid). Set by `beginControlCell`, counted down here.
+    private var cellFramesLeft = 0
+    /// Frames left in the ramp in flight (0 = values sit at their targets).
+    private var rampFramesLeft = 0
+    /// A derive landed since the ramp in flight began.
+    private var rampPending = false
+    /// The ramp in flight's per-frame steps (carried across calls; 0 at rest).
+    private var rampDriveDelta = 0.0
+    private var rampCeilingDelta = 0.0
+    private var rampMixDelta = 0.0
+    private var rampOutDelta = 0.0
+
+    /// m39-d CR-1 (design §5.3): the automated values stored at this control
+    /// cell's entry still stand. Adopt FIRST, so a knob publish waiting in the
+    /// slot is seen now, as a store would see it (then `overlay.hold()`
+    /// answers false and the renderer re-stores). Render thread; no allocation.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): the drive, ceiling, mix and output ramps
+    /// span the rest of the cell (`frames`), carried across calls, instead of one
+    /// call. (Mode and oversampling step at the derive, as before.)
+    func beginControlCell(frames: Int) {
+        cellFramesLeft = max(0, frames)
     }
 
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
@@ -382,11 +429,28 @@ final class ClipperEffect: EffectRendering, @unchecked Sendable {
         }
         guard channelCount > 0, minFrames > 0 else { return }
 
-        let span = Double(minFrames)
-        let driveDelta = (targetDriveGain - previousDriveGain) / span
-        let ceilingDelta = (targetCeiling - previousCeiling) / span
-        let mixDelta = (targetMix - previousMix) / span
-        let outDelta = (targetOutGain - previousOutGain) / span
+        // m39-d CR-2: start (or re-span) the ramp — see the MARK above. The
+        // delta expressions are the pre-grid ones, verbatim.
+        if rampPending || (rampFramesLeft > 0 && rampFramesLeft < minFrames) {
+            rampPending = false
+            let rampFrames = cellFramesLeft >= minFrames ? cellFramesLeft : minFrames
+            let span = Double(rampFrames)
+            rampDriveDelta = (targetDriveGain - previousDriveGain) / span
+            rampCeilingDelta = (targetCeiling - previousCeiling) / span
+            rampMixDelta = (targetMix - previousMix) / span
+            rampOutDelta = (targetOutGain - previousOutGain) / span
+            rampFramesLeft = rampFrames
+        }
+        let driveDelta = rampDriveDelta
+        let ceilingDelta = rampCeilingDelta
+        let mixDelta = rampMixDelta
+        let outDelta = rampOutDelta
+        // Where each accumulation ends (every channel runs the same sequence),
+        // for a ramp that carries past this call.
+        var endDrive = previousDriveGain
+        var endCeiling = previousCeiling
+        var endMix = previousMix
+        var endOut = previousOutGain
         let factor = oversampler.factor
         let shapeSoft = soft
         let ringMask = Self.dryRingMask
@@ -413,6 +477,7 @@ final class ClipperEffect: EffectRendering, @unchecked Sendable {
                 write += 1
                 frame += 1
             }
+            endDrive = drive
             ringCursor[channel] = write & ringMask
 
             // ── PASS 2 ── up to the oversampled rate.
@@ -439,6 +504,7 @@ final class ClipperEffect: EffectRendering, @unchecked Sendable {
                     ceiling += ceilingDelta
                     frame += 1
                 }
+                endCeiling = ceiling
             }
 
             // ── PASS 4 ── back down. Writes the WET signal into `driven`,
@@ -464,8 +530,27 @@ final class ClipperEffect: EffectRendering, @unchecked Sendable {
                 outGain += outDelta
                 frame += 1
             }
+            endMix = mix
+            endOut = outGain
             channel += 1
         }
+
+        // m39-d CR-2: a ramp still in flight carries what it reached; at the
+        // ramp's end the values are SNAPPED to their targets, exactly as every
+        // call end did before the grid (and still does off it).
+        rampFramesLeft = rampFramesLeft > minFrames ? rampFramesLeft - minFrames : 0
+        cellFramesLeft = cellFramesLeft > minFrames ? cellFramesLeft - minFrames : 0
+        if rampFramesLeft > 0 {
+            previousDriveGain = endDrive
+            previousCeiling = endCeiling
+            previousMix = endMix
+            previousOutGain = endOut
+            return
+        }
+        rampDriveDelta = 0
+        rampCeilingDelta = 0
+        rampMixDelta = 0
+        rampOutDelta = 0
 
         // SNAPPED to this quantum's targets rather than left at whatever the
         // accumulation landed on (the `StereoWidthEffect` rule): a value that

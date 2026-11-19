@@ -9,7 +9,7 @@
   "genres": ["house"],
   "tracks": [
     { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 0.74,
-      "instrument": { "kind": "drumSynth", "drumPreset": "909", "drumKit": { "noteLayout": "gm" } },
+      "instrument": { "kind": "drumSynth", "drumPreset": "909", "drumKit": { "noteLayout": "gm", "gain": 1 } },
       "sends": [ { "bus": "room", "level": 0.1 } ] },
     { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.06, "output": "pump",
       "instrument": { "kind": "polySynth", "waveform": "saw", "attack": 0.002, "decay": 0.25, "sustain": 0.6,

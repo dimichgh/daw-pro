@@ -1637,6 +1637,10 @@ struct CommandRouterTests {
             ]))
         let paramsByCommand: [String: [String: JSONValue]] = [
             "clip.getPlayedPitch": ["clipId": .string(playedPitchClipID)],
+            // p2-sing-e: project.transpose is DRIVEN as a dry run of a
+            // zero-semitone move — it plans over the whole song and writes
+            // nothing, so every command after it sees the same project.
+            "project.transpose": ["semitones": .number(0), "dryRun": .bool(true)],
             // I7a: clip.setNoteCleared is DRIVEN, not excluded, on the same
             // setup clip as clip.getPlayedPitch above. Its stored one-note
             // table, seeded off the wire, is exactly what the verb needs, so
@@ -1746,9 +1750,18 @@ struct CommandRouterTests {
             "marker.move": ["markerId": .string(movableMarkerID), "beat": .number(0)],
             "transport.setTempo": ["bpm": .number(120)],
             // tempo.map is a read (no params); tempo.setMap needs a valid map.
+            // m39-tpl-f8 (2026-10-06): ONE segment, on purpose. This loop runs
+            // every verb on one shared song, and a multi-segment map left here
+            // makes every verb behind `setTempo`'s guard refuse when its turn
+            // comes — since F-8 that includes `macro.songSkeleton`, which this
+            // loop drives later in `allCommands` and whose loop the
+            // `transport.record` route below relies on (so excluding it would
+            // change what that route proves). A one-segment map is still a
+            // validated map through the same route; the multi-segment wire
+            // path, its refusal of `transport.setTempo` included, is proven by
+            // TempoMapCommandTests.
             "tempo.setMap": ["segments": .array([
                 .object(["startBeat": .number(0), "bpm": .number(120)]),
-                .object(["startBeat": .number(8), "bpm": .number(90)]),
             ])],
             "transport.setLoop": ["enabled": .bool(true), "startBeat": .number(0), "endBeat": .number(8)],
             // enabled:false (m15-b): macro.songSkeleton re-enables a loop over
@@ -2184,6 +2197,9 @@ struct CommandRouterTests {
                 // SliceToSamplerReconstructionTests.
                 "clip.sliceToSampler",
                 "fx.remove", "fx.reorder", "fx.setBypass", "fx.setParam",
+                // m27-f: fx.getParams needs a real insert's effectId; proven in
+                // FXCommandTests (same chain as fx.setBypass, journals nothing).
+                "fx.getParams",
                 // fx.setSidechain (m12-g) is effect-id-dependent AND needs a
                 // compressor/gate keyed from a valid source track — the shared
                 // single gain effect can't be keyed. Proven by
@@ -2664,7 +2680,40 @@ struct CommandRouterTests {
                 // TemplateWireCommandTests.swift. template.list and
                 // template.describe are read-only and stay DRIVEN above.
                 "template.apply", "template.save", "template.remove",
-                "template.import", "template.export"].contains(command) {
+                "template.import", "template.export",
+                // p2-sing-e: sixteen of the seventeen singing verbs. This
+                // router has no singing engine wired in (no `singServices`),
+                // so the engine, voice and job verbs refuse
+                // `singNotConnected` by design, and sing.openVoiceRecorder
+                // refuses `singNoWindow` — both are the verbs WORKING, the
+                // same contract as the view.* verbs above. clip.setLyrics,
+                // clip.getLyrics, sing.proposeKey and sing.render also need a
+                // `clipId` naming a MIDI melody clip, and clip.setLyrics
+                // would edit the shared fixture's song. Each is proven with
+                // its own router in the SingWire*Tests files.
+                // project.transpose is NOT excluded: it is DRIVEN above as a
+                // dry run of a zero-semitone move, which reads the song and
+                // writes nothing.
+                "sing.sidecarStatus", "sing.sidecarStart", "sing.sidecarStop",
+                "sing.installEngine", "sing.cancelInstall", "sing.uninstallEngine",
+                "sing.listVoices", "sing.addVoice", "sing.removeVoice",
+                "sing.openVoiceRecorder", "sing.proposeKey", "clip.setLyrics",
+                "clip.getLyrics", "sing.render", "sing.jobStatus",
+                "sing.cancelJob",
+                // p2-sing-x7 part A: four of the five expansion verbs need a
+                // `clipId` naming a MIDI melody clip (and clip.setNoteWord /
+                // clip.setSingStyle would edit the shared fixture's song).
+                // Each is proven with its own router in
+                // SingWireExpansionTests.swift. sing.capabilities is NOT
+                // excluded: it takes no params and answers headless.
+                "clip.setNoteWord", "clip.setSingStyle", "clip.getSingStyle",
+                "sing.proposeHarmony",
+                // m39-w4-10: clip.addDrumPattern needs a DRUM track (the
+                // shared instrument track here plays the poly synth, which the
+                // verb refuses in words) and a pattern name. Proven by
+                // DrumPatternWireTests.swift (happy path, reply shape, every
+                // refusal). pattern.list takes no params and stays IN the loop.
+                "clip.addDrumPattern"].contains(command) {
                 continue
             }
             let response = await router.handle(ControlRequest(

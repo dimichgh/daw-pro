@@ -456,6 +456,14 @@ final class PlaybackGraph {
     /// `OfflineRenderer.render` (offline).
     var masterModulationSources: [ModulationSource] = []
     var masterModulationRoutes: [ModulationRoute] = []
+    /// The song's pan rule (m39-panlaw-new, `PanLaw`) — pushed by `AudioEngine`
+    /// (live: `wireGraphHooks`, `panLawChanged`, and the cache-only `setPanLaw`
+    /// at a project boundary, W9-PLRT R5) / `OfflineRenderer` (offline, before
+    /// its first parameter pass, from the render's own rule argument, never
+    /// the engine's cache: W9-PLRT R1). Read ONLY by `applyParameters`, on the
+    /// main actor: the render thread sees the knob value it publishes, never
+    /// this. Default `.balance` — the original rule, byte for byte.
+    var panLaw: PanLaw = .balance
     /// Monotonic; the render side re-seeks nothing (every source is
     /// position-absolute) but the generation still gates snapshot adoption in
     /// the instrument, exactly as `ParamSnapshot.generation` does.
@@ -473,6 +481,13 @@ final class PlaybackGraph {
         var strip: ModulationSnapshotBuilder.Strip
         var originSample: Int64
         var positionValid: Bool
+        /// m39-w4-4: the roll's clock fingerprint (tempo map, meter map, loop,
+        /// start beat, rate), or nil when the strip has no tempo-synced source,
+        /// so every other strip keeps exactly its old publish behaviour. Kept by
+        /// `structural`, so a tempo, meter, loop or start edit rebuilds the
+        /// snapshot — including one made while stopped AFTER the playhead,
+        /// which leaves `originSample` unchanged.
+        var clock: ModulationClockSpec? = nil
 
         /// The same key with every macro VALUE zeroed — equal keys under this
         /// normalisation mean the graph is structurally identical and only a
@@ -698,10 +713,20 @@ final class PlaybackGraph {
     /// anchor/epoch — the render cursors just re-seek).
     private var automationRollContext:
         (fromBeat: Double, tempoMap: TempoMap, mode: AutomationSchedule.Mode)?
+    /// m39-d CR-2 (`docs/design/2026-10-07-effect-control-rate.md` §5.5): the
+    /// OFFLINE render's length in frames, staged by `armOfflineAutomation` and
+    /// carried into every `.offline` roll schedule (`AutomationSchedule
+    /// .renderEndFrame`) until `stopAllPlayers` clears it. It survives
+    /// `startAllPlayers`, which re-arms the roll context, because the bounce's
+    /// own start goes through that call too. A live roll never reads it.
+    private var offlineRenderEndFrame: Int64?
     /// Timeline mapping staged by `scheduleAll` for the next `startAllPlayers`
     /// (the `pendingEvents` convention).
     private var stagedAutomationStart: (fromBeat: Double, tempoMap: TempoMap) =
         (0, TempoMap(constantBPM: 120))
+    /// m39-w4-4: the meter map of the staged/current roll, set by
+    /// `scheduleAll(meterMap:)` — where a synced step pattern restarts.
+    private var rollMeterMap = MeterMap(constant: TimeSignature())
     /// ACTIVE (enabled, non-empty) volume/pan lanes per strip plus the
     /// RESOLVED effect-param lane specs (M4 vii-c), recorded by
     /// `applyParameters` from the SAME tracks pass that writes the mixers —
@@ -2018,6 +2043,27 @@ final class PlaybackGraph {
             // keeps working with the transport parked and the node must not
             // also be panning.
             if modulatesPan { pan = 0 }
+            // m39-panlaw-new: the song's pan RULE decides who pans the KNOB.
+            // `.balance` (every saved song): the node keeps the knob exactly as
+            // above and the render stage gets 0, which `applyPan`'s centre
+            // short-circuit turns into a no-op — byte-identical by construction.
+            // `.equalPower` (new songs): the node sits at centre and the SAME
+            // value it would have carried — the knob, or the stopped lane
+            // preview; 0 while a lane rolls or a route rides pan, whose own
+            // stages pan — goes to the automation renderer's knob stage. As a
+            // DOUBLE: `Float(track.pan)` would break bit-identity with a
+            // constant lane at every pan that is not a dyadic fraction (0.4).
+            var stagePan = 0.0
+            if panLaw == .equalPower {
+                if let panLane {
+                    stagePan = rolling ? 0 : (panLane.value(atBeat: playheadBeat) ?? track.pan)
+                } else {
+                    stagePan = track.pan
+                }
+                if modulatesPan { stagePan = 0 }
+                pan = 0
+            }
+            automationRenderer(for: track.id)?.publishStaticPan(stagePan)
             // Same-value pan writes are swallowed by the property cache even
             // when engine.start() has just reset the underlying AU parameter
             // to 0 (measured) — route through the adjacent float so the write
@@ -2283,6 +2329,31 @@ final class PlaybackGraph {
         return (Int64((seconds * rate).rounded()), true)
     }
 
+    /// m39-w4-4 — one strip's clock fingerprint for its publish key, and the
+    /// input `ModulationSnapshotBuilder` compiles the clock from. nil when the
+    /// strip has no tempo-synced source (its key and snapshot are exactly what
+    /// they were before the clock existed) or when nothing rolls.
+    ///
+    /// Every value comes from the roll the MIDI and automation schedules were
+    /// built for: `fromBeat` and the tempo map from the roll context, the meter
+    /// staged by `scheduleAll`, and the loop's own `headSeconds` /
+    /// `cycleSeconds` from `loopUnroll` — the same Doubles every cycle block is
+    /// placed with, never recomputed. Because the key compares this value, an
+    /// edit to the tempo, the meter, the loop or the start beat rebuilds the
+    /// snapshot at the next publish; roll start re-runs the parameter pass
+    /// (`startAllPlayers`), so an edit made while stopped reaches the next roll.
+    private func modulationClockSpec(for strip: ModulationSnapshotBuilder.Strip) -> ModulationClockSpec? {
+        guard let context = automationRollContext,
+              ModulationSnapshotBuilder.hasSyncedSource(strip) else { return nil }
+        return ModulationClockSpec(
+            fromBeat: context.fromBeat, tempoMap: context.tempoMap, meterMap: rollMeterMap,
+            loop: loopUnroll.map {
+                ModulationClockSpec.Loop(startBeat: $0.loop.startBeat, endBeat: $0.loop.endBeat,
+                                         headSeconds: $0.headSeconds, cycleSeconds: $0.cycleSeconds)
+            },
+            sampleRate: graphFormat().sampleRate)
+    }
+
     /// Builds and publishes one strip's modulation snapshot to its automation
     /// renderer (P2/P3) and — on an instrument strip — to the instrument (P1).
     ///
@@ -2291,8 +2362,9 @@ final class PlaybackGraph {
     private func publishModulation(forTrack trackID: UUID,
                                    strip: ModulationSnapshotBuilder.Strip) {
         let origin = modulationOrigin()
+        let clock = modulationClockSpec(for: strip)
         let key = ModulationPublishKey(strip: strip, originSample: origin.sample,
-                                       positionValid: origin.valid)
+                                       positionValid: origin.valid, clock: clock)
         guard let renderer = automationRenderer(for: trackID) else { return }
         if let previous = publishedModulation[trackID], previous == key { return }
         if let previous = publishedModulation[trackID],
@@ -2307,7 +2379,7 @@ final class PlaybackGraph {
         let snapshot = ModulationSnapshotBuilder.build(
             strip: strip, generation: modulationGeneration,
             timelineID: automationRollTimelineID, sampleRate: graphFormat().sampleRate,
-            originSample: origin.sample, positionValid: origin.valid)
+            originSample: origin.sample, positionValid: origin.valid, clock: clock)
         renderer.publishModulation(snapshot)
         // P1: the instrument evaluates the same snapshot inside the per-frame
         // loop it already runs. Non-participating instruments inherit the
@@ -2320,8 +2392,9 @@ final class PlaybackGraph {
     private func publishMasterModulation(strip: ModulationSnapshotBuilder.Strip) {
         guard let renderer = masterAutomationRenderer else { return }
         let origin = modulationOrigin()
+        let clock = modulationClockSpec(for: strip)
         let key = ModulationPublishKey(strip: strip, originSample: origin.sample,
-                                       positionValid: origin.valid)
+                                       positionValid: origin.valid, clock: clock)
         if let previous = publishedMasterModulation, previous == key { return }
         if let previous = publishedMasterModulation,
            previous.structural == key.structural,
@@ -2334,7 +2407,7 @@ final class PlaybackGraph {
         renderer.publishModulation(ModulationSnapshotBuilder.build(
             strip: strip, generation: modulationGeneration,
             timelineID: automationRollTimelineID, sampleRate: graphFormat().sampleRate,
-            originSample: origin.sample, positionValid: origin.valid))
+            originSample: origin.sample, positionValid: origin.valid, clock: clock))
         publishedMasterModulation = key
     }
 
@@ -2381,7 +2454,8 @@ final class PlaybackGraph {
                 sampleRate: graphFormat().sampleRate,
                 generation: automationGeneration, mode: context.mode,
                 timelineID: automationRollTimelineID,
-                requireAnchor: requireAnchor)
+                requireAnchor: requireAnchor,
+                renderEndFrame: rollRenderEndFrame(context.mode))
         }
         return AutomationSchedule.build(
             volumeLane: volume, panLane: pan, effectParamLanes: effectParams,
@@ -2389,7 +2463,15 @@ final class PlaybackGraph {
             sampleRate: graphFormat().sampleRate,
             generation: automationGeneration, mode: context.mode,
             timelineID: automationRollTimelineID,
-            requireAnchor: requireAnchor)
+            requireAnchor: requireAnchor,
+            renderEndFrame: rollRenderEndFrame(context.mode))
+    }
+
+    /// m39-d CR-2: the render end an `.offline` roll's schedules carry; nil
+    /// for a live roll (cells are never capped there).
+    private func rollRenderEndFrame(_ mode: AutomationSchedule.Mode) -> Int64? {
+        if case .offline = mode { return offlineRenderEndFrame }
+        return nil
     }
 
     // MARK: - Master volume automation (m15-c)
@@ -2468,11 +2550,49 @@ final class PlaybackGraph {
     /// `engine.start()` and never ramps into the bounce head (the measured
     /// post-start outputVolume ramp leak). Live starts don't need this — the
     /// ~60 ms anchor lead-in absorbs the pin before schedule t=0.
-    func armOfflineAutomation(fromBeat: Double, tempoMap: TempoMap) {
+    ///
+    /// m39-w4-4b (W8-W44R Finding 1): the meter is staged WITH the roll
+    /// context, so the pre-start parameter passes compile a synced step
+    /// source's clock from the real map. `scheduleAll` restages the same map
+    /// next, so `startAllPlayers`' pass finds an equal publish key and
+    /// republishes nothing (before this, the bounce was right only because the
+    /// meter sits in the key and the start corrected it). nil means no meter
+    /// changes, the `scheduleAll` convention.
+    ///
+    /// m39-d CR-2 (design §5.5): `renderFrames` is the render's length in
+    /// frames, the SAME expression as the pull loop's total
+    /// (`OfflineRenderer.beginSession`). The control grid caps its last cell
+    /// there, so the bounce's partial last block keeps its own ramp span. It
+    /// defaults to nil ONLY for the test seams that arm a graph by hand (five
+    /// call sites in `Tests/`, none of them a bounce); the production bounce
+    /// states it, and plant P5 (drop it) turns the G1 byte gate red.
+    func armOfflineAutomation(fromBeat: Double, tempoMap: TempoMap, meterMap: MeterMap? = nil,
+                              renderFrames: Int? = nil) {
         automationRollContext = (fromBeat, tempoMap, .offline)
+        offlineRenderEndFrame = renderFrames.map { Int64($0) }
+        rollMeterMap = meterMap ?? MeterMap(constant: TimeSignature())
         automationGeneration += 1
         automationRollTimelineID = automationGeneration
     }
+
+    /// m39-w4-4d (W8-W44R N3): a METER edit while rolling. `scheduleAll` is the
+    /// only other writer of `rollMeterMap`, and a meter-only edit never
+    /// restarts the transport (`AudioEngine.metronomeChanged`), so without this
+    /// a synced step pattern kept its old origin until the next seek, tempo
+    /// edit or stop/play. Stages `meterMap` for the current (or next) roll and
+    /// returns whether a parameter pass must republish NOW: true only when the
+    /// map changed AND a roll is armed. While stopped the map is just staged
+    /// (`scheduleAll` restages the same one at the next start). An identical
+    /// map returns false, so a plain metronome toggle rebuilds nothing.
+    /// Main actor only, like every other roll-context write.
+    func restageRollMeterMap(_ meterMap: MeterMap) -> Bool {
+        guard meterMap != rollMeterMap else { return false }
+        rollMeterMap = meterMap
+        return automationRollContext != nil
+    }
+
+    /// TEST SEAM (m39-w4-4d): the meter map the roll's synced clocks compile from.
+    var rollMeterMapForTesting: MeterMap { rollMeterMap }
 
     private func addTrackNode(for trackID: UUID) -> TrackNode {
         let node = makeStripSandwich(for: trackID)
@@ -3301,8 +3421,13 @@ final class PlaybackGraph {
     /// inverts the m23-bp value proposition instead of extending it.
     func scheduleAll(fromBeat startBeats: Double, tempoMap: TempoMap,
                      loop: LoopWindow? = nil,
-                     cause: RescheduleCause = .relocation) {
+                     cause: RescheduleCause = .relocation,
+                     meterMap: MeterMap? = nil) {
         loopUnroll = nil
+        // m39-w4-4: the meter rolls with the tempo map (the modulation clock's
+        // pattern origin). nil means no meter changes — every caller that
+        // predates the clock.
+        rollMeterMap = meterMap ?? MeterMap(constant: TimeSignature())
         // Stage the timeline mapping the next startAllPlayers rolls
         // automation with (the pendingEvents convention).
         stagedAutomationStart = (startBeats, tempoMap)
@@ -4277,6 +4402,7 @@ final class PlaybackGraph {
         // resumes full fader/pan authority (the stopped-WYSIWYG values land
         // on the caller's next parameter pass).
         automationRollContext = nil
+        offlineRenderEndFrame = nil
         publishedAutomationLanes.removeAll()
         for trackID in trackIDs {
             automationRenderer(for: trackID)?.publish(nil)

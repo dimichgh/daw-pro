@@ -38,11 +38,35 @@ public struct SingWord: Equatable, Sendable {
     /// Every note of a unit belongs to exactly one word (the facade refuses
     /// anything else with `wordsDoNotCoverNotes`).
     public var noteIndices: [Int]
+    /// The language the facade sings this word in (p2-sing-x3, design
+    /// `docs/design/2026-10-06-p2-sing-expansion.md` §6.3): nil is English,
+    /// `"zh"` or `"yue"` a Chinese character or pinyin/jyutping syllable
+    /// (`LyricWord.language`). Folded into the plan's `signature` only when
+    /// set, so an English plan's signature is unchanged (design §9 S3).
+    ///
+    /// The request builder sends it as the word's `lang`
+    /// (`Sources/AIServices/SingJobRequest.swift`, `SingingPhraseWord`;
+    /// W8-XL), and the body is facade v2 only when a word carries one (§7.2).
+    public var language: String?
 
     public init(text: String, typed: String, noteIndices: [Int]) {
         self.text = text
         self.typed = typed
         self.noteIndices = noteIndices
+    }
+
+    /// A word sung in `language` (nil: English).
+    ///
+    /// A SEPARATE init, not a defaulted parameter on the old one: the old
+    /// init's symbol must stay, because `AIServicesTests` reaches DAWCore only
+    /// through `AIServices` and SwiftPM does not recompile it when DAWCore
+    /// changes (measured by W8-X3, 2026-10-06: its stale objects failed to
+    /// link against a defaulted-parameter init).
+    public init(text: String, typed: String, noteIndices: [Int], language: String?) {
+        self.text = text
+        self.typed = typed
+        self.noteIndices = noteIndices
+        self.language = language
     }
 }
 
@@ -293,7 +317,7 @@ public enum SingPlanner {
     /// chip shows are the words that are sung. A clip without lyrics throws
     /// `.noWords`.
     public static func assignment(for clip: Clip, tempoMap: TempoMap) throws(LyricRefusal) -> LyricAssignment {
-        try LyricNoteAssigner.assign(LyricTokenizer.tokenize(clip.lyrics?.text ?? ""),
+        try LyricNoteAssigner.assign(LyricTokenizer.tokenize(clip.lyrics?.text ?? "", language: clip.lyrics?.language),
                                      notes: melody(of: clip).notes,
                                      clipStartBeat: clip.startBeat, tempoMap: tempoMap)
     }
@@ -424,7 +448,8 @@ public enum SingPlanner {
                     words[words.count - 1].noteIndices.append(j)
                 } else {
                     words.append(SingWord(text: assignment.words[w].word.sung,
-                                          typed: assignment.words[w].word.typed, noteIndices: [j]))
+                                          typed: assignment.words[w].word.typed, noteIndices: [j],
+                                          language: assignment.words[w].word.language))
                     lastWord = w
                 }
             }
@@ -522,7 +547,10 @@ public enum SingPlanner {
     // MARK: The signature
 
     /// A digest of everything the render depends on, in a canonical text:
-    /// doubles by their bit patterns, word texts length-prefixed. Two passes
+    /// doubles by their bit patterns, word texts length-prefixed, a word's
+    /// language (`;l:zh`) ONLY when it has one, so a plan of English words
+    /// has the signature it had before languages existed (design
+    /// 2026-10-06 §9 S3, `SingPlannerTests.defaultSignatureUnchanged`). Two passes
     /// of 64-bit FNV-1a with different salts (the `Groove.builtinID`
     /// precedent), so no import beyond Foundation.
     static func signature(units: [SingUnit], t0Seconds: Double, atBeat: Double, octaveShift: Int) -> String {
@@ -536,6 +564,7 @@ public enum SingPlanner {
             for word in unit.words {
                 text += ";w:\(word.text.utf8.count):\(word.text)@"
                     + word.noteIndices.map(String.init).joined(separator: ",")
+                if let language = word.language { text += ";l:\(language)" }
             }
         }
         func fnv1a(salt: String) -> UInt64 {

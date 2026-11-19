@@ -602,56 +602,14 @@ struct ClipperTests {
 
     // MARK: - L12: the render path allocates NOTHING
 
-    private typealias MallocLoggerFn =
-        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
-
-    /// Heap cells, NOT stored properties: the hook runs INSIDE malloc with its
-    /// locks held, so it must never allocate nor trip a lazy global init.
-    private nonisolated(unsafe) static let eventCount =
-        UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private nonisolated(unsafe) static let watchedThread =
-        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-
-    private static let eventHook: MallocLoggerFn = { _, _, _, _, _, _ in
-        var tid: UInt64 = 0
-        pthread_threadid_np(nil, &tid)
-        if tid == ClipperTests.watchedThread.pointee {
-            ClipperTests.eventCount.pointee &+= 1
-        }
-    }
-
-    /// libmalloc's `malloc_logger` global. Nil is a FAILURE for the caller,
-    /// never a skip — a silently-absent probe is vacuity, not a pass.
-    private static func mallocLoggerSlot() -> UnsafeMutablePointer<MallocLoggerFn?>? {
-        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
-                              "malloc_logger") else { return nil }
-        return raw.assumingMemoryBound(to: MallocLoggerFn?.self)
-    }
-
-    /// ⛔⛔ SIBLING-IDENTICAL TO `FreqShifterTests`/`PhaserTests`/`RingModTests`
-    /// ON PURPOSE. Two local deviations (a Swift `Array` source instead of a raw
-    /// pointer, and a hand-made thread) once made this probe disagree with four
-    /// neighbours, and the neighbours were right. The `warmup` runs with the
-    /// hook live and the counter is zeroed afterwards, because Swift's
-    /// `static let` arrays allocate on FIRST TOUCH anywhere in the process.
-    private static func mallocEvents(
-        slot: UnsafeMutablePointer<MallocLoggerFn?>,
-        warmup: () -> Void = {}, _ body: () -> Void
-    ) -> Int {
-        pthread_threadid_np(nil, &watchedThread.pointee)
-        eventCount.pointee = 0
-        let previous = slot.pointee  // restore, don't assume it was nil
-        slot.pointee = eventHook
-        warmup()
-        eventCount.pointee = 0   // one-time lazy-global costs are not the measurement
-        body()
-        slot.pointee = previous
-        return eventCount.pointee
-    }
+    // The hook, the counter cells and the process-wide window lock live in
+    // `Support/MallocProbe.swift` (m39-test-mallocprobe): one measurement at a time.
+    // `warmup:` runs with the hook live and the counter is zeroed after it, because Swift's `static let` arrays
+    // allocate on FIRST TOUCH anywhere in the process.
 
     @Test("L12 — process() allocates NOTHING across 2 000 quanta, and it actually ran")
     func processIsAllocationFree() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("""
                 malloc_logger is unavailable — the allocation probe cannot run. \
                 FAILURE, not a skip.
@@ -681,7 +639,7 @@ struct ClipperTests {
         for frame in 0..<quantum { source[frame] = staged[frame] }
 
         var sum: Float = 0
-        let events = Self.mallocEvents(slot: slot, warmup: {
+        let events = MallocProbe.events(slot: slot, warmup: {
             var warm = 0
             while warm < 4 {
                 effect.storeAutomatedParam(slot: 0, value: Double(warm))
@@ -724,14 +682,14 @@ struct ClipperTests {
 
     @Test("L12b — POSITIVE CONTROL: the malloc probe can actually count")
     func theAllocationProbeCanSeeAnAllocation() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
             return
         }
         // ⭐ A zero from a probe that never fires and a zero from a render that
         // never allocates are the same number.
         var sink: [[Int]] = []
-        let events = Self.mallocEvents(slot: slot) {
+        let events = MallocProbe.events(slot: slot) {
             var index = 0
             while index < 200 {
                 sink.append([Int](repeating: index, count: 64))

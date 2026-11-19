@@ -9,7 +9,7 @@
   "genres": ["hip-hop", "r-and-b"],
   "tracks": [
     { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 0.5,
-      "instrument": { "kind": "drumSynth", "drumPreset": "808", "drumKit": { "noteLayout": "gm" } },
+      "instrument": { "kind": "drumSynth", "drumPreset": "808", "drumKit": { "noteLayout": "gm", "gain": 1 } },
       "sends": [ { "bus": "room", "level": 0.1 } ] },
     { "key": "sub-bass", "name": "808 Bass", "kind": "instrument", "volume": 0.71,
       "instrument": { "kind": "polySynth", "waveform": "sine", "attack": 0.002, "decay": 1.5, "sustain": 0.3,

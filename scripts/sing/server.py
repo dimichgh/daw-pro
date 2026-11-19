@@ -2,9 +2,12 @@
 docs/design/2026-09-27-p2-sing-integration.md §2.4, item p2-sing-b).
 
   GET  /health           {status: loading|ready|error, facadeVersion: 1, engine: {commit, weightsRevision,
-                          weightsBytes}, device: "mps", pid, loadSeconds, mpsDriverBytes, rendered, error?}
+                          weightsBytes}, device: "mps", pid, loadSeconds, mpsDriverBytes, rendered, error?,
+                          capabilities: {facadeVersions: [1, 2], controls: ["score"], languages: ["en", "zh", "yue"]}}
   POST /v1/sing/phrase   renders ONE unit synchronously, writes a float32 WAV, returns its facts
-                         (schema: singlib/schema.py; refusals: singlib/refusals.py)
+                         (schema: singlib/schema.py; refusals: singlib/refusals.py). A request may say
+                         facadeVersion 1 (unchanged) or 2 (optional `control`, per-word `lang`: design
+                         docs/design/2026-10-06-p2-sing-expansion.md §7); /health's facadeVersion stays 1.
 
 It binds 127.0.0.1 and refuses any other host. The socket opens BEFORE the model loads (eagerly, in a background
 thread), so /health answers "loading" and a render gets 503 until the model is ready: "ready" means ready.

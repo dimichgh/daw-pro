@@ -1,0 +1,297 @@
+{
+  "title": "What's new in DAW Pro: tune a voice, sing your words",
+  "_doc": "Stages in order. TALK = narration (vo/<id>.wav) over `shots`, cut on sentences by `cutOn` (sentence indices, resolved to `cutAt` seconds by sync-cuts.mjs from the take's own pauses). PLAY = loops/<loop> under bursts/<burst>/clip.mp4 (a screen take trimmed to the excerpt's first sample: sync-takes.py). Every play beat sets normalize:false — its level was set ONCE by cut-loops.py (an A/B pair shares one gain). Shots resolve against out/shots. Every number spoken is in work/measure/summary.json or loops/cuts.json, measured off the renders of the saved states that play under it.",
+  "video": {
+    "width": 1920,
+    "height": 1080,
+    "fps": 30,
+    "cut": 5,
+    "bed": 0.16,
+    "playMax": 14
+  },
+  "stages": [
+    {
+      "id": "open",
+      "narration": "This is DAW Pro. We'll write a short song, give it words, have the app sing them, and then tune that voice. Nobody sang into a microphone: the singer is DAW Pro's built-in voice, running on this Mac. Here's where we're headed.",
+      "shots": [
+        "../../bursts/open/prep.png"
+      ],
+      "loop": "open.wav",
+      "burst": "open",
+      "normalize": false,
+      "playMax": 8
+    },
+    {
+      "id": "drums",
+      "narration": "We start from an empty project. Drums first, from DAW Pro's own drum machine with its 909 kit. The step grid shows eight named rows, Kick up to Cymbal, and a new Accent row underneath: click a step there and every hit in it plays harder. I've left it empty.",
+      "shots": [
+        "s01-empty.png",
+        "s02-drums.png",
+        "s03-step-grid.png"
+      ],
+      "cutOn": [
+        1,
+        2
+      ],
+      "loop": "drums.wav",
+      "burst": "drums",
+      "normalize": false,
+      "playMax": 4.8,
+      "cutAt": [
+        1.75,
+        5.605
+      ]
+    },
+    {
+      "id": "band",
+      "narration": "Then a bass, and a soft pad playing four chords: B minor, G, D and A, round and round. That's the whole band.",
+      "shots": [
+        "s04-band.png"
+      ],
+      "loop": "band.wav",
+      "burst": "band",
+      "normalize": false,
+      "playMax": 6
+    },
+    {
+      "id": "lead",
+      "narration": "The tune gets its own track, called Lead: thirty-two notes across eight bars. For now, an electric piano plays it.",
+      "shots": [
+        "s05-lead-roll.png"
+      ],
+      "loop": "lead.wav",
+      "burst": "lead",
+      "normalize": false,
+      "playMax": 7
+    },
+    {
+      "id": "sheet",
+      "narration": "Now the words. Right-click the melody and choose Sing these notes. The sheet has three parts: Words, Voice and Height. I typed four lines of my own, one syllable per note. Height says the tune fits the voice. I add a harmony, a third above, and the sheet works out the key by itself: D major.",
+      "shots": [
+        "s06-sheet-empty.png",
+        "s07-sheet-words.png",
+        "s08-sheet-harmony.png"
+      ],
+      "cutOn": [
+        3,
+        5
+      ],
+      "stillsOnly": true,
+      "cutAt": [
+        6.342,
+        10.858
+      ]
+    },
+    {
+      "id": "singing",
+      "narration": "Press Sing it, and a card shows which line is being sung and roughly how long is left. It says Agent because I started this take from a script; the job is the same. Both parts took thirty-seven seconds.",
+      "shots": [
+        "s09-singing.png"
+      ],
+      "stillsOnly": true
+    },
+    {
+      "id": "sung",
+      "narration": "Two new tracks arrive: the lead vocal, and the harmony a third above. From here on the piano is muted, so the voice is on top.",
+      "shots": [
+        "s10-sung.png"
+      ],
+      "loop": "sung.wav",
+      "burst": "sung",
+      "normalize": false,
+      "playMax": 10
+    },
+    {
+      "id": "editor",
+      "narration": "Open the vocal in the note editor. It found thirty-three notes, plus twenty-one sounds with no pitch, like breaths, drawn as striped boxes. The white line is the pitch the singer actually sang. With Hear on, pressing a note plays just that note.",
+      "shots": [
+        "t01-editor.png",
+        {
+          "path": "t02-hear.png",
+          "zoom": [
+            0,
+            0.42,
+            0.62,
+            0.48
+          ]
+        }
+      ],
+      "cutOn": [
+        3
+      ],
+      "loop": "hear.wav",
+      "stillsOnly": true,
+      "normalize": false,
+      "playMax": 1.15,
+      "bedEligible": false,
+      "playShots": [
+        {
+          "path": "t02-hear.png",
+          "zoom": [
+            0,
+            0.42,
+            0.62,
+            0.48
+          ]
+        }
+      ],
+      "cutAt": [
+        10.047
+      ]
+    },
+    {
+      "id": "split",
+      "narration": "The Split tool shows its cut line before you cut. Here it would make two halves, of four hundred and ninety-six milliseconds each.",
+      "shots": [
+        {
+          "path": "t02b-cutline.png",
+          "zoom": [
+            0,
+            0.42,
+            0.62,
+            0.48
+          ]
+        }
+      ],
+      "stillsOnly": true
+    },
+    {
+      "id": "sour",
+      "narration": "Now I'll spoil this take on purpose, so there's something to fix. I select the last note of each line and drag one up, and the other three follow. Holding Option lets them sit between the keys: seventy cents sharp, about three quarters of a semitone. Measured on the sound, they now sit between sixty-five and seventy-six cents sharp. Listen to the line endings.",
+      "shots": [
+        "t03-selected.png",
+        "t04-dragging.png",
+        "t05-sour.png"
+      ],
+      "cutOn": [
+        2,
+        3
+      ],
+      "loop": "sour.wav",
+      "burst": "sour",
+      "normalize": false,
+      "playMax": 10,
+      "cutAt": [
+        6.382,
+        11.169
+      ]
+    },
+    {
+      "id": "ttm",
+      "narration": "Tune to Melody puts them back. Right-click the vocal, then Tune Vocal, then Tune to Melody. Each sung note moves to the melody note under it, and it found the right melody, Lead. Because I moved notes by hand, it asks first: replace your hand edits? Yes. Tuned twenty-nine notes to Lead.",
+      "shots": [
+        "t06-ttm-card.png",
+        "t06-ttm-replace.png",
+        "t06-ttm-done.png"
+      ],
+      "cutOn": [
+        3,
+        5
+      ],
+      "stillsOnly": true,
+      "cutAt": [
+        9.081,
+        13.876
+      ]
+    },
+    {
+      "id": "ttm-ab",
+      "narration": "Here are the first two lines, before and after. Their two spoiled notes go from seventy-five and sixty-five cents sharp, to seven and zero.",
+      "shots": [
+        "t09-tuned.png"
+      ],
+      "loop": "ttm-after.wav",
+      "burst": "ttm-after",
+      "normalize": false,
+      "ab": {
+        "before": "ttm-before.wav",
+        "beforeBurst": "ttm-before",
+        "seconds": 9.8,
+        "cycles": 1
+      }
+    },
+    {
+      "id": "hard",
+      "narration": "Tuning has styles. Natural, the one we used: every note lands in tune, and it still sounds like singing. Hard Tune: holds each note in tune, with less vibrato, the robot effect. Vibrato is the small wobble on a long note. The editor draws Hard Tune's notes almost flat, but measured on the sound it removes about half the wobble: on nine long notes, from seventy-eight cents top to bottom, down to thirty-eight. It's subtle on this voice, so here it is alone: Natural, then Hard Tune.",
+      "shots": [
+        "t09-tuned.png",
+        "t11-hard.png"
+      ],
+      "cutOn": [
+        4
+      ],
+      "loop": "hard-after.wav",
+      "burst": "hard-after",
+      "normalize": false,
+      "ab": {
+        "before": "hard-before.wav",
+        "beforeBurst": "hard-before",
+        "seconds": 8.8,
+        "cycles": 1
+      },
+      "cutAt": [
+        11.353
+      ]
+    },
+    {
+      "id": "size",
+      "narration": "Next, a big move: every note dragged down an octave. Keep voice size, at a hundred percent, keeps the voice its own size when notes move. Turned off, the voice follows the note. The editor warns it can sound squeaky, but that's for a jump up; going down, it turns into a slowed-down giant. Measured with it off, the centre of the voice's sound drops to fifty-three percent, like a tape at half speed, which measures fifty-four. At a hundred percent it stays at ninety-five. First off, then on.",
+      "shots": [
+        "t12-octave-drag.png",
+        "t13-octave-keep.png",
+        "t14-octave-off.png"
+      ],
+      "cutOn": [
+        1,
+        2
+      ],
+      "loop": "size-after.wav",
+      "burst": "size-after",
+      "normalize": false,
+      "ab": {
+        "before": "size-before.wav",
+        "beforeBurst": "size-before",
+        "seconds": 8,
+        "cycles": 1
+      },
+      "cutAt": [
+        2.778,
+        7.174
+      ]
+    },
+    {
+      "id": "voice",
+      "narration": "The Voice tool does this on purpose, one note at a time: drag a note down for a deeper voice, up for a brighter one, and the note itself stays. I made the whole last line deeper, by six. Measured, the centre of its sound drops fourteen percent, and the pitch doesn't move. It also gets quieter: the voice alone by about four decibels, the whole song by just over one. The last line, before and after.",
+      "shots": [
+        "t15-voice-drag.png",
+        "t16-line-deeper.png"
+      ],
+      "cutOn": [
+        1
+      ],
+      "loop": "voice-after.wav",
+      "burst": "voice-after",
+      "normalize": false,
+      "ab": {
+        "before": "voice-before.wav",
+        "beforeBurst": "voice-before",
+        "seconds": 7.8,
+        "cycles": 1
+      },
+      "cutAt": [
+        6.514
+      ]
+    },
+    {
+      "id": "close",
+      "narration": "That's what's new for voices: your words sung on your melody, a note editor you can hear, Tune to Melody, Hard Tune, and a voice that keeps its size. Here's the finished song.",
+      "shots": [
+        "../../bursts/close/prep.png"
+      ],
+      "loop": "close.wav",
+      "burst": "close",
+      "normalize": false,
+      "playMax": 8
+    }
+  ]
+}

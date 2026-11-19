@@ -469,7 +469,7 @@ private func renderVariant(set: String, variant: [String: Any], outDir: URL) asy
             case "track.setInstrument" where params["drumKit"] != nil:
                 // m39-tpl-4: the wire's `drumKit` object, ONE key of it only:
                 // `noteLayout`, overlaid onto the track's CURRENT kit exactly
-                // as the wire's `parseDrumKit(base: current)` does. The 75
+                // as the wire's `parseDrumKit(base: current)` does. The 77
                 // sound parameters stay refused here, for the transcription
                 // reason under `instrument.loadDrumPreset` below; use that verb
                 // or `instrument.setDrumParam` for them.

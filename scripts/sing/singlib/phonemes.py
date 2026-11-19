@@ -1,4 +1,4 @@
-"""g2p_en phonemizer for the facade (runtime venv only).
+"""g2p_en phonemizer for the facade (runtime venv only), and (facadeVersion 2) the Mandarin and Cantonese lexicon.
 
 The spike's rule (`score_from_notes.py` g2p()): `[t for t in G2p()(word.lower()) if t.strip() and t[0].isalpha()]`,
 with ONE measured correction for numbers and hyphens (design §3.2 "Numbers ... are sung through g2p_en's own
@@ -60,3 +60,98 @@ class G2PPhonemizer:
     def __call__(self, word):
         pre = self._normalize_numbers(word.lower()).replace("-", " ")
         return [t for t in self._g2p(pre) if t.strip() and t[0].isalpha()]
+
+
+# ------------------------------------------------------------------------- facadeVersion 2: Chinese (design §6.4)
+# Both libraries are already in requirements.lock and the installed venv (g2pm 0.1.2.5, tojyutping 3.2.0); NEITHER is
+# imported until the first request that has a Mandarin or Cantonese word, so an English-only process imports exactly
+# what it did before (test P8). Licences: g2pM is Apache 2.0, but its digest_cedict.pkl is CC-CEDICT content (CC BY-SA
+# 4.0); ToJyutping is BSD 2-Clause, its trie.txt's source is unstated. DAW Pro does not distribute either (the user's
+# Mac installs them from PyPI); see the x2 licence note before ever bundling them.
+
+def _rank(counts):
+    """{tone: count} -> tones, most common first; ties go to the lower tone number."""
+    return sorted(counts, key=lambda t: (-counts[t], t))
+
+
+class MandarinPhonemizer:
+    """g2pM over a run of Chinese characters, ONE syllable per character. char_split=True: with char_split=False
+    g2pM merges neighbouring digits and unknown characters into one item (measured 2026-10-06: 我20你 -> 3 items for
+    4 characters), which would shift every later syllable onto the wrong note; on all-Chinese runs the two agree.
+    An unknown character comes back as itself (喆 -> 喆) and a few have a two-syllable reading (shi2 ke4); the
+    converter refuses both as unknownPhone."""
+
+    def __init__(self):
+        from g2pM import G2pM
+        self._g = G2pM()
+        self._ranks = None
+
+    def syllables(self, chars):
+        return list(self._g(chars, tone=True, char_split=True))
+
+    def tone_rank(self, base):
+        """The tones of `base`, most common first, counted over g2pM's own dictionary (every reading of every
+        character), in memory, once per process [A: design §6.4; x9's character word check decides]."""
+        if self._ranks is None:
+            from . import langs
+            counts = {}
+            for prons in self._g.cedict.values():
+                for p in prons:
+                    if langs.is_syllable("zh", p):
+                        b, t = langs.split_tone(p)
+                        counts.setdefault(b, {}).setdefault(t, 0)
+                        counts[b][t] += 1
+            self._ranks = {b: _rank(c) for b, c in counts.items()}
+        return self._ranks.get(base, [])
+
+
+class CantonesePhonemizer:
+    """ToJyutping over a run of Chinese characters: get_jyutping_list gives one (character, jyutping or None) per
+    character, also inside a multi-character dictionary word (measured: 銀行 -> ngan4, hong4)."""
+
+    def __init__(self):
+        import ToJyutping
+        self._tj = ToJyutping
+        self._ranks = None
+
+    def syllables(self, chars):
+        return [j for _, j in self._tj.get_jyutping_list(chars)]
+
+    def tone_rank(self, base):
+        """The tones of `base`, most common first, counted over ToJyutping's own reading of every character in
+        U+4E00-U+9FFF taken alone (its public API; 0.14 s, measured), in memory, once per process [A]."""
+        if self._ranks is None:
+            from . import langs
+            counts = {}
+            for cp in range(0x4E00, 0xA000):
+                j = self._tj.get_jyutping_list(chr(cp))[0][1]
+                if langs.is_syllable("yue", j):
+                    b, t = langs.split_tone(j)
+                    counts.setdefault(b, {}).setdefault(t, 0)
+                    counts[b][t] += 1
+            self._ranks = {b: _rank(c) for b, c in counts.items()}
+        return self._ranks.get(base, [])
+
+
+class Lexicon:
+    """lang -> its phonemiser, built on first use (the converter's `lexicon`: syllables(lang, chars) and
+    tone_rank(lang, base)). Renders are serialized by the facade's one inference lock."""
+    FACTORIES = {"zh": MandarinPhonemizer, "yue": CantonesePhonemizer}
+
+    def __init__(self, factories=None):
+        self._factories = dict(self.FACTORIES if factories is None else factories)
+        self._made = {}
+
+    def _get(self, lang):
+        if lang not in self._made:
+            self._made[lang] = self._factories[lang]()
+        return self._made[lang]
+
+    def syllables(self, lang, chars):
+        return self._get(lang).syllables(chars)
+
+    def tone_rank(self, lang, base):
+        return self._get(lang).tone_rank(base)
+
+    def loaded(self):
+        return sorted(self._made)

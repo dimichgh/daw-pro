@@ -24,8 +24,17 @@ public struct LyricWord: Equatable, Sendable {
     /// reads it aloud (design §3.2).
     public var isNumber: Bool
     /// False when the word uses a letter or digit that is not English
-    /// ("café", "straße"). The assigner refuses the whole text then.
+    /// ("café", "straße", "我"). In an English clip the assigner refuses the
+    /// whole text then, exactly as before languages existed. A Chinese word
+    /// of a Chinese clip is not English either: it is sung because it has a
+    /// `language` (`isSingable`).
     public var isEnglish: Bool
+    /// The language this word is sung in (p2-sing-x3, design
+    /// `docs/design/2026-10-06-p2-sing-expansion.md` §6.3): nil is English.
+    /// Only a Chinese clip makes a word with a language: `"zh"` or `"yue"` on
+    /// each Han character and on each pinyin or jyutping syllable; its other
+    /// Latin words are English (nil), upstream's own rule.
+    public var language: String?
 
     public init(typed: String, sung: String, parts: [String], holds: Int = 0, line: Int = 0,
                 isNumber: Bool = false, isEnglish: Bool = true) {
@@ -37,6 +46,20 @@ public struct LyricWord: Equatable, Sendable {
         self.isNumber = isNumber
         self.isEnglish = isEnglish
     }
+
+    /// A word sung in `language` (nil: English). A separate init so the old
+    /// one's symbol stays (see `ClipLyrics.init(text:language:)`).
+    public init(typed: String, sung: String, parts: [String], holds: Int = 0, line: Int = 0,
+                isNumber: Bool = false, isEnglish: Bool = true, language: String?) {
+        self.init(typed: typed, sung: sung, parts: parts, holds: holds, line: line, isNumber: isNumber,
+                  isEnglish: isEnglish)
+        self.language = language
+    }
+
+    /// True when the word can be sung: an English word, or a word of the
+    /// clip's Chinese language. Anything else is refused by the assigner
+    /// (`LyricRefusal.forUnsingable`).
+    public var isSingable: Bool { isEnglish || language != nil }
 
     /// The notes the typed markup asks for: one per hyphen part, plus one per
     /// `+`. At least 1.
@@ -56,10 +79,20 @@ public struct LyricText: Equatable, Sendable {
     /// before it on the same line. Those marks are ignored, and the assigner
     /// says so with a warning.
     public var orphanHoldLines: [Int]
+    /// The clip's language as stored (`LyricLanguage.stored`: nil is
+    /// English), supported or not: the assigner refuses one it cannot sing.
+    public var language: String?
 
     public init(words: [LyricWord], orphanHoldLines: [Int] = []) {
         self.words = words
         self.orphanHoldLines = orphanHoldLines
+    }
+
+    /// The words of a clip whose language is `language` (stored: `"en"` is
+    /// nil). A separate init so the old one's symbol stays.
+    public init(words: [LyricWord], orphanHoldLines: [Int] = [], language: String?) {
+        self.init(words: words, orphanHoldLines: orphanHoldLines)
+        self.language = LyricLanguage.stored(language)
     }
 
     /// The NON-EMPTY lines, in order: each one the words of one text line.
@@ -102,6 +135,21 @@ public struct LyricText: Equatable, Sendable {
 /// - **Non-English words** (a letter or digit outside A–Z, a–z, 0–9) are
 ///   marked, and the assigner refuses the text with a sentence naming the
 ///   first one. Accents count as non-English, as the design states.
+/// - **Chinese clips** (`language` `"zh"` or `"yue"`, p2-sing-x3, design
+///   2026-10-06 §6.3): every Han character (`LyricLanguage.isHan`) is ONE word
+///   with ONE part, so it asks for one note, even with no space around it.
+///   A run of marks between two words is shared: an opening bracket or quote
+///   (「 《 （ “ …) goes with the word after it, every other mark (，。！？、」 + …)
+///   with the word before it, so `typed` keeps the punctuation and `+` holds
+///   the character before. A Latin word after a character starts a new word.
+///   A Latin word that is a pinyin syllable with its tone ("wo3", `"zh"`) or a
+///   jyutping one ("ngo5", `"yue"`) is ONE Chinese syllable, sung lowercased
+///   (`LyricLanguage.toneSyllable`). Any other Latin word in a Chinese clip
+///   is English, which is upstream's own rule
+///   (`upstream/preprocess/tools/g2p.py:49-55`: a word that is not one Chinese
+///   character is sung with the English front end). A token with no Han
+///   character is cut exactly as in an English clip. Any other code (and nil)
+///   tokenizes exactly as English always has.
 /// - **Numbers** are ONE lyric word each ("42", "2nd", "3.5", "1,000"), even
 ///   though they are sung as several ("forty two"). The facade expands a word
 ///   with g2p_en's own `normalize_numbers` and sings the whole expansion across
@@ -111,8 +159,17 @@ public struct LyricText: Equatable, Sendable {
 ///   facade's pre-step that makes this true. A lone "&" is sung as "and".
 public enum LyricTokenizer {
 
+    /// The words of `text`, in a clip whose language is `language` (nil:
+    /// English). Only `"zh"` and `"yue"` change how the text is cut.
+    public static func tokenize(_ text: String, language: String?) -> LyricText {
+        scan(text, language: language).text
+    }
+
+    /// The words of `text` in an English clip. A separate function from
+    /// `tokenize(_:language:)` so its symbol stays (see
+    /// `ClipLyrics.init(text:language:)`).
     public static func tokenize(_ text: String) -> LyricText {
-        scan(text).text
+        scan(text, language: nil).text
     }
 
     /// The characters read as an apostrophe and straightened to `'` before
@@ -129,8 +186,8 @@ public enum LyricTokenizer {
     ///
     /// It comes out of the SAME scan as `tokenize`, not a second parser, so
     /// a cut made here can never disagree with the words the assigner saw.
-    static func wordStartOffsets(_ text: String) -> [Int] {
-        scan(text).offsets
+    static func wordStartOffsets(_ text: String, language: String? = nil) -> [Int] {
+        scan(text, language: language).offsets
     }
 
     /// Cuts `text` in two so that words `0..<k` are on the left and the rest
@@ -141,11 +198,11 @@ public enum LyricTokenizer {
     /// goes right, verbatim. Only the whitespace at the very end of the left
     /// part is dropped (it separated the two halves). `k <= 0` puts all of
     /// the text right, `k >= ` the word count puts it all left.
-    static func cut(_ text: String, beforeWord k: Int) -> (left: String, right: String) {
-        let count = wordStartOffsets(text).count
+    static func cut(_ text: String, beforeWord k: Int, language: String? = nil) -> (left: String, right: String) {
+        let count = wordStartOffsets(text, language: language).count
         guard k > 0 else { return ("", text) }
         guard k < count else { return (text, "") }
-        return (slice(text, words: 0..<k), slice(text, words: k..<count))
+        return (slice(text, words: 0..<k, language: language), slice(text, words: k..<count, language: language))
     }
 
     /// The part of `text` that holds the words in `range`: from word
@@ -153,8 +210,8 @@ public enum LyricTokenizer {
     /// text when that is word 0) up to word `range.upperBound`'s (to the very
     /// end when there is none). When it stops before a word, the whitespace
     /// at its end is dropped. An empty range is "".
-    static func slice(_ text: String, words range: Range<Int>) -> String {
-        let offsets = wordStartOffsets(text)
+    static func slice(_ text: String, words range: Range<Int>, language: String? = nil) -> String {
+        let offsets = wordStartOffsets(text, language: language)
         guard !range.isEmpty, range.lowerBound < offsets.count else { return "" }
         let chars = Array(text)
         let start = range.lowerBound <= 0 ? 0 : offsets[range.lowerBound]
@@ -170,7 +227,9 @@ public enum LyricTokenizer {
     /// an array of `Character`s so that offsets into it are offsets into
     /// `text`: the curly map is one character for one, and `separatingWords`
     /// keeps the line's length.
-    private static func scan(_ text: String) -> (text: LyricText, offsets: [Int]) {
+    private static func scan(_ text: String, language: String?) -> (text: LyricText, offsets: [Int]) {
+        let stored = LyricLanguage.stored(language)
+        let chinese = LyricLanguage.isChinese(stored) ? stored : nil
         var words: [LyricWord] = []
         var offsets: [Int] = []
         var orphanHoldLines: [Int] = []
@@ -195,6 +254,29 @@ public enum LyricTokenizer {
                     lineWords[lineWords.count - 1].holds += count
                 }
             }
+            // One token (`line[start..<end]`, or one piece of one in a Chinese
+            // clip) into at most one word.
+            func addToken(_ start: Int, _ end: Int) {
+                var token = String(line[start..<end])
+                let length = token.count
+                let leading = peelMarks(&token, fromEnd: false)
+                let wordStart = lineStart + start + (length - token.count)
+                let trailing = peelMarks(&token, fromEnd: true)
+                addHolds(leading)
+                if token == "&" {
+                    lineWords.append(LyricWord(typed: "&", sung: "and", parts: ["and"], holds: trailing,
+                                               line: lineIndex))
+                    offsets.append(wordStart)
+                    return
+                }
+                guard var word = makeWord(typed: token, line: lineIndex, chinese: chinese) else {
+                    addHolds(trailing)          // "!+" : the mark still belongs to the word before
+                    return
+                }
+                word.holds = trailing
+                lineWords.append(word)
+                offsets.append(wordStart)
+            }
             // Tokens: the runs of non-whitespace, as `split(whereSeparator:
             // \.isWhitespace)` would cut them.
             var k = 0
@@ -202,32 +284,62 @@ public enum LyricTokenizer {
                 guard !line[k].isWhitespace else { k += 1; continue }
                 let tokenStart = k
                 while k < line.count, !line[k].isWhitespace { k += 1 }
-                var token = String(line[tokenStart..<k])
-                let length = token.count
-                let leading = peelMarks(&token, fromEnd: false)
-                let wordStart = lineStart + tokenStart + (length - token.count)
-                let trailing = peelMarks(&token, fromEnd: true)
-                addHolds(leading)
-                if token == "&" {
-                    lineWords.append(LyricWord(typed: "&", sung: "and", parts: ["and"], holds: trailing,
-                                               line: lineIndex))
-                    offsets.append(wordStart)
-                    continue
+                if chinese != nil {
+                    for piece in hanPieces(line, tokenStart..<k) { addToken(piece.lowerBound, piece.upperBound) }
+                } else {
+                    addToken(tokenStart, k)
                 }
-                guard var word = makeWord(typed: token, line: lineIndex) else {
-                    addHolds(trailing)          // "!+" : the mark still belongs to the word before
-                    continue
-                }
-                word.holds = trailing
-                lineWords.append(word)
-                offsets.append(wordStart)
             }
             words += lineWords
             guard lineEnd < straightened.count else { break }
             lineStart = lineEnd + 1
             lineIndex += 1
         }
-        return (LyricText(words: words, orphanHoldLines: orphanHoldLines), offsets)
+        return (LyricText(words: words, orphanHoldLines: orphanHoldLines, language: stored), offsets)
+    }
+
+    // MARK: - Chinese clips: one word per Han character
+
+    /// The pieces one whitespace token of a Chinese clip is cut into: a cut
+    /// before every Han character, and before a Latin word that follows one,
+    /// except before the token's first such word. The marks between two words
+    /// stay with the word before, except a run of opening brackets or quotes
+    /// right before the next word, which goes with it. A token with no Han
+    /// character is one piece, so it is cut exactly as in an English clip.
+    static func hanPieces(_ line: [Character], _ token: Range<Int>) -> [Range<Int>] {
+        var cuts: [Int] = []
+        var lastWordCharacter: Int?             // where the previous word's last letter is
+        var lastWasHan = false
+        for i in token {
+            let ch = line[i]
+            let han = LyricLanguage.isHan(ch)
+            guard han || ch.isLetter || ch.isNumber else { continue }
+            if let previous = lastWordCharacter, han || lastWasHan {
+                var cut = i
+                while cut - 1 > previous, isOpening(line[cut - 1]) { cut -= 1 }
+                cuts.append(cut)
+            }
+            lastWordCharacter = i
+            lastWasHan = han
+        }
+        var pieces: [Range<Int>] = []
+        var start = token.lowerBound
+        for cut in cuts {
+            pieces.append(start..<cut)
+            start = cut
+        }
+        pieces.append(start..<token.upperBound)
+        return pieces
+    }
+
+    /// An opening bracket or quote: Unicode's "open punctuation" (「 《 （ ( [)
+    /// or "initial quote" (“). It belongs to the word after it.
+    private static func isOpening(_ character: Character) -> Bool {
+        guard let scalar = character.unicodeScalars.first else { return false }
+        switch scalar.properties.generalCategory {
+        case .openPunctuation, .initialPunctuation: return true
+        default: return false
+        }
     }
 
     // MARK: - Pieces
@@ -290,8 +402,30 @@ public enum LyricTokenizer {
     }
 
     /// One word from a token with its marks already peeled, or nil when the
-    /// token is only punctuation.
-    private static func makeWord(typed: String, line: Int) -> LyricWord? {
+    /// token is only punctuation. `chinese` is the clip's code when it is a
+    /// Chinese clip (`"zh"` or `"yue"`), else nil.
+    private static func makeWord(typed: String, line: Int, chinese: String?) -> LyricWord? {
+        if let chinese, let han = typed.first(where: { LyricLanguage.isHan($0) }) {
+            // A piece of a Chinese clip holds at most one Han character
+            // (`hanPieces`): it is the word, its marks are only typed.
+            return LyricWord(typed: typed, sung: String(han), parts: [String(han)], holds: 0, line: line,
+                             isNumber: false, isEnglish: false, language: chinese)
+        }
+        guard var word = makeLatinWord(typed: typed, line: line) else { return nil }
+        if let chinese, word.parts.count == 1, let syllable = LyricLanguage.toneSyllable(word.sung, language: chinese) {
+            // "wo3": one Chinese syllable, sung as the engine's table spells it.
+            word.sung = syllable
+            word.parts = [syllable]
+            word.isNumber = false
+            word.isEnglish = false
+            word.language = chinese
+        }
+        return word
+    }
+
+    /// `makeWord` for every word that is not a Han character: the English
+    /// rules, unchanged since before languages existed.
+    private static func makeLatinWord(typed: String, line: Int) -> LyricWord? {
         let chars = Array(typed)
         var parts: [String] = []
         var current = ""

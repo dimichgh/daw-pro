@@ -181,3 +181,19 @@ final class InputCapture {
         }
     }
 }
+
+/// What the input-only capture (p2-sing-e, "Add your voice") needs from a
+/// capture source: exactly `InputCapture`'s own surface, so the real engine
+/// records through the SAME object a take does. Tests substitute a synthetic
+/// source that hands buffers to the writer directly (no microphone, no TCC
+/// prompt, no device).
+@MainActor
+protocol InputCaptureSource: AnyObject {
+    var deviceUID: String? { get set }
+    var configurationChangeHandler: (() -> Void)? { get set }
+    func prepare() throws -> AVAudioFormat
+    func start(writer: RecordingWriter) throws
+    func stop()
+}
+
+extension InputCapture: InputCaptureSource {}

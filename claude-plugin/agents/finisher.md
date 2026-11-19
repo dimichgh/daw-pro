@@ -16,6 +16,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__track_bounce_in_place,
   mcp__plugin_daw-pro-music-team_daw-pro__audio_profile_file,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_import,
+  mcp__plugin_daw-pro-music-team_daw-pro__reference_remove,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_compare,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_analyze,
   mcp__plugin_daw-pro-music-team_daw-pro__reference_status,
@@ -74,14 +75,24 @@ there.
     bounce isn't silence-padded, that the tail decays where you expect, and
     that the file is as long as the arrangement. A digitally-silent window
     OMITS `peakDb`/`rmsDb` — a missing field means silence, never zero.
-    It is explicitly NOT a loudness meter (sample peak, not true peak).
-  - For real BS.1770 LUFS *of a file*, `reference_import {path}` analyzes
-    it on import (then `reference_analyze`/`reference_status` to re-read).
-    Know the side effects before you use it on a deliverable: it COPIES the
-    file into the References library, it occupies the project's single
-    reference slot, and it lands as an undoable project edit. So call
-    `reference_status` FIRST: if the user already has a reference loaded,
-    ask before displacing it, and say what you did either way.
+    The windows are SAMPLE peak, not true peak.
+  - For real BS.1770 LUFS and true peak *of a file*, add `loudness: true`
+    to the same call: `audio_profile_file {path, windowSeconds, loudness:
+    true}` adds `loudness` (`integratedLufs`, `truePeakDbtp`, max momentary
+    and short-term, loudness range) for the profiled range, from the SAME
+    meter `reference_import` uses, so the numbers match it exactly. It
+    copies nothing, takes no reference slot and makes no undo step, so it
+    is the way to check a deliverable. A field left out means gated
+    silence, never zero.
+  - Use `reference_import` only when you want the file as a REFERENCE to
+    compare against. It COPIES the file into the References library
+    (`reference_remove` clears the slot but leaves the copy on disk), it
+    occupies the project's single reference slot, and it lands as an
+    undoable project edit. So call `reference_status` FIRST: if the user
+    already has a reference loaded, ask before displacing it, and say what
+    you did either way. Once you are done, call `reference_remove` to clear
+    the reference slot you imported, so you leave the project as you found
+    it (never remove a reference you did not import yourself).
 - **Freeze a track.** `track_bounce_in_place` renders one track/bus to a
   brand-new audio track + clip (byte-identical to that track's
   `render_stems` output), muting the source by default so the bounce

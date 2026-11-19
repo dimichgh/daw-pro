@@ -79,50 +79,8 @@ struct InsertSpectrumTapTests {
     // severe, independently-detectable RT-safety violation, not a leak this
     // probe was ever positioned to catch.
 
-    private typealias MallocLoggerFn =
-        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
-
-    /// Heap cells, NOT Swift stored properties: the hook runs INSIDE malloc
-    /// with its locks held, so it must never allocate and never trip a lazy
-    /// global initializer. `mallocEvents` touches both cells before it
-    /// installs the hook, which is what guarantees their `swift_once` tokens
-    /// are already resolved by the time the hook can fire.
-    private nonisolated(unsafe) static let eventCount =
-        UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private nonisolated(unsafe) static let watchedThread =
-        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-
-    private static let eventHook: MallocLoggerFn = { _, _, _, _, _, _ in
-        var tid: UInt64 = 0
-        pthread_threadid_np(nil, &tid)  // no allocation, safe under malloc
-        if tid == InsertSpectrumTapTests.watchedThread.pointee {
-            InsertSpectrumTapTests.eventCount.pointee &+= 1
-        }
-    }
-
-    /// The address of libmalloc's `malloc_logger` global, or nil if the
-    /// symbol ever goes away. Nil is treated as a FAILURE by the caller, not
-    /// as a skip — a silently-absent allocation probe is exactly the vacuity
-    /// this leg exists to prevent.
-    private static func mallocLoggerSlot() -> UnsafeMutablePointer<MallocLoggerFn?>? {
-        // RTLD_DEFAULT: search every loaded image.
-        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
-                              "malloc_logger") else { return nil }
-        return raw.assumingMemoryBound(to: MallocLoggerFn?.self)
-    }
-
-    /// malloc + free events raised BY THE CALLING THREAD while `body` runs.
-    private static func mallocEvents(
-        slot: UnsafeMutablePointer<MallocLoggerFn?>, _ body: () -> Void
-    ) -> Int {
-        pthread_threadid_np(nil, &watchedThread.pointee)
-        eventCount.pointee = 0
-        let previous = slot.pointee  // restore, don't assume it was nil
-        slot.pointee = eventHook
-        body()
-        slot.pointee = previous
-        return eventCount.pointee
-    }
+    // The hook, the counter cells and the process-wide window lock live in
+    // `Support/MallocProbe.swift` (m39-test-mallocprobe): one measurement at a time.
 
     private static let sampleRate = 48_000.0
     private static let bandCount = MasterAnalysisSnapshot.bandCount
@@ -792,7 +750,7 @@ struct InsertSpectrumTapTests {
 
     @Test("write() allocates nothing across 10_000 quanta — retained AND transient — and the ring advanced while it didn't")
     func writeIsAllocationFreeAndActuallyRan() {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — the allocation probe cannot run. Treat this as a FAILURE, not a skip.")
             return
         }
@@ -818,7 +776,7 @@ struct InsertSpectrumTapTests {
         eventCounts.reserveCapacity(windows)
         var window = 0
         while window < windows {
-            let events = Self.mallocEvents(slot: slot) {
+            let events = MallocProbe.events(slot: slot) {
                 var call = 0
                 while call < perWindow {
                     tap.write(buffers: feeder.list, frameCount: quantum)
@@ -844,7 +802,7 @@ struct InsertSpectrumTapTests {
         var controlEvents: [Int] = []
         var controlWindow = 0
         while controlWindow < windows {
-            let events = Self.mallocEvents(slot: slot) {
+            let events = MallocProbe.events(slot: slot) {
                 var call = 0
                 while call < perWindow {
                     sink.append([Float](repeating: 0, count: 8))

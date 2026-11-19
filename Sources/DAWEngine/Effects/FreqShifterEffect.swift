@@ -373,6 +373,13 @@ final class FreqShifterEffect: EffectRendering, @unchecked Sendable {
         phaseL = 0
         phaseR = 0
         needsPrime = true
+        // m39-d CR-2: a reset drops the ramp in flight (`needsPrime` re-seats
+        // the values); the cell geometry is the renderer's and stays.
+        rampFramesLeft = 0
+        rampIncrementLDelta = 0
+        rampIncrementRDelta = 0
+        rampMixDelta = 0
+        rampWetGainDelta = 0
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — the retire bin
@@ -417,6 +424,7 @@ final class FreqShifterEffect: EffectRendering, @unchecked Sendable {
         // signal directly, so linear is what must be continuous, and it saves a
         // `pow` per sample on the render thread.
         targetWetGain = pow(10.0, db / 20.0)
+        rampPending = true  // m39-d CR-2: the next `process` starts a ramp
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). ⛔ SLOT ORDER IS
@@ -465,6 +473,49 @@ final class FreqShifterEffect: EffectRendering, @unchecked Sendable {
         return y
     }
 
+    // MARK: - m39-d CR-2: the control cell (docs/design/2026-10-07-effect-control-rate.md §5.4)
+    //
+    // Render-thread only. A ramp starts in the `process` call after a derive
+    // (`rampPending`). On the control grid (`cellFramesLeft` covers the whole
+    // call) it spans the REST OF THE CELL and carries across calls; off it,
+    // it spans the call, exactly as before the grid. A ramp in flight that
+    // would end INSIDE a call is re-spanned over that call, so no ramp ever
+    // ends mid-call and the per-sample loop is untouched. In a 512 bounce the
+    // cell is the call: the same delta expression, run the same number of
+    // times (G1 byte gate).
+    /// Frames from the next `process` call to the next control-cell line
+    /// (0 = off the grid). Set by `beginControlCell`, counted down here.
+    private var cellFramesLeft = 0
+    /// Frames left in the ramp in flight (0 = values sit at their targets).
+    private var rampFramesLeft = 0
+    /// A derive landed since the ramp in flight began.
+    private var rampPending = false
+    /// The ramp in flight's per-frame steps (carried across calls; 0 at rest).
+    private var rampIncrementLDelta = 0.0
+    private var rampIncrementRDelta = 0.0
+    private var rampMixDelta = 0.0
+    private var rampWetGainDelta = 0.0
+    /// The per-channel carrier increments a ramp in flight has reached. The
+    /// `previous*` shift/spread pair cannot carry them (they are what the
+    /// increments are DERIVED from), so mid-ramp these are the start point.
+    private var carriedIncrementL = 0.0
+    private var carriedIncrementR = 0.0
+
+    /// m39-d CR-1 (design §5.3): the automated values stored at this control
+    /// cell's entry still stand. Adopt FIRST, so a knob publish waiting in the
+    /// slot is seen now, as a store would see it (then `overlay.hold()`
+    /// answers false and the renderer re-stores). Render thread; no allocation.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): the ramp toward a new value spans the
+    /// rest of the cell (`frames`), carried across calls, instead of one call.
+    func beginControlCell(frames: Int) {
+        cellFramesLeft = max(0, frames)
+    }
+
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
         adoptPendingParams()
         // Automation lane(s) vanished: knob params restore, no republish.
@@ -507,14 +558,30 @@ final class FreqShifterEffect: EffectRendering, @unchecked Sendable {
         // Covered by L7b, which renders mono and asserts 1204 Hz is empty.
         let targetIncrementL = targetShiftIncrement + (stereo ? targetSpreadHalf : 0)
         let targetIncrementR = targetShiftIncrement - targetSpreadHalf
-        let previousIncrementL = previousShiftIncrement + (stereo ? previousSpreadHalf : 0)
-        let previousIncrementR = previousShiftIncrement - previousSpreadHalf
+        // m39-d CR-2: mid-ramp the increments start where the last call left
+        // them; at rest they are derived from `previous*` exactly as before.
+        let inFlight = rampFramesLeft > 0
+        let previousIncrementL = inFlight
+            ? carriedIncrementL : previousShiftIncrement + (stereo ? previousSpreadHalf : 0)
+        let previousIncrementR = inFlight
+            ? carriedIncrementR : previousShiftIncrement - previousSpreadHalf
 
-        let span = Double(minFrames)
-        let incrementLDelta = (targetIncrementL - previousIncrementL) / span
-        let incrementRDelta = (targetIncrementR - previousIncrementR) / span
-        let mixDelta = (targetMix - previousMix) / span
-        let wetGainDelta = (targetWetGain - previousWetGain) / span
+        // m39-d CR-2: start (or re-span) the ramp — see the MARK above. The
+        // delta expressions are the pre-grid ones, verbatim.
+        if rampPending || (rampFramesLeft > 0 && rampFramesLeft < minFrames) {
+            rampPending = false
+            let rampFrames = cellFramesLeft >= minFrames ? cellFramesLeft : minFrames
+            let span = Double(rampFrames)
+            rampIncrementLDelta = (targetIncrementL - previousIncrementL) / span
+            rampIncrementRDelta = (targetIncrementR - previousIncrementR) / span
+            rampMixDelta = (targetMix - previousMix) / span
+            rampWetGainDelta = (targetWetGain - previousWetGain) / span
+            rampFramesLeft = rampFrames
+        }
+        let incrementLDelta = rampIncrementLDelta
+        let incrementRDelta = rampIncrementRDelta
+        let mixDelta = rampMixDelta
+        let wetGainDelta = rampWetGainDelta
 
         var incrementL = previousIncrementL
         var incrementR = previousIncrementR
@@ -621,6 +688,23 @@ final class FreqShifterEffect: EffectRendering, @unchecked Sendable {
 
         phaseL = phL
         phaseR = phR
+
+        // m39-d CR-2: a ramp still in flight carries what it reached; at the
+        // ramp's end the values are SNAPPED to their targets, exactly as every
+        // call end did before the grid (and still does off it).
+        rampFramesLeft = rampFramesLeft > minFrames ? rampFramesLeft - minFrames : 0
+        cellFramesLeft = cellFramesLeft > minFrames ? cellFramesLeft - minFrames : 0
+        if rampFramesLeft > 0 {
+            carriedIncrementL = incrementL
+            carriedIncrementR = incrementR
+            previousMix = mix
+            previousWetGain = wetGain
+            return
+        }
+        rampIncrementLDelta = 0
+        rampIncrementRDelta = 0
+        rampMixDelta = 0
+        rampWetGainDelta = 0
 
         // SNAPPED to this quantum's targets rather than left at whatever the
         // accumulation landed on (the `StereoWidthEffect` rule): a value that

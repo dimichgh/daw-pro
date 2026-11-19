@@ -10,6 +10,11 @@ final class PassthroughEffect: EffectRendering, @unchecked Sendable {
     func prepare(sampleRate: Double, maxFramesPerQuantum: Int, channelCount: Int) {}
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {}
     func reset() {}
+    /// m39-d CR-1: no automated params (the protocol's default store is inert), so nothing can
+    /// fail to stand.
+    func holdAutomatedParams() -> Bool { true }
+    /// m39-d CR-2: no-op — a bit-exact passthrough has nothing to ramp.
+    func beginControlCell(frames: Int) {}
 }
 
 /// Maps `EffectDescriptor` → live `EffectRendering` instance, for the live

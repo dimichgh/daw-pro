@@ -318,4 +318,65 @@ struct MetronomeMeterMapTests {
         print("[measured] m15a live smoke: all four live schedule paths handed "
               + "the Metronome the 2-change map (4/4@0, 3/4@8) verbatim")
     }
+
+    // MARK: - m39-w4-4d (W8-W44F): a meter edit reaches the synced clock (W8-W44R N3)
+
+    /// ⭐ T-N3a, headless pin: the meter-only intent (`metronomeChanged`, which
+    /// the store sends for a meter edit and its undo/redo) restages the graph's
+    /// ROLL meter map too, not only the click's cache. Headless-safe: the
+    /// restage runs before the intent's live-scheduling guard.
+    @Test("m39-w4-4d T-N3a: metronomeChanged restages the graph's roll meter map, never only the click cache")
+    func w44fMeterEditRestagesTheRollMeter() throws {
+        let engine = AudioEngine()
+        var transport = TransportState()
+        engine.metronomeChanged(transport)
+        #expect(engine.graph.rollMeterMapForTesting == MeterMap(constant: TimeSignature()))
+
+        transport.meterMapOverride = try auditMeterMap()
+        engine.metronomeChanged(transport)
+        #expect(engine.graph.rollMeterMapForTesting == transport.meterMap)
+        #expect(engine.graph.rollMeterMapForTesting.changes.count == 2)
+        #expect(engine.clickMeterMapForTesting == transport.meterMap)
+    }
+
+    /// ⭐ T-N3c, the engine leg WHILE A ROLL IS ARMED (headless: the live graph's
+    /// roll context is armed through the offline seam, which is the state
+    /// `metronomeChanged` meets while the transport rolls, without a device).
+    /// A meter edit must republish the synced strip's clock at once (two
+    /// segments: the change at beat 8), from BEFORE the intent's anchor guard,
+    /// which returns early here. A plain metronome toggle with the same meter
+    /// republishes nothing.
+    @Test("m39-w4-4d T-N3c: a meter edit through metronomeChanged republishes a synced strip's clock while a roll is armed; a toggle does not")
+    func w44fMeterEditWhileRollingRepublishesTheClock() throws {
+        let engine = AudioEngine()
+        let source = ModulationSource(kind: .stepSequencer, params: .stepSequencer(
+            StepSequencerSourceParams(steps: [1, 0, 0], stepDivision: "1/4")))
+        var track = Track(name: "Synced", kind: .audio, clips: [])
+        track.modulationSources = [source]
+        track.modulationRoutes = [ModulationRoute(sourceID: source.id, target: .volume, depth: -0.5)]
+        engine.tracksDidChange([track])
+        engine.graph.armOfflineAutomation(fromBeat: 0, tempoMap: TempoMap(constantBPM: 120))
+        engine.graph.applyParameters(tracks: [track])
+        func current() -> (generation: UInt64?, segments: Int?) {
+            let snapshot = engine.graph.automationRenderer(forTrack: track.id)?.currentModulation
+            return (snapshot?.generation, snapshot?.clock.count)
+        }
+        let armed = current()
+
+        var transport = TransportState()
+        transport.isMetronomeEnabled = true            // a toggle: same (constant) meter
+        engine.metronomeChanged(transport)
+        let toggled = current()
+
+        transport.meterMapOverride = try auditMeterMap()   // 4/4, then 3/4 from beat 8
+        engine.metronomeChanged(transport)
+        let edited = current()
+        print("[measured] W44F T-N3c generation/segments: armed \(String(describing: armed)), after a "
+              + "toggle \(String(describing: toggled)), after the meter edit \(String(describing: edited))")
+        #expect(armed.generation != nil)
+        #expect(armed.segments == 1)
+        #expect(toggled.generation == armed.generation, "a toggle with an unchanged meter must republish nothing")
+        #expect(edited.generation != armed.generation, "the meter edit must republish the synced strip")
+        #expect(edited.segments == 2, "the republished clock carries the change at beat 8")
+    }
 }

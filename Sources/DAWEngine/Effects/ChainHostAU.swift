@@ -310,14 +310,16 @@ final class ChainHostAU: AUAudioUnit {
                 automation.apply(bufferList: outputData, frameCount: frames,
                                  timestamp: timestamp)
             }
-            // Effect-param automation FIRST (M4 vii-c): quantum-start values
-            // stored into the live units so the walk below renders with them.
-            // No-op while no effect-param track is published.
-            automation.storeEffectParams(chain: processor, frameCount: frames,
-                                         timestamp: timestamp)
-            // Walk the published chain in place, handing the key buffer (nil
-            // = every unit self-keyed). Empty chain: no-op.
-            processor.process(bufferList: outputData, frameCount: frames, key: keyList)
+            // Effect-param automation, then the walk (M4 vii-c; m39-d CR-1):
+            // ONE call. Values are stored once per 512-frame control cell
+            // counted from the roll start, and a call that crosses a cell line
+            // walks the chain in two segments — so a strip sounds the same at
+            // any device buffer as in the bounce. A strip with no effect-param
+            // track walks exactly as before (one store-free walk). The key
+            // buffer rides along (nil = every unit self-keyed). Empty chain:
+            // no-op.
+            automation.renderChain(chain: processor, bufferList: outputData,
+                                   frameCount: frames, key: keyList, timestamp: timestamp)
             // PDC compensation ring (M4 viii-b): post-chain, pre-fader —
             // aligns this strip's output (and every send tap downstream)
             // to the stage target. Bit-exact no-op at target 0.

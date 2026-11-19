@@ -178,9 +178,21 @@ extension TemplateReader {
 
     // MARK: - Drum machine
 
-    /// `drumPreset` first — the whole kit of that factory preset, matched
-    /// without regard to case — then `drumKit` over it. Neither: the factory
-    /// kit, left implicit (`drumKit: nil`), exactly as a fresh drum machine.
+    /// W9-DRUMDEF — A TEMPLATE'S DRUM MACHINE IS A NEW ONE, and its kit is
+    /// written into the track EXPLICITLY: a nil kit means "a drum machine saved
+    /// before the user's picks" and plays the old factory kit forever.
+    ///   · `drumPreset`: that factory preset's sound, matched without regard to
+    ///     case, in a NEW drum machine's layout (`applyingPreset` onto
+    ///     `newDrumMachineKit`): General MIDI keys, the preset's own (new-kit)
+    ///     hat and cymbal levels and its new-kit gain (W9-HEAD's headroom). Then
+    ///     `drumKit` over it: the built-in templates name the kit `gain` they
+    ///     always played at (1, `lofi` 0.9) there, so they play exactly as they
+    ///     did.
+    ///   · neither: `DrumKitParams.newDrumMachineKit`, the user's picks.
+    ///   · `drumKit` alone: over the FACTORY kit `DrumKitParams()`, unchanged.
+    ///     ⛔ That is the base `TemplateCapture.drumKitObject` writes a kit
+    ///     against, so every template already saved reads back exactly as it
+    ///     was saved (a saved template never carries `drumPreset`).
     mutating func readDrumMachine(_ object: [String: TemplateJSON],
                                   _ path: String) throws -> InstrumentDescriptor {
         var kit: DrumKitParams?
@@ -188,7 +200,7 @@ extension TemplateReader {
             let presetPath = Self.join(path, "drumPreset")
             let name = try string(raw, presetPath)
             if let preset = DrumKitParams.preset(named: name) {
-                kit = preset.params
+                kit = DrumKitParams.newDrumMachineKit.applyingPreset(preset)
             } else {
                 let known = DrumKitParams.presets.map(\.name).joined(separator: ", ")
                 try refuseOrSkip(
@@ -197,21 +209,25 @@ extension TemplateReader {
                                         + "are: \(known)."),
                     .unknownPresetSkipped,
                     "the drum kit '\(name)' comes from a newer version of DAW Pro, so the "
-                        + "drum machine starts from its factory kit.")
+                        + "drum machine starts as a new one would.")
             }
         }
         if let raw = object["drumKit"] {
             kit = try readDrumKit(raw, Self.join(path, "drumKit"), base: kit ?? DrumKitParams())
         }
-        return InstrumentDescriptor(kind: .drumSynth, drumKit: kit)
+        return InstrumentDescriptor(kind: .drumSynth, drumKit: kit ?? DrumKitParams.newDrumMachineKit)
     }
 
     /// The fields of `DrumKitParams` this reader writes: the eight voices and
     /// the four kit-wide settings. `TrackSetTemplateCodecTests` compares this
     /// with the struct's stored properties, so a new field (TPL-0's
     /// `noteLayout`) cannot arrive unread.
+    /// W8-HAT's two level trims are kit-wide NUMBER leaves, so `readDrumKit`'s
+    /// existing `kit.<key>` branch already reads them through the one name
+    /// home; only this list had to learn their names.
     static let drumKitFieldsRead: Set<String> = Set(DrumVoice.allCases.map(\.rawValue))
-        .union(["gain", "velocityToTone", "accentThreshold", "accentDepth", "noteLayoutStorage"])
+        .union(["gain", "velocityToTone", "accentThreshold", "accentDepth", "noteLayoutStorage",
+                "hatsLevelDb", "cymbalsLevelDb"])
 
     /// A `drumKit` object, parsed as the overlay `track.setInstrument` parses
     /// it (`CommandRouter.parseDrumKit`): an object per voice of number leaves,
@@ -450,7 +466,7 @@ extension TemplateReader {
                                   "seqPosition", "randMin", "randMax", "tuneCents", "pan",
                                   "ampVelTrack", "oneShot", "startFrame", "endFrame", "attack",
                                   "decay", "sustain", "release", "loopMode", "loopStart",
-                                  "loopEnd", "crossfade", "reverse", "chokeGroup"]
+                                  "loopEnd", "crossfade", "reverse", "chokeGroup", "drumRole"]
 
     /// A zone's `crossfade` object: every `SamplerCrossfade` field, raw MIDI
     /// values (`SamplerCrossfade.init` clamps each to 0…127).
@@ -498,7 +514,7 @@ extension TemplateReader {
             endFrame: zone.endFrame, attack: zone.attack, decay: zone.decay, sustain: zone.sustain,
             release: zone.release, loopMode: zone.loopMode, loopStart: zone.loopStart,
             loopEnd: zone.loopEnd, crossfade: zone.crossfade, reverse: zone.reverse,
-            chokeGroup: zone.chokeGroup)
+            chokeGroup: zone.chokeGroup, drumRole: zone.drumRole)
     }
 
     // MARK: Reading
@@ -624,6 +640,7 @@ extension TemplateReader {
         let reverse = try object["reverse"].map { try bool($0, Self.join(path, "reverse")) }
         let chokeGroup = try samplerInteger(object, "chokeGroup", SamplerZone.chokeGroupRange,
                                             path, &written)
+        let drumRole = try samplerDrumRole(object["drumRole"], Self.join(path, "drumRole"))
         let fresh = SamplerZone(audioFileURL: URL(fileURLWithPath: file))
         let zone = SamplerZone(
             id: Self.samplerZoneID(index), audioFileURL: URL(fileURLWithPath: file),
@@ -634,7 +651,8 @@ extension TemplateReader {
             tuneCents: tuneCents, pan: pan, ampVelTrack: ampVelTrack, oneShot: oneShot,
             startFrame: startFrame, endFrame: endFrame, attack: attack, decay: decay,
             sustain: sustain, release: release, loopMode: loopMode, loopStart: loopStart,
-            loopEnd: loopEnd, crossfade: crossfade, reverse: reverse, chokeGroup: chokeGroup)
+            loopEnd: loopEnd, crossfade: crossfade, reverse: reverse, chokeGroup: chokeGroup,
+            drumRole: drumRole)
         try samplerReadBack(written, path) { Self.samplerZoneReading(zone, $0) }
         try samplerReadBack(crossfadeWritten, Self.join(path, "crossfade")) { key in
             Self.samplerCrossfadeReading(zone.crossfade, key).map { .number(Double($0)) }
@@ -799,6 +817,25 @@ extension TemplateReader {
         return nil
     }
 
+    /// A zone's drum role (m39-w4-6): a `DrumVoice` raw value, or `"other"`
+    /// (explicitly not a drum, read as no role). The wire's `parseDrumRole`
+    /// accepts exactly the same words (`TemplateSamplerWireParityTests`).
+    mutating func samplerDrumRole(_ json: TemplateJSON?, _ path: String) throws -> DrumVoice? {
+        guard let json else { return nil }
+        let text = try string(json, path)
+        if text == "other" { return nil }
+        if let voice = DrumVoice(rawValue: text) { return voice }
+        try refuseOrSkip(
+            TemplateRefusal(code: .unknownSetting, path: path,
+                            message: "a zone's drum role is one of "
+                                + DrumVoice.allCases.map { "\"\($0.rawValue)\"" }.joined(separator: ", ")
+                                + " or \"other\"; '\(text)' is not one."),
+            .unknownSettingSkipped,
+            "the drum role '\(text)' comes from a newer version of DAW Pro, so that zone has no "
+                + "drum role.")
+        return nil
+    }
+
     // MARK: Writing, and the one table the read-back shares
 
     /// What `sampler` holds under `key`, as the JSON a template writes; nil
@@ -870,6 +907,7 @@ extension TemplateReader {
             return .object(members)
         case "reverse": return flag(zone.reverse)
         case "chokeGroup": return whole(zone.chokeGroup)
+        case "drumRole": return zone.drumRole.map { .string($0.rawValue) }
         default: return nil
         }
     }

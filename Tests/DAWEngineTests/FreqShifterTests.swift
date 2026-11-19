@@ -584,73 +584,15 @@ struct FreqShifterTests {
 
     // MARK: - L11: the render path allocates NOTHING
 
-    private typealias MallocLoggerFn =
-        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
-
-    /// Heap cells, NOT stored properties: the hook runs INSIDE malloc with its
-    /// locks held, so it must never allocate nor trip a lazy global init.
-    private nonisolated(unsafe) static let eventCount =
-        UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private nonisolated(unsafe) static let watchedThread =
-        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-
-    private static let eventHook: MallocLoggerFn = { _, _, _, _, _, _ in
-        var tid: UInt64 = 0
-        pthread_threadid_np(nil, &tid)
-        if tid == FreqShifterTests.watchedThread.pointee {
-            FreqShifterTests.eventCount.pointee &+= 1
-        }
-    }
-
-    /// libmalloc's `malloc_logger` global. Nil is a FAILURE for the caller,
-    /// never a skip — a silently-absent probe is vacuity, not a pass.
-    private static func mallocLoggerSlot() -> UnsafeMutablePointer<MallocLoggerFn?>? {
-        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
-                              "malloc_logger") else { return nil }
-        return raw.assumingMemoryBound(to: MallocLoggerFn?.self)
-    }
-
-    /// ⛔⛔ SIBLING-IDENTICAL TO `PhaserTests`/`RingModTests`/`TransientShaperTests`
-    /// ON PURPOSE, AND THE ONE DEVIATION IS `warmup`.
-    ///
-    /// ⚠️ MEASURED, AND THE LESSON IS ABOUT DEVIATING: an earlier draft ran the
-    /// measured body on a THREAD THIS FUNCTION CREATED, reasoning that a
-    /// process-global `malloc_logger` shared with four other suites could have
-    /// its attribution disturbed under parallel execution. That reasoning was
-    /// wrong in a checkable way — in the very same full run, all four sibling
-    /// probes read **0** while this one read 3 835 259 and then 239. The
-    /// difference was never the scheduler: it was two local deviations from the
-    /// sibling shape (a Swift `Array` source instead of a raw pointer, and the
-    /// extra thread). **When four neighbouring instruments agree and yours does
-    /// not, suspect your instrument.**
-    ///
-    /// `warmup` runs with the hook live and the counter is zeroed after it.
-    /// ⚠️ THAT ORDER IS LOAD-BEARING: Swift's `static let` arrays
-    /// (`FreqShifterParams.hilbertI`/`hilbertQ`) allocate on FIRST TOUCH
-    /// anywhere in the process, so whichever test reaches them first pays a real
-    /// `malloc` inside `swift_once`. MEASURED: without the warm-up this leg
-    /// reported an order-dependent 0, 2, 5 and 6 events on identical code.
-    /// A probe that reports a SMALL non-zero is the dangerous kind — it reads as
-    /// "the render path allocates a little", a sentence that should never be
-    /// true and that would be debugged as a real defect.
-    private static func mallocEvents(
-        slot: UnsafeMutablePointer<MallocLoggerFn?>,
-        warmup: () -> Void = {}, _ body: () -> Void
-    ) -> Int {
-        pthread_threadid_np(nil, &watchedThread.pointee)
-        eventCount.pointee = 0
-        let previous = slot.pointee  // restore, don't assume it was nil
-        slot.pointee = eventHook
-        warmup()
-        eventCount.pointee = 0   // one-time lazy-global costs are not the measurement
-        body()
-        slot.pointee = previous
-        return eventCount.pointee
-    }
+    // The hook, the counter cells and the process-wide window lock live in
+    // `Support/MallocProbe.swift` (m39-test-mallocprobe): one measurement at a time.
+    // `warmup:` runs with the hook live and the counter is zeroed after it. That order is load-bearing here:
+    // `FreqShifterParams.hilbertI`/`hilbertQ` are Swift `static let` arrays that allocate on FIRST TOUCH anywhere in
+    // the process (MEASURED: without the warm-up this leg read an order-dependent 0, 2, 5 and 6 events).
 
     @Test("L11 — process() allocates NOTHING across 4 000 quanta, and it actually ran")
     func processIsAllocationFree() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("""
                 malloc_logger is unavailable — the allocation probe cannot run. \
                 FAILURE, not a skip.
@@ -689,7 +631,7 @@ struct FreqShifterTests {
         // never be true and that would be debugged as a real defect. See
         // `mallocEvents` for the two measured causes.
         var sum: Float = 0
-        let events = Self.mallocEvents(slot: slot, warmup: {
+        let events = MallocProbe.events(slot: slot, warmup: {
             var warm = 0
             while warm < 4 {
                 effect.storeAutomatedParam(slot: 0, value: Double(warm))
@@ -731,14 +673,14 @@ struct FreqShifterTests {
 
     @Test("L11b — POSITIVE CONTROL: the malloc probe can actually count")
     func theAllocationProbeCanSeeAnAllocation() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
             return
         }
         // ⭐ A zero from a probe that never fires and a zero from a render that
         // never allocates are the same number.
         var sink: [[Int]] = []
-        let events = Self.mallocEvents(slot: slot) {
+        let events = MallocProbe.events(slot: slot) {
             var index = 0
             while index < 200 {
                 sink.append([Int](repeating: index, count: 64))

@@ -61,9 +61,11 @@ public enum ClipEditorModePolicy {
     /// - Parameters:
     ///   - override: the mode the user picked this session, or nil if they have
     ///     not touched the chip.
-    ///   - isDrumKit: `SMFProjectExporter.isDrumKit(track)` — the app's ONE
-    ///     predicate for the question, made `public` for this call rather than
-    ///     re-expressed here.
+    ///   - isDrumKit: true when the clip's track has drum rows,
+    ///     `DrumLaneMap.lanes(for:) != nil` (m39-w4-2). Before that item it was
+    ///     `SMFProjectExporter.isDrumKit(track)`, which a `pads` drum machine
+    ///     answers "no" (it is not a General MIDI kit), so a new Drum Machine
+    ///     opened in the piano roll. The export predicate stays the export's.
     nonisolated public static func resolve(override: ClipEditorMode?,
                                            isDrumKit: Bool) -> ClipEditorMode {
         if let override { return override }
@@ -75,13 +77,15 @@ public enum ClipEditorModePolicy {
 public struct StepSequencerLane: Sendable, Equatable, Identifiable {
     /// MIDI pitch this row writes.
     public let pitch: Int
-    /// The row label. A GM percussion name on a drum kit ("Acoustic Snare"),
-    /// a scientific pitch name otherwise ("C4"). Never invented: see
-    /// `StepSequencerLanes.label(forPitch:isDrumKit:)`.
+    /// The row label. A GM percussion name on a GM drum kit ("Acoustic
+    /// Snare"), a drum name on our drum machine ("Kick"), a scientific pitch
+    /// name otherwise ("C4"). Never invented: see
+    /// `StepSequencerLanes.lanes(drumLanes:notes:)`.
     public let label: String
-    /// True when the label came from the GM percussion key map rather than from
-    /// the note-name derivation — the property a probe uses to assert that drum
-    /// lanes are NAMED and not numbered.
+    /// True when the label came from the instrument's drum rows (`DrumLaneMap`:
+    /// the GM percussion key map, or the drum machine's voice names) rather than
+    /// from the note-name derivation — the property a probe uses to assert that
+    /// drum lanes are NAMED and not numbered.
     public let isNamedPercussion: Bool
 
     public var id: Int { pitch }
@@ -122,24 +126,42 @@ public enum StepSequencerLanes {
     /// structural rather than promised: an uncovered GM percussion note (39 hand
     /// clap, 54 tambourine) or a melodic note two octaves above the window still
     /// gets a row, labelled by its note name.
-    nonisolated public static func lanes(isDrumKit: Bool, notes: [MIDINote]) -> [StepSequencerLane] {
+    ///
+    /// m39-w4-2 — THE ROWS COME FROM `DrumLaneMap.lanes(for:)`, the one home
+    /// for "which rows does a drum instrument have". `drumLanes` nil means a
+    /// melodic track: the window above. Otherwise its rows, each labelled by
+    /// the map (the GM names on a percussion bank, "Kick" … "Cymbal" on our
+    /// drum machine in either note layout), plus every present pitch.
+    nonisolated public static func lanes(drumLanes: [DrumLane]?,
+                                         notes: [MIDINote]) -> [StepSequencerLane] {
         var pitches = Set(notes.map(\.pitch))
-        if isDrumKit {
-            pitches.formUnion(InstrumentFamilyResolver.percussionNotes.map(\.note))
+        var drumLabels: [Int: String] = [:]
+        if let drumLanes {
+            for lane in drumLanes where drumLabels[lane.note] == nil {
+                drumLabels[lane.note] = lane.label
+            }
+            pitches.formUnion(drumLanes.map(\.note))
         } else {
             pitches.formUnion(melodicWindow)
         }
         return pitches.sorted(by: >).map { pitch in
-            let named = isDrumKit ? InstrumentFamilyResolver.percussionNote(pitch) : nil
+            let named = drumLabels[pitch]
             return StepSequencerLane(
                 pitch: pitch,
                 // `Fundamental.noteName` is the repo's ONE scientific-pitch
                 // name (which itself defers to `KeyEstimate.pitchClassesSharp`,
                 // the sole pitch-class table) — a private "C#/D#…" array here
                 // would be the third home for twelve strings.
-                label: named?.gmName ?? Fundamental.noteName(midiNote: pitch),
+                label: named ?? Fundamental.noteName(midiNote: pitch),
                 isNamedPercussion: named != nil)
         }
+    }
+
+    /// The pre-m39-w4-2 form: `true` is the General MIDI percussion bank's 17
+    /// rows (`DrumLaneMap.generalMIDIPercussionLanes`), `false` the melodic
+    /// window. Kept for its callers; the view feeds the lane map itself.
+    nonisolated public static func lanes(isDrumKit: Bool, notes: [MIDINote]) -> [StepSequencerLane] {
+        lanes(drumLanes: isDrumKit ? DrumLaneMap.generalMIDIPercussionLanes : nil, notes: notes)
     }
 }
 
@@ -269,6 +291,13 @@ public struct StepSequencerGeometry: Sendable, Equatable {
     /// the user's pitch view.
     public let opensAtBottom: Bool
 
+    /// The drum rows this grid was built from (`DrumLaneMap.lanes(for:)` of the
+    /// clip's track), or nil for a melodic grid. m39-w4-3: kept so the toggle's
+    /// entry velocity (`NoteEntryDefaults`) and the Accent row
+    /// (`StepAccent.hasRow`) read the SAME lane list the rows came from. A
+    /// grid whose rows are drum rows cannot mint a melodic-default note.
+    public let drumLanes: [DrumLane]?
+
     /// Builds the geometry for a clip, ON THE SONG'S GRID (m23-ap I5-F4).
     ///
     /// ⭐ **THE COLUMNS ARE THE SONG'S GRID CELLS, NOT THE CLIP'S.** I5-F2/F3 put
@@ -292,8 +321,12 @@ public struct StepSequencerGeometry: Sendable, Equatable {
     /// delete without the keyboard. It is the onset (not the end) because a
     /// cell IS an onset: extending for a tail would add columns nothing can
     /// ever fill. The partial column 0 of an off-grid clip adds `phaseBeats`.
+    ///
+    /// m39-w4-2: the rows come from the drum lane map (`DrumLaneMap.lanes(for:)`
+    /// of the clip's track, nil for a melodic track), and any drum grid opens at
+    /// the bottom, where its kick is.
     nonisolated public static func make(
-        isDrumKit: Bool,
+        drumLanes: [DrumLane]?,
         notes: [MIDINote],
         clipLengthBeats: Double,
         resolution: SnapResolution,
@@ -330,7 +363,7 @@ public struct StepSequencerGeometry: Sendable, Equatable {
             return (Int(index), perBeat)
         }
         return StepSequencerGeometry(
-            lanes: StepSequencerLanes.lanes(isDrumKit: isDrumKit, notes: notes),
+            lanes: StepSequencerLanes.lanes(drumLanes: drumLanes, notes: notes),
             stepBeats: step,
             stepCount: count,
             rowHeight: rowHeight,
@@ -343,7 +376,26 @@ public struct StepSequencerGeometry: Sendable, Equatable {
             firstStepSongBeat: firstStepSongBeat,
             firstStepIndex: lattice?.index ?? 0,
             stepsPerWholeBeat: lattice?.perBeat,
-            opensAtBottom: isDrumKit)
+            opensAtBottom: drumLanes != nil,
+            drumLanes: drumLanes)
+    }
+
+    /// The pre-m39-w4-2 form: `isDrumKit` true is the General MIDI percussion
+    /// bank's rows (`DrumLaneMap.generalMIDIPercussionLanes`), false the
+    /// melodic window. Forwards to the lane-map `make`, so it is the old
+    /// geometry for both.
+    nonisolated public static func make(
+        isDrumKit: Bool,
+        notes: [MIDINote],
+        clipLengthBeats: Double,
+        resolution: SnapResolution,
+        songGrid: PianoRollSongGrid.Context,
+        rowHeight: CGFloat = StepSequencerGeometry.defaultRowHeight,
+        stepWidth: CGFloat = StepSequencerGeometry.defaultStepWidth
+    ) -> StepSequencerGeometry {
+        make(drumLanes: isDrumKit ? DrumLaneMap.generalMIDIPercussionLanes : nil,
+             notes: notes, clipLengthBeats: clipLengthBeats, resolution: resolution,
+             songGrid: songGrid, rowHeight: rowHeight, stepWidth: stepWidth)
     }
 
     /// The pre-I5-F4 signature: a clip whose first beat is the song's beat 0, in
@@ -622,11 +674,14 @@ public struct StepBarMark: Sendable, Equatable {
 /// design decision about this surface, judged on its own merits.
 public enum StepSequencerEdit {
 
-    /// Velocity a toggled-on note gets — the SAME default `PianoRollModel.addNote`
-    /// uses, so a note authored in either editor sounds identically. (Velocity is
-    /// editable in the roll's velocity lane; the step grid deliberately has no
-    /// velocity gesture in v1.)
-    public static let defaultVelocity = 100
+    /// The MELODIC entry velocity, kept as a name for its readers. m39-w4-3: a
+    /// toggled-on note's velocity no longer comes from here — `toggle` asks
+    /// `NoteEntryDefaults` (through `StepAccent.entryVelocity`) with the grid's
+    /// own lane list, the SAME function `PianoRollModel.addNote` asks, so a note
+    /// authored in either editor sounds identically BY CONSTRUCTION rather than
+    /// because two literals agreed. (Per-note velocity is edited in the roll's
+    /// velocity lane; the step grid's one velocity gesture is the Accent row.)
+    public static let defaultVelocity = NoteEntryDefaults.melodicVelocity
 
     /// What a toggle did.
     public struct ToggleOutcome: Sendable, Equatable {
@@ -700,8 +755,8 @@ public enum StepSequencerEdit {
 
     /// Toggles a cell: removes the notes in it, or adds one when it is empty.
     ///
-    /// A toggled-ON note takes the step's start beat, ONE step of length and
-    /// `defaultVelocity` — the same "one grid cell, velocity 100" default the
+    /// A toggled-ON note takes the step's start beat, ONE step of length and the
+    /// entry velocity — the same "one grid cell, entry velocity" default the
     /// roll's double-click add applies (`PianoRollModel.addNote` +
     /// `defaultLength(for:)`), so the two editors author identical notes.
     ///
@@ -716,13 +771,21 @@ public enum StepSequencerEdit {
     /// note lands ON the clip's first beat — clamped at 0, the I5-F3 "notes
     /// clamp at 0 only" rule the roll's own add follows — and still sits in
     /// column 0, so the round trip holds there too.
+    ///
+    /// m39-w4-3: the new note's velocity is the track's ENTRY velocity
+    /// (`NoteEntryDefaults`, read with `geometry.drumLanes`, so a drum grid
+    /// mints the drum default), or the accent when the column is fully
+    /// accented on a drum grid (`StepAccent.entryVelocity`). `entry` is for
+    /// tests holding a fixture constant; the app uses `.shipped`.
     nonisolated public static func toggle(notes: [MIDINote], cell: StepCell,
-                                          geometry: StepSequencerGeometry) -> ToggleOutcome {
+                                          geometry: StepSequencerGeometry,
+                                          entry: NoteEntryDefaults.Values = .shipped) -> ToggleOutcome {
         let occupants = self.notes(in: notes, cell: cell, geometry: geometry)
         if occupants.isEmpty {
             let note = MIDINote(
                 pitch: cell.pitch,
-                velocity: defaultVelocity,
+                velocity: StepAccent.entryVelocity(notes: notes, step: cell.step,
+                                                   geometry: geometry, entry: entry),
                 startBeat: max(0, geometry.beat(forStep: cell.step)),
                 lengthBeats: geometry.stepBeats)
             return ToggleOutcome(notes: notes + [note], added: note, removed: [])
@@ -732,5 +795,98 @@ public enum StepSequencerEdit {
             notes: notes.filter { !doomed.contains($0.id) },
             added: nil,
             removed: occupants)
+    }
+}
+
+// MARK: - "Start from a beat" (m39-w4-10 UI)
+
+/// One entry of the "Start from a beat" menu: a ready-made drum beat from
+/// `DrumPatternLibrary`, by the name a beginner reads.
+public struct StepBeatChoice: Sendable, Equatable, Identifiable {
+    /// The beat's id ("basicRock"): what the store is asked to write.
+    public let id: String
+    /// The menu item ("Basic Rock").
+    public let name: String
+    /// The beat's one-line description, shown as the item's help text.
+    public let help: String
+
+    public init(id: String, name: String, help: String) {
+        self.id = id
+        self.name = name
+        self.help = help
+    }
+}
+
+/// What picking a beat did, as the line(s) the step grid shows under its menu.
+public struct StepBeatOutcome: Sendable, Equatable {
+    /// True when the clip now holds the beat (the pick changed something, so it
+    /// engages the editor pane like every other edit).
+    public let changed: Bool
+    /// The result line first, then each warning; or the refusal, verbatim.
+    public let lines: [String]
+    /// True when a line needs attention: a drum left out, an off-bar start, or
+    /// a refusal. The grid draws it in the warning colour.
+    public let isWarning: Bool
+
+    public init(changed: Bool, lines: [String], isWarning: Bool) {
+        self.changed = changed
+        self.lines = lines
+        self.isWarning = isWarning
+    }
+
+    /// Nothing happened and there is nothing to say (the parent wired no store).
+    public static let nothing = StepBeatOutcome(changed: false, lines: [], isWarning: false)
+}
+
+/// THE ONE HOME for the step grid's "Start from a beat" offer (design
+/// `docs/design/2026-10-07-loop-drum-depth.md` §8, last bullet; §10.2 L2).
+///
+/// ⛔ OFFERED ONLY ON AN EMPTY DRUM CLIP. "Drum" is the step grid's own drum
+/// predicate, `drumLanes != nil` (`DrumLaneMap.lanes(for:)`, the same answer
+/// that opens the clip in Steps and draws its drum rows). "Empty" is no note at
+/// all, a latent one past the clip's end included: the beat never mixes into
+/// or replaces anything the user wrote. The store refuses a non-empty clip too
+/// (`ProjectStore.fillDrumPattern`), so a stale click cannot overwrite.
+///
+/// ⭐ THE MENU LISTS EVERY BEAT IN LIBRARY ORDER, so the first item is the
+/// user's L2 pick (Basic Rock, eighth-note hats). It never re-sorts.
+///
+/// The view only draws this and hands the chosen id to its parent; the notes are
+/// worked out and written by the store, which knows the track's instrument. The
+/// drum rows alone cannot: a General MIDI kit's rows leave out its side stick
+/// and hand clap (`DrumLaneMap.generalMIDIPercussionLanes`).
+public enum StepStartFromBeat {
+
+    /// The menu's title, on its chip.
+    public static let menuTitle = "Start from a beat"
+    /// The words before the chip on an empty drum clip.
+    public static let emptyPrompt = "This clip is empty. Click the boxes to add hits, or"
+    /// The chip's help text.
+    public static let menuHelp = "Fill this empty clip with a ready-made drum beat. You can change any "
+        + "step afterwards, and Undo takes the whole beat back."
+
+    /// The beats to offer, in library order, or nil when the menu does not
+    /// belong here (not a drum clip, or the clip already has notes).
+    nonisolated public static func choices(drumLanes: [DrumLane]?,
+                                           notes: [MIDINote]) -> [StepBeatChoice]? {
+        guard drumLanes != nil, notes.isEmpty else { return nil }
+        return DrumPatternLibrary.patterns.map {
+            StepBeatChoice(id: $0.id, name: $0.name, help: $0.summary)
+        }
+    }
+
+    /// Runs the store write and turns what it answered into the lines the grid
+    /// shows: the result line and every warning, or the refusal sentence
+    /// verbatim (the view holds the words, never the reason).
+    nonisolated public static func outcome(
+        _ write: () throws -> DrumPatternFillResult) -> StepBeatOutcome {
+        do {
+            let result = try write()
+            return StepBeatOutcome(changed: true, lines: [result.summary] + result.warnings,
+                                   isWarning: !result.warnings.isEmpty)
+        } catch {
+            let sentence = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            return StepBeatOutcome(changed: false, lines: [sentence], isWarning: true)
+        }
     }
 }

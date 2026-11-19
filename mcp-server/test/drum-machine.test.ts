@@ -167,7 +167,7 @@ test("instrument_set_drum_param's description states the clamp-vs-refuse split, 
 
 test("instrument_describe_drum_kit forwards {trackId} to instrument.describeDrumKit", async () => {
   const trackId = randomUUID();
-  queuedResult = { trackId, kind: "drumSynth", isActiveInstrument: true, parameterCount: 75 };
+  queuedResult = { trackId, kind: "drumSynth", isActiveInstrument: true, parameterCount: 77 };
 
   const result = (await client.callTool({
     name: "instrument_describe_drum_kit",
@@ -189,11 +189,11 @@ test("instrument_describe_drum_kit's strict schema rejects an unknown key — it
   assert.equal(calls.length, 0);
 });
 
-test("instrument_describe_drum_kit's description teaches the 75/64 route budget, appliesAtNextNoteOn, and the level/pan exception", () => {
+test("instrument_describe_drum_kit's description teaches the 77/64 route budget, appliesAtNextNoteOn, and the level/pan exception", () => {
   const tool = tools.find((t) => t.name === "instrument_describe_drum_kit");
   assert.ok(tool);
   const description = (tool.description ?? "") as string;
-  assert.match(description, /75/);
+  assert.match(description, /77/);
   assert.match(description, /64/);
   assert.match(description, /appliesAtNextNoteOn/);
   assert.match(description, /`level`\/`pan`/);
@@ -235,7 +235,7 @@ test("instrument_load_drum_preset forwards {trackId, name} to instrument.loadDru
     name: "trap",
     summary: "A very long sub kick.",
     replacedAllParameters: true,
-    parameterCount: 75,
+    parameterCount: 77,
     kind: "drumSynth",
     isActiveInstrument: true,
   };
@@ -444,17 +444,57 @@ test("track_set_instrument's kind description and main description mention drumS
 // The schema IS the contract — JSON schema shape checks, not just behavior
 // ---------------------------------------------------------------------------
 
-test("track_set_instrument's drumKit schema exposes all eight voices and the four kit-wide leaves", () => {
+test("track_set_instrument's drumKit schema exposes all eight voices and the six kit-wide leaves", () => {
   const tool = tools.find((t) => t.name === "track_set_instrument");
   assert.ok(tool);
   const drumKitProps = (tool.inputSchema as any).properties?.drumKit?.properties ?? {};
   for (const voice of ["kick", "snare", "closedHat", "openHat", "clap", "tom", "rim", "cymbal"]) {
     assert.ok(drumKitProps[voice], `drumKit exposes ${voice}`);
   }
-  for (const kitLeaf of ["gain", "velocityToTone", "accentThreshold", "accentDepth"]) {
+  for (const kitLeaf of ["gain", "velocityToTone", "accentThreshold", "accentDepth", "hatsLevelDb", "cymbalsLevelDb"]) {
     assert.ok(drumKitProps[kitLeaf], `drumKit exposes top-level ${kitLeaf}`);
   }
   assert.ok(!drumKitProps["kit"], "there must be no nested `kit` sub-object on the write side");
+});
+
+test("drumKit's hatsLevelDb and cymbalsLevelDb are in the schema with their real ranges, unit and default", () => {
+  const tool = tools.find((t) => t.name === "track_set_instrument");
+  assert.ok(tool);
+  const props = (tool.inputSchema as any).properties?.drumKit?.properties ?? {};
+  const hats = props["hatsLevelDb"];
+  const cymbals = props["cymbalsLevelDb"];
+  assert.ok(hats, "drumKit exposes hatsLevelDb");
+  assert.ok(cymbals, "drumKit exposes cymbalsLevelDb");
+  assert.equal(hats.type, "number");
+  assert.equal(cymbals.type, "number");
+  // The range lives in the description (every drumKit value clamps app-side, so no JSON-schema min/max).
+  assert.match(hats.description, /-24 to \+36/);
+  assert.match(cymbals.description, /-24 to \+24/);
+  // W9-DRUMDEF (the user's 2026-10-07 picks): the default is what a NEW drum machine starts at —
+  // hats +23.4, cymbals +5.7 (`DrumKitParams.newKitHatsLevelDb`/`newKitCymbalsLevelDb`) — and
+  // 0 survives as how a song saved before then still plays.
+  assert.match(hats.description, /default 23\.4\b/);
+  assert.match(cymbals.description, /default 5\.7\b/);
+  for (const d of [hats.description, cymbals.description]) {
+    assert.match(d, /dB/);
+    assert.doesNotMatch(d, /default 0\b/);
+    assert.match(d, /NEW drum machine/);
+    assert.match(d, /saved/);
+    assert.match(d, /next note-on/);
+  }
+  assert.equal(hats.minimum, undefined);
+  assert.equal(hats.maximum, undefined);
+  assert.equal(cymbals.minimum, undefined);
+  assert.equal(cymbals.maximum, undefined);
+  // The wire-side counts and names the descriptions teach.
+  const main = ((tool.inputSchema as any).properties?.drumKit?.description ?? "") as string;
+  assert.match(main, /SIX kit-wide leaves/);
+  assert.match(main, /71 \+ 6 = the full 77/);
+  const setParam = tools.find((t) => t.name === "instrument_set_drum_param");
+  assert.ok(setParam);
+  assert.match((setParam.description ?? "") as string, /kit\.hatsLevelDb/);
+  assert.match((setParam.description ?? "") as string, /kit\.cymbalsLevelDb/);
+  assert.doesNotMatch(main, /\b75\b/);
 });
 
 test("no drumKit leaf field carries a JSON-schema minimum/maximum — every value clamps app-side, never refused by range", () => {
@@ -595,4 +635,58 @@ test("the drum tools' descriptions carry the note-layout facts", () => {
   assert.match(describeText, /READ `voiceNotes` BEFORE WRITING DRUM NOTES/);
   assert.match((setParam.description ?? "") as string, /noteLayout[\s\S]{0,200}REFUSED/);
   assert.match((loadPreset.description ?? "") as string, /KEEPS the kit's `noteLayout`/);
+});
+
+// W9-DRUMDEF (m39-hat-default + m39-dm-gm-default, the user's 2026-10-07 picks): a NEW drum
+// machine starts on General MIDI notes with the hats at +23.4 dB and the cymbals at +5.7 dB.
+// An agent that still believed "MIDI notes 36-43" would write every beat on the wrong drums.
+test("a NEW drum machine's start (gm, +23.4, +5.7) is taught where an agent reads it", () => {
+  const setInstrument = tools.find((t) => t.name === "track_set_instrument");
+  const describe = tools.find((t) => t.name === "instrument_describe_drum_kit");
+  const loadPreset = tools.find((t) => t.name === "instrument_load_drum_preset");
+  assert.ok(setInstrument && describe && loadPreset);
+  const props = (setInstrument.inputSchema as any).properties ?? {};
+  const kindText = (props.kind?.description ?? "") as string;
+  assert.match(kindText, /NEW one\s+plays General MIDI drum notes/);
+  assert.match(kindText, /voiceNotes/);
+  assert.doesNotMatch(kindText, /MIDI notes\s+36-43 —/, "the old fixed-pad-notes claim is back");
+  const drumKit = props.drumKit ?? {};
+  const main = (drumKit.description ?? "") as string;
+  assert.match(main, /NEW drum machine[\s\S]{0,200}General MIDI notes[\s\S]{0,120}\+23\.4 dB[\s\S]{0,80}\+5\.7 dB/);
+  assert.match(main, /saved\s+earlier keeps the kit it plays/);
+  const layoutText = (drumKit.properties?.noteLayout?.description ?? "") as string;
+  assert.match(layoutText, /`gm` \(what a NEW drum machine starts with\)/);
+  assert.doesNotMatch(layoutText, /`pads` \(the default/, "pads is no longer the default");
+  const describeText = (describe.description ?? "") as string;
+  assert.match(describeText, /isConfigured[\s\S]{0,300}\+23\.4 dB[\s\S]{0,40}\+5\.7 dB/);
+  const presetText = (loadPreset.description ?? "") as string;
+  assert.match(presetText, /Every factory kit sets the hi-hats to \+23\.4 dB and the cymbals to \+5\.7 dB/);
+});
+
+// W9-HEAD (m39-dm-headroom): a NEW drum machine starts at kit gain 0.7 (headroom), so a plain beat on a
+// new song stays under -1 dBTP, and every factory kit carries the same headroom (lofi and acoustic
+// 0.63, a step below the others; acoustic's step is on the headroom alone, it played at 1.0 before); a drum
+// machine in a song saved before keeps its own level. An agent told "default 1.0" would "restore" the
+// default and put the clipping back.
+test("a NEW drum machine's kit gain (0.7, headroom) is taught where an agent reads it", () => {
+  const setInstrument = tools.find((t) => t.name === "track_set_instrument");
+  const describe = tools.find((t) => t.name === "instrument_describe_drum_kit");
+  const loadPreset = tools.find((t) => t.name === "instrument_load_drum_preset");
+  assert.ok(setInstrument && describe && loadPreset);
+  const drumKit = (setInstrument.inputSchema as any).properties?.drumKit ?? {};
+  const gain = (drumKit.properties?.gain?.description ?? "") as string;
+  assert.match(gain, /default 0\.7\b/);
+  assert.doesNotMatch(gain, /default 1\.0\b/, "the old default is back");
+  assert.match(gain, /NEW drum machine starts at 0\.7, and so does every factory kit/);
+  assert.match(gain, /lofi and acoustic 0\.63/);
+  assert.match(gain, /saved before then keeps its own\s+level/);
+  assert.doesNotMatch(gain, /sets that kit's own gain/, "the option-A preset gain is back");
+  const main = (drumKit.description ?? "") as string;
+  assert.match(main, /NEW drum machine[\s\S]{0,500}`gain` at 0\.7/);
+  const describeText = (describe.description ?? "") as string;
+  assert.match(describeText, /isConfigured[\s\S]{0,400}kit gain 0\.7/);
+  const presetText = (loadPreset.description ?? "") as string;
+  assert.match(presetText, /sets the kit `gain` to 0\.7 \(lofi and acoustic 0\.63\)/);
+  assert.match(presetText, /saved before then keeps its own level/);
+  assert.doesNotMatch(presetText, /back to 0\.7|about 3 dB louder/, "the dropped preset-clipping advice is back");
 });

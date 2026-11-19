@@ -1,0 +1,124 @@
+{
+  "headSeconds" : 0.25011337868480726,
+  "midiClipLengthBeats" : 4,
+  "midiClipStartBeat" : 2,
+  "notes" : [
+    {
+      "lengthBeats" : 0.49981859410430829,
+      "pitch" : 36,
+      "startBeat" : 0.50022675736961464,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 0.99986394557823122,
+      "pitch" : 37,
+      "startBeat" : 1.0000453514739229,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 1.0000907029478459,
+      "pitch" : 38,
+      "startBeat" : 1.9999092970521541,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 1,
+      "pitch" : 39,
+      "startBeat" : 3,
+      "velocity" : 127
+    }
+  ],
+  "slices" : [
+    {
+      "beat" : 2.5002267573696146,
+      "endFrame" : 22051,
+      "index" : 0,
+      "pitch" : 36,
+      "residualAmplitude" : 0.00029999999999999997,
+      "snapOffsetFrames" : 5,
+      "sourceSeconds" : 0.25011337868480726,
+      "startFrame" : 11030,
+      "strength" : 0.90000000000000002
+    },
+    {
+      "beat" : 3.0000453514739229,
+      "endFrame" : 44098,
+      "index" : 1,
+      "pitch" : 37,
+      "residualAmplitude" : 0.001,
+      "snapOffsetFrames" : 1,
+      "sourceSeconds" : 0.50002267573696146,
+      "startFrame" : 22051,
+      "strength" : 0.34999999999999998
+    },
+    {
+      "beat" : 3.9999092970521541,
+      "endFrame" : 66150,
+      "index" : 2,
+      "pitch" : 38,
+      "residualAmplitude" : 0.00020000000000000001,
+      "snapOffsetFrames" : -2,
+      "sourceSeconds" : 0.99995464852607707,
+      "startFrame" : 44098,
+      "strength" : 1
+    },
+    {
+      "beat" : 5,
+      "index" : 3,
+      "pitch" : 39,
+      "residualAmplitude" : 0,
+      "snapOffsetFrames" : 0,
+      "sourceSeconds" : 1.5,
+      "startFrame" : 66150,
+      "strength" : 0.59999999999999998
+    }
+  ],
+  "warnings" : [
+    "0.25 s of audio before the first slice point was discarded (pad 1 starts at the first onset, like an MPC or Recycle). Pass includeHead: true to keep it as pad 1 — worth doing if the detector missed the downbeat"
+  ],
+  "zones" : [
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 22051,
+      "gain" : 1,
+      "maxPitch" : 36,
+      "minPitch" : 36,
+      "release" : 0.01,
+      "rootPitch" : 36,
+      "startFrame" : 11030
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 44098,
+      "gain" : 1,
+      "maxPitch" : 37,
+      "minPitch" : 37,
+      "release" : 0.01,
+      "rootPitch" : 37,
+      "startFrame" : 22051
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 66150,
+      "gain" : 1,
+      "maxPitch" : 38,
+      "minPitch" : 38,
+      "release" : 0.01,
+      "rootPitch" : 38,
+      "startFrame" : 44098
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "gain" : 1,
+      "maxPitch" : 39,
+      "minPitch" : 39,
+      "release" : 0.01,
+      "rootPitch" : 39,
+      "startFrame" : 66150
+    }
+  ]
+}

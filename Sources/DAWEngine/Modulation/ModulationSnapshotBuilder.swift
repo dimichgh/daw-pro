@@ -46,9 +46,16 @@ enum ModulationSnapshotBuilder {
     /// publish is a GUARD RAIL, not the refusal surface — the store refuses
     /// these at the edit boundary with a named reason, so nothing an agent can
     /// create arrives here to be silently discarded.
+    ///
+    /// m39-w4-4: `clock` is the roll the snapshot is published against
+    /// (`PlaybackGraph` passes it only when the strip has a tempo-synced step
+    /// source and the transport rolls). It is compiled here, on the main actor,
+    /// and ONLY when a resolved source is synced — a strip without one carries
+    /// no clock and renders exactly as it did before the clock existed.
     static func build(strip: Strip, generation: UInt64, timelineID: UInt64,
                       sampleRate: Double, originSample: Int64,
-                      positionValid: Bool) -> ModulationSnapshot? {
+                      positionValid: Bool,
+                      clock spec: ModulationClockSpec? = nil) -> ModulationSnapshot? {
         guard !strip.routes.isEmpty, !strip.sources.isEmpty, sampleRate > 0 else { return nil }
 
         // Sources, in model order. The index IS the render-side source id.
@@ -94,11 +101,15 @@ enum ModulationSnapshotBuilder {
             routes.append(contentsOf: routesByTarget[index])
         }
 
+        var clock = ModulationSnapshot.Clock.empty
+        if let spec, sources.contains(where: { $0.divisionBeats > 0 }) {
+            clock = compileClock(spec)
+        }
         return ModulationSnapshot(
             generation: generation, timelineID: timelineID, sampleRate: sampleRate,
             originSample: originSample, positionValid: positionValid,
             sources: sources, routes: routes, targets: targets, steps: steps,
-            macroValues: macros)
+            macroValues: macros, clock: clock)
     }
 
     /// The effect params a strip modulates but does NOT automate. Each needs a
@@ -157,15 +168,16 @@ enum ModulationSnapshotBuilder {
 
     // MARK: - Resolution
 
-    /// ⭐ **THE m39-c SEAM (render side).** Free-running Hz becomes a per-sample
+    /// ⭐ **THE RATE SEAM (render side).** Free-running Hz becomes a per-sample
     /// rate in exactly two lines below — `cyclesPerSample` for the LFO and
-    /// `samplesPerStep` for the step sequencer. When m39-c ships its tempo-sync
-    /// resolver, a `syncDivision` resolves to a cycle length HERE and nothing
-    /// downstream changes: the closed forms in `ModulationMath` already take a
-    /// rate, not a tempo, and are position-absolute, so a synced LFO inherits
-    /// seek-exactness and loop-exactness for free. The other half of the seam is
-    /// `ModulationSourceParams.apply`'s `refuseSync`, which is what currently
-    /// keeps a division from ever reaching this function.
+    /// `samplesPerStep` for the step sequencer. A TEMPO-SYNCED step source
+    /// (m39-w4-4, `stepDivision`, registered in `TempoSync`'s sibling table) is
+    /// NOT resolved to a rate: a rate needs one tempo, but its phase needs the
+    /// whole tempo map. Its division reaches the snapshot as `divisionBeats`,
+    /// and the render reads the musical clock the main actor compiled
+    /// (`ModulationSnapshotClock.swift`). The LFO's `syncDivision` never reaches
+    /// this function: `ModulationSourceParams.apply`'s `refuseSync` refuses it
+    /// (a synced LFO is not built).
     private static func resolve(_ source: ModulationSource, sampleRate: Double,
                                 steps: inout [Float], macros: inout [Float])
         -> ModulationSnapshot.Source {
@@ -193,6 +205,14 @@ enum ModulationSnapshotBuilder {
             resolved.edgeFraction = resolved.samplesPerStep > 0
                 ? min(p.edgeMs * 0.001 * sampleRate / resolved.samplesPerStep, 0.98)
                 : 0
+            // m39-w4-4: a SYNCED source reads the snapshot's musical clock
+            // instead of `samplesPerStep` (the fields above stay as they were,
+            // unread). Only a recognised `NoteDivision` syncs; anything else
+            // runs free exactly as before.
+            if let division = p.syncedDivision {
+                resolved.divisionBeats = division.beats
+                resolved.edgeSamples = p.edgeMs * 0.001 * sampleRate
+            }
         case .envelopeFollower(let p):
             resolved.kindCode = ModulationSnapshot.SourceCode.envelopeFollower
             resolved.detectorIsPeak = p.detector == .peak

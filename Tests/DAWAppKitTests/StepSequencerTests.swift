@@ -773,3 +773,291 @@ struct StepSequencerTests {
         }
     }
 }
+
+// MARK: - m39-w4-3: entry velocity in one home, and the Accent row
+
+/// `docs/design/2026-10-07-loop-drum-depth.md` §3.4–§3.6, §9.2 `m39-w4-3`.
+/// Appended to this suite (no new `@Suite`): the `PianoRollModel` legs are
+/// `@MainActor` per test, which the suite census does not count.
+///
+/// The gates hold a FIXTURE drum velocity of 80. At the shipped 100 the drum and
+/// melodic answers coincide, so only a fixture that differs can tell "both
+/// editors read `NoteEntryDefaults`" from "both still carry a literal 100".
+extension StepSequencerTests {
+
+    static let w43Fixture = NoteEntryDefaults.Values(drumVelocity: 80)
+    /// Our drum machine in its default `pads` layout: the track `isDrumKit`
+    /// answers "no" for and the lane map answers with eight rows.
+    static let w43PadsLanes = DrumLaneMap.lanes(for: InstrumentDescriptor(kind: .drumSynth))
+    static let w43GMKitLanes = DrumLaneMap.lanes(for: InstrumentDescriptor(
+        kind: .soundBank,
+        soundBank: SoundBankConfig(source: .generalMIDI, program: 0,
+                                   bankMSB: GMProgramCatalog.percussionBankMSB)))
+    static let w43GMLayoutLanes = DrumLaneMap.lanes(for: InstrumentDescriptor(
+        kind: .drumSynth, drumKit: DrumKitParams(noteLayout: .gm)))
+
+    /// A 4-beat 4/4 clip at 1/16 on the song's beat 0: 16 columns.
+    static func w43Grid(_ drumLanes: [DrumLane]?, notes: [MIDINote] = []) -> StepSequencerGeometry {
+        StepSequencerGeometry.make(
+            drumLanes: drumLanes, notes: notes, clipLengthBeats: 4, resolution: .sixteenth,
+            songGrid: PianoRollSongGrid.Context(clipStartBeat: 0,
+                                                meterMap: MeterMap(constant: TimeSignature())))
+    }
+
+    static func w43Note(_ lanes: [DrumLane]?, _ voice: DrumVoice) throws -> Int {
+        try #require(lanes?.first { $0.voice == voice }?.note)
+    }
+
+    /// Clicks `cells` (step, pitch) in order on `grid`, as a user would.
+    static func w43Click(_ cells: [(Int, Int)], on grid: StepSequencerGeometry,
+                         entry: NoteEntryDefaults.Values = .shipped,
+                         into start: [MIDINote] = []) -> [MIDINote] {
+        var notes = start
+        for (step, pitch) in cells {
+            notes = StepSequencerEdit.toggle(notes: notes, cell: StepCell(step: step, pitch: pitch),
+                                             geometry: grid, entry: entry).notes
+        }
+        return notes
+    }
+
+    // MARK: P1 + the plant-3 target: both editors read the one function
+
+    @MainActor
+    @Test("m39-w4-3 P1 — both editors mint through the ONE entry function: with a fixture drum velocity of 80, a hit on our pads drum machine is 80 in the step grid AND the piano roll, and a melodic note is 100 in both")
+    func bothEditorsReadTheOneEntryFunction() throws {
+        let fixture = Self.w43Fixture
+        let pads = try #require(Self.w43PadsLanes)
+        let kick = try Self.w43Note(pads, .kick)
+
+        let drumGrid = Self.w43Grid(pads)
+        let stepHit = StepSequencerEdit.toggle(notes: [], cell: StepCell(step: 0, pitch: kick),
+                                               geometry: drumGrid, entry: fixture).added
+        #expect(stepHit?.velocity == 80)
+
+        let roll = PianoRollModel(notes: [], clipLengthBeats: 4)
+        let rollHit = roll.addNote(atBeat: 0, pitch: kick, resolution: .sixteenth,
+                                   drumLanes: pads, entry: fixture)
+        #expect(rollHit.velocity == 80)
+
+        // The same melodic fixture, both editors: the melodic default.
+        let melodicGrid = Self.w43Grid(nil)
+        let stepMelodic = StepSequencerEdit.toggle(notes: [], cell: StepCell(step: 0, pitch: 60),
+                                                   geometry: melodicGrid, entry: fixture).added
+        #expect(stepMelodic?.velocity == 100)
+        let rollMelodic = roll.addNote(atBeat: 1, pitch: 60, resolution: .sixteenth,
+                                       drumLanes: nil, entry: fixture)
+        #expect(rollMelodic.velocity == 100)
+
+        // The two editors author the SAME note on the same track (the law at
+        // `StepSequencerEdit.defaultVelocity`, now by construction).
+        #expect(stepHit?.velocity == rollHit.velocity)
+        #expect(stepHit?.pitch == rollHit.pitch)
+        #expect(stepHit?.startBeat == rollHit.startBeat)
+        #expect(stepHit?.lengthBeats == rollHit.lengthBeats)
+    }
+
+    // MARK: I1: zero behaviour change at the shipped values
+
+    @MainActor
+    @Test("m39-w4-3 I1 — at the shipped values a note toggled on in either editor, on any track, is born at 100, exactly as before the item")
+    func shippedEntryVelocityUnchangedInBothEditors() throws {
+        let roll = PianoRollModel(notes: [], clipLengthBeats: 4)
+        for (name, lanes) in [("pads drum machine", Self.w43PadsLanes),
+                              ("gm-layout drum machine", Self.w43GMLayoutLanes),
+                              ("GM percussion bank", Self.w43GMKitLanes),
+                              ("melodic", nil)] {
+            let pitch = lanes?.first?.note ?? 60
+            let stepHit = StepSequencerEdit.toggle(notes: [], cell: StepCell(step: 3, pitch: pitch),
+                                                   geometry: Self.w43Grid(lanes)).added
+            #expect(stepHit?.velocity == 100, "\(name) step grid")
+            #expect(roll.addNote(atBeat: 2, pitch: pitch, resolution: .sixteenth,
+                                 drumLanes: lanes).velocity == 100, "\(name) piano roll")
+        }
+        // The roll's old call shape (no lane list) is the melodic default, 100.
+        #expect(roll.addNote(atBeat: 3, pitch: 64, resolution: .beat).velocity == 100)
+        #expect(StepSequencerEdit.defaultVelocity == 100)
+    }
+
+    // MARK: The Accent row: read
+
+    @Test("m39-w4-3 — the Accent row reads the accent CONSTANT, never the kit's threshold: a beat clicked in at the shipped 100 lights NO column; an all-127 column is on, a 127 + 100 column is mixed, a column with no hit is empty")
+    func accentReadsTheConstantNotTheKitThreshold() throws {
+        let pads = try #require(Self.w43PadsLanes)
+        let grid = Self.w43Grid(pads)
+        let kick = try Self.w43Note(pads, .kick)
+        let snare = try Self.w43Note(pads, .snare)
+        let hat = try Self.w43Note(pads, .closedHat)
+        let beat = Self.w43Click([(0, kick), (8, kick), (4, snare), (12, snare)]
+                                 + stride(from: 0, to: 16, by: 2).map { ($0, hat) }, on: grid)
+        // Premises: every hit was born at the shipped 100, which the kit's
+        // default threshold (100) would call accented.
+        #expect(beat.count == 12)
+        #expect(beat.allSatisfy { $0.velocity == 100 })
+        #expect(DrumKitParams().accentThreshold == 100)
+
+        let columns = StepAccent.columns(notes: beat, geometry: grid)
+        #expect(columns.map(\.step) == [0, 2, 4, 6, 8, 10, 12, 14])
+        #expect(columns.allSatisfy { $0.state == .off }, "no column is accented until the user asks")
+        #expect(StepAccent.state(notes: beat, step: 1, geometry: grid) == .empty)
+
+        // On: every hit in column 0 at 127.
+        let accented = beat.map { note -> MIDINote in
+            var n = note
+            if grid.stepIndex(forBeat: n.startBeat) == 0 { n.velocity = 127 }
+            if grid.stepIndex(forBeat: n.startBeat) == 4, n.pitch == snare { n.velocity = 127 }
+            return n
+        }
+        #expect(StepAccent.state(notes: accented, step: 0, geometry: grid) == .on)
+        // Mixed: column 4 holds a 127 snare and a 100 hat.
+        #expect(StepAccent.state(notes: accented, step: 4, geometry: grid) == .mixed)
+        #expect(StepAccent.state(notes: accented, step: 2, geometry: grid) == .off)
+        #expect(StepAccent.columns(notes: accented, geometry: grid).first { $0.step == 4 }?.state == .mixed)
+        #expect(StepAccent.columns(notes: accented, geometry: grid).first { $0.step == 0 }?.state == .on)
+    }
+
+    // MARK: The Accent row: write
+
+    @Test("m39-w4-3 — clicking an Accent cell lifts every hit in that column to 127 and nothing else; clicking again returns them to the drum default (fixture 80); a mixed column goes to 127; a column with no hit answers nil (no commit)")
+    func accentColumnToggleWritesEveryHitInTheColumn() throws {
+        let fixture = Self.w43Fixture
+        let pads = try #require(Self.w43PadsLanes)
+        let grid = Self.w43Grid(pads)
+        let kick = try Self.w43Note(pads, .kick)
+        let snare = try Self.w43Note(pads, .snare)
+        let hat = try Self.w43Note(pads, .closedHat)
+        let beat = Self.w43Click([(0, kick), (0, hat), (4, snare), (4, hat)], on: grid, entry: fixture)
+        #expect(beat.allSatisfy { $0.velocity == 80 })
+
+        let on = try #require(StepAccent.toggle(notes: beat, step: 0, geometry: grid, entry: fixture))
+        #expect(on.count == beat.count)
+        for (before, after) in zip(beat, on) {
+            #expect(after.id == before.id)
+            #expect(after.pitch == before.pitch)
+            #expect(after.startBeat == before.startBeat)
+            #expect(after.lengthBeats == before.lengthBeats)
+            let inColumn = grid.stepIndex(forBeat: before.startBeat) == 0
+            #expect(after.velocity == (inColumn ? 127 : 80), "pitch \(before.pitch)")
+        }
+        #expect(StepAccent.state(notes: on, step: 0, geometry: grid, entry: fixture) == .on)
+
+        let off = try #require(StepAccent.toggle(notes: on, step: 0, geometry: grid, entry: fixture))
+        #expect(off == beat, "a second click returns the column to the drum default")
+
+        var mixed = beat
+        let snareIndex = try #require(mixed.firstIndex { $0.pitch == snare })
+        mixed[snareIndex].velocity = 127
+        #expect(StepAccent.state(notes: mixed, step: 4, geometry: grid, entry: fixture) == .mixed)
+        let lifted = try #require(StepAccent.toggle(notes: mixed, step: 4, geometry: grid, entry: fixture))
+        #expect(StepAccent.hits(in: lifted, step: 4, geometry: grid).map(\.velocity) == [127, 127])
+
+        #expect(StepAccent.toggle(notes: beat, step: 1, geometry: grid, entry: fixture) == nil)
+        // A melodic grid has no Accent row: nothing to click, nothing written.
+        let melodicNotes = [MIDINote(pitch: 60, startBeat: 0, lengthBeats: 0.25)]
+        let melodic = Self.w43Grid(nil, notes: melodicNotes)
+        #expect(StepAccent.toggle(notes: melodicNotes, step: 0, geometry: melodic) == nil)
+    }
+
+    @Test("m39-w4-3 — a hit toggled on in a fully accented column is born at 127; in a mixed column at the drum default; on a melodic grid an all-127 column means nothing and a new note takes the melodic default")
+    func aHitBornInAnAccentedColumnIsAccented() throws {
+        let fixture = Self.w43Fixture
+        let pads = try #require(Self.w43PadsLanes)
+        let grid = Self.w43Grid(pads)
+        let kick = try Self.w43Note(pads, .kick)
+        let snare = try Self.w43Note(pads, .snare)
+        let hat = try Self.w43Note(pads, .closedHat)
+        let beat = Self.w43Click([(0, kick), (4, snare), (4, hat)], on: grid, entry: fixture)
+        let column0On = try #require(StepAccent.toggle(notes: beat, step: 0, geometry: grid, entry: fixture))
+        let bornOn = StepSequencerEdit.toggle(notes: column0On, cell: StepCell(step: 0, pitch: hat),
+                                              geometry: grid, entry: fixture).added
+        #expect(bornOn?.velocity == 127)
+
+        var mixed = beat
+        let snareIndex = try #require(mixed.firstIndex { $0.pitch == snare })
+        mixed[snareIndex].velocity = 127
+        let bornMixed = StepSequencerEdit.toggle(notes: mixed, cell: StepCell(step: 4, pitch: kick),
+                                                 geometry: grid, entry: fixture).added
+        #expect(bornMixed?.velocity == 80)
+
+        let loud = [MIDINote(pitch: 60, velocity: 127, startBeat: 0, lengthBeats: 0.25)]
+        let melodic = Self.w43Grid(nil, notes: loud)
+        let bornMelodic = StepSequencerEdit.toggle(notes: loud, cell: StepCell(step: 0, pitch: 62),
+                                                   geometry: melodic, entry: fixture).added
+        #expect(bornMelodic?.velocity == 100)
+        #expect(StepAccent.columns(notes: loud, geometry: melodic).isEmpty)
+    }
+
+    // MARK: Where the row exists, and its hit test
+
+    @Test("m39-w4-3 — only drum grids carry an Accent row: the geometry keeps the lane list its rows came from (pads and gm drum machine, GM kit), and a melodic grid keeps nil; the pre-w4-2 Bool forms agree")
+    func onlyDrumGridsCarryAnAccentRow() throws {
+        for lanes in [Self.w43PadsLanes, Self.w43GMLayoutLanes, Self.w43GMKitLanes] {
+            let grid = Self.w43Grid(lanes)
+            #expect(lanes != nil)
+            #expect(grid.drumLanes == lanes)
+            #expect(StepAccent.hasRow(grid))
+            #expect(grid.opensAtBottom == StepAccent.hasRow(grid))
+        }
+        let melodic = Self.w43Grid(nil)
+        #expect(melodic.drumLanes == nil)
+        #expect(!StepAccent.hasRow(melodic))
+        #expect(StepAccent.hasRow(geometry(isDrumKit: true)))
+        #expect(!StepAccent.hasRow(geometry(isDrumKit: false)))
+        #expect(geometry(isDrumKit: true).drumLanes == DrumLaneMap.generalMIDIPercussionLanes)
+    }
+
+    @Test("m39-w4-3 — the Accent row reads only columns the grid draws: onsets past the last column, before the first, or on a pitch with no row are not in any column; the row's hit test is the grid's")
+    func accentIgnoresOnsetsOutsideTheGrid() throws {
+        let pads = try #require(Self.w43PadsLanes)
+        let kick = try Self.w43Note(pads, .kick)
+        let grid = Self.w43Grid(pads)            // built with no notes: 16 columns
+        #expect(grid.stepCount == 16)
+        let notes = [MIDINote(pitch: kick, startBeat: 0, lengthBeats: 0.25),
+                     MIDINote(pitch: 90, startBeat: 0, lengthBeats: 0.25),     // no row on this grid
+                     MIDINote(pitch: kick, startBeat: 5, lengthBeats: 0.25)]   // past column 15
+        #expect(StepAccent.hits(in: notes, step: 0, geometry: grid).map(\.pitch) == [kick])
+        #expect(StepAccent.hits(in: notes, step: 20, geometry: grid).isEmpty)
+        #expect(StepAccent.hits(in: notes, step: -1, geometry: grid).isEmpty)
+        #expect(StepAccent.columns(notes: notes, geometry: grid).map(\.step) == [0])
+
+        let w = grid.stepWidth
+        #expect(StepAccent.step(atX: -1, geometry: grid) == nil)
+        #expect(StepAccent.step(atX: 0, geometry: grid) == 0)
+        #expect(StepAccent.step(atX: w * 15.5, geometry: grid) == 15)
+        #expect(StepAccent.step(atX: grid.contentWidth, geometry: grid) == nil)
+        for step in 0..<grid.stepCount {
+            let x = grid.x(forStep: step) + w / 2
+            #expect(StepAccent.step(atX: x, geometry: grid)
+                    == grid.cell(at: CGPoint(x: x, y: 0))?.step)
+        }
+    }
+
+    // MARK: I2: opening a saved drum clip changes nothing
+
+    @Test("m39-w4-3 I2 — opening a saved drum clip and reading it through the grid and the Accent row changes nothing: the decoded notes re-encode to the same bytes, and a stored note with no velocity still decodes at 100 whatever the entry defaults say")
+    func openingADrumClipChangesNothing() throws {
+        let pads = try #require(Self.w43PadsLanes)
+        let kick = try Self.w43Note(pads, .kick)
+        let snare = try Self.w43Note(pads, .snare)
+        let saved = Clip(name: "Beat", startBeat: 0, lengthBeats: 4, notes: [
+            MIDINote(pitch: kick, velocity: 100, startBeat: 0, lengthBeats: 0.25),
+            MIDINote(pitch: snare, velocity: 127, startBeat: 1, lengthBeats: 0.25),
+            MIDINote(pitch: kick, velocity: 64, startBeat: 2, lengthBeats: 0.25),
+        ])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let bytes = try encoder.encode(saved)
+        let opened = try JSONDecoder().decode(Clip.self, from: bytes)
+        let notes = try #require(opened.notes)
+        let grid = Self.w43Grid(pads, notes: notes)
+        _ = StepSequencerEdit.fills(notes: notes, geometry: grid)
+        _ = StepAccent.columns(notes: notes, geometry: grid)
+        #expect(notes == saved.notes)
+        #expect(try encoder.encode(opened) == bytes)
+
+        // The decode default is STORAGE, not entry: a note saved without a
+        // velocity key reads 100 even with a drum entry default of 80.
+        let bare = Data(#"{"pitch":36,"startBeat":0,"lengthBeats":0.25}"#.utf8)
+        #expect(try JSONDecoder().decode(MIDINote.self, from: bare).velocity == 100)
+        #expect(Self.w43Fixture.drumVelocity == 80)
+    }
+}

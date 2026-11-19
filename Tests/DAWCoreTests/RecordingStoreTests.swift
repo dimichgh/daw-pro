@@ -772,4 +772,38 @@ struct RecordingStoreTests {
         #expect(store.transport.isRecording)  // never interrupted the take
         store.stop()
     }
+
+    // p2-sing-f2.
+    @Test("p2-sing-f2: while the voice recorder is open record() refuses FIRST in its words, prompts and starts nothing")
+    func recordRefusedWhileTheVoiceRecorderIsOpen() throws {
+        let engine = FakeRecordingEngine()
+        let store = ProjectStore()
+        store.engine = engine
+        let track = store.addTrack(kind: .audio)
+        try store.setTrackArm(id: track.id, armed: true)
+        let sentence = "The voice recorder is open. Close it before recording in the song."
+        store.voiceRecorderOpenReason = sentence
+        // The microphone undecided: the refusal comes BEFORE the permission gate, so no prompt fires either.
+        engine.recordPermission = .undetermined
+        let requestsBefore = engine.permissionRequests
+        let error = projectError { try store.record() }
+        guard case .transportBusy(let message) = try #require(error) else {
+            Issue.record("expected transportBusy, got \(String(describing: error))")
+            return
+        }
+        #expect(message == sentence)
+        #expect(store.lastRecordingError == sentence)
+        #expect(engine.permissionRequests == requestsBefore)
+        #expect(engine.startRecordingURLs.isEmpty)
+        #expect(!store.transport.isRecording && !store.transport.isPlaying)
+
+        // The card closes: the same store records.
+        store.voiceRecorderOpenReason = nil
+        engine.recordPermission = .granted
+        try store.record()
+        #expect(store.transport.isRecording)
+        #expect(store.lastRecordingError == nil)
+        #expect(engine.startRecordingURLs.count == 1)
+        store.stop()
+    }
 }

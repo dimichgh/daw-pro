@@ -266,7 +266,7 @@ struct EditorSurfaceOwnershipSiteTests {
 
     // MARK: - F3/F11: the roll's eight funnels, and the gesture count that guards them
 
-    @Test("all TEN piano-roll engagement funnels R1–R10 are still present")
+    @Test("all ELEVEN piano-roll engagement funnels R1–R11 are still present")
     func rollFunnelsArePresent() {
         let roll = Self.text(Self.rollPath)
         #expect(!roll.isEmpty)
@@ -275,7 +275,7 @@ struct EditorSurfaceOwnershipSiteTests {
         // without a call is a lie and a call without a marker is unmaintainable.
         for tag in ["m23-al R1", "m23-al R2", "m23-al R3", "m23-al R4",
                     "m23-al R5", "m23-al R6", "m23-al R7", "m23-al R8",
-                    "m23-al R9", "m23-al R10"] {
+                    "m23-al R9", "m23-al R10", "m23-al R11"] {
             let note = "the \(tag) engagement funnel is gone from PianoRollView. Each funnel "
                 + "covers a DISTINCT gesture family — R7 in particular is NOT covered by R6, "
                 + "because the controller strip carries its own `onCommit` and never calls "
@@ -304,13 +304,22 @@ struct EditorSurfaceOwnershipSiteTests {
         // ⌘+/⌘−/⌘0 at an arrange collapsed to an 86 pt ruler strip. The
         // counter-example that stays OUT is CLOSE: it ends the surface rather than
         // claiming it, so it has no engagement and should never grow one.
+        //
+        // ⚠️ 12 → 13 AT m39-w4-10 (2026-10-12, W9-PATUI), RE-MEASURED, and the new
+        // site was held to the rule rather than waved through: R11 is the step
+        // grid's "Start from a beat" menu (`applyStartFromBeat`). A pick writes a
+        // whole beat into the open clip, so it is an EDIT inside this pane, and it
+        // claims ⌘+ exactly as a cell toggle does through R6. It does NOT go through
+        // `commit(` (the store writes it, uncoalesced), which is why it needs its
+        // own engagement, and it engages ONLY when the store reports the clip
+        // changed: a refused pick (a song not in 4/4 there) is a no-op.
         let calls = Self.codeOnly(roll).joined(separator: "\n")
             .components(separatedBy: "onEngage()").count - 1
-        let countNote = "expected 12 `onEngage()` calls in PianoRollView (R1–R10, with R5 and R9 "
+        let countNote = "expected 13 `onEngage()` calls in PianoRollView (R1–R11, with R5 and R9 "
             + "each counted twice — the header cluster's two buttons, and the clipboard's cut "
             + "and paste), found \(calls). If a gesture was added, add its engagement and "
             + "update this number; if one was removed, that gesture no longer claims ⌘+."
-        #expect(calls == 12, "\(countNote)")
+        #expect(calls == 13, "\(countNote)")
     }
 
     @Test("R6 `commit()` has no NON-GESTURE caller — the property that makes it safe to engage there")
@@ -396,10 +405,18 @@ struct EditorSurfaceOwnershipSiteTests {
         //   `deleteNonce` handler (key AND menu), `applyStepToggle`, and the
         //   velocity lane's closure. Every one is a user gesture or an explicit
         //   user menu action, so R6 still cannot false-engage.
-        let note = "expected 7 occurrences of `commit(` in PianoRollView (6 gesture/menu callers "
+        // RE-MEASURED 2026-10-07 (m39-w4-3), 7 -> 8, and the new caller was held
+        // to the rule above rather than waved through:
+        //   • `applyAccentToggle` — the step grid's ACCENT ROW. Its only caller is
+        //     the row's `SpatialTapGesture` (`StepSequencerBand.accentTap` →
+        //     `onAccent`), a click. It commits ONLY when the click changed a
+        //     velocity (`StepAccent.toggle` answers nil on a column with no hits,
+        //     and then nothing commits and nothing engages). No timer, no
+        //     `.onAppear`, no staging seam (none was added).
+        let note = "expected 8 occurrences of `commit(` in PianoRollView (7 gesture/menu callers "
             + "+ the definition), found \(callers). A NEW caller must be checked: if it is not a "
             + "user gesture or an explicit user menu action, R6 now false-engages the roll."
-        #expect(callers == 7, "\(note)")
+        #expect(callers == 8, "\(note)")
         // ⚠️ THE NEEDLE HERE WAS `onCommit: commit` UNTIL 2026-08-13 (m25-a), AND
         // IT WAS VACUOUS: `onCommit: commitControllerLane` (the controller strip,
         // one screen down) contains that string as a PREFIX, so this expectation
@@ -464,14 +481,26 @@ struct EditorSurfaceOwnershipSiteTests {
         // tree cannot observe (m23-bw). If this number ever reaches 9 because
         // somebody "restored consistency with the arrange", that is the
         // regression, not the fix.
+        //
+        // RE-MEASURED 2026-10-07 (m39-w4-3), 8 -> 9, and NOT for that reason:
+        // `StepSequencerGrid` adds ONE — the ACCENT ROW's `accentTap`, a new
+        // surface (one row under the drum rows), not a second gesture racing
+        // `gridDrag`. It engages the way `cellTap` does, through
+        // `PianoRollView.applyAccentToggle` → `commit()` (R6), and only when the
+        // click changed a velocity. Breakdown at 9: PianoRollView 4,
+        // StepSequencerGrid 2 (cellTap, accentTap), KeyboardSidebar 1,
+        // VelocityLane 1, ControllerLaneStrip 1. A 10th that is a rubber band
+        // in the roll is still the m23-ek-1 regression above.
         let breakdown: String = perFile.sorted { $0.key < $1.key }
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: " ")
-        let note = "gesture attachments under Sources/DAWApp/PianoRoll/ moved from 8 to "
+        let note = "gesture attachments under Sources/DAWApp/PianoRoll/ moved from 9 to "
             + "\(total) (\(breakdown)). A NEW gesture in the piano roll must decide whether it "
             + "ENGAGES the roll (call `onEngage()` and add an `m23-al Rn` marker) — otherwise "
             + "that gesture silently fails to claim ⌘+/⌘−/⌘0. Then update this number."
-        #expect(total == 8, "\(note)")
+        #expect(total == 9, "\(note)")
+        #expect(perFile["StepSequencerGrid.swift"] == 2,
+                "StepSequencerGrid carries cellTap and the Accent row's accentTap (m39-w4-3)")
     }
 
     private func sourcesDirPianoRoll() -> URL {

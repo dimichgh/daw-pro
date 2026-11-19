@@ -46,6 +46,13 @@ public struct SliceToSamplerSettings: Sendable, Equatable {
     /// ⭐⭐ Default FALSE, and the reason is arithmetic, not taste — see
     /// `SliceToSamplerPlan`'s velocity note.
     public var velocityFromStrength: Bool
+    /// m39-w4-6: how the pads are numbered. `.chromatic` (the default) is the
+    /// chop exactly as it was before; `.kit` sorts the hits into a General
+    /// MIDI drum kit (`KitSliceLayout`) and has no use for `baseNote`.
+    public var mapping: SliceMapping
+    /// m39-w4-6, `.kit` only: slice index → the role a caller forces on it,
+    /// applied before the classifier.
+    public var roleOverrides: [Int: KitSliceRole]
 
     public static let defaultMinSliceSeconds: Double = 0.05
     public static let defaultMaxSlices = 32
@@ -77,7 +84,9 @@ public struct SliceToSamplerSettings: Sendable, Equatable {
                 snapWindowSeconds: Double = SliceToSamplerSettings.defaultSnapWindowSeconds,
                 generateMIDI: Bool = true,
                 atBeat: Double? = nil,
-                velocityFromStrength: Bool = false) {
+                velocityFromStrength: Bool = false,
+                mapping: SliceMapping = .chromatic,
+                roleOverrides: [Int: KitSliceRole] = [:]) {
         self.mode = mode
         self.sensitivity = sensitivity.clamped(to: 0...1)
         self.divisions = divisions.map { $0.clamped(to: Self.divisionsRange) }
@@ -90,6 +99,8 @@ public struct SliceToSamplerSettings: Sendable, Equatable {
         self.generateMIDI = generateMIDI
         self.atBeat = atBeat
         self.velocityFromStrength = velocityFromStrength
+        self.mapping = mapping
+        self.roleOverrides = roleOverrides
     }
 
     /// ⭐ The snap window ACTUALLY used: never more than half the minimum
@@ -130,6 +141,18 @@ public struct SliceToSamplerSettings: Sendable, Equatable {
     public var includeHeadIsEffective: Bool {
         mode == .transients
     }
+
+    /// m39-w4-6: the settings the CHROMATIC planner runs with. `.chromatic`
+    /// is `self`, unchanged. In `.kit` the planner numbers the pads 0, 1, 2…
+    /// (an index, never past 95, so its MIDI-127 ceiling cannot refuse a chop
+    /// the kit layout would accept) and `KitSliceLayout` then gives each pad
+    /// its kit note, with its own ceiling for the extras.
+    public var planSettings: SliceToSamplerSettings {
+        guard mapping == .kit else { return self }
+        var copy = self
+        copy.baseNote = 0
+        return copy
+    }
 }
 
 /// One emitted pad, as the wire reports it (m32-b2 §6.11). The `Codable`
@@ -159,10 +182,17 @@ public struct SliceReport: Codable, Sendable, Equatable {
     /// `max_c |x_c[k]|` at the chosen frame — how quiet the cut actually is.
     /// Absent on the head pad, for the same reason.
     public var residualAmplitude: Double?
+    /// m39-w4-6, `mapping: "kit"` only: the role this pad was sorted into
+    /// ("other" when nothing matched), and how sure (0.5…1; 1 for a role the
+    /// caller forced with `roles`). Absent from a chromatic chop, whose reply
+    /// is therefore byte-for-byte what it was before.
+    public var role: KitSliceRole?
+    public var confidence: Double?
 
     public init(index: Int, pitch: Int, startFrame: Int, endFrame: Int?,
                 sourceSeconds: Double, beat: Double, strength: Double?,
-                snapOffsetFrames: Int?, residualAmplitude: Double?) {
+                snapOffsetFrames: Int?, residualAmplitude: Double?,
+                role: KitSliceRole? = nil, confidence: Double? = nil) {
         self.index = index
         self.pitch = pitch
         self.startFrame = startFrame
@@ -172,6 +202,8 @@ public struct SliceReport: Codable, Sendable, Equatable {
         self.strength = strength
         self.snapOffsetFrames = snapOffsetFrames
         self.residualAmplitude = residualAmplitude
+        self.role = role
+        self.confidence = confidence
     }
 }
 

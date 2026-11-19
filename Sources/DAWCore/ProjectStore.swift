@@ -67,6 +67,14 @@ public final class ProjectStore {
     public private(set) var lastNonSilentMasterMeter: MeterFrame?
     /// Master output gain 0...2 (1 = unity), applied to the main mix bus.
     public private(set) var masterVolume: Double = 1
+    /// The song's pan rule (m39-panlaw-new, `PanLaw`): how the pan KNOBS
+    /// spread tracks between the speakers. Set ONLY at a project boundary —
+    /// `PanLaw.newSong` by `newProject()`, the file's rule by open / recover
+    /// (no key = the original rule) — and pushed to the engine there and when
+    /// the engine attaches. Never changes inside a song, so it is not in
+    /// `EditState` and undo never touches it. Persisted with the song
+    /// (`ProjectDocument.panLaw`, omitted for the original rule).
+    public private(set) var panLaw: PanLaw = PanLaw.savedSongDefault
     /// The MASTER insert chain (m13-d): project-level effects processing the
     /// whole mix, post-fader between the main mix and the output
     /// (design-m13d §1-B — the C0 verdict). Built-in kinds only in v1
@@ -170,6 +178,16 @@ public final class ProjectStore {
     /// Why the last record attempt failed (or why the last take was
     /// discarded); nil after a successful take or a fresh record start.
     public private(set) var lastRecordingError: String?
+    /// While non-nil, the song's Record refuses with THIS sentence and nothing
+    /// starts: `record()` and every layer take (`recordLayer()`, a loop-deck
+    /// pass) check it FIRST, so `transport.record` / `transport.recordLayer`,
+    /// the transport's button and any key all meet one refusal (p2-sing-f2).
+    /// The app's voice recorder (`SingVoiceRecorderModel`) sets it while its
+    /// card is open and clears it when the card closes. ⚠️ The store never
+    /// clears it itself, on new / open / recover included: the recorder is
+    /// app-level and stays open across a project swap, so the refusal must be
+    /// exactly as alive as the card on screen.
+    public var voiceRecorderOpenReason: String?
     /// UID of the input device pinned for recording; nil = system default.
     /// Only updated when the engine accepts the selection.
     public private(set) var selectedInputDeviceUID: String?
@@ -363,6 +381,9 @@ public final class ProjectStore {
             // an already-wanted subscription across an engine swap — the
             // `isSubscribed` latch would otherwise leave the new engine silent.
             midiControl.reattach(engine: engine)
+            // m39-panlaw-new: the song's pan rule. The app's launch song has no
+            // project boundary to push it, so it rides the attach.
+            engine?.panLawChanged(panLaw)
         }
     }
 
@@ -678,14 +699,20 @@ public final class ProjectStore {
         loopDeck = nil
     }
 
+    /// `panLaw` (m39-panlaw-new): the ORIGINAL rule by default, so every store a
+    /// test or tool builds keeps today's sound. ⚠️ A store that IS a new song
+    /// (the app's launch store) passes `PanLaw.newSong` — `newProject()` sets
+    /// it itself.
     public init(
         projectName: String = "Untitled Session",
         tracks: [Track] = [],
-        transport: TransportState = TransportState()
+        transport: TransportState = TransportState(),
+        panLaw: PanLaw = PanLaw.savedSongDefault
     ) {
         self.projectName = projectName
         self.tracks = tracks
         self.transport = transport
+        self.panLaw = panLaw
     }
 
     deinit {
@@ -943,14 +970,25 @@ public final class ProjectStore {
     /// authored map is a destructive surprise; the error names `tempo.setMap`).
     /// On a trivial project it behaves byte-identically to the scalar era.
     public func setTempo(_ bpm: Double) throws {
+        try requireSingleTempoChangeAllowed()
+        performEdit("Set Tempo", key: "transport.tempo") {
+            applyTempoChange(bpm)
+        }
+    }
+
+    /// `setTempo`'s two refusals, in its order: while recording
+    /// (`transportBusy`), then on a project with a MULTI-SEGMENT tempo map
+    /// (`tempoMapMultiSegment`). ONE home since m39-tpl-f8 (design §5.5, F-8):
+    /// the song skeleton's `planSongSkeleton` (so its apply, its `template:`
+    /// path and its dry run) changes the tempo too and refuses through THIS
+    /// function, so both throw the same error with the same sentence.
+    /// Module-internal (not private) for that caller.
+    func requireSingleTempoChangeAllowed() throws {
         guard !transport.isRecording else {
             throw ProjectError.transportBusy("cannot change tempo while recording — stop first")
         }
         guard transport.tempoMapOverride == nil else {
             throw ProjectError.tempoMapMultiSegment
-        }
-        performEdit("Set Tempo", key: "transport.tempo") {
-            applyTempoChange(bpm)
         }
     }
 
@@ -1115,6 +1153,12 @@ public final class ProjectStore {
     /// and sub-1-second cycles refuse with teaching errors; the loop region
     /// itself is frozen for the take (`setLoop` refuses mid-record).
     public func record() throws {
+        // p2-sing-f2: the voice recorder holds the microphone while its card
+        // is open. Refused FIRST, so its sentence is what a person or an agent
+        // reads and nothing (not even a permission prompt) starts.
+        if let reason = voiceRecorderOpenReason {
+            throw recordFailure(.transportBusy(reason))
+        }
         guard let engine else {
             throw recordFailure(.engineUnavailable)
         }
@@ -1429,6 +1473,10 @@ public final class ProjectStore {
     /// engine call below is `recordLayer()`'s, unchanged — the deck adds a
     /// field to `PendingTake` and nothing else to this path.
     func startLayerTake(deckWindow: DeckTakeWindow?) throws {
+        // p2-sing-f2: `record()`'s first gate, for a layer and a deck pass too.
+        if let reason = voiceRecorderOpenReason {
+            throw recordFailure(.transportBusy(reason))
+        }
         guard let engine else {
             throw recordFailure(.engineUnavailable)
         }
@@ -2026,6 +2074,13 @@ public final class ProjectStore {
         engine?.insertAnalysis(trackID: trackID, effectID: effectID)
     }
 
+    /// m27-j (W8-M27J): frames one armed insert's analyzer has processed and
+    /// frames its tap dropped since the arm (nil when not armed or headless) —
+    /// how `fx.spectrum`'s `audition` hold shows it measured without a gap.
+    public func insertAnalysisCoverage(trackID: UUID?, effectID: UUID) -> InsertAnalysisCoverage? {
+        engine?.insertAnalysisCoverage(trackID: trackID, effectID: effectID)
+    }
+
     /// Latest goniometer/vectorscope frame (m22-d) as the engine reports it
     /// — the phase-scope view's poll seam, `.empty` when running headless.
     /// In-process ONLY by design: raw sample pairs never ride the always-on
@@ -2280,6 +2335,21 @@ public final class ProjectStore {
                              velocity: Int = AuditionController.defaultVelocity,
                              durationMs: Int = AuditionController.defaultDurationMs) throws
         -> AuditionResult {
+        try validateAuditionNote(trackID: trackID, pitches: pitches, velocity: velocity,
+                                 durationMs: durationMs)
+        // m23-ct arbitration: a one-shot ALSO opens an audition hold, so it must
+        // take the live-note ledger the same way `auditionPitches` does.
+        if livePlay.isHolding { livePlay.stop(engine: engine) }
+        return audition.oneShot(trackID: trackID, pitches: pitches, velocity: velocity,
+                                durationMs: durationMs, engine: engine)
+    }
+
+    /// Every check `auditionNote` runs before anything sounds, in the same order
+    /// and with the same errors — ONE home (m27-j, W8-M27J): `fx.spectrum`'s
+    /// `audition` calls it BEFORE it arms a tap, so a refused call arms
+    /// nothing and sounds nothing.
+    public func validateAuditionNote(trackID: UUID, pitches: [Int], velocity: Int,
+                                     durationMs: Int) throws {
         guard !transport.isRecording else {
             throw ProjectError.transportBusy("cannot audition while recording — stop the take first")
         }
@@ -2289,11 +2359,6 @@ public final class ProjectStore {
                 "durationMs must be \(AuditionController.durationRangeMs.lowerBound)…"
                 + "\(AuditionController.durationRangeMs.upperBound) ms — got \(durationMs)")
         }
-        // m23-ct arbitration: a one-shot ALSO opens an audition hold, so it must
-        // take the live-note ledger the same way `auditionPitches` does.
-        if livePlay.isHolding { livePlay.stop(engine: engine) }
-        return audition.oneShot(trackID: trackID, pitches: pitches, velocity: velocity,
-                                durationMs: durationMs, engine: engine)
     }
 
     /// Releases every audition voice everywhere. Called on the project boundary
@@ -3759,7 +3824,7 @@ public final class ProjectStore {
         // The poly-synth rebuild below is an explicit initialiser call, which
         // is why it needs 25 hand-mirrored `?? p.field` lines and why the file
         // warns that a twenty-sixth "WILL COMPILE, SHIP, AND DELETE ITSELF".
-        // With 75 drum parameters that pattern is not maintainable by anyone.
+        // With 77 drum parameters that pattern is not maintainable by anyone.
         //
         // A struct you MUTATE cannot drop a field it does not mention. So the
         // kit starts as whatever the track already had, takes a wholesale
@@ -3773,9 +3838,11 @@ public final class ProjectStore {
             kit = replacement
         }
         if let drumParam {
-            // `nil` means the track has never been given a kit; start from the
-            // factory one so a single-parameter edit works on a fresh track.
-            var overlaid = kit ?? DrumKitParams()
+            // `nil` means the track has never been given a kit. Start from what
+            // that nil PLAYS (`resolvedDrumKit`, W9-DRUMDEF): the factory kit on a
+            // saved never-edited drum machine, so a one-knob edit keeps the rest
+            // of its sound; a new drum machine's kit on any other instrument.
+            var overlaid = kit ?? current.resolvedDrumKit
             // A false return is an unknown name: leave the kit exactly as it
             // was rather than storing a half-applied edit. The control layer
             // reports the refusal.
@@ -3783,9 +3850,20 @@ public final class ProjectStore {
                 kit = overlaid
             }
         }
+        let resolvedKind = kind ?? (audioUnit != nil ? .audioUnit
+                                    : soundBank != nil ? .soundBank : current.kind)
+        // ⭐ W9-DRUMDEF — A KIND CHANGE INTO OR OUT OF THE DRUM MACHINE WRITES A
+        // NIL KIT OUT AS WHAT IT PLAYS (`InstrumentDescriptor.drumKitCarried(into:)`,
+        // the one rule). Picking the Drum Machine (the picker and the wire both
+        // land here) BIRTHS it with the user's picks — the hi-hats and cymbals as
+        // loud as the Mac's own drum kit, the General MIDI keys. Leaving a saved
+        // song's never-edited drum machine keeps the kit it played, so picking it
+        // again (the picker stays open to compare) plays the song as before. Any
+        // other call leaves a nil kit nil: a saved file is not rewritten by a
+        // re-pick or an unrelated knob.
+        if kit == nil { kit = current.drumKitCarried(into: resolvedKind) }
         let resolved = InstrumentDescriptor(
-            kind: kind ?? (audioUnit != nil ? .audioUnit
-                           : soundBank != nil ? .soundBank : current.kind),
+            kind: resolvedKind,
             polySynth: PolySynthParams(
                 waveform: waveform ?? p.waveform,
                 attack: attack ?? p.attack,
@@ -4075,7 +4153,7 @@ public final class ProjectStore {
         guard descriptor.kind == .audioUnit else {
             if descriptor.kind == .soundBank {
                 throw ProjectError.notAnAudioUnitParamTarget(
-                    "track '\(trackID.uuidString)' uses a sound-bank instrument — sound banks have no AU parameter surface (the bank program is the single source of truth); choose programs with instrument.listSoundBankPrograms + track.setInstrument. AU parameters apply only to Audio Unit instruments")
+                    "track '\(trackID.uuidString)' uses a sound-bank instrument — its player has only gain, pan and tuning controls, and settings made there would not be saved with the song, so AU parameters and presets are not offered for sound banks. Gain and pan are already the track's volume and pan (track.setVolume / track.setPan); to change the sound, choose another program with instrument.listSoundBankPrograms + track.setInstrument. AU parameters apply only to Audio Unit instruments")
             }
             throw ProjectError.notAnAudioUnitParamTarget(
                 "track '\(trackID.uuidString)' uses the built-in \(descriptor.kind.rawValue) instrument — AU parameters apply only to Audio Unit instruments (built-in kinds use track.setInstrument)")
@@ -4635,9 +4713,13 @@ public final class ProjectStore {
     /// it never falls below one beat (`minTimeRangeClipLengthBeats`) OR the furthest
     /// remaining note's end (so no surviving note is stranded past the clip end).
     ///
-    /// ONE `performEdit` folds the note edit AND the length change into a single
-    /// undo step (the house rule: one journal entry per call — undo restores the
-    /// exact prior notes + length). Throws `clipNotFound`, `notAMIDIClip`, or
+    /// The clip's WORDS follow the arrange's bar delete (p2-sing-pr-words-f1,
+    /// `ClipLyrics.distributeAfterDelete`): a word whose notes were all cut leaves
+    /// the text; every other word stays.
+    ///
+    /// ONE `performEdit` folds the note edit, the length change AND the words into
+    /// a single undo step (the house rule: one journal entry per call — undo
+    /// restores the exact prior notes + length + words). Throws `clipNotFound`, `notAMIDIClip`, or
     /// `invalidClipEdit` (non-positive `lengthBeats`, or `startBeat` outside
     /// `[0, lengthBeats)`).
     @discardableResult
@@ -4688,10 +4770,22 @@ public final class ProjectStore {
         let noteExtent = kept.map(\.endBeat).max() ?? 0
         let newClipLength = max(clipLength - removed, Self.minTimeRangeClipLengthBeats, noteExtent)
         let ordered = MIDINote.canonicallyOrdered(kept)
+        // The words (p2-sing-pr-words-f1): the arrange's bar-delete rule
+        // (`clipAfterDelete`, ruled 2026-10-05) on the one clip that is left. A
+        // word whose notes were ALL cut leaves the text in this same edit, so the
+        // one undo step brings it back; a word that keeps a note stays; text the
+        // singer cannot place, and a clip with no words, are left exactly as they
+        // are. Worked out from the clip BEFORE the cut (the notes the words sat on).
+        var survivor = tracks[t].clips[c]
+        survivor.notes = ordered
+        survivor.lengthBeats = newClipLength
+        let lyrics = ClipLyrics.distributeAfterDelete([survivor], cutFrom: tracks[t].clips[c], atClipBeat: s,
+                                                      tempoMap: transport.tempoMap)[0].lyrics  // one in, one out
 
         performEdit("Delete Time Range") {
             tracks[t].clips[c].notes = ordered
             tracks[t].clips[c].lengthBeats = newClipLength
+            tracks[t].clips[c].lyrics = lyrics
             engine?.tracksDidChange(tracks)
         }
         return tracks[t].clips[c]
@@ -5117,7 +5211,11 @@ public final class ProjectStore {
             // so an out-of-window segment costs nothing, and a split is
             // reversible by re-joining while discarded tuning is not.
             pitchEdits: clip.pitchEdits,
-            lyrics: lyricsHalves?.left)
+            lyrics: lyricsHalves?.left,
+            // Singing style (p2-sing-x5): the clip-wide choices, and the
+            // per-note choices of the notes THIS half holds (the split keeps
+            // note ids, so each choice goes with its note).
+            singStyle: clip.singStyle?.keepingOverrides(for: firstNotes))
         let second = Clip(
             id: UUID(), name: clip.name,
             startBeat: clip.startBeat + firstLength, lengthBeats: secondLength,
@@ -5133,7 +5231,8 @@ public final class ProjectStore {
             // is the half where a re-anchoring mistake would actually change the
             // sound, because its `startOffsetSeconds` moved.
             pitchEdits: clip.pitchEdits,
-            lyrics: lyricsHalves?.right)
+            lyrics: lyricsHalves?.right,
+            singStyle: clip.singStyle?.keepingOverrides(for: secondNotes))
 
         performEdit("Split Clip '\(clip.name)'") {
             tracks[t].clips[c] = first
@@ -5241,7 +5340,12 @@ public final class ProjectStore {
             // dropping them would turn a reversible gesture into lost tuning.
             pitchEdits: clip.pitchEdits,
             // Lyrics (p2-sing-d1b): a trim keeps the text exactly.
-            lyrics: clip.lyrics)
+            lyrics: clip.lyrics,
+            // Singing style (p2-sing-x5): the clip-wide choices, and the
+            // per-note choices of the notes that survive the trim (ids kept);
+            // a note the trim dropped takes its choice with it, and undo
+            // brings both back.
+            singStyle: clip.singStyle?.keepingOverrides(for: newNotes))
 
         performEdit(label, key: key) {
             tracks[t].clips[c] = rebuilt
@@ -6185,8 +6289,14 @@ public final class ProjectStore {
             pitchEdits: clip.pitchEdits,
             // Lyrics (p2-sing-d1b): a copy keeps the text exactly. The bar
             // insert/delete tails re-minted here are re-shared by
-            // `ClipLyrics.distribute` in `clipAfterInsert` / `clipAfterDelete`.
-            lyrics: clip.lyrics)
+            // `ClipLyrics.distribute` (`clipAfterInsert`) and
+            // `ClipLyrics.distributeAfterDelete` (`clipAfterDelete`).
+            lyrics: clip.lyrics,
+            // Singing style (p2-sing-x5): VERBATIM. The notes above are copied
+            // with their ids, so every per-note choice still names a note of
+            // this clip. The bar insert/delete tails reach here already cut to
+            // their own notes by `clipTrimmedToWindow`.
+            singStyle: clip.singStyle)
     }
 
     /// Duplicates a clip (m15-d) — a VALUE-COPY of everything (`reidentified`)
@@ -6326,7 +6436,12 @@ public final class ProjectStore {
             // touched — the worst shape this bug can take.
             pitchEdits: clip.pitchEdits,
             // Lyrics (p2-sing-d1b): a trim keeps the text exactly.
-            lyrics: clip.lyrics)
+            lyrics: clip.lyrics,
+            // Singing style (p2-sing-x5): the same rule as `applyTrimWindow`
+            // (these two must agree). Reached by the overlap choke point and
+            // by both pieces of the bar insert/delete straddle, so a note the
+            // insert pivot cuts in two keeps its choice in BOTH pieces.
+            singStyle: clip.singStyle?.keepingOverrides(for: newNotes))
     }
 
     /// Resolves how one STATIONARY same-track clip must change so it no longer
@@ -6705,9 +6820,11 @@ public final class ProjectStore {
             let tailID = pieces.isEmpty ? clip.id : UUID()
             pieces.append(reidentified(tail, id: tailID, startBeat: deleteEnd - delta))
         }
-        // Lyrics (p2-sing-d1b): head AND tail is a split at the delete's start;
-        // the words inside the deleted range go with the tail, a trim.
-        return ClipLyrics.distribute(pieces, cutFrom: clip, atClipBeat: deleteStart - start, tempoMap: tempoMap)
+        // Lyrics (p2-sing-e, ruled 2026-10-05): head AND tail is a split at the
+        // delete's start; a word whose notes were ALL deleted leaves the text in
+        // this same edit (one undo step), and a word that keeps a note stays.
+        return ClipLyrics.distributeAfterDelete(pieces, cutFrom: clip, atClipBeat: deleteStart - start,
+                                                tempoMap: tempoMap)
     }
 
     /// Automation-point shift for an insert: a point at/after `pivot` moves right
@@ -7332,6 +7449,9 @@ public final class ProjectStore {
         // last-saved patch while the user hears the current one.
         let exclusion = try RenderExclusion.resolve(session: tracksWithLiveAudioUnitState(),
                                                     excluding: excludeTrackIds)
+        // W9-PLRT R1: the song's pan rule is an INPUT of the render, read here
+        // with the rest of the song, never by the engine after an await.
+        let law = panLaw
 
         let url = Self.mixdownDestination(from: path, format: format)
         // The format crosses HERE, not at `writeAudioFile`: on this path the
@@ -7340,6 +7460,8 @@ public final class ProjectStore {
         let info = try await engine.renderMixdown(
             tracks: exclusion.tracks,
             tempoMap: transport.tempoMap,
+            meterMap: transport.meterMap,  // m39-w4-4a: where synced step patterns restart
+            panLaw: law,  // W9-PLRT R1: the song's pan rule, an input
             masterVolume: masterVolume,
             masterEffects: masterEffects,  // MASTERED class (m13-d, design §2)
             masterAutomation: masterAutomation,  // rides the class (m15-c)
@@ -7390,6 +7512,13 @@ public final class ProjectStore {
     /// called only from state-changing session mutations, never from
     /// play/stop/seek, playhead pushes, input-device selection, or metering.
     private func markDirty() { isDirty = true }
+
+    /// A second door to `markDirty()`, for a change that is saved but is
+    /// deliberately NOT an undo step (p2-sing-x5, from W8-SE1's report):
+    /// `recordSungVocalChecks` writes a check result into a landed take's
+    /// record after the landing. Not a second policy: the same funnel, so a
+    /// save made before the result arrived no longer hides it.
+    func markDirtyWithoutUndoStep() { markDirty() }
 
     // MARK: - Undo / redo
 
@@ -7684,7 +7813,9 @@ public final class ProjectStore {
             reference: reference,
             // m39-e (W7-MODP): the master strip's modulation was never handed to the save format.
             masterModulationSources: masterModulationSources,
-            masterModulationRoutes: masterModulationRoutes
+            masterModulationRoutes: masterModulationRoutes,
+            // m39-panlaw-new: the song's pan rule (omitted for the original rule).
+            panLaw: panLaw
         )
         do {
             try ProjectBundle.write(
@@ -7882,6 +8013,9 @@ public final class ProjectStore {
         tracks = []
         transport = TransportState()
         masterVolume = 1
+        // m39-panlaw-new: a NEW song — the pan knobs use the automation rule
+        // (the user's pick, "One rule for new songs only").
+        panLaw = PanLaw.newSong
         masterEffects = []  // m13-d: a fresh session carries no master chain
         masterAutomation = []  // m15-c: … and no master automation
         // m39-e (F1, W7-MODP): … and no master modulation. It used to survive New — in the store AND in the
@@ -7941,6 +8075,10 @@ public final class ProjectStore {
         // a once-rendered engine rebuilds from the new (empty) model inside
         // the tracksDidChange below instead of tearing nodes down one by one.
         engine?.projectWillReplace()
+        // m39-panlaw-new: the rule lands BEFORE the rebuild, so the fresh graph
+        // is built with it (`wireGraphHooks` reads the engine's cache).
+        // W9-PLRT R5: cache-only; the tracksDidChange below runs the pass.
+        engine?.setPanLaw(panLaw)
         engine?.tracksDidChange(tracks)
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
@@ -7968,6 +8106,9 @@ public final class ProjectStore {
         tracks = runtime.tracks
         transport = runtime.transport
         masterVolume = runtime.masterVolume
+        // m39-panlaw-new: the file's pan rule — the ORIGINAL rule when it has
+        // no key, which is every song saved before the setting existed.
+        panLaw = document.runtimePanLaw
         masterEffects = runtime.masterEffects
         masterAutomation = runtime.masterAutomation
         // Master modulation (m39-e; F1, W7-MODP): the document's — EMPTY when the file has none, which is what
@@ -8042,6 +8183,9 @@ public final class ProjectStore {
         // a once-rendered engine rebuilds from the opened model inside the
         // tracksDidChange below instead of tearing nodes down one by one.
         engine?.projectWillReplace()
+        // m39-panlaw-new: the rule lands BEFORE the rebuild (the newProject
+        // order). W9-PLRT R5: cache-only; the tracksDidChange below runs the pass.
+        engine?.setPanLaw(panLaw)
         engine?.tracksDidChange(tracks)
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
@@ -8275,7 +8419,10 @@ public final class ProjectStore {
             reference: reference,
             // m39-e (W7-MODP): crash-recovery and untitled-recovery bundles carry it too (F4).
             masterModulationSources: masterModulationSources,
-            masterModulationRoutes: masterModulationRoutes
+            masterModulationRoutes: masterModulationRoutes,
+            // m39-panlaw-new: and the song's pan rule, so a recovered new song
+            // keeps sounding like one.
+            panLaw: panLaw
         )
     }
 
@@ -8417,6 +8564,8 @@ public final class ProjectStore {
         tracks = runtime.tracks
         transport = runtime.transport
         masterVolume = runtime.masterVolume
+        // m39-panlaw-new: the recovered snapshot's pan rule, the open-path rule.
+        panLaw = document.runtimePanLaw
         masterEffects = runtime.masterEffects
         masterAutomation = runtime.masterAutomation
         // Master modulation (m39-e; F1 + F4, W7-MODP): the recovered snapshot's, the open-path rule.
@@ -8458,6 +8607,9 @@ public final class ProjectStore {
         resetRecordingScratch()
         journal.clear()
 
+        // m39-panlaw-new: the recovered rule, before the tracks (the open order).
+        // W9-PLRT R5: cache-only; the tracksDidChange below runs the pass.
+        engine?.setPanLaw(panLaw)
         engine?.tracksDidChange(tracks)
         engine?.masterVolumeChanged(masterVolume)
         engine?.masterEffectsChanged(masterEffects)
@@ -8808,7 +8960,8 @@ public final class ProjectStore {
             engineNotices: engineNotices,
             reference: reference,
             stopAtContentEnd: stopAtContentEnd,
-            contentEndBeat: contentEndBeat
+            contentEndBeat: contentEndBeat,
+            panLaw: panLaw
         )
     }
 

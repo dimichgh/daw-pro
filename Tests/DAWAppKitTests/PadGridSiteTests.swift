@@ -314,3 +314,72 @@ struct PadGridSiteTests {
         #expect(model.contains("public private(set) var lastRefusal: String?"))
     }
 }
+
+// MARK: - m39-w4-8: the drum machine, the role labels, the choke link, the kit box
+
+/// The model is tested headless (`PadGridTests`, `PadGridDrumMapTests`). What
+/// only a site test can see is that the APP binds the new injector (it defaults
+/// to `{ nil }`, so its absence compiles and passes every model test), and that
+/// the views DRAW what the model now says.
+extension PadGridSiteTests {
+
+    @Test("⛔ the drum machine's injector is BOUND by the app, and the keys share the mouse's map")
+    func drumMachineInjectorIsBound() {
+        let staging = Self.code("DAWApp/PadGridStaging.swift")
+        #expect(staging.contains("instrument: { [unowned self] in self.padGridInstrument() }"))
+        #expect(staging.contains("func padGridInstrument() -> InstrumentDescriptor?"))
+        // The model installs the letter keys' map itself, so it cannot be
+        // forgotten, and the controller consults it before the arithmetic.
+        let model = Self.code("DAWAppKit/PadGridModel.swift")
+        #expect(model.contains("typing.padNoteMap = { [weak self] in self?.drumPads?.map(\\.note) }"))
+        #expect(model.contains("guard let pitch = typing.padPitch(index: index) else { return }"))
+        let controller = Self.code("DAWAppKit/MusicalTypingController.swift")
+        #expect(controller.contains("if let map = padNoteMap?() {"))
+        // ⚠️ NON-VACUITY: the drum map has ONE home, and it reads the lane map.
+        let map = Self.code("DAWAppKit/PadGridDrumMap.swift")
+        #expect(map.contains("DrumLaneMap.lanes(for: instrument)"))
+        #expect(map.contains("DrumVoice.voice(forSlot: slot)"))
+    }
+
+    @Test("⛔ the grid DRAWS the drum name, the choke glyph and the drum hint")
+    func gridDrawsDrumsAndChoke() {
+        let view = Self.code("DAWApp/Components/PadGridView.swift")
+        #expect(view.contains("if let drum = state.drumLabel, state.levelsSemitones == nil {"))
+        #expect(view.contains(".overlay(alignment: .topTrailing) { chokeGlyph(state, isLit: isLit) }"))
+        #expect(view.contains("if state.chokeLink != nil {"))
+        #expect(view.contains("Text(bankHint)"))
+        #expect(view.contains("PadGridModel.pastLastDrumHelp"))
+        // The strip hands the view the model's words, and draws its noun.
+        let strip = Self.code("DAWApp/Components/MusicalKeyboardStrip.swift")
+        #expect(strip.contains("bankHint: padGrid.bankHint"))
+        #expect(strip.contains("Text(padGrid.loadedNoun)"))
+        #expect(strip.contains("notice.kitSummary"))
+        #expect(strip.contains("padGrid?.bank ?? controller.padBank"))
+        // NON-VACUITY: the old hard-coded noun is gone from the header.
+        #expect(strip.contains("\"slices loaded\"") == false)
+    }
+
+    @Test("⛔ the kit box is MOUNTED in Simple, labelled from one home, and dims Pad 1 on the model's rule")
+    func kitBoxIsMountedAndWired() {
+        let card = Self.code("DAWApp/Instrument/ChopToPadsPanel.swift")
+        // In the body, BEFORE the Pro block — the novice is in Simple.
+        let body = try! #require(card.range(of: "var body: some View {"))
+        let rest = String(card[body.upperBound...])
+        let kit = try! #require(rest.range(of: "kitRow"))
+        let pro = try! #require(rest.range(of: "if isPro { proRow }"))
+        #expect(kit.lowerBound < pro.lowerBound)
+        #expect(card.contains("label: PadChopSettings.sortIntoKitLabel"))
+        #expect(card.contains("model.chop.sortIntoKit.toggle()"))
+        #expect(card.contains("\"Sort the hits into a drum kit\"") == false)
+        // "Pad 1 plays note": dimmed, not disabled, and it says why.
+        #expect(card.contains("dimmed: !model.chop.baseNoteIsEffective"))
+        #expect(card.contains("model.chop.baseNoteInertNote"))
+        // The staging seam can tick it and read what the chop will send.
+        let staging = Self.code("DAWApp/PadGridStaging.swift")
+        #expect(staging.contains("params[\"sortIntoKit\"]?.boolValue"))
+        #expect(staging.contains("\"chopMapping\": .string(padGrid.chop.settings().mapping.rawValue)"))
+        // ⛔ AND STILL NO PARALLEL PATH: the chop is the store's function.
+        #expect(staging.contains("store.sliceClipToSampler("))
+        #expect(staging.contains("mapping: .kit") == false)
+    }
+}

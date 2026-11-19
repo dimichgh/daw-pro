@@ -229,6 +229,13 @@ final class TransientShaperEffect: EffectRendering, @unchecked Sendable {
         envAttack = 0
         envSustain = 0
         needsPrime = true
+        // m39-d CR-2: a reset drops the ramp in flight (`needsPrime` re-seats
+        // the values); the cell geometry is the renderer's and stays.
+        rampFramesLeft = 0
+        rampAttackDelta = 0
+        rampSustainDelta = 0
+        rampOutputDelta = 0
+        rampMixDelta = 0
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -278,6 +285,7 @@ final class TransientShaperEffect: EffectRendering, @unchecked Sendable {
             ms: (p.sustainMs.isFinite ? p.sustainMs : 200)
                 .clamped(to: TransientShaperParams.sustainMsRange),
             sampleRate: sampleRate)
+        rampPending = true  // m39-d CR-2: the next `process` starts a ramp
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). ⛔ SLOT ORDER IS
@@ -299,6 +307,45 @@ final class TransientShaperEffect: EffectRendering, @unchecked Sendable {
         default: overlay.effective.mix = value
         }
         deriveRenderParams(overlay.effective)
+    }
+
+    // MARK: - m39-d CR-2: the control cell (docs/design/2026-10-07-effect-control-rate.md §5.4)
+    //
+    // Render-thread only. A ramp starts in the `process` call after a derive
+    // (`rampPending`). On the control grid (`cellFramesLeft` covers the whole
+    // call) it spans the REST OF THE CELL and carries across calls; off it,
+    // it spans the call, exactly as before the grid. A ramp in flight that
+    // would end INSIDE a call is re-spanned over that call, so no ramp ever
+    // ends mid-call and the per-sample loop is untouched. In a 512 bounce the
+    // cell is the call: the same delta expression, run the same number of
+    // times (G1 byte gate).
+    /// Frames from the next `process` call to the next control-cell line
+    /// (0 = off the grid). Set by `beginControlCell`, counted down here.
+    private var cellFramesLeft = 0
+    /// Frames left in the ramp in flight (0 = values sit at their targets).
+    private var rampFramesLeft = 0
+    /// A derive landed since the ramp in flight began.
+    private var rampPending = false
+    /// The ramp in flight's per-frame steps (carried across calls; 0 at rest).
+    private var rampAttackDelta = 0.0
+    private var rampSustainDelta = 0.0
+    private var rampOutputDelta = 0.0
+    private var rampMixDelta = 0.0
+
+    /// m39-d CR-1 (design §5.3): the automated values stored at this control
+    /// cell's entry still stand. Adopt FIRST, so a knob publish waiting in the
+    /// slot is seen now, as a store would see it (then `overlay.hold()`
+    /// answers false and the renderer re-stores). Render thread; no allocation.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): the dB and mix ramps span the rest of the
+    /// cell (`frames`), carried across calls, instead of one call. (The envelope
+    /// coefficients step at the derive, as before.)
+    func beginControlCell(frames: Int) {
+        cellFramesLeft = max(0, frames)
     }
 
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
@@ -330,11 +377,22 @@ final class TransientShaperEffect: EffectRendering, @unchecked Sendable {
         }
         guard channelCount > 0, minFrames > 0 else { return }
 
-        let span = Double(minFrames)
-        let attackDelta = (targetAttackDb - previousAttackDb) / span
-        let sustainDelta = (targetSustainDb - previousSustainDb) / span
-        let outputDelta = (targetOutputDb - previousOutputDb) / span
-        let mixDelta = (targetMix - previousMix) / span
+        // m39-d CR-2: start (or re-span) the ramp — see the MARK above. The
+        // delta expressions are the pre-grid ones, verbatim.
+        if rampPending || (rampFramesLeft > 0 && rampFramesLeft < minFrames) {
+            rampPending = false
+            let rampFrames = cellFramesLeft >= minFrames ? cellFramesLeft : minFrames
+            let span = Double(rampFrames)
+            rampAttackDelta = (targetAttackDb - previousAttackDb) / span
+            rampSustainDelta = (targetSustainDb - previousSustainDb) / span
+            rampOutputDelta = (targetOutputDb - previousOutputDb) / span
+            rampMixDelta = (targetMix - previousMix) / span
+            rampFramesLeft = rampFrames
+        }
+        let attackDelta = rampAttackDelta
+        let sustainDelta = rampSustainDelta
+        let outputDelta = rampOutputDelta
+        let mixDelta = rampMixDelta
 
         let floorLin = TransientShaperParams.detectorFloorLinear
         let maxShape = TransientShaperParams.maxShapeDb
@@ -439,6 +497,23 @@ final class TransientShaperEffect: EffectRendering, @unchecked Sendable {
         envFast = fast
         envAttack = attackEnv
         envSustain = sustainEnv
+
+        // m39-d CR-2: a ramp still in flight carries what it reached; at the
+        // ramp's end the values are SNAPPED to their targets, exactly as every
+        // call end did before the grid (and still does off it).
+        rampFramesLeft = rampFramesLeft > minFrames ? rampFramesLeft - minFrames : 0
+        cellFramesLeft = cellFramesLeft > minFrames ? cellFramesLeft - minFrames : 0
+        if rampFramesLeft > 0 {
+            previousAttackDb = attackDb
+            previousSustainDb = sustainDb
+            previousOutputDb = outputDb
+            previousMix = mix
+            return
+        }
+        rampAttackDelta = 0
+        rampSustainDelta = 0
+        rampOutputDelta = 0
+        rampMixDelta = 0
 
         // SNAPPED to this quantum's targets rather than left at whatever the
         // accumulation landed on (the `StereoWidthEffect` rule): a value that

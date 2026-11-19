@@ -1,0 +1,107 @@
+# W8-CR0 control-grid goldens (m39-d CR-0, docs/design/2026-10-07-effect-control-rate.md §6 G1)
+# captured: 2026-10-07T17:51:57Z
+# plant: none (OfflineRenderer default constructor)
+# hash: SHA-256 over Float32 bit patterns of RenderedAudio.channelData, native byte order, ch0 frames then ch1
+# renderer: OfflineRenderer(sampleRate: 48000[, maximumFrameCount: plant]).render(tracks:tempoMap:fromBeat:durationSeconds:)
+# tempo: 120 BPM constant; input: synthesized 8 s stereo float WAV (CR0.inputChannels), clip beats 0-16
+# lane points (beat:fraction): 0.37:0.2 1.13:0.8 2.71:0.35 4.29:0.9 5.83:0.15 7.21:0.7 7.9:0.3
+# routes: LFO sine 5.0 Hz bipolar depth 0.25; step [0,1] 8.0 Hz edge 2.0 ms depth 0.15
+# static params: continuous 30% toward the farther range end (geometric on log curves); refused params flipped, except *Enabled=on, freeze=0, sync=0, division=default; overrides limiter.ceilingDb=-14, gate.thresholdDb=-17/holdMs=10/releaseMs=30 (see '# settings' lines)
+# activity (a vs c differing samples): gain=288000 eq=288000 compressor=288000 limiter=287520 reverb=276708 delay=206880 saturator=288000 gate=197390 chorus=286870 bassEnhancer=287997 bitCrusher=287992 djFilter=287998 ringMod=288000 flanger=287510 hallReverb=288000 tapeDelay=237318 stereoWidth=288000 phaser=288000 transientShaper=287996 freqShifter=287998 clipper=288000 dynamicEQ=288000
+# test file sha256: 1b32a72d52fe7c504900ecf5ae80f296406f33a709918c5a9369c38ee5891cae
+# columns: id	sha256	frames	channels	peak	rms	nonFinite	note
+# settings gain: gainLinear=5.5,invertPolarity=1
+# settings eq: lowShelfFreq=245.646,lowShelfGainDb=7.2,peak1Freq=1512.13,peak1GainDb=7.2,peak1Q=6.1,peak2Freq=5300.22,peak2GainDb=7.2,peak2Q=6.1,highShelfFreq=10531.1,highShelfGainDb=7.2,highPassFreq=64.6727,highPassSlopeDbPerOct=24,highPassEnabled=1,lowShelfQ=5.89497,lowShelfEnabled=1,peak1Enabled=1,peak2Enabled=1,highShelfQ=5.89497,highShelfEnabled=1,lowPassFreq=8141.81,lowPassSlopeDbPerOct=24,lowPassEnabled=1
+# settings compressor: thresholdDb=-30.6,ratio=8.8,attackMs=67,releaseMs=670,kneeDb=11.4,makeupDb=7.2,mix=0.7,detectorMode=2,detectorFreqHz=8516.78,detectorQ=3.8
+# settings limiter: ceilingDb=-14,releaseMs=335,truePeak=1
+# settings reverb: roomSize=0.65,damping=0.65,mix=0.545,preDelayMs=67,width=0.7
+# settings delay: timeMs=845,feedback=0.5447,mix=0.51,pingPong=1,highCutHz=10531.1,sync=0,division=1
+# settings saturator: driveDb=19.2,mix=0.7,outputDb=3.6,oversampling=4
+# settings gate: thresholdDb=-17,attackMs=15.7,holdMs=10,releaseMs=30
+# settings chorus: rateHz=1.38629,depthMs=5.1,mix=0.65
+# settings bassEnhancer: crossoverHz=112.602,amount=0.65,mix=0.7
+# settings bitCrusher: bits=8.7,downsampleHz=9793.74,antiAlias=1,dither=1,mix=0.7
+# settings djFilter: position=0.3,resonance=0.475,slopeDbPerOct=12,deadZoneWidth=0.088,resonanceTrack=0.3
+# settings ringMod: carrierHz=912.237,mix=0.65,waveform=3,inputHighCutHz=6613.21,stereoSpreadDeg=54
+# settings flanger: rateHz=0.858984,depthMs=4.30512,delayMs=1.99526,feedback=0.065,mix=0.65,stereoPhaseDeg=117
+# settings hallReverb: mix=0.51,decaySeconds=3.70681,sizeMeters=19.4479,preDelayMs=89,width=0.7,diffusion=0.49,earlyLateBalance=0.3,lowDecayMultiplier=1.51572,highDecayMultiplier=0.615572,lowCrossoverHz=324.131,highCrossoverHz=8052.71,modRateHz=0.697711,modDepthMs=1.605,freeze=0
+# settings tapeDelay: timeMs=726.885,feedback=0.5797,mix=0.51,wowDepthMs=4.15,wowRateHz=1.18932,flutterDepthMs=0.475,saturationDrive=0.51,highCutHz=8610.23
+# settings stereoWidth: width=1.3,spread=0.51,bassMonoHz=184.127,bassMonoAmount=0.7
+# settings phaser: rateHz=1.22823,centerHz=430.512,depthOctaves=2.1,stages=12,feedback=0.065,mix=0.65,stereoPhaseDeg=117
+# settings transientShaper: attackDb=6,sustainDb=6,attackMs=9.97631,sustainMs=324.131,outputDb=7.2,mix=0.7
+# settings freqShifter: shiftHz=600,fineHz=6,stereoSpreadHz=6,mix=0.65,outputDb=7.2
+# settings clipper: driveDb=10.8,ceilingDb=-7.41,mode=1,oversampling=4,mix=0.7,outputDb=7.2
+# settings dynamicEQ: band1Mode=2,band1Freq=556.847,band1Q=6.8,band1ThresholdDb=-30.6,band1Ratio=8.8,band1RangeDb=3,band1AttackMs=67,band1ReleaseMs=670,band2Mode=2,band2Freq=1512.13,band2Q=6.8,band2ThresholdDb=-30.6,band2Ratio=8.8,band2RangeDb=3,band2AttackMs=67,band2ReleaseMs=670,band3Mode=2,band3Freq=5300.22,band3Q=6.8,band3ThresholdDb=-30.6,band3Ratio=8.8,band3RangeDb=3,band3AttackMs=67,band3ReleaseMs=670,band4Mode=2,band4Freq=10531.1,band4Q=6.8,band4ThresholdDb=-30.6,band4Ratio=8.8,band4RangeDb=3,band4AttackMs=67,band4ReleaseMs=670
+fx.gain.a	d0341400ea36db3d2efb0e88dcb631b8ce03eb3f324bd78dc2550f09c5cacf95	144000	2	4.903349	0.670681	0	audio strip; lane gainLinear; lfo5Hz+step8Hz gainLinear; beat 0, 3.0 s
+fx.gain.b	0ef61e9ee0f4f60d9d9f45b21c440a80d5519cd5bbcb5be58cf8825b63e0a402	96000	2	4.903349	0.688747	0	audio strip; lane gainLinear; lfo5Hz+step8Hz gainLinear; fromBeat 3.37, 2.0 s
+fx.gain.c	ae63c14556b789acd1be6d7bcd985e8c41997e0445d32f9f26dcdea8d432a929	144000	2	1.813688	0.361339	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.eq.a	2770eba345181168291ccbcc967068f00ad1d98990d230d3d5a28c9b5202a016	144000	2	5.200113	0.669555	0	audio strip; lane lowShelfFreq; lfo5Hz+step8Hz lowShelfGainDb; beat 0, 3.0 s
+fx.eq.b	8b4ce28875820c9deed1b510945c436baec482f646f6aefaaf3572b6fd212a76	96000	2	5.923727	0.669499	0	audio strip; lane lowShelfFreq; lfo5Hz+step8Hz lowShelfGainDb; fromBeat 3.37, 2.0 s
+fx.eq.c	5f6a2214b47d86be0a0fe0742d5e4d3053473337f40301934b1e0c0807283f61	144000	2	0.847927	0.211396	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.compressor.a	6fd37145902045db0336ad20f032cd05aa9def8e4db44a9f18977b4430644d5a	144000	2	0.528403	0.072231	0	audio strip; lane thresholdDb; lfo5Hz+step8Hz ratio; beat 0, 3.0 s
+fx.compressor.b	af7afa1e5b1a09c919c2a70bdeb835f984917acac5ff6b78063ef0c97a385c92	96000	2	0.622728	0.090762	0	audio strip; lane thresholdDb; lfo5Hz+step8Hz ratio; fromBeat 3.37, 2.0 s
+fx.compressor.c	85ad0071d7092c552db0f522699284b309f03f58760b3a99c274359a143b79da	144000	2	0.562958	0.084813	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.limiter.a	493618a2063be4f2820dfa975f2f50eda44efec2820887f821f2df1827f6812c	144000	2	0.306556	0.053685	0	audio strip; lane ceilingDb; lfo5Hz+step8Hz releaseMs; beat 0, 3.0 s
+fx.limiter.b	a607962e09ca741d051c3c3056cd46c79abd2e71384aa7a19f86362c26feef43	96000	2	0.329761	0.055404	0	audio strip; lane ceilingDb; lfo5Hz+step8Hz releaseMs; fromBeat 3.37, 2.0 s
+fx.limiter.c	ae1e07cb9295792b12eafa577ed2e8b928be2438eb75f90b2f60d9208e572648	144000	2	0.199526	0.045669	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.reverb.a	247f26d7aee92d3b1babd107b46252484dde1ae401ee130174901bc4848f0954	144000	2	0.171513	0.035151	0	audio strip; lane roomSize; lfo5Hz+step8Hz damping; beat 0, 3.0 s
+fx.reverb.b	36d5eaca1ae153b97485563c0cb24046aa7759bb55a01f37c66897e18ad1e519	96000	2	0.166666	0.035057	0	audio strip; lane roomSize; lfo5Hz+step8Hz damping; fromBeat 3.37, 2.0 s
+fx.reverb.c	15e4d585a07b767ce160354102a8e43fd3581af6fdd4fbe5e775dfdde607b20c	144000	2	0.170604	0.035419	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.delay.a	d7265cb6b75765f7983b779d2ae618514787983bf02ab5b3eb2b16c1cfd23fe9	144000	2	0.269596	0.042864	0	audio strip; lane timeMs; lfo5Hz+step8Hz feedback; beat 0, 3.0 s
+fx.delay.b	db9742a4205511b871566c34b845348c4b3e7ca9550a56b72f02410c7fd8d02a	96000	2	0.238450	0.041214	0	audio strip; lane timeMs; lfo5Hz+step8Hz feedback; fromBeat 3.37, 2.0 s
+fx.delay.c	9aa9506dfebdeaf76bb87af4514f96295d043e32203b9a5e2f82bc880e3e5fc0	144000	2	0.231260	0.045535	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.saturator.a	badd7de016f2e5a86e16f8ba9f4d95603ea9d056c195c06b7f0318feaeecce90	144000	2	0.639960	0.179409	0	audio strip; lane driveDb; lfo5Hz+step8Hz mix; beat 0, 3.0 s
+fx.saturator.b	94086c70837e8172b54882903950689dd2364294847bc840e8aeb44bc461f101	96000	2	0.603240	0.178822	0	audio strip; lane driveDb; lfo5Hz+step8Hz mix; fromBeat 3.37, 2.0 s
+fx.saturator.c	6993149e09c3fd8939034429e36558066b89347bb7641221fe676b9f4a4afef5	144000	2	0.449176	0.182779	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.gate.a	7354b9d310e86e35d50cd32da26578b669c8575f8c3b870e6085b76be2f9b262	144000	2	0.329761	0.062035	0	audio strip; lane thresholdDb; lfo5Hz+step8Hz attackMs; beat 0, 3.0 s
+fx.gate.b	821a05fd7d7202109ba40577851844e04b7fbd3f35de765f72197b127459d338	96000	2	0.329761	0.061275	0	audio strip; lane thresholdDb; lfo5Hz+step8Hz attackMs; fromBeat 3.37, 2.0 s
+fx.gate.c	a534100b9f9d0b62497306e5dfe5d1f225b0f43b700d1874d063bcaebb86d4cb	144000	2	0.269186	0.046399	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.chorus.a	fe8491ac1e7b637d254704fe9d963a69f49a8615b48f442e4aafd0f07d52e9e7	144000	2	0.211936	0.037693	0	audio strip; lane rateHz; lfo5Hz+step8Hz depthMs; beat 0, 3.0 s
+fx.chorus.b	5acb7a16d636f3936bf947d3900239c925c55f4c4d3f57ed678042adf82cec6e	96000	2	0.220099	0.038584	0	audio strip; lane rateHz; lfo5Hz+step8Hz depthMs; fromBeat 3.37, 2.0 s
+fx.chorus.c	8fa73ea965724b02f8f552dc8f290ccb059b3d79abebe753e1c7fb147777f890	144000	2	0.229560	0.039880	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.bassEnhancer.a	08bfea6d8a4e186ea5441e407b461a181474001474a64150a58a85edb9148560	144000	2	0.342775	0.065681	0	audio strip; lane crossoverHz; lfo5Hz+step8Hz amount; beat 0, 3.0 s
+fx.bassEnhancer.b	93f13891f82ecfaa69436869de68ab36a7ad33719bd4314cf99e74cad2d6cff6	96000	2	0.342951	0.065776	0	audio strip; lane crossoverHz; lfo5Hz+step8Hz amount; fromBeat 3.37, 2.0 s
+fx.bassEnhancer.c	5dea95e7fc072c8ceb1e6a5a28bf8499f5325701c4a1648861592a94505b6748	144000	2	0.332602	0.065634	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.bitCrusher.a	ca0becdf68d5648669b7ec35b082586763655bfce7a5e725cdead951bf9d38f8	144000	2	0.345567	0.064366	0	audio strip; lane bits; lfo5Hz+step8Hz downsampleHz; beat 0, 3.0 s
+fx.bitCrusher.b	104e167cb69af124475e7914e64fa58de611bf592dac01dcb993a7faf86d62ea	96000	2	0.360952	0.064293	0	audio strip; lane bits; lfo5Hz+step8Hz downsampleHz; fromBeat 3.37, 2.0 s
+fx.bitCrusher.c	ad162d48a18ae702dd83dd29efd65279a47e678d0c974043be7f6c63b8ddaa31	144000	2	0.284867	0.062033	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.djFilter.a	c536a355bd7b07ab12982babffe7f55730ed331c0d83e144d9c571515691b975	144000	2	0.243714	0.033798	0	audio strip; lane position; lfo5Hz+step8Hz resonance; beat 0, 3.0 s
+fx.djFilter.b	fa44891e591a0748e31ff36094f021bc87149832205c0132b684b9688b069d95	96000	2	0.243728	0.036635	0	audio strip; lane position; lfo5Hz+step8Hz resonance; fromBeat 3.37, 2.0 s
+fx.djFilter.c	53b4dddc575bda1e512dc2e17b2705797b953f2457c526c8f1d4a6c31e514802	144000	2	0.285961	0.072898	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.ringMod.a	aa1f8856db7e383e273db67b5cc9149d861dc0370ce34e24e232ab293f815941	144000	2	0.270068	0.034446	0	audio strip; lane carrierHz; lfo5Hz+step8Hz mix; beat 0, 3.0 s
+fx.ringMod.b	b3eb743fe495b43eaa072927ec696f1db6f324dc4120b2eee4e0b8edf9e3a2f1	96000	2	0.261161	0.034987	0	audio strip; lane carrierHz; lfo5Hz+step8Hz mix; fromBeat 3.37, 2.0 s
+fx.ringMod.c	9e1794600aeb9f63792d81164f00ad3b1b12ad513bc4031bdf476269f189c0bd	144000	2	0.257754	0.033057	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.flanger.a	af582fa60be298cd2d155962f3cfc7c5790363afe0d403efb4d1a5eb8010e647	144000	2	0.261315	0.044378	0	audio strip; lane rateHz; lfo5Hz+step8Hz depthMs; beat 0, 3.0 s
+fx.flanger.b	8cd0994358c9d0474d1c85b186e5d0c2c01ac10692480e410fac8db5a384f8bd	96000	2	0.276017	0.044452	0	audio strip; lane rateHz; lfo5Hz+step8Hz depthMs; fromBeat 3.37, 2.0 s
+fx.flanger.c	2a878bff566b3ff9f7c90827a5464989419c88b73936662ffc2815cc5508b37e	144000	2	0.271887	0.043216	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.hallReverb.a	a482b0b999497797e028cb1e0b00137731fbbd5ee4d1482d8919435df44f5080	144000	2	0.247688	0.039991	0	audio strip; lane mix; lfo5Hz+step8Hz decaySeconds; beat 0, 3.0 s
+fx.hallReverb.b	29695d14fae4ae4464a0968904bfeb747c3da72e12c0cf2f759f97c8614de045	96000	2	0.248916	0.038140	0	audio strip; lane mix; lfo5Hz+step8Hz decaySeconds; fromBeat 3.37, 2.0 s
+fx.hallReverb.c	2cde19654a20635d3cac5cc51b704d329dfd61b3eba76ddc678e15cc06142926	144000	2	0.178840	0.038460	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.tapeDelay.a	ee08738aa1006a3736753290a07bfba919d96595d408ac8ae2be352b98b52831	144000	2	0.251887	0.047864	0	audio strip; lane timeMs; lfo5Hz+step8Hz feedback; beat 0, 3.0 s
+fx.tapeDelay.b	431e5c10ebc0601d34cdd10fb85ddce616688b268e583a51cd52e26590ac26b3	96000	2	0.210033	0.043395	0	audio strip; lane timeMs; lfo5Hz+step8Hz feedback; fromBeat 3.37, 2.0 s
+fx.tapeDelay.c	c603bb26f197bb699cd29d6419d4cfcfa6b0ecf6fa97bdcfc60a8e2f3f800e3a	144000	2	0.227693	0.040544	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.stereoWidth.a	51a8574850d09adebd40de7e4fbb73af1aeb3986bc45d4f5196eafe9cd7be6e2	144000	2	0.370864	0.056277	0	audio strip; lane width; lfo5Hz+step8Hz spread; beat 0, 3.0 s
+fx.stereoWidth.b	42f45053025a2265305a08bcb2cfb780d255c7d99ff959d3b8895a689584aedb	96000	2	0.370863	0.056600	0	audio strip; lane width; lfo5Hz+step8Hz spread; fromBeat 3.37, 2.0 s
+fx.stereoWidth.c	a539bfd7da9451dcfef7c3d58b5f8f8fb1257d06b63911586a8c12fef7d27088	144000	2	0.331833	0.058115	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.phaser.a	04dd3bb933aa4563f26f510eb0df594ea83c2a527a6bdb90c02e2f8c452b4fbf	144000	2	0.267894	0.045705	0	audio strip; lane rateHz; lfo5Hz+step8Hz centerHz; beat 0, 3.0 s
+fx.phaser.b	832e470ce8eb9a5c350064ac1197fc2027a704d91bf1774b907bf760c7becced	96000	2	0.272586	0.046752	0	audio strip; lane rateHz; lfo5Hz+step8Hz centerHz; fromBeat 3.37, 2.0 s
+fx.phaser.c	1bd410a07448131b528376b6f229e821efb8828c72f2e9a9070d25c4e7bf121d	144000	2	0.288042	0.045389	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.transientShaper.a	f5e6891f51ac60214abc014384464614d12390b2d798786acb7d6caca9c90a1e	144000	2	1.434693	0.216623	0	audio strip; lane attackDb; lfo5Hz+step8Hz sustainDb; beat 0, 3.0 s
+fx.transientShaper.b	e0abcfb31af8b2aca1d68b6704f60b59dfb15d9eb7812153b558da2e67fd4d71	96000	2	1.434693	0.217188	0	audio strip; lane attackDb; lfo5Hz+step8Hz sustainDb; fromBeat 3.37, 2.0 s
+fx.transientShaper.c	cf62a0e6634db0cd4a8147178186ec45800aaec2e8b7a57e6e8e98b87275b16b	144000	2	1.083518	0.169594	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.freqShifter.a	288a7f3bd57cb2bfb032176ab4e279a968262dc82f3354aa3bed13b5e5663f6d	144000	2	0.512622	0.100520	0	audio strip; lane shiftHz; lfo5Hz+step8Hz fineHz; beat 0, 3.0 s
+fx.freqShifter.b	2fa05370182a2056d7b63f6ad5b69d644b24620108d7f122deb5401ef298deac	96000	2	0.511190	0.100645	0	audio strip; lane shiftHz; lfo5Hz+step8Hz fineHz; fromBeat 3.37, 2.0 s
+fx.freqShifter.c	33845a697da74c6a6457568ebae8e0ac38cf380b6bd00323560cbab8fc9e78b4	144000	2	0.503353	0.100492	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.clipper.a	4d2cfc69ff96ed0d194df0bf4650bf3d3f9f5bb5c9135d7cd5a0b96a3ab07511	144000	2	1.793594	0.514731	0	audio strip; lane driveDb; lfo5Hz+step8Hz ceilingDb; beat 0, 3.0 s
+fx.clipper.b	bc58ebcb3862b1bfb89007b7c1fe4c4ae4786b2ed35cff58c6b45109565e747d	96000	2	1.793923	0.537088	0	audio strip; lane driveDb; lfo5Hz+step8Hz ceilingDb; fromBeat 3.37, 2.0 s
+fx.clipper.c	5eb30b2ff1e718dc476ffdcc33834a451fa89ad8b88729ef5d795668255904dd	144000	2	0.792307	0.335053	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+fx.dynamicEQ.a	92ed4aeb958b952bf249793d708015c98c4a1677810d7062d4220343f7088006	144000	2	0.346487	0.066425	0	audio strip; lane band1Freq; lfo5Hz+step8Hz band1Q; beat 0, 3.0 s
+fx.dynamicEQ.b	7bf757d62805738210d41a16f8e159a53fe35061f6cda3561f81960696f77177	96000	2	0.339755	0.066390	0	audio strip; lane band1Freq; lfo5Hz+step8Hz band1Q; fromBeat 3.37, 2.0 s
+fx.dynamicEQ.c	ebd60e9181f8f1d883c52c8cd36f6a105585541f11258cd32d918d9f7c7cfb45	144000	2	0.344653	0.066601	0	audio strip; static params, no lanes/routes; beat 0, 3.0 s
+inst.gain.a	737ee067b39d5ecb1e54e9b15afff66137fff44ff4974ddae786cf115fbe8617	144000	2	4.603268	0.678284	0	polySynth strip; lane gainLinear; lfo5Hz+step8Hz gainLinear; beat 0, 3.0 s
+inst.gain.b	d76606cf7320c362dd1cffbe02b64e8ceb0f67718274aea8d50ad1a024ab2c4c	96000	2	4.603268	0.664154	0	polySynth strip; lane gainLinear; lfo5Hz+step8Hz gainLinear; fromBeat 3.37, 2.0 s
+inst.flanger.a	420c238dd843086ad72ab205d79b54b8a4386b1b59d7e5d2d8dd961ad73d8027	144000	2	0.232374	0.047990	0	polySynth strip; lane rateHz; lfo5Hz+step8Hz depthMs; beat 0, 3.0 s
+inst.flanger.b	1227a4457423c310c450c4b3dbde842d79b383690b7db3bb4c2d356446b0e85f	96000	2	0.244070	0.045385	0	polySynth strip; lane rateHz; lfo5Hz+step8Hz depthMs; fromBeat 3.37, 2.0 s
+inst.djFilter.a	5b3635c94c1b5e93b64c2ab988120133c4b07a671d6a0450b2c6e8a0ee782262	144000	2	0.256375	0.036903	0	polySynth strip; lane position; lfo5Hz+step8Hz resonance; beat 0, 3.0 s
+inst.djFilter.b	77646cb51cd3b57a83719c2709a9a24a9d0596719761e1d69eddf6c3ca60cd04	96000	2	0.202468	0.036463	0	polySynth strip; lane position; lfo5Hz+step8Hz resonance; fromBeat 3.37, 2.0 s
+inst.none.c	a59aa161a1698477e4a704cf177bebbb0c219102864414330eb8fe680166e6d9	144000	2	0.315135	0.065941	0	polySynth strip; no effects; beat 0, 3.0 s

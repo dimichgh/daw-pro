@@ -128,6 +128,17 @@ public final class OfflineRenderer {
     /// Default: a private throwaway (direct construction stays isolated).
     var performance = EnginePerformanceContext()
 
+    /// The song's pan rule (m39-panlaw-new, `PanLaw`), handed to the graph
+    /// before its first parameter pass. `AudioEngine.renderOffline` assigns
+    /// the rule its CALLER handed it (W9-PLRT R1), never the engine's live
+    /// cache; this graph is a separate graph, so the live rule alone would
+    /// never reach an export. The compensation planner
+    /// (`AudioEngine.offlineCompensationTargets`) does NOT set it and keeps the
+    /// default: the knob stage adds no latency, and the plan reads only the
+    /// PDC report. Default `.balance`: the original rule, which every direct
+    /// construction (engine tests, the pan-law pin) keeps.
+    public var panLaw: PanLaw = .balance
+
     public convenience init(sampleRate: Double = 48_000, channelCount: Int = 2,
                             maximumFrameCount: Int = RenderBlockSize.offlineFrames) {
         self.init(sampleRate: sampleRate, channelCount: channelCount,
@@ -267,6 +278,12 @@ public final class OfflineRenderer {
     /// every synchronous AVFAudio section runs under the same
     /// "offline render" context `AudioEngine.renderOffline` used to apply
     /// around the whole call — raise conversion is behavior-identical.
+    ///
+    /// m39-w4-4a: `meterMap` has NO default here (unlike `render`, whose
+    /// default keeps the engine tests' many direct renders compiling). This is the
+    /// production seam, and a default here is how every bounce, mixdown and
+    /// stem lost the project's meter (W8-W44R N1): the compiler now makes
+    /// each caller state it.
     public func renderCooperatively(
         tracks: [Track], tempoMap: TempoMap,
         fromBeat: Double = 0,
@@ -277,7 +294,7 @@ public final class OfflineRenderer {
         masterModulationSources: [ModulationSource] = [],
         masterModulationRoutes: [ModulationRoute] = [],
         metronomeEnabled: Bool = false,
-        meterMap: MeterMap = MeterMap(constant: TimeSignature())
+        meterMap: MeterMap
     ) async throws -> RenderedAudio {
         let session = try withObjCExceptionBarrier("offline render") {
             try beginSession(
@@ -315,13 +332,13 @@ public final class OfflineRenderer {
                               meterMap: MeterMap) throws -> OfflineRenderSession {
         // m22-f: tempo-synced delays bounce at the tempo governing the render
         // START — the same control-plane resolve the live engine's intake
-        // seams apply (`DelayTempoSync`), so an offline bounce and live
+        // seams apply (`TempoSync`, m39-c), so an offline bounce and live
         // playback of the same program derive the same effective time. A
         // mid-window tempo change does not retune the delay (matches live,
         // which retunes only on control-plane intents).
-        let tracks = DelayTempoSync.resolved(
+        let tracks = TempoSync.resolved(
             tracks: tracks, tempoBPM: tempoMap.bpm(atBeat: fromBeat))
-        let masterEffects = DelayTempoSync.resolved(
+        let masterEffects = TempoSync.resolved(
             effects: masterEffects, tempoBPM: tempoMap.bpm(atBeat: fromBeat))
         let engine = AVAudioEngine()
         // m20-c: the graph's rate is injected — the renderer's own rate, the
@@ -355,6 +372,9 @@ public final class OfflineRenderer {
         // needs. `[]` for both is the graph's own default: no byte moves.
         graph.masterModulationSources = masterModulationSources
         graph.masterModulationRoutes = masterModulationRoutes
+        // m39-panlaw-new: the song's pan rule, before the first parameter pass
+        // (which is where the knob is handed to the node or to the stage).
+        graph.panLaw = panLaw
 
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: sampleRate,
@@ -440,7 +460,14 @@ public final class OfflineRenderer {
         // volume-lane strip pins its mixer to (gated ? 0 : 1) pre-start —
         // in place from frame 0, no ramp — and the render stage owns the
         // lane gain for the whole bounce (.offline first-pull epoch).
-        graph.armOfflineAutomation(fromBeat: fromBeat, tempoMap: tempoMap)
+        // m39-w4-4b: and the meter with it, so the pre-start passes compile a
+        // synced step source's clock from the map `scheduleAll` stages below.
+        // m39-d CR-2 (design §5.5): and the render's length, the SAME expression
+        // as the session's `totalFrames` below, so the control grid caps the
+        // last cell where the bounce ends (its partial last block keeps today's
+        // ramp span). Plant P5 drops this argument; G1 goes red.
+        graph.armOfflineAutomation(fromBeat: fromBeat, tempoMap: tempoMap, meterMap: meterMap,
+                                   renderFrames: Int((durationSeconds * sampleRate).rounded()))
         graph.applyParameters(tracks: tracks, playheadBeat: fromBeat)
         try engine.start()
         graph.applyParameters(tracks: tracks, playheadBeat: fromBeat)
@@ -478,7 +505,8 @@ public final class OfflineRenderer {
         // EVERY render from beat 0 is byte-identical to the pre-ruling tree.
         // `NoteChaseGraphTests` machine-checks that containment through this
         // very call, so it is checked rather than argued.
-        graph.scheduleAll(fromBeat: fromBeat, tempoMap: tempoMap, cause: .offlineRender)
+        graph.scheduleAll(fromBeat: fromBeat, tempoMap: tempoMap, cause: .offlineRender,
+                          meterMap: meterMap)
         if let metronome {
             // One click per integer beat across the render range (the window
             // end is the inverse integral of the render duration — m12-b,

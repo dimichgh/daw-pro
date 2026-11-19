@@ -4802,6 +4802,119 @@ struct PitchEditorModelTests {
         bridge.clearSurface(from: token)
         #expect(bridge.selectionKinds == [], "a pane that went away leaves no noun behind")
     }
+
+    // MARK: - vf-19 — Select All does not move the sounds
+
+    @Test("vf-19 — after Select All a drag moves every pitched NOTE by the one delta and writes nothing to any SOUND; a table sync keeps the rule for the next drag; a sound the user picks (⇧-click, a plain click) or presses still moves")
+    func vf19SelectAllDragLeavesTheSounds() {
+        // A3 note · B3 SOUND · C4 note · D4 SOUND, nothing moved yet.
+        let (model, sink, ids) = withSounds([1, 3])
+        let rh = model.geometry.rowHeight
+        model.selectAll()
+        // UE-2 unchanged: Select All still SELECTS the sounds ("Clear Selected Sounds").
+        #expect(model.selection == Set(ids))
+        #expect(model.selectionKinds == [.note, .sound])
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        #expect(model.drag?.members.map(\.segmentID) == [ids[2]],
+                "Select All carried these along: \(model.drag?.members.map(\.isUnpitched) ?? [])")
+        model.updatePitchDrag(translationHeight: -2 * rh, free: false)
+        #expect(close(model.drag?.targetMidi ?? 0, 59, 1e-6))
+        _ = model.endPitchDrag()
+        guard case .notePitches(let offsets, _)? = sink.commits.last?.kind else {
+            Issue.record("a Select All drag committed \(String(describing: sink.commits.last?.kind))")
+            return
+        }
+        #expect(offsets.map(\.segmentId) == [ids[0], ids[2]], "a sound was written")
+        #expect(offsets.allSatisfy { close($0.offsetCents, 200, 1e-6) }, "\(offsets.map(\.offsetCents))")
+
+        // The store hands the moved table back: the selection survives the sync,
+        // and so does the rule, so the SECOND drag leaves the sounds too.
+        var table = model.noteTable
+        for offset in offsets {
+            if let index = table.segments.firstIndex(where: { $0.id == offset.segmentId }) {
+                table.segments[index].pitchOffsetCents = offset.offsetCents
+            }
+        }
+        model.syncStoredNoteTable(table)
+        #expect(model.selection == Set(ids))
+        #expect(model.blobs[1].offsetCents == 0 && model.blobs[3].offsetCents == 0)
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[2]))
+        #expect(model.drag?.members.map(\.segmentID) == [ids[0]])
+        model.cancelDrag()
+
+        // A sound the user PICKS after Select All (⇧-click it out and back in)
+        // rides, UE-1's rule; the other sound still stays.
+        model.toggle(ids[3])
+        model.toggle(ids[3])
+        #expect(model.selection == Set(ids))
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        #expect(model.drag?.members.map(\.segmentID) == [ids[2], ids[3]])
+        model.cancelDrag()
+
+        // A PRESSED sound moves (on purpose, R21) and the notes ride its
+        // whole-semitone delta; the OTHER sound Select All took stays.
+        model.selectAll()
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[1]))
+        #expect(model.drag?.isUnpitched == true)
+        #expect(model.drag?.members.map(\.segmentID) == [ids[0], ids[2]])
+        model.cancelDrag()
+
+        // POSITIVE CONTROL: the same four blobs picked by hand (a plain click,
+        // then ⇧-clicks) ride together, sounds included: UE-1, unchanged.
+        model.selectOnly(ids[0])
+        for id in ids.dropFirst() { model.toggle(id) }
+        #expect(model.selection == Set(ids))
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        #expect(model.drag?.members.map(\.segmentID) == [ids[1], ids[2], ids[3]])
+        model.cancelDrag()
+    }
+
+    @Test("vf-19 — after Select All a ⇧-band CHOOSES the sounds it touches (they ride) and the others stay; Escape mid-band gives back what Select All took; a plain band chooses all it holds")
+    func vf19BandChoosesTheSoundsItTouches() {
+        // A3 note · B3 SOUND · C4 note · D4 SOUND (`bandSelectionRules`' geometry).
+        let (model, sink, ids) = withSounds([1, 3])
+        let rects = model.blobs.map { model.rect(for: $0) }
+        let slop = PitchEditorModel.hitSlop
+        let origin = CGPoint(x: rects[0].minX - slop - 4, y: rects[3].minY - 20)
+        #expect(model.pressHit(at: origin) == .empty)
+        let afterB = (rects[1].maxX + rects[2].minX) / 2
+        #expect(rects[1].maxX + slop < afterB && afterB < rects[2].minX - slop)
+        let coverAB = CGPoint(x: afterB, y: rects[0].maxY + 20)
+
+        // ⇧-band over A and the B3 SOUND after Select All: B3 is chosen, D4 is not.
+        model.selectAll()
+        _ = model.trackPress(start: origin, location: origin, modifiers: .shift)
+        _ = model.trackPress(start: origin, location: coverAB, modifiers: .shift)
+        #expect(model.band?.hits == [ids[0], ids[1]])
+        #expect(model.releasePress(start: origin, location: coverAB, modifiers: .shift) == .endBand)
+        #expect(model.selection == Set(ids))
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        #expect(model.drag?.members.map(\.segmentID) == [ids[1], ids[2]])
+        model.cancelDrag()
+
+        // ESCAPE mid-band: the base comes back, and so does what Select All took.
+        model.selectAll()
+        _ = model.trackPress(start: origin, location: origin, modifiers: .shift)
+        _ = model.trackPress(start: origin, location: coverAB, modifiers: .shift)
+        model.cancelGestureForEscape()
+        #expect(model.band == nil)
+        _ = model.releasePress(start: origin, location: coverAB, modifiers: .shift)
+        #expect(model.selection == Set(ids))
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        #expect(model.drag?.members.map(\.segmentID) == [ids[2]])
+        model.cancelDrag()
+
+        // A PLAIN band REPLACES the selection with what it touches, all of it chosen.
+        model.selectAll()
+        _ = model.trackPress(start: origin, location: origin, modifiers: .none)
+        _ = model.trackPress(start: origin, location: coverAB, modifiers: .none)
+        #expect(model.releasePress(start: origin, location: coverAB, modifiers: .none) == .endBand)
+        #expect(model.selection == [ids[0], ids[1]])
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        #expect(model.drag?.members.map(\.segmentID) == [ids[1]])
+        model.cancelDrag()
+        #expect(sink.commits.isEmpty, "selecting is not editing")
+    }
 }
 
 // MARK: - I1 UI hooks fakes
@@ -6562,5 +6675,281 @@ extension PitchEditorModelTests {
             #expect(PitchEditorFarMoveHint.line(movedNoteIDs: [a], table: notUpdated, formantPreserve: false)
                     == PitchEditorFormantCopy.farMoveHint)
         }
+    }
+}
+
+// MARK: - vf-18 leg 3 — the group drag CARRIES followed slides; a slide is DRAWN where it plays
+
+// W9-SLED (design `$S/w9/SLRV/REVIEW.md` §3.7 and §6 E1–E3). A followed slide's
+// own offset is RELATIVE to the line between its neighbours, so a group drag
+// that adds the same delta to the slide AND to its neighbours moved the slide
+// twice (vf-18). The editor now reads each moving note's carry `k` ONCE, at
+// the press, from DAWCore's one home (`PitchEditSet.groupMoveCarries`), and
+// stores `baseline + delta·100·k`; and it draws each followed slide where it
+// PLAYS (`NoteBlob.followCents`), so a carried slide never sits an octave below
+// its line inviting a hand drag that would double it again.
+@MainActor
+extension PitchEditorModelTests {
+
+    private static let vf18Clip = UUID(uuidString: "F1800000-0000-4000-8000-00000000ED00")!
+
+    private static func vf18ID(_ index: Int) -> UUID {
+        UUID(uuidString: String(format: "F1800000-0000-4000-8000-%012d", index))!
+    }
+
+    /// vf-18 leg 3's vocal: every note sung at 220 Hz (midi 57 — asserted
+    /// exact where it matters), on a NEW-set table (voice amount 1.0,
+    /// consonants on, slope 3000: the editor's own seed values, so D4-1's
+    /// whole-vocal update never runs and only vf-18 shows):
+    ///
+    ///     0 A  0.30-0.60 · 1 T1 0.60-0.70, a TWO-SIDED slide · 2 B 0.70-1.00
+    ///     · 200 ms gap · 3 C 1.20-1.50 · 4 T2 1.50-1.60, a TAIL-OFF
+    ///     · 200 ms gap · 5 L 1.80-1.90, a LEAD-IN · 6 E 1.90-2.40
+    ///
+    /// The three slides follow fully (`glideFollow` 1). `offsets` sets stored
+    /// offsets by index. The window is opened to 40…90 so a +12 group fits
+    /// (the group clamp keeps every moving note inside the window).
+    private func vf18Rig(offsets: [Int: Double] = [:])
+    -> (model: PitchEditorModel, sink: Box, ids: [UUID]) {
+        let (model, sink, _) = fourNotes(clipID: Self.vf18Clip)
+        let spans: [(start: Double, end: Double, follow: Double)] = [
+            (0.30, 0.60, 0), (0.60, 0.70, 1), (0.70, 1.00, 0),
+            (1.20, 1.50, 0), (1.50, 1.60, 1),
+            (1.80, 1.90, 1), (1.90, 2.40, 0)]
+        let segments = spans.enumerated().map { index, span in
+            NoteSegment(id: Self.vf18ID(index), startSeconds: span.start, endSeconds: span.end,
+                        detectedHz: 220, detectedConfidence: 0.95,
+                        pitchOffsetCents: offsets[index] ?? 0, glideFollow: span.follow,
+                        origin: span.follow > 0 ? .transition : .detected)
+        }
+        let table = PitchEditSet(segments: segments,
+                                 formantCorrection: PitchEditSet.newSetFormantCorrection,
+                                 keepsConsonantsUntuned: true,
+                                 transitionSlopeCentsPerSecond: PitchEditSet.defaultTransitionSlope)
+        model.syncStoredNoteTable(table)
+        model.geometry.midiRange = 40...90
+        return (model, sink, segments.map(\.id))
+    }
+
+    /// The same timing with EVERY note a plain (unfollowed) note at `cents`:
+    /// what an exact uniform move of a zero table must render
+    /// (`SlideBridgeTests.plainShifted`'s shape).
+    private static func vf18PlainShifted(_ set: PitchEditSet, by cents: Double) -> PitchEditSet {
+        var out = set
+        out.slideFollowRule = .sungAtOpenSide
+        for index in out.segments.indices {
+            out.segments[index].glideFollow = 0
+            out.segments[index].pitchOffsetCents = cents
+        }
+        return out
+    }
+
+    /// The worst |a − b| of two sets' pitch curves, every 0.5 ms over the
+    /// whole table and 0.3 s past it.
+    private static func vf18WorstDifference(_ a: PitchEditSet,
+                                            _ b: PitchEditSet) -> (error: Double, at: Double) {
+        let ca = PitchCorrectionCurve.make(editSet: a)
+        let cb = PitchCorrectionCurve.make(editSet: b)
+        let end = (a.segments.last?.endSeconds ?? 0) + 0.3
+        var worst = (error: 0.0, at: Double.nan)
+        for step in 0...Int((end / 0.0005).rounded()) {
+            let t = Double(step) * 0.0005
+            let error = abs(ca.semitones(atSourceSecond: t) - cb.semitones(atSourceSecond: t))
+            if error > worst.error || worst.at.isNaN { worst = (error, t) }
+        }
+        return worst
+    }
+
+    @Test("vf-18 E1 — Select All + a +12 drag CARRIES every followed slide (two-sided, tail-off, lead-in): k read once at the press from groupMoveCarries; the notes commit +1200 and the slides +0, bit for bit what applyingGroupPitchMove stores; the draft set and line ARE the committed ones; every slide plays exactly +12")
+    func vf18E1SelectAllDragCarriesTheSlides() throws {
+        #expect(PitchCorrectionMath.midi(fromHz: 220).bitPattern == (57.0).bitPattern,
+                "the fixture's bit-exact numbers assume 220 Hz is exactly midi 57")
+        let (model, sink, ids) = vf18Rig()
+        let rh = model.geometry.rowHeight
+        let unmoved = model.noteTable
+        let slides: Set<UUID> = [ids[1], ids[4], ids[5]]
+        #expect(unmoved.slideFollowRule == .sungAtOpenSide && unmoved.isSlideFollowRuleInert,
+                "the fixture must start legacy and inert, so the drag adopts the hold rule")
+
+        model.selectAll()
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        let pressed = try #require(model.drag)
+        // ⭐ THE CARRY, ONCE, FROM DAWCORE'S ONE HOME: 0 for each slide (follow
+        // 1, its anchors ride), 1 for every note.
+        let home = unmoved.groupMoveCarries(movingIDs: Set(ids))
+        #expect(Set(home.filter { $0.value != 1 }.keys) == slides && slides.allSatisfy { home[$0] == 0 },
+                "DAWCore's carries: \(home)")
+        #expect(pressed.carry == home[ids[0]])
+        #expect(pressed.members.map(\.segmentID) == Array(ids.dropFirst()))
+        #expect(pressed.members.allSatisfy { $0.carry == home[$0.segmentID] },
+                "\(pressed.members.map { ($0.segmentID, $0.carry) })")
+
+        model.updatePitchDrag(translationHeight: -12 * rh, free: false)
+        let live = try #require(model.drag)
+        #expect(live.members.map(\.carry) == pressed.members.map(\.carry), "the carry moved during the gesture")
+        // Drawn where the DRAFT plays: every moving note, each carried slide
+        // included (its anchors brought it), sits 12 above where it was sung.
+        #expect(close(live.targetMidi, 69))
+        for member in live.members {
+            let drawn = member.targetMidi(clipPitchShiftSemitones: live.clipPitchShiftSemitones)
+            #expect(close(drawn, 69), "\(member.segmentID) is drawn at \(drawn) during the drag")
+        }
+        let draftSet = try #require(model.draftEditSet)
+        let draftLine = try #require(model.draftPlayedLine)
+        _ = model.endPitchDrag()
+        guard case .notePitches(let offsets, _)? = sink.commits.last?.kind else {
+            Issue.record("a Select All drag committed \(String(describing: sink.commits.last?.kind))")
+            return
+        }
+        #expect(offsets.map(\.segmentId) == ids)
+        for offset in offsets {
+            let want = slides.contains(offset.segmentId) ? 0.0 : 1200.0
+            #expect(offset.offsetCents.bitPattern == want.bitPattern,
+                    "\(offset.segmentId) committed \(offset.offsetCents), not \(want)")
+        }
+        // ⭐ THE ONE TRANSFORM AGREES, BIT FOR BIT: what the drag commits is
+        // what `applyingGroupPitchMove` (the wire's `moveByCents`) stores.
+        let group = try unmoved.applyingGroupPitchMove(segmentIDs: ids, byCents: 1200, clipId: Self.vf18Clip)
+        #expect(offsets.map(\.segmentId) == group.offsets.map(\.segmentId))
+        #expect(offsets.map { $0.offsetCents.bitPattern } == group.offsets.map { $0.offsetCents.bitPattern })
+        #expect(Set(group.carriedSlideIDs) == slides)
+        // The app's applier runs the store's `setClipNotePitchOffsets`, whose
+        // one transform is `applyingNotePitchOffsets`.
+        let stored = try unmoved.applyingNotePitchOffsets(offsets, clipId: Self.vf18Clip)
+        #expect(stored == group.set)
+        #expect(draftSet == stored, "the line drawn during the drag was built from another set")
+        #expect(stored.slideFollowRule == .holdAtOpenSide,
+                "an inert table adopts the hold rule on its first edit, in the draft and the release alike")
+        model.syncStoredNoteTable(stored)
+        #expect(model.playedLine == draftLine, "the line drawn during the drag is not the line that plays")
+
+        // THE PHYSICS: every note, every slide (two-sided AND one-sided) plays
+        // exactly 12 semitones above the unmoved table, over the whole vocal.
+        let worst = Self.vf18WorstDifference(stored, Self.vf18PlainShifted(unmoved, by: 1200))
+        print("vf18| E1 Select All +12: worst |curve - plain +12| \(worst.error) at \(worst.at)")
+        #expect(worst.error < 1e-9, "the carried vocal is off a plain +12 by \(worst)")
+        // POSITIVE CONTROL: the literal state (every note's own offset +1200,
+        // no carry) plays the slides near +24, so the check above can see a
+        // missing carry.
+        var literal = unmoved
+        for index in literal.segments.indices { literal.segments[index].pitchOffsetCents = 1200 }
+        literal = literal.afterHandEdit(from: unmoved)
+        let doubled = Self.vf18WorstDifference(literal, Self.vf18PlainShifted(unmoved, by: 1200))
+        print("vf18| E1 control, literal +1200 on every note: worst \(doubled.error) at \(doubled.at)")
+        #expect(doubled.error > 11, "the literal +12 must play a slide near +24: \(doubled)")
+    }
+
+    @Test("vf-18 E2 — a LONE drag of a followed slide is the one-note drag (no members, carry 1, `.notePitch`) and stores +D: with its neighbours as sung, today's number exactly; with A at +300 it is drawn and snapped where it PLAYS (+150 c up) and a drawn move of +1.5 st stores +150 c")
+    func vf18E2LoneSlideDragStoresPlusD() throws {
+        // CONTROL — neighbours as sung (follow 0): today's arithmetic, +100 c.
+        do {
+            let (model, sink, ids) = vf18Rig()
+            let rh = model.geometry.rowHeight
+            #expect(model.blobs[1].followCents == 0)
+            model.selectOnly(ids[1])
+            #expect(model.beginSelectionPitchDrag(on: model.blobs[1]))
+            #expect(model.drag?.members.isEmpty == true && model.drag?.carry == 1)
+            model.updatePitchDrag(translationHeight: -1 * rh, free: false)
+            _ = model.endPitchDrag()
+            guard case .notePitch(let id, let cents)? = sink.commits.last?.kind else {
+                Issue.record("a lone slide drag committed \(String(describing: sink.commits.last?.kind))")
+                return
+            }
+            #expect(id == ids[1] && cents.bitPattern == (100.0).bitPattern, "\(cents)")
+        }
+        // A at +300, B as sung: the two-sided slide plays g·(300 + 0)/2 = +150 c
+        // above where it was sung, and is DRAWN there.
+        let (model, sink, ids) = vf18Rig(offsets: [0: 300])
+        let rh = model.geometry.rowHeight
+        let slide = model.blobs[1]
+        #expect(slide.id == ids[1] && slide.offsetCents == 0 && slide.followCents == 150)
+        #expect(close(model.geometry.drawnMidi(for: slide), 58.5))
+        model.selectOnly(ids[1])
+        #expect(model.beginSelectionPitchDrag(on: slide))
+        let pressed = try #require(model.drag)
+        #expect(pressed.members.isEmpty && pressed.carry == 1 && pressed.baselineFollowCents == 150)
+        #expect(close(pressed.targetMidi, 58.5))
+        // 1.2 rows up from 58.5 is 59.7, snapped (chromatic) to 60 — where the
+        // slide is DRAWN, not where its own offset alone would put it.
+        model.updatePitchDrag(translationHeight: -1.2 * rh, free: false)
+        let live = try #require(model.drag)
+        #expect(close(live.targetMidi, 60), "drawn at \(live.targetMidi)")
+        #expect(close(live.offsetCents, 150), "a drawn +1.5 st must store +150 c, not \(live.offsetCents)")
+        #expect(live.readout == PitchEditorReadout.centsReadout(300),
+                "the readout names how far the slide now plays from where it was sung")
+        _ = model.endPitchDrag()
+        guard case .notePitch(let id, let cents)? = sink.commits.last?.kind else {
+            Issue.record("a lone slide drag committed \(String(describing: sink.commits.last?.kind))")
+            return
+        }
+        #expect(id == ids[1] && close(cents, 150), "\(cents)")
+        // The one transform agrees: a slide moved WITHOUT its anchors is not
+        // carried (k = 1), so +150 stays +150 (§4.b.3).
+        let alone = try model.noteTable.applyingGroupPitchMove(segmentIDs: [ids[1]], byCents: cents,
+                                                               clipId: Self.vf18Clip)
+        #expect(alone.carriedSlideIDs.isEmpty && alone.offsets.first?.offsetCents == cents)
+        // And it PLAYS where it was let go: the middle of its line is +3 st.
+        let stored = try model.noteTable.applyingNotePitchOffsets(
+            [NotePitchOffset(segmentId: id, offsetCents: cents)], clipId: Self.vf18Clip)
+        let middle = PitchCorrectionCurve.make(editSet: stored).semitones(atSourceSecond: 0.65)
+        #expect(close(middle, 3), "the slide's middle plays \(middle) st, not where it was drawn (+3)")
+    }
+
+    @Test("vf-18 E3 — a followed slide's blob is DRAWN where it plays: after Select All +12 every slide (two-sided, tail-off, lead-in) sits on its group's line, 12 up, tuned colour and ghost on; A alone +3 moves the UNSELECTED two-sided slide's drawn centre +1.5 and nothing else")
+    func vf18E3SlideBlobsAreDrawnWhereTheyPlay() throws {
+        let (model, sink, ids) = vf18Rig()
+        let rh = model.geometry.rowHeight
+        let before = Dictionary(uniqueKeysWithValues: model.blobs.map {
+            ($0.id, model.geometry.drawnMidi(for: $0))
+        })
+        #expect(before.values.allSatisfy { close($0, 57) })
+        model.selectAll()
+        #expect(model.beginSelectionPitchDrag(on: model.blobs[0]))
+        model.updatePitchDrag(translationHeight: -12 * rh, free: false)
+        _ = model.endPitchDrag()
+        guard case .notePitches(let offsets, _)? = sink.commits.last?.kind else {
+            Issue.record("a Select All drag committed \(String(describing: sink.commits.last?.kind))")
+            return
+        }
+        model.syncStoredNoteTable(try model.noteTable.applyingNotePitchOffsets(offsets, clipId: Self.vf18Clip))
+        #expect(model.blobs.map(\.id) == ids)
+        for blob in model.blobs {
+            let moved = model.geometry.drawnMidi(for: blob) - (before[blob.id] ?? .nan)
+            #expect(close(moved, 12), "\(blob.id) is drawn \(moved) st from where it was, not 12")
+        }
+        for index in [1, 4, 5] {
+            let slide = model.blobs[index]
+            #expect(slide.offsetCents == 0 && slide.followCents == 1200,
+                    "slide \(index): own \(slide.offsetCents), follow \(slide.followCents)")
+            #expect(slide.isPitchEdited, "slide \(index): a carried slide plays tuned and must look tuned")
+            #expect(slide.isMoved, "slide \(index): a carried slide keeps its ghost like every note beside it")
+            #expect(model.geometry.drawnNoteName(for: slide) == model.geometry.drawnNoteName(for: model.blobs[0]))
+        }
+        // POSITIVE CONTROL: the same segment drawn WITHOUT its follow sits an
+        // octave below its line — the picture that invited a doubling drag.
+        let bare = NoteBlob(segment: model.noteTable.segments[1], frameCount: 0)
+        #expect(close(model.geometry.drawnMidi(for: bare), 57) && !bare.isMoved)
+
+        // A ALONE +3 (a fresh vocal): the unselected two-sided slide follows
+        // half of it (g·(300 + 0)/2) and is drawn on the middle of its line.
+        let (solo, soloSink, soloIDs) = vf18Rig()
+        let srh = solo.geometry.rowHeight
+        solo.selectOnly(soloIDs[0])
+        #expect(solo.beginSelectionPitchDrag(on: solo.blobs[0]))
+        solo.updatePitchDrag(translationHeight: -3 * srh, free: false)
+        _ = solo.endPitchDrag()
+        guard case .notePitch(let id, let cents)? = soloSink.commits.last?.kind else {
+            Issue.record("a one-note drag committed \(String(describing: soloSink.commits.last?.kind))")
+            return
+        }
+        #expect(id == soloIDs[0] && cents.bitPattern == (300.0).bitPattern, "\(cents)")
+        solo.syncStoredNoteTable(try solo.noteTable.applyingNotePitchOffsets(
+            [NotePitchOffset(segmentId: id, offsetCents: cents)], clipId: Self.vf18Clip))
+        let drawn = solo.blobs.map { solo.geometry.drawnMidi(for: $0) }
+        #expect(close(drawn[0], 60) && close(drawn[1], 58.5), "\(drawn)")
+        #expect(drawn.dropFirst(2).allSatisfy { close($0, 57) }, "\(drawn)")
+        #expect(solo.blobs[1].offsetCents == 0 && solo.blobs[1].followCents == 150)
+        let middle = PitchCorrectionCurve.make(editSet: solo.noteTable).semitones(atSourceSecond: 0.65)
+        #expect(close(middle, 1.5), "the blob sits on the middle of the line it plays: \(middle)")
     }
 }

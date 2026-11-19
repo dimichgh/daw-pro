@@ -58,7 +58,13 @@ extension AppModel {
                 guard let store else { throw DebugError("project store unavailable") }
                 return try await store.sliceClipToSampler(
                     clipId: clipID, settings: settings, muteSourceTrack: mute)
-            })
+            },
+            // m39-w4-8 — ⛔ THE DRUM MACHINE'S PADS HANG OFF THIS ONE INJECTOR,
+            // and it DEFAULTS to `{ nil }`: delete this line and the package
+            // still compiles, every model test still passes (they inject their
+            // own), and a drum machine draws sixteen "Empty" pads while its
+            // keys play the base-note sum. `PadGridSiteTests` pins it.
+            instrument: { [unowned self] in self.padGridInstrument() })
     }
 
     // MARK: - Mouse funnels
@@ -156,6 +162,19 @@ extension AppModel {
               let instrument = track.instrument,
               instrument.kind == .sampler else { return [] }
         return instrument.resolvedSampler.zones
+    }
+
+    /// The pad target's instrument, whatever its kind, or nil (m39-w4-8).
+    ///
+    /// ⚠️ Resolved through `activeTrackID`, the same step every injector here
+    /// takes, so the drum names DRAWN are the drums the keys SOUND. Only the
+    /// drum machine is read from it (`PadGridDrumMap`); the sampler pads keep
+    /// coming from `padGridZones()`.
+    func padGridInstrument() -> InstrumentDescriptor? {
+        guard let id = activeTrackID,
+              let track = store.tracks.first(where: { $0.id == id }),
+              track.kind == .instrument else { return nil }
+        return track.instrument
     }
 
     func padGridTargetName() -> String? {
@@ -262,9 +281,10 @@ extension AppModel {
 
     /// `debug.padGrid {padDown?, padY?, padUp?, bank?, baseNote?, openChop?,
     /// closeChop?, mode?, sensitivity?, divisions?, gridBeats?, maxSlices?,
-    /// chopBaseNote?, includeHead?, muteSourceTrack?, triggerMode?,
+    /// chopBaseNote?, includeHead?, muteSourceTrack?, sortIntoKit?, triggerMode?,
     /// spreadDirection?, levels?, levelsFromPad?, exitLevels?, chop?}` — drives
     /// the SAME instances `debug.captureUI` renders, and reports what they hold.
+    /// (`sortIntoKit`, m39-w4-8, is the chop card's drum-kit box.)
     ///
     /// `spreadDirection` ("up" | "centered", m39-levels-2) is applied BEFORE
     /// `levels`/`levelsFromPad`, so one call can choose the direction and make
@@ -305,6 +325,8 @@ extension AppModel {
         if let raw = params["chopBaseNote"]?.doubleValue { padGrid.chop.baseNote = Int(raw) }
         if let raw = params["includeHead"]?.boolValue { padGrid.chop.includeHead = raw }
         if let raw = params["muteSourceTrack"]?.boolValue { padGrid.muteSourceTrack = raw }
+        // m39-w4-8: the card's "Sort the hits into a drum kit" box.
+        if let raw = params["sortIntoKit"]?.boolValue { padGrid.chop.sortIntoKit = raw }
         if let raw = params["triggerMode"]?.stringValue {
             guard let value = PadTriggerMode(rawValue: raw) else {
                 throw DebugError("'\(raw)' is not a pad trigger mode — one of "
@@ -368,6 +390,15 @@ extension AppModel {
                 ])
             } ?? .null,
             "muteSourceTrack": .bool(padGrid.muteSourceTrack),
+            // m39-w4-8: the kit-sort box, what the chop will SEND for it, and
+            // whether the "Pad 1 plays note" slider can reach the chop.
+            "sortIntoKit": .bool(padGrid.chop.sortIntoKit),
+            "chopMapping": .string(padGrid.chop.settings().mapping.rawValue),
+            "baseNoteEffective": .bool(padGrid.chop.baseNoteIsEffective),
+            // Is the pad target our drum machine (pads = its eight drums)?
+            "isDrumMachine": .bool(padGrid.isDrumMachine),
+            "loadedNoun": .string(padGrid.loadedNoun),
+            "bankHint": .string(padGrid.bankHint),
             // ⚠️ null is a REAL value here — "the target is not a sampler", not
             // "false". A gate reading a bool would green on a track with no
             // pads at all.
@@ -409,6 +440,8 @@ extension AppModel {
                     "warnings": .array($0.warnings.map { .string($0) }),
                     // What the notice SHOWS a person (m33-d), index-aligned.
                     "warningsForHumans": .array($0.warningsForHumans.map { .string($0) }),
+                    // m39-w4-8: the store's kit sentence, or null for a plain chop.
+                    "kitSummary": $0.kitSummary.map { JSONValue.string($0) } ?? .null,
                 ])
             } ?? .null,
             // m33-d: does the chop card's lead-in toggle reach the chop in the
@@ -430,6 +463,12 @@ extension AppModel {
                     "levelsSemitones":
                         pad.levelsSemitones.map { JSONValue.number(Double($0)) } ?? .null,
                     "ai": .bool(pad.isAITouched),
+                    // m39-w4-8: the drum a pad names, its choke link (group +
+                    // the pads it cuts off), and the drum machine's no-drum pads.
+                    "drum": pad.drumLabel.map { JSONValue.string($0) } ?? .null,
+                    "chokeGroup": pad.chokeLink.map { JSONValue.number(Double($0.group)) } ?? .null,
+                    "chokePartners": .array((pad.chokeLink?.partners ?? []).map { .string($0) }),
+                    "pastLastDrum": .bool(pad.isPastLastDrum),
                 ])
             }),
             "sounding": .array(musicalTyping.soundingPitches.map { .number(Double($0)) }),

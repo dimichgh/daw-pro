@@ -18,6 +18,20 @@ import Foundation
 /// entirely (it is not measuring "how loud", it is measuring "what is here,
 /// windowed") and must never grow LUFS math.
 ///
+/// OPT-IN LOUDNESS (m27-k): `measuringLoudness: true` adds ONE program
+/// reading for the profiled range by handing the same chunks to
+/// `Loudness.Stream`, THE meter `ReferenceAnalyzer.analyze` feeds for
+/// `reference.import`/`reference.analyze` (and the streaming twin of
+/// `Loudness.measure`, which `render.measureLoudness` uses). That is the
+/// meter through a second door, not LUFS math here: no K-weighting, gating
+/// or true-peak code lives in this file, and the close (zero tail + field
+/// mapping) is pinned EQUAL to `ReferenceAnalyzer.analyze` by test
+/// (`FileProfileLoudnessTests`). Being the same meter, it cannot validate
+/// those commands either; the external cross-check stays external. It
+/// exists so a bounce's loudness can be checked without `reference.import`
+/// COPYING the file into the References library (m27-k: three checks left
+/// 243 MB behind).
+///
 /// FILE OPEN: shares ``ReferenceAnalyzer/openValidatedFile(_:)`` rather than
 /// re-deriving its own "is this a readable, non-empty audio file" check —
 /// the m23-ch anti-fork reasoning applied to file I/O instead of DSP
@@ -39,8 +53,8 @@ import Foundation
 /// NOT the 4x-oversampled BS.1770 Annex-2 true peak `Loudness`/
 /// `ReferenceAnalyzer` report as `truePeakDbtp`. A window can read under
 /// 0 dBFS sample peak here and still exceed 0 dBTP true peak between
-/// samples. Use `render.measureLoudness`/`reference.analyze` for true-peak
-/// questions.
+/// samples. For true-peak questions use the opt-in loudness reading's
+/// `truePeakDbtp` (below), `render.measureLoudness` or `reference.analyze`.
 ///
 /// HONEST ABSENCE: a window whose linear peak/RMS is exactly zero (digital
 /// silence) or non-finite omits `peakDb`/`rmsDb` rather than reporting `0`
@@ -64,10 +78,14 @@ public enum FileProfiler {
     /// consecutive `windowSeconds`-wide windows, streamed in bounded chunks
     /// — never a full-file buffer. Blocking — call from a detached task
     /// only. `chunkFrames` is a test seam (chunk-size invariance pin);
-    /// production uses the 64k default.
+    /// production uses the 64k default. `measuringLoudness` (m27-k, default
+    /// false) also feeds the profiled range to `Loudness.Stream` and returns
+    /// the reading in `FileProfile.loudness`; false leaves every statement of
+    /// the m25-z path as it was and `loudness` nil.
     public static func profile(
         fileAt url: URL, windowSeconds: Double,
         fromSeconds: Double = 0, durationSeconds: Double? = nil,
+        measuringLoudness: Bool = false,
         chunkFrames: AVAudioFrameCount = defaultChunkFrames
     ) throws -> FileProfile {
         guard windowSeconds > 0 else {
@@ -112,6 +130,9 @@ public enum FileProfiler {
             pcmFormat: format, frameCapacity: max(1, chunkFrames)) else {
             throw AudioContentAnalyzerError.unreadable("buffer allocation failed")
         }
+        // m27-k: THE meter, only when asked (nil = no reading requested).
+        let loudnessStream = measuringLoudness
+            ? Loudness.Stream(sampleRate: rate, channelCount: channelCount) : nil
 
         var windows: [FileProfileWindow] = []
         var windowStartFrame = startFrame
@@ -142,6 +163,10 @@ public enum FileProfiler {
             try reader.read(into: chunk, frameCount: toRead)
             guard chunk.frameLength > 0, let data = chunk.floatChannelData else { break }
             let available = Int(chunk.frameLength)
+            // m27-k: every read is capped at `remaining`, so the meter sees
+            // exactly the profiled samples (it sanitizes NaN/Inf at its door).
+            loudnessStream?.process(channels: data, channelCount: channelCount,
+                                    frameCount: available)
             var offset = 0
             while offset < available {
                 let take = min(windowFrameCount - framesInWindow, available - offset)
@@ -176,7 +201,29 @@ public enum FileProfiler {
         return FileProfile(
             durationSeconds: fileDurationSeconds, sampleRateHz: rate,
             channelCount: channelCount, bitDepth: bitDepth, isFloat: isFloat,
-            windows: windows)
+            windows: windows,
+            loudness: loudnessStream.map { closedReading($0, channelCount: channelCount) })
+    }
+
+    /// m27-k: closes the meter exactly as `ReferenceAnalyzer.analyze` does:
+    /// `ReferenceAnalyzer.truePeakTailFrames` zero frames flush the true-peak
+    /// interpolator (reproducing `Loudness.measure`'s zero-padded edge), then
+    /// the snapshot's five program fields map 1:1 onto the
+    /// `LoudnessMeasurement` `render.measureLoudness` carries. An exact
+    /// equality test against `ReferenceAnalyzer.analyze` keeps the two closes
+    /// from drifting apart (`FileProfileLoudnessTests`).
+    private static func closedReading(_ stream: Loudness.Stream,
+                                      channelCount: Int) -> LoudnessMeasurement {
+        stream.process([[Float]](
+            repeating: [Float](repeating: 0, count: ReferenceAnalyzer.truePeakTailFrames),
+            count: channelCount))
+        let snapshot = stream.snapshot()
+        return LoudnessMeasurement(
+            integratedLufs: snapshot.integratedLufs,
+            truePeakDbtp: snapshot.truePeakDbtp,
+            maxMomentaryLufs: snapshot.maxMomentaryLufs,
+            maxShortTermLufs: snapshot.maxShortTermLufs,
+            loudnessRangeLu: snapshot.loudnessRangeLu)
     }
 
     /// Linear amplitude → dBFS, OMITTED (nil) for zero/non-finite input —

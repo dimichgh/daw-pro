@@ -213,4 +213,13 @@ public final class HostedAUEffect: EffectRendering, @unchecked Sendable {
     func reset() {
         auAudioUnit.reset()
     }
+
+    /// m39-d CR-1: a hosted AU has no parameter delivery path (its lanes never reach the
+    /// schedule and its store is the protocol's inert default), so nothing can fail to stand.
+    func holdAutomatedParams() -> Bool { true }
+
+    /// m39-d CR-2: no-op — the AU owns its own smoothing. On a strip that splits, it simply
+    /// receives two shorter render calls with a contiguous sample time (`process` advances
+    /// its own clock by the frames rendered), which `maximumFramesToRender` already allows.
+    func beginControlCell(frames: Int) {}
 }

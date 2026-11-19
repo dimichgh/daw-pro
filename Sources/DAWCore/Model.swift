@@ -749,6 +749,33 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
     /// `ClipLyricsPersistenceTests`, `ClipLyricsRebuildTests` and
     /// `ProjectStoreClipEditTests` pin every site.
     public var lyrics: ClipLyrics?
+    /// How this melody is to be SUNG (p2-sing-x5, design
+    /// `docs/design/2026-10-06-p2-sing-expansion.md` §5.3): vibrato, air and
+    /// velocity-follows-level, clip-wide and per note (keyed by `MIDINote.id`).
+    /// `nil` == ABSENT == today's behaviour EXACTLY. MIDI clips only: `init`
+    /// drops it from a non-MIDI clip and normalises an all-default style to nil
+    /// (`SingStyle.normalized`), and both encoders that write a clip
+    /// (`encode(to:)` here, `ClipDocument.init(from:)`) write that one
+    /// spelling, so a clip without a style encodes byte-identically to a build
+    /// that never had the field (design §9 S2, `ProjectDocumentFidelityTests`).
+    /// NOT render material: nothing that keys or schedules a render reads it.
+    /// In `Equatable` on purpose, for the reason `lyrics` gives.
+    ///
+    /// CARRIED where a clip is saved or rebuilt (W8-X5M's census): `ClipDocument`
+    /// (init, encode, decode, and BOTH reconstructions), and every rebuild site
+    /// listed under `pitchEdits` except the audio-only `AudioQuantizePlan.makeSlice`.
+    /// The carry rule: each clip that comes out keeps the clip-wide choices and
+    /// the per-note choices of exactly the notes it holds
+    /// (`SingStyle.keepingOverrides(for:)`); every site keeps note ids, so a
+    /// choice goes with its note. Decoding never prunes (no load-time
+    /// mutation). `SingStyleTests`, `SingStyleFieldsOptionalTests` and
+    /// `SingStyleRebuildStoreTests` pin it.
+    ///
+    /// ⚠️ The looper's re-tile (`ProjectStore.materializeDeckLayers`) rewrites a
+    /// layer clip's notes IN PLACE with fresh ids every pass and has no
+    /// old→new map: the clip-wide choices survive, per-note choices become
+    /// orphans (`SingStyle.orphanedNoteIDs(in:)`).
+    public var singStyle: SingStyle?
 
     /// Per-clip gain bounds: a generous studio range, matching the fader's
     /// mental model (a clip can be pulled 72 dB down toward silence or pushed
@@ -876,7 +903,8 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         controllerLanes: [MIDIControllerLane] = [],
         takeGroupID: UUID? = nil,
         pitchEdits: PitchEditSet? = nil,
-        lyrics: ClipLyrics? = nil
+        lyrics: ClipLyrics? = nil,
+        singStyle: SingStyle? = nil
     ) {
         self.id = id
         self.name = name
@@ -915,6 +943,18 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // (the notes-wins cousin, like `controllerLanes`), and blank text is
         // nil, so "no lyrics" has one spelling and survives a save unchanged.
         self.lyrics = notes == nil ? nil : ClipLyrics.normalized(lyrics)
+        // Singing style (p2-sing-x5): a melody's, like lyrics — a non-MIDI clip
+        // drops it, and an all-default style is nil (one spelling). Never
+        // looks at the notes beyond "is this MIDI": no pruning here.
+        self.singStyle = notes == nil ? nil : SingStyle.normalized(singStyle)
+    }
+
+    /// The style as it is WRITTEN (p2-sing-x5): nil for a non-MIDI clip, and
+    /// normalised, so even a style assigned directly (skipping `init`) reaches
+    /// a file in the one spelling. Shared by `encode(to:)` and
+    /// `ClipDocument.init(from:)` so the two writers cannot disagree.
+    var singStyleToWrite: SingStyle? {
+        notes == nil ? nil : SingStyle.normalized(singStyle)
     }
 
     /// Linear playback gain at `beat` (measured from the clip start): the static
@@ -1113,6 +1153,7 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupID
         case pitchEdits
         case lyrics
+        case singStyle
     }
 
     /// Decoding routes through the clamping `init`; every edit field tolerates
@@ -1143,7 +1184,8 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
             controllerLanes: try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes) ?? [],
             takeGroupID: try c.decodeIfPresent(UUID.self, forKey: .takeGroupID),
             pitchEdits: try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits),
-            lyrics: try c.decodeIfPresent(ClipLyrics.self, forKey: .lyrics)
+            lyrics: try c.decodeIfPresent(ClipLyrics.self, forKey: .lyrics),
+            singStyle: try c.decodeIfPresent(SingStyle.self, forKey: .singStyle)
         )
     }
 
@@ -1187,6 +1229,10 @@ public struct Clip: Identifiable, Codable, Sendable, Equatable {
         // Lyrics (p2-sing-d1): written ONLY when present, so a clip without
         // them carries no new key (byte-identical to a pre-lyrics save).
         try c.encodeIfPresent(lyrics, forKey: .lyrics)
+        // Singing style (p2-sing-x5): written ONLY when present, in the one
+        // spelling, so a clip without one carries no new key (byte-identical
+        // to a pre-x5 save).
+        try c.encodeIfPresent(singStyleToWrite, forKey: .singStyle)
     }
 }
 
@@ -1907,8 +1953,8 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
     public var soundBank: SoundBankConfig?
     /// Drum-machine kit (m39-dm; additive optional, carried across kind
     /// switches like `sampler`/`audioUnit`/`soundBank`, so pre-drumSynth
-    /// project files still decode). `nil` reads as the factory 808 kit — see
-    /// `resolvedDrumKit`.
+    /// project files still decode). `nil` on a drum machine reads as the
+    /// factory 808 kit — see `resolvedDrumKit`.
     public var drumKit: DrumKitParams?
 
     public static let `default` = InstrumentDescriptor()
@@ -1917,10 +1963,21 @@ public struct InstrumentDescriptor: Codable, Sendable, Equatable {
     public var resolvedSampler: SamplerParams { sampler ?? SamplerParams() }
 
     /// The drum kit with the nil-default resolved. ⚠️ Unlike `resolvedSampler`
-    /// (whose nil is an EMPTY, silent sampler), a nil kit resolves to the full
-    /// FACTORY KIT: a drum machine with no configuration is a playable 808, not
-    /// silence. Nothing external has to resolve for it to sound.
-    public var resolvedDrumKit: DrumKitParams { drumKit ?? DrumKitParams() }
+    /// (whose nil is an EMPTY, silent sampler), a nil kit resolves to a full,
+    /// playable kit, never silence. Nothing external has to resolve for it to
+    /// sound. W9-DRUMDEF — WHICH kit depends on the kind:
+    ///   · on a DRUM MACHINE, the factory kit `DrumKitParams()` (hats and
+    ///     cymbals at 0 dB, the `pads` layout). A drum machine with a nil kit
+    ///     was saved and never edited, so it plays exactly what it always
+    ///     played (`DrumLevelTrimTests.aNeverEditedDrumMachineKeepsTodaysTrims`).
+    ///   · on any OTHER instrument, the kit a NEW drum machine starts with
+    ///     (`DrumKitParams.newDrumMachineKit`): what this track gets if it
+    ///     becomes one, so a describe or a kit edit before the switch agrees
+    ///     with the switch (`drumKitCarried(into:)` writes it in on the way).
+    public var resolvedDrumKit: DrumKitParams {
+        if let drumKit { return drumKit }
+        return kind == .drumSynth ? DrumKitParams() : DrumKitParams.newDrumMachineKit
+    }
 
     public init(
         kind: Kind = .polySynth,
@@ -2706,6 +2763,16 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
     /// Two zones in the same choke group LAYERED by ONE note-on do not choke
     /// each other, and neither does the note that fires the choke.
     public var chokeGroup: Int?
+    /// Which drum this zone is (m39-w4-6, kit-aware slicing), or nil: not a
+    /// drum, or a hit nobody recognised ("other"). Written by
+    /// `clip.sliceToSampler`'s `mapping: "kit"` and correctable one zone at a
+    /// time through `zonePatches`. It is a LABEL, not a sound: the render
+    /// never reads it. `DrumLaneMap` reads it to give a sampler drum rows.
+    ///
+    /// ⚠️ Not `role` and not `group`: `group` is already the round-robin
+    /// selection group. nil never encodes, so a project written before this
+    /// field existed re-saves byte-identically.
+    public var drumRole: DrumVoice?
 
     public static let pitchRange: ClosedRange<Int> = 0...127
     /// m19-b (A5): 0...2 (+6 dB), relaxed from 0...1 — decode-safe for every
@@ -2755,7 +2822,8 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
         loopEnd: Int? = nil,
         crossfade: SamplerCrossfade? = nil,
         reverse: Bool? = nil,
-        chokeGroup: Int? = nil
+        chokeGroup: Int? = nil,
+        drumRole: DrumVoice? = nil
     ) {
         self.id = id
         self.audioFileURL = audioFileURL
@@ -2821,6 +2889,8 @@ public struct SamplerZone: Identifiable, Codable, Sendable, Equatable {
         // m32-f: clamp rather than reject, matching every other field here.
         // nil stays nil = no choke.
         self.chokeGroup = chokeGroup.map { $0.clamped(to: Self.chokeGroupRange) }
+        // m39-w4-6: a label, nothing to clamp; nil stays nil.
+        self.drumRole = drumRole
     }
 
     /// The identity of this zone's SOURCE FILE, for every "do these two zones
@@ -3417,6 +3487,38 @@ public struct TransportState: Codable, Sendable, Equatable {
     }
 }
 
+/// How a song's pan KNOB spreads a track between the left and right speakers
+/// (m39-panlaw-new; the user's pick 2026-10-07, "One rule for new songs
+/// only"). ONE setting per song, saved with it (`ProjectDocument.panLaw`).
+///
+/// - `balance`: the original knob — the far side gets quieter and the near
+///   side stays as it is (Apple's `AVAudioMixerNode.pan` on the strip's mixer
+///   node). A song saved before this setting existed has no key in its file
+///   and keeps this rule EXACTLY, byte for byte (`PanLawSavedSongGateTests`).
+/// - `equalPower`: the rule pan AUTOMATION and a pan wobble (a modulation
+///   route on pan) have always used — constant loudness as it moves: gains
+///   √2·cos θ and √2·sin θ with θ = (pan + 1)·π/4, so the centre is unchanged
+///   and the near side rises +3.01 dB at full pan (−5.33 / +2.32 dB halfway).
+///   The knob then renders through the SAME stage as a lane
+///   (`AutomationRenderer`), so the knob at p and a constant lane at p are
+///   sample-identical.
+///
+/// ⚠️ THE DEFAULT IS `balance` EVERYWHERE — decode-absent, `ProjectStore.init`,
+/// the engine, the offline renderer — except where a NEW song is born, which
+/// asks for `newSong`: `ProjectStore.newProject()` and the app's launch store
+/// (`DAWProApp`). A future birth site that forgets it gets today's sound, never
+/// a saved song re-voiced.
+public enum PanLaw: String, Codable, Sendable, Equatable, CaseIterable {
+    case balance
+    case equalPower
+
+    /// The ONE home of the rule a new song starts with.
+    public static let newSong: PanLaw = .equalPower
+    /// The rule of a song whose file has no pan-rule key: every song made
+    /// before m39-panlaw-new.
+    public static let savedSongDefault: PanLaw = .balance
+}
+
 /// Codable snapshot of the whole session — the payload of `project.snapshot`
 /// on the control protocol and the state MCP agents orient from.
 public struct ProjectSnapshot: Codable, Sendable, Equatable {
@@ -3535,6 +3637,13 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
     /// project with no clips, so an empty session's snapshot stays
     /// byte-identical.
     public var contentEndBeat: Double?
+    /// The song's pan rule (m39-panlaw-new-wire), mirrored from
+    /// `ProjectStore.panLaw`. Present (`"equalPower"`) only in a song that uses
+    /// the equal-loudness knob (every song made from now on); ABSENT for the
+    /// original rule (`balance`), so an old song's snapshot stays byte-identical
+    /// and a missing key reads as the OLD rule (`PanLaw.savedSongDefault`), the
+    /// same convention the saved file uses. Read it with `?? "balance"`.
+    public var panLaw: PanLaw?
 
     public init(
         name: String,
@@ -3560,7 +3669,8 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         engineNotices: [EngineNotice]? = nil,
         reference: ReferenceSlot? = nil,
         stopAtContentEnd: Bool = true,
-        contentEndBeat: Double = 0
+        contentEndBeat: Double = 0,
+        panLaw: PanLaw = PanLaw.savedSongDefault
     ) {
         self.name = name
         self.transport = transport
@@ -3604,6 +3714,8 @@ public struct ProjectSnapshot: Codable, Sendable, Equatable {
         self.runsPastContentEnd = stopAtContentEnd ? nil : true
         // No clips → key omitted (an empty session stays byte-identical).
         self.contentEndBeat = contentEndBeat > 0 ? contentEndBeat : nil
+        // The original rule → key omitted (an old song's snapshot is unchanged).
+        self.panLaw = panLaw == PanLaw.savedSongDefault ? nil : panLaw
     }
 }
 

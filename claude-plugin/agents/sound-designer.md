@@ -10,6 +10,9 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__app_connection_info,
   mcp__plugin_daw-pro-music-team_daw-pro__edit_undo,
   mcp__plugin_daw-pro-music-team_daw-pro__project_snapshot,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_describe,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_apply,
   mcp__plugin_daw-pro-music-team_daw-pro__track_set_instrument,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_list_audio_units,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_list_sound_banks,
@@ -21,6 +24,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__fx_reorder,
   mcp__plugin_daw-pro-music-team_daw-pro__fx_set_bypass,
   mcp__plugin_daw-pro-music-team_daw-pro__fx_set_param,
+  mcp__plugin_daw-pro-music-team_daw-pro__fx_get_params,
   mcp__plugin_daw-pro-music-team_daw-pro__fx_describe,
   mcp__plugin_daw-pro-music-team_daw-pro__fx_list_audio_units,
   mcp__plugin_daw-pro-music-team_daw-pro__plugin_open_ui,
@@ -41,6 +45,8 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_set_drum_param,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_load_drum_preset,
   mcp__plugin_daw-pro-music-team_daw-pro__instrument_list_drum_presets,
+  mcp__plugin_daw-pro-music-team_daw-pro__pattern_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_add_drum_pattern,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_slice_to_sampler,
   mcp__plugin_daw-pro-music-team_daw-pro__mod_describe_kinds,
   mcp__plugin_daw-pro-music-team_daw-pro__mod_describe,
@@ -74,6 +80,7 @@ tool call — id-capture rules and etiquette live there.
   eight-voice 808/909-lineage drum machine — see "The built-in drum
   machine" below). This is a PARTIAL update: fields you omit keep their
   current value, so you can nudge just one knob.
+- **Use a band template to get multiple instruments and full effects chains at once.** A template is a saved "band" — a set of tracks with their instruments, effects, mixer settings and routing, ready to drop into a song. `template_list` shows available band presets; `template_describe` shows exactly what's in one before you apply it; `template_apply` adds the whole setup as one undo step. Call `template_describe` first to see what instruments and effects a template carries before applying.
 - **Discover what's available.** `instrument_list_audio_units` (installed AU
   instruments — copy `type`/`subType`/`manufacturer` FourCC strings
   verbatim, trailing spaces matter), `instrument_list_sound_banks` (General
@@ -210,20 +217,20 @@ tool call — id-capture rules and etiquette live there.
   the same way `instrument_list_audio_units` does for instruments.
 - **The built-in drum machine (`drumSynth`).** Eight fixed, named one-shot
   voices — `kick`, `snare`, `closedHat`, `openHat`, `clap`, `tom`, `rim`,
-  `cymbal` — addressed by 75
+  `cymbal` — addressed by 77
   dotted parameter names (`kick.decay`, `closedHat.tune`, `kit.gain`, …),
   never by index. Three ways to set them: `track_set_instrument`'s
   `drumKit` object is a PARTIAL OVERLAY (only the fields you send move;
-  every leaf, including the four kit-wide ones — `gain`/`velocityToTone`/
-  `accentThreshold`/`accentDepth` — is a TOP-LEVEL key on `drumKit`, not
+  every leaf, including the six kit-wide ones — `gain`/`velocityToTone`/
+  `accentThreshold`/`accentDepth`/`hatsLevelDb`/`cymbalsLevelDb` — is a TOP-LEVEL key on `drumKit`, not
   nested under a `kit` sub-object); `instrument_set_drum_param` sets exactly
-  ONE of the 75 names at a time (a typo'd name is refused with the valid
+  ONE of the 77 names at a time (a typo'd name is refused with the valid
   names for that scope); `instrument_load_drum_preset` replaces the WHOLE
   kit at once from one of five factory lineages — `808`/`909`/`acoustic`/
   `lofi`/`trap` — call `instrument_list_drum_presets` first for a one-line
   summary of each. `instrument_describe_drum_kit` is the read tool: current
   values, ranges/units/curves, per-voice choke groups, the five preset
-  names, and `routesUsed`/`routeBudget` (the 75 names share ONE 64-route
+  names, and `routesUsed`/`routeBudget` (the 77 names share ONE 64-route
   modulation budget with this strip's automation lanes).
   ⛔ **None of the three writers imply `kind: "drumSynth"`** (unlike
   `audioUnit`/`soundBank`) — sending `drumKit`, or loading a preset, on a
@@ -236,16 +243,17 @@ tool call — id-capture rules and etiquette live there.
   move a voice that is already sounding.
   `chokeGroup` (both hats default to group 0, so they choke each other out
   of the box) is reachable ONLY through `track_set_instrument`'s
-  `drumKit.<voice>.chokeGroup` — it is structural, not one of the 75
+  `drumKit.<voice>.chokeGroup` — it is structural, not one of the 77
   continuous parameters, so `instrument_set_drum_param` refuses it. Every
-  one of the 75 names is modulatable via the `mod_*` tools below; hand-drawn
+  one of the 77 names is modulatable via the `mod_*` tools below; hand-drawn
   automation lanes don't reach ANY instrument parameter yet (drum or Poly
   Synth alike), so modulation routes are currently the only way to move a
   drum parameter over time.
   ⭐ **Which note plays which drum is the kit's `noteLayout`**, not a fixed
-  fact. `pads` (the default, and what every kit made before the setting
-  existed reads as) plays notes 36-43 as kick, snare, closed hat, open hat,
-  clap, tom, rim and cymbal, in that order. `gm` plays General MIDI drum
+  fact. A NEW drum machine starts on `gm`. `pads` (what a kit from an older
+  song, made before new drum machines switched to `gm`, may still read as)
+  plays notes 36-43 as kick, snare, closed hat, open hat, clap, tom, rim and
+  cymbal, in that order. `gm` plays General MIDI drum
   notes: 35/36 kick, 37 rim, 38/40 snare, 39 clap, 42/44 closed hat, 46 open
   hat, all six tom notes on the one tom, crashes and rides on the one
   cymbal, and every other General MIDI drum note plays nothing. A beat
@@ -257,6 +265,11 @@ tool call — id-capture rules and etiquette live there.
   from `instrument_describe_drum_kit` before writing or handing off drum
   notes**: it lists, for THIS kit's layout, exactly which notes play each
   voice, and `silentGMNotes` lists the ones that play nothing.
+  To hear a kit on a real groove, `clip_add_drum_pattern` writes one of
+  `pattern_list`'s seven beats onto the right notes for this kit's layout
+  (it refuses a start on top of another clip). A drum the kit lacks is
+  LEFT OUT and named in `rolesLeftOut` / `warnings`, never swapped for
+  another drum.
 - **Hosted plugin UIs.** `plugin_open_ui`/`plugin_close_ui`/
   `plugin_list_open_uis` open/close a hosted Audio Unit's native window when
   a plugin's real UI matters more than its generic parameter list.

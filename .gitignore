@@ -131,6 +131,16 @@ bursts/
 # after the scratchpad is reaped -- a listener on 17695 with no pidfile means
 # you do not know whose process it is, and kills here are pidfile-exact only.
 /scripts/video/features/staging.json
+# The Voice film (2026-10-11): the same rule as features/ above. `work/` holds
+# per-stage project copies, process listings (`ps-*.txt`), lsof captures, an
+# `omlx.env` and symlinks into ~/Library -- machine run state, never source, and
+# this repo is PUBLIC. `out/` is the rendered film, `logs/` the run logs.
+/scripts/video/voice/work/
+/scripts/video/voice/out/
+/scripts/video/voice/out-superseded-*/
+/scripts/video/voice/logs/
+/scripts/video/voice/staging.json
+/scripts/video/voice/staging.log
 
 # Emitted per-variant Shorts specs (246 files, 27 MB): the same generated-spec
 # reasoning as the F1/B3/V? rules above, one file per variant trial.

@@ -233,6 +233,15 @@ export HF_HOME="$RUNTIME/cache/hf" HF_HUB_DISABLE_TELEMETRY=1
 export MPLCONFIGDIR="$RUNTIME/cache/mpl" NUMBA_CACHE_DIR="$RUNTIME/cache/numba" XDG_CACHE_HOME="$RUNTIME/cache/xdg"
 export TORCH_HOME="$RUNTIME/cache/torch" MODELSCOPE_CACHE="$RUNTIME/cache/modelscope" PYTHONNOUSERSITE=1
 export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+# HOME and NLTK_DATA point INSIDE staging for every step (W8-SFIX, measured 2026-10-06): the real install's venv check
+# imported g2p_en, whose import-time nltk.download() wrote 3.4 MB into the user's ~/nltk_data. Whatever any tool writes
+# under HOME now lands in staging and goes with it, and nothing reads the caller's dotfiles. (tools/verify_venv.py
+# also stops that download outright; this is the second wall.) The finish step re-creates the folder after it clears
+# staging, so HOME never names a missing folder. STAGING_TMP is the venv check's TMPDIR (see venv_verify).
+STAGING_HOME="$STAGING/home"
+STAGING_TMP="$STAGING/tmp"
+mkdir -p "$STAGING_HOME" "$STAGING_TMP" || fail "cannot create the staging home"
+export HOME="$STAGING_HOME" NLTK_DATA="$STAGING_HOME/nltk_data"
 unset PYTORCH_ENABLE_MPS_FALLBACK
 if [[ -n "$SRC" ]]; then export UV_OFFLINE=1; fi
 
@@ -291,8 +300,11 @@ fi
 # ================================================================================================ 4 venv
 begin_step venv
 IMPORTS="$(pin VERIFY_IMPORTS)"
+# TMPDIR inside staging for the check only: importing torch makes $TMPDIR/torchinductor_<user>/ (measured 2026-10-06).
+# Not exported for every step: uv's source builds would then run with a TMPDIR that has a space in it, untested.
 venv_verify() {   # venv_verify <python> <prefix>
-  run "$1" "$SCRIPT_DIR/tools/verify_venv.py" --lock "$LOCK_PATH" --python-version "$PY_VER" --prefix "$2" --imports "$IMPORTS"
+  run /usr/bin/env TMPDIR="$STAGING_TMP/" "$1" "$SCRIPT_DIR/tools/verify_venv.py" --lock "$LOCK_PATH" \
+    --python-version "$PY_VER" --prefix "$2" --imports "$IMPORTS"
 }
 VENV_STAMP="lock=$LOCK_SHA python=$PY_VER prefix=$RUNTIME/venv"
 if [[ -x "$VENV_PY" ]] && stamp_ok venv "$VENV_STAMP" && venv_verify "$VENV_PY" "$RUNTIME/venv"; then
@@ -483,7 +495,7 @@ else
   if [[ -x "$UV" ]]; then run "$UV" cache clean > /dev/null || say "uv cache clean failed (not fatal)"; fi
   rm -rf "$STAGING"
   INSTALLED_BYTES=$(( $(du -sk "$RUNTIME" | cut -f 1) * 1024 ))
-  mkdir -p "$STAGING"
+  mkdir -p "$STAGING" "$STAGING_HOME"
   marker_json "$INSTALLED_BYTES" > "$STAGING/install.json" || fail "could not write install.json"
   mv -f "$STAGING/install.json" "$MARKER" || fail "could not move install.json into place"
 fi

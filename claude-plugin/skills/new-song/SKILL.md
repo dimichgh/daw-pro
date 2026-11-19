@@ -57,11 +57,17 @@ starting point — poll to completion, `import_generation`/
 `import_generated_stems` before moving on). Reference section beat ranges
 from step 1's markers, not guesses.
 
-Once a track has real content, delegate to **sound-designer** to pick its
-instrument sound (or tune the sample/AU already loaded) and build a light
-first-pass effect chain. Sound-designer works AFTER composer on each track
-— there's no point tuning a sound before there's a performance to hear it
-against.
+Delegate to **sound-designer** to pick each track's instrument sound (or tune
+the sample/AU already loaded) and build a light first-pass effect chain.
+Sound-designer MAY run at the same time as composer, because their tools touch
+separate state: `track_set_instrument` and `fx_*` never edit clips, and
+`clip_*` never changes an instrument. Nothing in this pipeline can hear, so
+waiting for notes buys nothing. One condition: if an instrument changes after
+composer has written controller lanes (CC11 expression, CC7 volume, pitch bend)
+on that track, read the `warnings` array that `track_set_instrument` returns
+and pass it on. It says when a lane was inert and now sounds, or the reverse
+(for example, CC11 lanes that silently cut the level on a sound bank). Leave a
+lane that sounds wrong to composer; sound-designer must not edit clips.
 
 ### 2a. Solo wind and lead lines: say "slurred" in BOTH delegations
 

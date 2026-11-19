@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import DAWCore
@@ -414,5 +415,148 @@ private struct SingPlanRNG: RandomNumberGenerator {
         z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
         z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
         return z ^ (z >> 31)
+    }
+}
+
+// MARK: - S3 / S4 (p2-sing-x3, design docs/design/2026-10-06-p2-sing-expansion.md §9.2)
+
+/// The default plan, pinned BEFORE languages existed. ⭐ PIN-BEFORE: `s3Signatures` and `s4Digests` were captured by
+/// W8-X3 on 2026-10-06 from the tree before `SingWord.language` / `ClipLyrics.language` existed (runs PB1/PB2 in the
+/// lane's STATUS). A golden recorded after the change would pin nothing (design §9 "Pin-before").
+extension SingPlannerTests {
+
+    static func fixedID(_ n: Int) -> UUID {
+        UUID(uuidString: String(format: "00000000-0000-0000-0000-%012d", n))!
+    }
+
+    /// The SING-6 line T1T2 (`Fixtures/Sing/T1T2.json`, the facade's metadata form) as a melody clip at 120 BPM:
+    /// one note per pitched entry (seconds × 2 = beats), a word on each `note_type` 2, a `+` on each 3 (the same
+    /// word held on), a line break at each rest. "Twinkle + twinkle + little + star how I wonder + what you are",
+    /// "hold me + +", "now": 19 notes, three lines, three breath phrases.
+    static func t1t2Clip() throws -> Clip {
+        let url = try #require(Bundle.module.url(forResource: "T1T2", withExtension: "json", subdirectory: "Fixtures/Sing"))
+        let entries = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        let entry = try #require(entries.first)
+        func list(_ key: String) throws -> [String] {
+            try #require(entry[key] as? String).split(separator: " ").map(String.init)
+        }
+        let durations = try list("duration").compactMap { Double($0) }
+        let pitches = try list("note_pitch").compactMap { Int($0) }
+        let types = try list("note_type").compactMap { Int($0) }
+        let tokens = try list("text")
+        try #require(durations.count == pitches.count && pitches.count == types.count && types.count == tokens.count)
+        var notes: [MIDINote] = []
+        var text = ""
+        var newLine = false
+        var seconds = 0.0
+        for i in durations.indices {
+            let start = seconds
+            seconds += durations[i]
+            guard pitches[i] > 0 else {
+                if !text.isEmpty { newLine = true }
+                continue
+            }
+            notes.append(MIDINote(id: fixedID(1_000 + i), pitch: pitches[i], velocity: 100,
+                                  startBeat: start * 2, lengthBeats: durations[i] * 2))
+            if types[i] == 3 {
+                text += " +"
+                continue
+            }
+            if !text.isEmpty { text += newLine ? "\n" : " " }
+            text += tokens[i]
+            newLine = false
+        }
+        return Clip(id: fixedID(1), name: "T1T2", startBeat: 0, lengthBeats: notes.map { $0.endBeat }.max() ?? 4,
+                    notes: notes, lyrics: ClipLyrics(text: text))
+    }
+
+    /// The clips S3 and S4 pin: T1T2 (as written and an octave up), the suite's own signature and word clips
+    /// with fixed ids, and a long flow-mode clip with a chord that cuts into two units and holds a word.
+    static func s3s4Cases() throws -> [(name: String, clip: Clip, shift: Int)] {
+        let t1t2 = try t1t2Clip()
+        let base = Clip(id: fixedID(2), name: "Melody", startBeat: 4, lengthBeats: 8,
+                        notes: [MIDINote(id: fixedID(201), pitch: 60, velocity: 100, startBeat: 0, lengthBeats: 1),
+                                MIDINote(id: fixedID(202), pitch: 62, velocity: 100, startBeat: 1, lengthBeats: 1),
+                                MIDINote(id: fixedID(203), pitch: 64, velocity: 100, startBeat: 2, lengthBeats: 2)],
+                        lyrics: ClipLyrics(text: "one two three"))
+        let wordNotes = (0..<7).map {
+            MIDINote(id: fixedID(300 + $0), pitch: 60 + $0, velocity: 100, startBeat: Double($0), lengthBeats: 1)
+        }
+        let words = Clip(id: fixedID(3), name: "Words", startBeat: 0, lengthBeats: 7, notes: wordNotes,
+                         lyrics: ClipLyrics(text: "Twin-kle, star! 3-2-1 go"))
+        var longNotes: [MIDINote] = []
+        for p in 0..<4 {
+            for k in 0..<8 {
+                longNotes.append(MIDINote(id: fixedID(400 + p * 10 + k), pitch: 55 + p + k, velocity: 100,
+                                          startBeat: Double(p * 10 + k), lengthBeats: 1))
+            }
+        }
+        longNotes.append(MIDINote(id: fixedID(499), pitch: 48, velocity: 100, startBeat: 0, lengthBeats: 1))
+        let long = Clip(id: fixedID(4), name: "Long", startBeat: 2, lengthBeats: 40, notes: longNotes,
+                        lyrics: ClipLyrics(text: la(29) + " sing-ing"))
+        return [("T1T2", t1t2, 0), ("T1T2 up an octave", t1t2, 1), ("one two three", base, 0),
+                ("words", words, 0), ("long", long, 0)]
+    }
+
+    /// Everything in a plan except its signature (S3 pins that), in a canonical text. Note ids are written as
+    /// their index in the clip's note list; doubles by their shortest round-trip description.
+    static func dump(_ plan: SingPlan, notes clipNotes: [MIDINote]) -> String {
+        let index = Dictionary(clipNotes.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { a, _ in a })
+        func ids(_ list: [UUID]) -> String { list.map { index[$0].map(String.init) ?? "?" }.joined(separator: ",") }
+        var out = "clip=\(plan.clipID) shift=\(plan.octaveShift) t0=\(plan.t0Seconds) at=\(plan.atBeat)\n"
+        for (u, unit) in plan.units.enumerated() {
+            out += "unit \(u) offset=\(unit.offsetSeconds) onset=\(unit.onsetSeconds) span=\(unit.spanSeconds)\n"
+            for n in unit.notes {
+                out += " n \(ids([n.noteID])) \(n.startSeconds) \(n.endSeconds) \(n.midi) \(n.sourcePitch)\n"
+            }
+            for w in unit.words {
+                out += " w \(w.text.debugDescription) \(w.typed.debugDescription) \(w.noteIndices)\n"
+            }
+        }
+        let a = plan.assignment
+        out += "assignment \(a.mode.rawValue) phrases=\(a.phraseCount) lines=\(a.lineCount) unsung=\(ids(a.unsungNoteIDs))\n"
+        for w in a.words {
+            out += " a \(w.word.typed.debugDescription) \(w.word.sung.debugDescription) \(w.word.parts) h\(w.word.holds)"
+                + " l\(w.word.line) num=\(w.word.isNumber) en=\(w.word.isEnglish) [\(ids(w.noteIDs))]"
+                + " \(w.startBeat) \(w.endBeat) p\(w.phrase) s\(w.syllables) held=\(w.heldNotes)\n"
+        }
+        for warning in plan.warnings { out += " warn \(warning.sentence)\n" }
+        return out
+    }
+
+    static func sha256(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static let s3Signatures: [String] = [
+        "855b343074cb71305a019b5a027ad186", "dde826adc96928e5875613fcbf122b2f", "eba76d5447953b8339b715fb359de495",
+        "c0fb62a143c9857281920bc6b22c2c48", "b5aefdc2c540fd69cf414bdf1963ec0b",
+    ]
+    static let s4Digests: [String] = [
+        "7f255a54d1a7e2ac842b16fd01333c390f1cfa7d4f03eefe8e904ab621ec6ad1",
+        "b5225a9541f3bd9058242affff3f9552e7f5b1fe50374feb529a3beb71c5e912",
+        "7e3457b3f544256ee645760e54e89150877f7932d445365c2e3b05823bc843c6",
+        "fd47ef7a1a71558e8524db40a451aa88790f69e8a917093cb299bc03ab60b769",
+        "a0f979babaee2bd0d41442eb080be6bc14aa47c3f57e2c20fe75e83f2f13b1a7",
+    ]
+
+    @Test("S3: each default plan's signature equals its pin-before value")
+    func defaultSignatureUnchanged() throws {
+        let cases = try Self.s3s4Cases()
+        let signatures = try cases.map { try Self.plan($0.clip, shift: $0.shift).signature }
+        #expect(signatures == Self.s3Signatures)
+    }
+
+    @Test("S4: each whole default plan (units, notes, words, offsets, assignment, warnings) equals its pin-before value")
+    func defaultPlanUnchanged() throws {
+        let cases = try Self.s3s4Cases()
+        let dumps = try cases.map { Self.dump(try Self.plan($0.clip, shift: $0.shift), notes: $0.clip.notes ?? []) }
+        let digests = dumps.map(Self.sha256)
+        #expect(digests == Self.s4Digests, "\(dumps.joined(separator: "----\n"))")
+        #expect(cases.map { $0.clip.lyrics?.text.isEmpty == false } == [true, true, true, true, true], "control")
+        // Added after the change (p2-sing-x3): no word of a default plan carries a language.
+        let plans = try cases.map { try Self.plan($0.clip, shift: $0.shift) }
+        #expect(plans.allSatisfy { plan in plan.units.allSatisfy { unit in unit.words.allSatisfy { $0.language == nil } } })
+        #expect(plans.allSatisfy { plan in plan.assignment.words.allSatisfy { $0.word.language == nil } })
     }
 }

@@ -399,7 +399,10 @@ struct MIDIControllerInstrumentTests {
                                                 channels: 2))
         let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 512))
         buffer.frameLength = 512
-        let output = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        // `nonisolated(unsafe)`: a release test build (`-c release -enable-testing`) rejects the render closure below
+        // for capturing this task-isolated pointer into a main-actor closure ("sending 'output' risks causing data
+        // races"); the pointer is used from this one thread only, so the annotation states what already holds.
+        nonisolated(unsafe) let output = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
 
         var pull = 0
         func renderQuantum(_ events: [ScheduledMIDIEvent]) -> Duration {

@@ -16,6 +16,30 @@ public enum GenerationJobOrigin: String, Sendable, CaseIterable, Codable {
     /// stems/full-song/clip-fix import pipeline (`importGeneration`,
     /// `fixClipRegion`, `importClipFix`).
     case `import`
+    /// A sung vocal the PERSON asked for (p2-sing-e/f): the Sing sheet's
+    /// [Sing it] or the results card's [Try another take]. Chip "SING".
+    ///
+    /// Its row still has a `jobID` the card's status closure is asked about:
+    /// the app's closure routes every "sing-" id to the sing coordinator
+    /// (`SingPresenceBridge`), never to ACE, and the bridge never answers
+    /// queued (so ACE's boot is never painted on it) and never throws.
+    case sing
+    /// A sung vocal an AI AGENT asked for over the wire (`sing.render`): chip
+    /// "AGENT", design §5.5 ("Jobs that come over the wire show AGENT").
+    ///
+    /// ⚠️ NOT `.wire`, which also says "AGENT": `registerSubmission` hands a
+    /// new job the open pre-submit row of the SAME origin, and a `.wire` row
+    /// with no job id is an agent's ACE generate still booting. A sing job
+    /// registered as `.wire` would take that row over and the ACE boot would
+    /// vanish from the card. Appended last (p2-sing-f): the earlier cases'
+    /// raw values and labels are unchanged.
+    case singAgent
+
+    /// The origin a sing job's row is registered under: AGENT when an agent
+    /// asked (`SingJobRequest.fromAgent` / `SingJobStatus.fromAgent`).
+    public static func forSingJob(fromAgent: Bool) -> GenerationJobOrigin {
+        fromAgent ? .singAgent : .sing
+    }
 
     /// Beginner-readable chip text (SF Mono uppercase in the card). "AGENT"
     /// for the wire — a newcomer knows what an AI agent is, not a WebSocket.
@@ -24,6 +48,8 @@ public enum GenerationJobOrigin: String, Sendable, CaseIterable, Codable {
         case .sketchpad: return "SKETCHPAD"
         case .wire: return "AGENT"
         case .import: return "IMPORT"
+        case .sing: return "SING"
+        case .singAgent: return "AGENT"
         }
     }
 }

@@ -94,7 +94,7 @@ struct MixerPresetTests {
             let result = try store.applyMixerPreset(trackID: t.id, presetName: preset.name)
 
             let applied = track(store, t.id).effects
-            #expect(result.effects.map(\.id) == applied.map(\.id))
+            #expect(result.track.effects.map(\.id) == applied.map(\.id))
             #expect(applied.count == preset.chain.count)
             // Kinds in order.
             #expect(applied.map(\.kind) == preset.chain.map(\.kind))
@@ -305,5 +305,99 @@ struct MixerPresetTests {
         // Nothing changed: the pre-existing chain and undo depth are intact.
         #expect(track(store, t.id).effects.map(\.kind) == [.eq])
         #expect(store.journal.undoStack.count == depth)
+    }
+}
+
+// MARK: - m39-tpl-f9: a preset that replaces a sidechain-keyed chain mid-take
+
+// Design §5.4, finding F-9: replacing a chain removes every effect in it, and removing a KEYED effect clears a
+// sidechain key, which `removeEffect` refuses mid-take. `applyMixerPreset` follows the same rule, exactly when keyed:
+// a keyed chain mid-take is refused, a plain chain mid-take is not, and an allowed apply names every key it removed.
+// The reference for "the same rule" is `removeEffect` itself, called on a twin of the store under test.
+extension MixerPresetTests {
+    /// Kick and Bass (both audio); Bass carries a compressor (optionally keyed from Kick) and an EQ. Built idle,
+    /// because `setSidechain` is itself refused mid-take, then handed to a store whose transport is `recording`.
+    func tplfStrips(keyed: Bool, recording: Bool) throws
+        -> (store: ProjectStore, bass: UUID, kick: UUID, compressor: UUID) {
+        let build = ProjectStore()
+        let kick = build.addTrack(name: "Kick", kind: .audio)
+        let bass = build.addTrack(name: "Bass", kind: .audio)
+        let compressor = try build.addEffect(toTrack: bass.id, kind: .compressor)
+        _ = try build.addEffect(toTrack: bass.id, kind: .eq)
+        if keyed {
+            try build.setSidechain(trackID: bass.id, effectID: compressor.id, sourceTrackID: kick.id)
+        }
+        var transport = build.transport
+        transport.isRecording = recording
+        let store = ProjectStore(tracks: build.tracks, transport: transport)
+        return (store, bass.id, kick.id, compressor.id)
+    }
+
+    /// What `removeEffect` does with the same effect on a twin of `store`: nil when it is allowed.
+    func tplfRemoveEffectRefusal(_ store: ProjectStore, track: UUID, effect: UUID) -> ProjectError? {
+        let twin = ProjectStore(tracks: store.tracks, transport: store.transport)
+        return projectError { try twin.removeEffect(trackID: track, effectID: effect) }
+    }
+
+    @Test("m39-tpl-f9: mid-take, a preset over a chain with a sidechain-keyed effect is refused, as removeEffect is, and nothing changes")
+    func tplfKeyedChainRefusedMidTake() throws {
+        let (store, bass, kick, compressor) = try tplfStrips(keyed: true, recording: true)
+        #expect(store.transport.isRecording)
+        #expect(track(store, bass).effects.first?.sidechainSourceTrackID == kick, "the chain must really be keyed")
+        // The reference: removeEffect refuses this same effect, mid-take, with the routing guard's error.
+        guard case .transportBusy? = tplfRemoveEffectRefusal(store, track: bass, effect: compressor) else {
+            Issue.record("removeEffect itself does not refuse here; the rule under test is not in force"); return
+        }
+        let chain = track(store, bass).effects
+        let depth = store.journal.undoStack.count
+
+        let error = projectError { _ = try store.applyMixerPreset(trackID: bass, presetName: "bass-tight") }
+        guard case .transportBusy(let message)? = error else {
+            Issue.record("expected transportBusy, got \(String(describing: error))"); return
+        }
+        #expect(message == "cannot apply a preset that removes a sidechain-keyed effect while recording — stop first")
+        #expect(track(store, bass).effects == chain, "the chain changed")
+        #expect(track(store, bass).effects.first?.sidechainSourceTrackID == kick, "the key was cleared")
+        #expect(store.journal.undoStack.count == depth, "an undo entry was recorded")
+    }
+
+    @Test("m39-tpl-f9: mid-take, a preset over a chain with no sidechain key is allowed, as removeEffect is, and reports no key removed")
+    func tplfUnkeyedChainAllowedMidTake() throws {
+        let (store, bass, _, compressor) = try tplfStrips(keyed: false, recording: true)
+        #expect(store.transport.isRecording)
+        #expect(!track(store, bass).effects.contains { $0.sidechainSourceTrackID != nil })
+        // The reference: removeEffect allows removing this same (unkeyed) effect mid-take.
+        #expect(tplfRemoveEffectRefusal(store, track: bass, effect: compressor) == nil)
+
+        let result = try store.applyMixerPreset(trackID: bass, presetName: "clean-boost")
+        #expect(track(store, bass).effects.map(\.kind) == [.gain])
+        #expect(result.track == track(store, bass))
+        #expect(result.removedSidechainKeys.isEmpty)
+        #expect(store.undoLabel == "Apply Preset 'Clean Boost'")
+    }
+
+    @Test("m39-tpl-f9: idle, a preset over a keyed chain is allowed, the result names the key it removed, and one undo brings it back")
+    func tplfKeyedChainIdleNamesTheRemovedKey() throws {
+        let (store, bass, kick, compressor) = try tplfStrips(keyed: true, recording: false)
+        #expect(!store.transport.isRecording)
+        let before = track(store, bass).effects
+        #expect(before.first?.sidechainSourceTrackID == kick)
+
+        let result = try store.applyMixerPreset(trackID: bass, presetName: "clean-boost")
+        #expect(track(store, bass).effects.map(\.kind) == [.gain])
+        #expect(!track(store, bass).effects.contains { $0.sidechainSourceTrackID != nil }, "a key survived")
+        #expect(result.track == track(store, bass))
+        let removed = try #require(result.removedSidechainKeys.first)
+        #expect(result.removedSidechainKeys.count == 1)
+        #expect(removed.effectID == compressor)
+        #expect(removed.effectKind == .compressor)
+        #expect(removed.sourceTrackID == kick)
+        #expect(removed.sourceTrackName == "Kick")
+        #expect(removed.message
+                == "The Bass compressor listened to Kick, and 'Clean Boost' replaced it, so Bass will no longer duck when Kick plays.")
+
+        // One undo restores the keyed chain exactly.
+        try store.undo()
+        #expect(track(store, bass).effects == before)
     }
 }

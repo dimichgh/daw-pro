@@ -76,6 +76,9 @@ struct PadGridView: View {
     /// Why the toggle is dead, when it is — the LEVELS button's own reason.
     var spreadDirectionUnavailableReason: String?
     var onSetSpreadDirection: (SixteenLevels.Direction) -> Void
+    /// The hint beside the bank chips — the model's words (m39-w4-8): on a drum
+    /// machine K / L do nothing, so it says what the pads are instead.
+    var bankHint: String = "K / L switches bank"
 
     /// Pad edge, and the gap between pads. Generous: this is a surface fingers
     /// aim at, and the design language asks for generous spacing before it asks
@@ -161,6 +164,7 @@ struct PadGridView: View {
             }
             .overlay { padLabels(state, isLit: isLit) }
             .overlay(alignment: .bottom) { positionBar(state, tint: tint, isLit: isLit) }
+            .overlay(alignment: .topTrailing) { chokeGlyph(state, isLit: isLit) }
             // ⭐ THE GLOW RECIPE, and ONLY on a sounding pad. "Never glow static
             // chrome" (Rule 3) — an idle pad that glowed would make the whole
             // grid one flat wash and take the meaning out of the one that fires.
@@ -223,11 +227,24 @@ struct PadGridView: View {
             // pad is the same zone there, so sixteen squares would all read
             // "7" while each played a different pitch — true of the zone,
             // false of the sound. `PadState.levelsSemitones` decides.
-            Text(state.levelsSemitones.map(SixteenLevels.offsetLabel(semitones:))
-                 ?? state.sliceOrdinal.map { "\($0)" } ?? "—")
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .tracking(0.6)
-                .foregroundStyle(state.levelsSemitones == 0 ? ink.primary : ink.secondary)
+            // ⭐ m39-w4-8: A DRUM PAD SAYS WHICH DRUM, in words ("Kick",
+            // "Open Hat") — the step grid's row label for the same note. A
+            // word, not a number, so not SF Mono; it shrinks rather than
+            // wrapping, because "Closed Hat 2" is the widest a pad must hold.
+            if let drum = state.drumLabel, state.levelsSemitones == nil {
+                Text(drum)
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .padding(.horizontal, 4)
+                    .foregroundStyle(ink.primary)
+            } else {
+                Text(state.levelsSemitones.map(SixteenLevels.offsetLabel(semitones:))
+                     ?? state.sliceOrdinal.map { "\($0)" } ?? "—")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundStyle(state.levelsSemitones == 0 ? ink.primary : ink.secondary)
+            }
             Text(state.noteName)
                 .font(.system(size: 8, weight: .medium, design: .monospaced))
                 .tracking(0.5)
@@ -262,6 +279,25 @@ struct PadGridView: View {
             return (DAWTheme.textFaint, DAWTheme.textFaint, DAWTheme.textFaint)
         }
         return (DAWTheme.textPrimary, DAWTheme.textSecondary, DAWTheme.textDim)
+    }
+
+    /// ⭐ THE CHOKE LINK (m39-w4-8) — a thin link mark on every pad that cuts
+    /// another off (the hi-hats, by default). Drawn from `chokeLink`, which is
+    /// keyed on the choke GROUP, so it follows the setting the sound follows.
+    /// Static chrome: no glow and no accent — it marks a relationship, it does
+    /// not announce a state. On a lit pad it takes the pad's own ink.
+    @ViewBuilder
+    private func chokeGlyph(_ state: PadState, isLit: Bool) -> some View {
+        if state.chokeLink != nil {
+            Image(systemName: "link")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(isLit ? labelInk(state, isLit: true).secondary
+                                       : (canSound ? DAWTheme.textDim : DAWTheme.textFaint))
+                .padding(.top, 5)
+                .padding(.trailing, 6)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
     }
 
     /// Where this slice sits in the record, as a fraction of the loaded span.
@@ -332,7 +368,7 @@ struct PadGridView: View {
             .clipShape(RoundedRectangle(cornerRadius: 5))
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
 
-            Text("K / L switches bank")
+            Text(bankHint)
                 .font(.system(size: 10))
                 .foregroundStyle(DAWTheme.textFaint)
             Spacer(minLength: 0)
@@ -489,10 +525,21 @@ struct PadGridView: View {
     // MARK: - Words
 
     private func tooltip(_ state: PadState) -> String {
+        // m39-w4-8: a drum machine's pads 9–16 — no ninth drum, not past MIDI.
+        if state.isPastLastDrum { return PadGridModel.pastLastDrumHelp }
         guard state.pitch != nil else {
             return "This bank runs past the top of MIDI — there is no note here to play."
         }
         let key = state.keyLabel.map { "Key “\($0)”. " } ?? ""
+        // m39-w4-8: a DRUM pad names its drum first; a kit-sorted slice keeps
+        // its slice number after it. The choke sentence follows when linked.
+        if let drum = state.drumLabel, state.levelsSemitones == nil {
+            let slice = state.sliceOrdinal.map { " — slice \($0)" } ?? ""
+            let link = state.chokeLink.map { " " + $0.sentence } ?? ""
+            return key + drum + slice + ", note \(state.noteName)." + link
+                + (state.isAITouched ? " AI-generated material." : "")
+        }
+        let link = state.chokeLink.map { " " + $0.sentence } ?? ""
         // ⛔ A SPREAD PAD IS LOADED AND HAS NO SLICE NUMBER — its ordinal is
         // withheld on purpose (see `PadState.levelsSemitones`). Before
         // m39-levels-2 that fell through to the "Empty" branch below, so every
@@ -504,20 +551,27 @@ struct PadGridView: View {
         guard state.isLoaded, let ordinal = state.sliceOrdinal else {
             return key + "Empty — note \(state.noteName). Chop a clip onto the pads to fill it."
         }
-        return key + "Slice \(ordinal), note \(state.noteName)."
+        return key + "Slice \(ordinal), note \(state.noteName)." + link
             + (state.isAITouched ? " AI-generated material." : "")
     }
 
     private func accessibilityText(_ state: PadState) -> String {
+        if state.isPastLastDrum { return "Empty pad — the drum machine has eight drums" }
         guard state.pitch != nil else { return "Pad out of MIDI range" }
         if let semitones = state.levelsSemitones {
             return "Pad playing " + Self.spreadSentence(semitones).lowercased()
                 + ", note \(state.noteName)"
         }
+        let link = state.chokeLink.map {
+            ", linked with " + $0.partners.joined(separator: " and ")
+        } ?? ""
+        if let drum = state.drumLabel {
+            return "Pad playing \(drum), note \(state.noteName)" + link
+        }
         guard state.isLoaded, let ordinal = state.sliceOrdinal else {
             return "Empty pad, note \(state.noteName)"
         }
-        return "Pad playing slice \(ordinal), note \(state.noteName)"
+        return "Pad playing slice \(ordinal), note \(state.noteName)" + link
     }
 
     /// What one spread pad plays, in words — "The slice 3 semitones lower".

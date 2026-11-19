@@ -33,6 +33,8 @@ struct NaturalTuningFieldCarryTests {
         // W7-NTU (2026-10-04): what a preset would REPLACE, stamped beside it.
         "autoCorrectReplaceableStamp",
         "formantCorrection", "consonantProtection", "transitionSlopeCentsPerSecond",
+        // vf-18 (W9-SLFX, 2026-10-12): which notes a followed slide reads.
+        "slideFollowRule",
     ]
 
     /// Every stored property except `segments`, as text. `String(describing:)`
@@ -60,6 +62,8 @@ struct NaturalTuningFieldCarryTests {
         out.formantCorrection = 0.25
         out.keepsConsonantsUntuned = true
         out.transitionSlopeCentsPerSecond = 7000
+        // vf-18: the only non-legacy value (no seed writes it either).
+        out.slideFollowRule = .holdAtOpenSide
         return out
     }
 
@@ -154,7 +158,7 @@ struct NaturalTuningFieldCarryTests {
         })
         let text = String(decoding: try JSONEncoder().encode(legacy), as: UTF8.self)
         for key in ["formantCorrection", "keepsConsonantsUntuned", "transitionSlope",
-                    "transitionOut", "glideFollow"] {
+                    "transitionOut", "glideFollow", "slideFollowRule"] {
             #expect(!text.contains("\"\(key)\""), "a legacy set wrote `\(key)`")
         }
         // Positive control: the same probe FINDS keys that are written.
@@ -163,6 +167,7 @@ struct NaturalTuningFieldCarryTests {
         #expect(decoded.formantCorrection == nil)
         #expect(decoded.keepsConsonantsUntuned == false)
         #expect(decoded.transitionSlopeCentsPerSecond == 0)
+        #expect(decoded.slideFollowRule == .sungAtOpenSide)
         #expect(decoded.segments.allSatisfy { $0.transitionOutMs == 0 && $0.glideFollow == 0 })
         #expect(decoded.predatesNaturalTuning == false, "an identity set is not a tuned vocal")
     }

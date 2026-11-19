@@ -212,6 +212,15 @@ final class FlangerEffect: EffectRendering, @unchecked Sendable {
         line.reset()
         phase = 0
         needsPrime = true
+        // m39-d CR-2: a reset drops the ramp in flight (`needsPrime` re-seats
+        // the values); the cell geometry is the renderer's and stays.
+        rampFramesLeft = 0
+        rampIncrementDelta = 0
+        rampDelayDelta = 0
+        rampDepthDelta = 0
+        rampFeedbackDelta = 0
+        rampMixDelta = 0
+        rampOffsetDelta = 0
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -252,6 +261,7 @@ final class FlangerEffect: EffectRendering, @unchecked Sendable {
         targetMix = (p.mix.isFinite ? p.mix : 0.5).clamped(to: FlangerParams.mixRange)
         // THROUGH THE LAW, never a second copy of the degrees→radians math.
         targetOffset = FlangerParams.stereoPhaseOffsetRadians(stereoPhaseDeg: p.stereoPhaseDeg)
+        rampPending = true  // m39-d CR-2: the next `process` starts a ramp
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
@@ -272,6 +282,46 @@ final class FlangerEffect: EffectRendering, @unchecked Sendable {
         default: overlay.effective.stereoPhaseDeg = value
         }
         deriveRenderParams(overlay.effective)
+    }
+
+    // MARK: - m39-d CR-2: the control cell (docs/design/2026-10-07-effect-control-rate.md §5.4)
+    //
+    // Render-thread only. A ramp starts in the `process` call after a derive
+    // (`rampPending`). On the control grid (`cellFramesLeft` covers the whole
+    // call) it spans the REST OF THE CELL and carries across calls; off it,
+    // it spans the call, exactly as before the grid. A ramp in flight that
+    // would end INSIDE a call is re-spanned over that call, so no ramp ever
+    // ends mid-call and the per-sample loop is untouched. In a 512 bounce the
+    // cell is the call: the same delta expression, run the same number of
+    // times (G1 byte gate).
+    /// Frames from the next `process` call to the next control-cell line
+    /// (0 = off the grid). Set by `beginControlCell`, counted down here.
+    private var cellFramesLeft = 0
+    /// Frames left in the ramp in flight (0 = values sit at their targets).
+    private var rampFramesLeft = 0
+    /// A derive landed since the ramp in flight began.
+    private var rampPending = false
+    /// The ramp in flight's per-frame steps (carried across calls; 0 at rest).
+    private var rampIncrementDelta = 0.0
+    private var rampDelayDelta = 0.0
+    private var rampDepthDelta = 0.0
+    private var rampFeedbackDelta = 0.0
+    private var rampMixDelta = 0.0
+    private var rampOffsetDelta = 0.0
+
+    /// m39-d CR-1 (design §5.3): the automated values stored at this control
+    /// cell's entry still stand. Adopt FIRST, so a knob publish waiting in the
+    /// slot is seen now, as a store would see it (then `overlay.hold()`
+    /// answers false and the renderer re-stores). Render thread; no allocation.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): the ramp toward a new value spans the
+    /// rest of the cell (`frames`), carried across calls, instead of one call.
+    func beginControlCell(frames: Int) {
+        cellFramesLeft = max(0, frames)
     }
 
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
@@ -305,13 +355,26 @@ final class FlangerEffect: EffectRendering, @unchecked Sendable {
         guard channelCount > 0, minFrames > 0, let left = channelData[0] else { return }
         let right = channelCount > 1 ? channelData[1] : nil
 
-        let span = Double(minFrames)
-        let incrementDelta = (targetIncrement - previousIncrement) / span
-        let delayDelta = (targetDelayMs - previousDelayMs) / span
-        let depthDelta = (targetDepthMs - previousDepthMs) / span
-        let feedbackDelta = (targetFeedback - previousFeedback) / span
-        let mixDelta = (targetMix - previousMix) / span
-        let offsetDelta = (targetOffset - previousOffset) / span
+        // m39-d CR-2: start (or re-span) the ramp — see the MARK above. The
+        // delta expressions are the pre-grid ones, verbatim.
+        if rampPending || (rampFramesLeft > 0 && rampFramesLeft < minFrames) {
+            rampPending = false
+            let rampFrames = cellFramesLeft >= minFrames ? cellFramesLeft : minFrames
+            let span = Double(rampFrames)
+            rampIncrementDelta = (targetIncrement - previousIncrement) / span
+            rampDelayDelta = (targetDelayMs - previousDelayMs) / span
+            rampDepthDelta = (targetDepthMs - previousDepthMs) / span
+            rampFeedbackDelta = (targetFeedback - previousFeedback) / span
+            rampMixDelta = (targetMix - previousMix) / span
+            rampOffsetDelta = (targetOffset - previousOffset) / span
+            rampFramesLeft = rampFrames
+        }
+        let incrementDelta = rampIncrementDelta
+        let delayDelta = rampDelayDelta
+        let depthDelta = rampDepthDelta
+        let feedbackDelta = rampFeedbackDelta
+        let mixDelta = rampMixDelta
+        let offsetDelta = rampOffsetDelta
         let msToSamples = 0.001 * sampleRate
         let denormalFloor = Self.denormalFloor
 
@@ -393,6 +456,27 @@ final class FlangerEffect: EffectRendering, @unchecked Sendable {
         }
 
         phase = lfo
+
+        // m39-d CR-2: a ramp still in flight carries what it reached; at the
+        // ramp's end the values are SNAPPED to their targets, exactly as every
+        // call end did before the grid (and still does off it).
+        rampFramesLeft = rampFramesLeft > minFrames ? rampFramesLeft - minFrames : 0
+        cellFramesLeft = cellFramesLeft > minFrames ? cellFramesLeft - minFrames : 0
+        if rampFramesLeft > 0 {
+            previousIncrement = increment
+            previousDelayMs = delayMs
+            previousDepthMs = depthMs
+            previousFeedback = feedback
+            previousMix = mix
+            previousOffset = offset
+            return
+        }
+        rampIncrementDelta = 0
+        rampDelayDelta = 0
+        rampDepthDelta = 0
+        rampFeedbackDelta = 0
+        rampMixDelta = 0
+        rampOffsetDelta = 0
 
         previousIncrement = targetIncrement
         previousDelayMs = targetDelayMs

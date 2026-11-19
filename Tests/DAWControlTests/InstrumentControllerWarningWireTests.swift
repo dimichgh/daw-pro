@@ -251,4 +251,27 @@ struct InstrumentControllerWarningWireTests {
         let support = try #require(track["instrument"]?["honoredControllers"])
         #expect(support["cc"]?.arrayValue?.compactMap(\.doubleValue) == [11, 64])
     }
+
+    // W9-W45 (m39-panlaw-new-wire) — the pan rule on the snapshot reply. Lives
+    // here only because this suite already builds a router over a store.
+    @Test("W45: project.snapshot names the pan rule of a new song and stays silent for an old one")
+    func w45SnapshotReportsThePanLaw() async throws {
+        // An old song / a headless store: the original rule, key ABSENT.
+        let (oldRouter, oldStore) = makeRouter()
+        #expect(oldStore.panLaw == .balance)
+        let old = await oldRouter.handle(ControlRequest(id: "o", command: "project.snapshot", params: [:]))
+        #expect(old.ok)
+        #expect(old.result?["masterVolume"] != nil, "control: the reply is the real snapshot")
+        #expect(old.result?["panLaw"] == nil, "the original rule adds no key; absent reads as balance")
+        // A new song: the equal-loudness rule, named.
+        let newStore = ProjectStore(panLaw: .newSong)
+        newStore.media = FakeMedia()
+        let fresh = await CommandRouter(store: newStore).handle(
+            ControlRequest(id: "n", command: "project.snapshot", params: [:]))
+        #expect(fresh.result?["panLaw"]?.stringValue == "equalPower")
+        // Decoding a reply that has no key reads as the old rule.
+        let decoded = try JSONDecoder().decode(
+            ProjectSnapshot.self, from: JSONEncoder().encode(oldStore.snapshot()))
+        #expect((decoded.panLaw ?? PanLaw.savedSongDefault) == .balance)
+    }
 }

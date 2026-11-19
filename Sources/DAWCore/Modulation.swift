@@ -115,11 +115,12 @@ public struct LFOSourceParams: Codable, Sendable, Equatable {
     /// Free-running rate. Ignored when `syncDivision` is set — which v1 always
     /// refuses (§7.2.1), so today this is the only rate there is.
     public var rateHz: Double
-    /// Tempo-synced rate. ⛔ v1 REFUSES every non-nil value with
-    /// `modulationTempoSyncUnavailable`: resolving a note division to
-    /// `samplesPerCycle` is m39-c's generalised resolver, and hand-rolling a
-    /// second one here is the exact duplication m39-c exists to remove. The
-    /// FIELD ships so the persistence shape never changes when m39-c lands.
+    /// Tempo-synced rate. ⛔ STILL REFUSED (`modulationTempoSyncUnavailable`):
+    /// a synced LFO is not built. The step sequencer's `stepDivision` is the
+    /// only modulation sync that ships (m39-w4-4); `TempoSync`'s sibling table
+    /// (`modulationSourceRegistrations`) has no LFO entry, deliberately. The
+    /// FIELD ships so the persistence shape never changes when a synced LFO
+    /// lands.
     public var syncDivision: String?
     public var phaseDeg: Double
     public var pulseWidth: Double
@@ -176,15 +177,29 @@ public struct StepSequencerSourceParams: Codable, Sendable, Equatable {
     /// 0 is the knob. The polarity is a property of the DEPTH'S SIGN, not of
     /// the step array — which is why it has to be stated rather than inferred.
     public var steps: [Double]
-    /// ⛔ v1 REFUSES a non-nil value (`modulationTempoSyncUnavailable`) for the
-    /// same reason as `LFOSourceParams.syncDivision`. Until m39-c lands the
-    /// step rate is the free-running `rateHz` below, in steps per second.
+    /// m39-w4-4 — the note division one step lasts (`"1/16"`, `"1/8t"`, … one
+    /// of `NoteDivision`'s raw values), or nil to run free on `rateHz`. When
+    /// it is set the steps follow the song's beat: step 1 sits on song beat 0
+    /// and the pattern starts again at every time-signature change
+    /// (`MeterMap.patternOriginBeat`), read off the musical clock the main
+    /// actor compiles (`ModulationSnapshotClock.swift`). `mod.addSource` /
+    /// `mod.setSource` accept a valid raw value, clear it on null and refuse
+    /// anything else, listing the values that work.
     public var stepDivision: String?
-    /// Free-running step rate in STEPS PER SECOND — the un-synced stand-in for
-    /// `stepDivision` (§7.2.1's "ship `rateHz` only"). 4 steps/s is a 1/16 at
-    /// 60 BPM; the tempo-relative spelling arrives with m39-c.
+    /// Free-running step rate in STEPS PER SECOND. 4 steps/s is a 1/16 at
+    /// 60 BPM. INERT while `stepDivision` is set: it stays stored, and it takes
+    /// over again when the division is cleared. The setter and `mod.describe`
+    /// both say so with `TempoSync.inertRateNote(for:)`, one sentence.
     public var rateHz: Double
     public var edgeMs: Double
+
+    /// m39-w4-4 — the note division this source is LOCKED to, or nil when it
+    /// runs free on `rateHz`. Only one of `NoteDivision`'s raw values syncs; any
+    /// other string (only a hand-edited file could carry one — the store
+    /// refuses it) runs free, exactly as it always has.
+    public var syncedDivision: NoteDivision? {
+        stepDivision.flatMap(NoteDivision.init(rawValue:))
+    }
 
     public init(steps: [Double] = [1, 0, 1, 0], stepDivision: String? = nil,
                 rateHz: Double = 4.0, edgeMs: Double = 2.0) {
@@ -194,6 +209,65 @@ public struct StepSequencerSourceParams: Codable, Sendable, Equatable {
         self.stepDivision = stepDivision
         self.rateHz = rateHz.clamped(to: Self.rateRange)
         self.edgeMs = edgeMs.clamped(to: Self.edgeRange)
+    }
+}
+
+/// m39-w4-4 — what `mod.describe` says about a TEMPO-SYNCED step source
+/// (design `docs/design/2026-10-07-loop-drum-depth.md` §4.2, §4.4): its
+/// division, how many steps fill a bar at the meter in force, where the pattern
+/// starts again, and the inert-`rateHz` sentence the setter's reply carries.
+public struct StepSyncSummary: Sendable, Equatable {
+    public var division: NoteDivision
+    /// Steps that fill one bar at the meter in force: bar beats ÷ division
+    /// beats. Not always whole (a 1/8d step in 4/4 gives 5.33).
+    public var stepsPerBar: Double
+    /// The meter in force, as written (`"3/4"`).
+    public var meter: String
+    /// Where step 1 sits, where the pattern starts again, whether it lines up
+    /// with the bar, and the loop-wrap caveat — in words.
+    public var restart: String
+    /// `TempoSync.inertRateNote(for:)`, the setter's sentence.
+    public var rateNote: String
+}
+
+public extension StepSequencerSourceParams {
+    /// The describe summary at `beat` under `meterMap`, or nil when this source
+    /// runs free. Control plane only; the pattern origin it describes is
+    /// `MeterMap.patternOriginBeat`, the home the render's clock reads.
+    func syncSummary(meterMap: MeterMap, atBeat beat: Double) -> StepSyncSummary? {
+        guard let division = syncedDivision,
+              let rateNote = TempoSync.inertRateNote(for: .stepSequencer(self)) else { return nil }
+        let probe = beat.isFinite ? beat : 0
+        let change = meterMap.changes.last { $0.startBeat <= probe } ?? meterMap.changes[0]
+        let barBeats = Double(change.beatsPerBar)
+        let stepsPerBar = barBeats / division.beats
+        let meter = "\(change.beatsPerBar)/\(change.beatUnit)"
+        let count = steps.count
+        let stepWord = count == 1 ? "step" : "steps"
+        func plain(_ value: Double) -> String {
+            value == value.rounded() ? String(Int(value)) : String(format: "%.2f", value)
+        }
+        let wholeBar = abs(stepsPerBar - stepsPerBar.rounded()) < 1e-9 ? Int(stepsPerBar.rounded()) : nil
+        let fit: String
+        if let wholeBar, wholeBar > 0, wholeBar % count == 0 {
+            fit = "In \(meter) a bar holds \(wholeBar) steps of \(division.rawValue), so this "
+                + "\(count)-\(stepWord) pattern plays \(wholeBar / count) time"
+                + "\(wholeBar / count == 1 ? "" : "s") per bar and always starts on the bar line."
+        } else if let wholeBar, wholeBar > 0, count % wholeBar == 0 {
+            fit = "In \(meter) a bar holds \(wholeBar) steps of \(division.rawValue), so this "
+                + "\(count)-step pattern spans \(count / wholeBar) bars and starts on a bar line."
+        } else {
+            fit = "In \(meter) a bar holds \(plain(stepsPerBar)) steps of \(division.rawValue), so "
+                + "this \(count)-\(stepWord) pattern does not line up with the bar: it drifts across "
+                + "the bar lines until the next time-signature change starts it again."
+        }
+        let restart = "Step 1 sits on the song's first beat, and the pattern starts again from step 1 "
+            + "at every time-signature change. " + fit + " Inside a loop the steps follow the song's "
+            + "position, so a loop that is not a whole number of patterns long jumps from the "
+            + "step at the loop end straight to the step at the loop start, and 'edgeMs' does not "
+            + "soften that jump."
+        return StepSyncSummary(division: division, stepsPerBar: stepsPerBar, meter: meter,
+                               restart: restart, rateNote: rateNote)
     }
 }
 
@@ -683,6 +757,17 @@ public enum ModulationMath {
         return current
     }
 
+    /// The half-width `h` of a step edge, as a fraction of one step. THE ONE
+    /// spelling of this clamp: `stepSequencer` below reads it, and so does the
+    /// render-side musical clock (m39-w4-4), which evaluates a SYNCED source `h`
+    /// later so its edge trails the boundary and the boundary itself returns
+    /// exactly the new step. A second spelling could drift and silently move
+    /// the trailing edge off the boundary.
+    @inline(__always)
+    public static func stepEdgeHalfWidth(edgeFraction: Double) -> Double {
+        min(max(edgeFraction, 0) * 0.5, 0.49)
+    }
+
     /// The step sequencer, bipolar `[-1, 1]`, RENDER-SIDE entry point.
     /// `stepPosition` is `p / samplesPerStep` — a Double so the fractional part
     /// inside the step is free.
@@ -695,7 +780,7 @@ public enum ModulationMath {
         let frac = stepPosition - floorPosition
         let index = wrapIndex(Int64(floorPosition), count: stepCount)
         let current = Double(steps[index])
-        let h = min(max(edgeFraction, 0) * 0.5, 0.49)
+        let h = stepEdgeHalfWidth(edgeFraction: edgeFraction)
         if h <= 0 { return current }
         if frac < h {
             let previous = Double(steps[wrapIndex(Int64(floorPosition) &- 1, count: stepCount)])
@@ -760,8 +845,12 @@ public enum ModulationMath {
     /// `mod.describe`'s `effective` block; the render side calls the same
     /// pieces through `ModulationEvaluator`.
     ///
-    /// Returns `nil` for `envelopeFollower` — the one source that is not a
-    /// function of position, declared rather than faked.
+    /// Returns `nil`, declared rather than faked, for the two sources that are
+    /// not a function of this input: `envelopeFollower` (not a function of
+    /// position at all) and a TEMPO-SYNCED step sequencer (m39-w4-4c: a
+    /// function of the musical position, which ignores `rateHz`; read it with
+    /// `syncedStepValue(_:atBeat:tempoMap:meterMap:sampleRate:)`). A caller that
+    /// forgets the synced case shows a null, not a wrong number.
     public static func value(of params: ModulationSourceParams, atSample p: Int64,
                              sampleRate: Double) -> Double? {
         switch params {
@@ -784,6 +873,7 @@ public enum ModulationMath {
                         cycleIndex: Int64(floor(raw)))
             return spec.bipolar ? v : toUnipolar(v)
         case .stepSequencer(let step):
+            guard step.syncedDivision == nil else { return nil }
             guard sampleRate > 0, step.rateHz > 0, !step.steps.isEmpty else { return 0 }
             let samplesPerStep = sampleRate / step.rateHz
             let stepPosition = Double(p) / samplesPerStep
@@ -791,6 +881,43 @@ public enum ModulationMath {
             return stepSequencer(stepPosition: stepPosition, steps: step.steps,
                                  edgeFraction: edgeFraction)
         }
+    }
+
+    /// m39-w4-4c: a TEMPO-SYNCED step sequencer at song beat `beat`, which is
+    /// what the render's musical clock makes it output there. `mod.describe`
+    /// calls this. Returns nil when the source is not synced (`syncedDivision`
+    /// is nil, so it runs free on `rateHz` and `value(of:atSample:sampleRate:)`
+    /// answers for it).
+    ///
+    /// The render side's arithmetic, in the same order
+    /// (`ModulationSnapshotBuilder.resolve` plus
+    /// `ModulationEvaluator.syncedStepValue`). The step position is
+    /// `(beat − pattern origin) / division.beats`. The edge fraction is the edge
+    /// in samples × beats per sample ÷ division, capped at 0.98. The position is
+    /// read `h` late, so the edge trails the boundary. The pattern origin comes
+    /// from `MeterMap.patternOriginBeat`, the home `compileClock` reads too.
+    /// `ModDescribeClockAgreementTests` pins this bit for bit against the
+    /// evaluator at the clock's own beat.
+    ///
+    /// `sampleRate` cancels in the maths (edge samples ÷ samples per beat); it is
+    /// a parameter so a test can match the render's rate bit for bit. Anything
+    /// the render would hold neutral (a beat, rate or tempo it cannot use)
+    /// returns 0, the neutral value.
+    public static func syncedStepValue(_ step: StepSequencerSourceParams, atBeat beat: Double,
+                                       tempoMap: TempoMap, meterMap: MeterMap,
+                                       sampleRate: Double) -> Double? {
+        guard let division = step.syncedDivision else { return nil }
+        guard beat.isFinite, sampleRate.isFinite, sampleRate > 0, !step.steps.isEmpty else { return 0 }
+        let framesPerBeat = tempoMap.framesPerBeat(atBeat: beat, sampleRate: sampleRate)
+        guard framesPerBeat.isFinite, framesPerBeat > 0 else { return 0 }
+        let divisionBeats = division.beats
+        let beatsPerSample = 1 / framesPerBeat
+        let edgeSamples = step.edgeMs * 0.001 * sampleRate
+        let stepPosition = (beat - meterMap.patternOriginBeat(atBeat: beat)) / divisionBeats
+        let edgeFraction = min(edgeSamples * beatsPerSample / divisionBeats, 0.98)
+        let h = stepEdgeHalfWidth(edgeFraction: edgeFraction)
+        return stepSequencer(stepPosition: stepPosition + h, steps: step.steps,
+                             edgeFraction: edgeFraction)
     }
 
     /// `edgeMs` expressed as a fraction of one LFO cycle.
@@ -867,9 +994,9 @@ public enum ModulationError: Error, LocalizedError, Equatable {
         case .modulationStepsInvalid(let detail):
             return "step sequencer steps are invalid: \(detail)"
         case .modulationTempoSyncUnavailable(let field):
-            return "'\(field)' needs tempo-synced rates, which are not built yet "
-                + "(m39-c is the prerequisite: it generalises the one tempo-sync "
-                + "resolver so a second one is never hand-rolled). Use 'rateHz' "
+            return "'\(field)' would lock an LFO to the song's beat, which is not built "
+                + "yet. Only a step sequencer's 'stepDivision' follows the beat today "
+                + "(it shares m39-c's one tempo-sync home, `TempoSync`). Use 'rateHz' "
                 + "for a free-running rate."
         }
     }
@@ -919,12 +1046,15 @@ public extension ModulationSourceParams {
     /// m27-c precedent. Rejects only what cannot be honoured at all: an unknown
     /// key, a wrong-typed value, invalid steps, and tempo-synced rates (§7.2.1).
     ///
-    /// ⛔ **`syncDivision` / `stepDivision` REFUSE in v1.** Resolving a note
-    /// division to `samplesPerCycle` is m39-c's generalised resolver, and
-    /// copying `DelayTempoSync`'s `guard effect.kind == .delay` shape into a
-    /// second place is the exact duplication m39-c exists to remove. The fields
-    /// persist so the shape never changes when m39-c lands; only the VALUE is
-    /// refused, and the refusal names m39-c as the prerequisite.
+    /// m39-w4-4 — **`stepDivision` is ACCEPTED; the LFO's `syncDivision` still
+    /// REFUSES.** The kinds that may sync are `TempoSync`'s sibling table
+    /// (`modulationSourceRegistrations`), which registers the step sequencer
+    /// only. A division is a `NoteDivision` raw value; null clears it; anything
+    /// else is refused, listing the values that work. A call that leaves the
+    /// source synced and carries the division or `rateHz` gets the
+    /// `modulationParamIgnored` warning built by `TempoSync.inertRateNote(for:)`,
+    /// the sentence `mod.describe` repeats. `syncDivision` refuses with
+    /// `modulationTempoSyncUnavailable` (a synced LFO is not built).
     static func apply(_ values: [String: ModulationParamValue],
                       to existing: ModulationSourceParams)
         throws -> (params: ModulationSourceParams, warnings: [String]) {
@@ -965,11 +1095,24 @@ public extension ModulationSourceParams {
             }
             return raw
         }
-        /// The tempo-sync gate, in one place so both fields refuse identically.
+        /// The tempo-sync gate for a kind the sibling table does NOT register
+        /// (the LFO's `syncDivision`): null is "no sync", anything else refuses.
         func refuseSync(_ key: String) throws {
             guard let value = values[key] else { return }
             if case .null = value { return }
             throw ModulationError.modulationTempoSyncUnavailable(field: key)
+        }
+        /// m39-w4-4 — a division param on a kind the sibling table registers.
+        /// Absent keeps `current`; null clears it (the source runs free on its
+        /// rate again); a `NoteDivision` raw value locks it; anything else (an
+        /// unknown string like "1/17", a number, a bool) is refused with every
+        /// value that works.
+        func division(_ key: String, _ current: String?) throws -> String? {
+            guard let value = values[key] else { return current }
+            if case .null = value { return nil }
+            if case .string(let raw) = value, NoteDivision(rawValue: raw) != nil { return raw }
+            throw ModulationError.unknownModulationParam(
+                key: key, kind: existing.kind.rawValue, valid: TempoSync.divisionValues)
         }
 
         switch existing {
@@ -1019,7 +1162,8 @@ public extension ModulationSourceParams {
         case .stepSequencer(let current):
             try reject(values, valid: ["steps", "stepDivision", "rateHz", "edgeMs"],
                        kind: "stepSequencer")
-            try refuseSync("stepDivision")
+            let sync = TempoSync.stepSequencerRegistration
+            let stepDivision = try division(sync.divisionParam, current.stepDivision)
             var steps = current.steps
             if let value = values["steps"] {
                 guard case .numbers(let raw) = value else {
@@ -1047,11 +1191,20 @@ public extension ModulationSourceParams {
                 steps = clamped
             }
             let updated = StepSequencerSourceParams(
-                steps: steps, stepDivision: nil,
-                rateHz: try number("rateHz", current.rateHz,
+                steps: steps, stepDivision: stepDivision,
+                rateHz: try number(sync.freeRateParam, current.rateHz,
                                    StepSequencerSourceParams.rateRange),
                 edgeMs: try number("edgeMs", current.edgeMs,
                                    StepSequencerSourceParams.edgeRange))
+            // §4.4: a synced source ignores its rate, and a call that sets the
+            // division or the rate is told so (the W7-SMP lesson: an inert
+            // value must never reply as a plain success). An edit that touches
+            // neither (`steps` alone) is not re-told.
+            let carriesDivision = values[sync.divisionParam].map { $0 != .null } ?? false
+            if carriesDivision || values[sync.freeRateParam] != nil,
+               let note = TempoSync.inertRateNote(for: .stepSequencer(updated)) {
+                warnings.append("\(ModulationWarning.paramIgnored): \(note)")
+            }
             return (.stepSequencer(updated), warnings)
 
         case .envelopeFollower(let current):

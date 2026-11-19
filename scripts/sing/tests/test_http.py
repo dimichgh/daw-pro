@@ -45,7 +45,8 @@ class FakeBackend(object):
                 raise self.exc
             wavio.write_float32_wav(req.output_real, [0.0] * 8, req.out_sr)
             return {"outputPath": req.output_path, "frames": 8, "voice": req.voice.kind,
-                    "testPromptF0": req.test_prompt_f0}
+                    "testPromptF0": req.test_prompt_f0, "facadeVersion": req.facade_version, "control": req.control,
+                    "langs": req.word_langs}
         finally:
             with self.lock:
                 self.active -= 1
@@ -180,6 +181,19 @@ class RefusalTable(Base):
         self.backend.st, self.backend.err = "error", "FFmpeg's libraries could not be loaded"
         got = self.expect(self.req(), "inferenceFailed")
         self.assertIn("FFmpeg", got["message"])
+        self.backend.st, self.backend.err = "ready", None
+        # facadeVersion 2's codes (design 2026-10-06 §7.4): two come from the schema over the wire ...
+        r = self.req(facadeVersion=2)
+        r["phrase"]["words"][0]["lang"] = "es"
+        self.assertIn("'es'", self.expect(r, "languageNotSupported")["message"])
+        r = self.req(facadeVersion=2)
+        r["phrase"]["notes"][0]["vibrato"] = {"rateHz": 5.5, "depthCents": 45, "onsetS": 0.25}
+        self.expect(r, "vibratoNeedsMelody")
+        # ... and two belong to melody mode (item x10), unreachable while control can only be "score": planted
+        for code in ("promptF0Missing", "f0TooShort"):
+            self.backend.exc = Refusal(code, "planted %s" % code)
+            self.assertEqual(self.expect(self.req(facadeVersion=2), code)["message"], "planted %s" % code)
+        self.backend.exc = None
         self.assertEqual(self.seen, set(HTTP_STATUS))                        # the whole table, no more, no less
 
     def test_the_schema_answers_before_the_engine_state(self):
@@ -188,6 +202,22 @@ class RefusalTable(Base):
         r["extra"] = 1
         self.assertEqual(self.post(r)[0], 400)
         self.assertEqual(self.post(self.req())[0], 503)
+
+
+class Versions(Base):
+    def test_v1_and_v2_requests_reach_the_backend_as_they_were_sent(self):
+        st, body = self.post(self.req())
+        self.assertEqual((st, body["facadeVersion"], body["control"], body["langs"]), (200, 1, "score", ["en"] * 3))
+        r = self.req(facadeVersion=2, control="score")
+        r["phrase"]["words"][2].update(text="你", lang="zh")
+        st, body = self.post(r)
+        self.assertEqual((st, body["facadeVersion"], body["control"], body["langs"]), (200, 2, "score",
+                                                                                         ["en", "en", "zh"]))
+        r = self.req(control="score")                                     # the same key under v1: refused, unrendered
+        st, body = self.post(r)
+        self.assertEqual((st, body["error"]), (400, "badRequest"))
+        self.assertIn("'control' needs facadeVersion 2.", body["message"])
+        self.assertEqual(self.backend.calls, 2)
 
 
 class Concurrency(Base):

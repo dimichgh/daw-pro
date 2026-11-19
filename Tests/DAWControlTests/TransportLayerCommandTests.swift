@@ -402,4 +402,35 @@ struct TransportLayerCommandTests {
         // land every layer at the top of the song.
         #expect(engine.lastLayerTransport?.positionBeats == 12.5)
     }
+
+    // MARK: - p2-sing-f2: the voice recorder's refusal reaches the wire
+
+    /// The sentence the app's recorder registers (`SingCopy.recorderIsOpen`, in DAWAppKit, which this module cannot
+    /// see). Its identity with the recorder's copy is pinned in `GenerationPresenceModelTests`.
+    private static let recorderOpen = "The voice recorder is open. Close it before recording in the song."
+
+    @Test("p2-sing-f2: transport.record and transport.recordLayer are refused in the recorder's words, and nothing starts")
+    func recordVerbsRefusedWhileTheVoiceRecorderIsOpen() async throws {
+        let (router, store, engine) = try fixture()
+        store.voiceRecorderOpenReason = Self.recorderOpen
+        var r = await send(router, "transport.record")
+        #expect(!r.ok)
+        #expect(r.error == Self.recorderOpen, "\(r.error ?? "nil")")
+        #expect(engine.ordinaryStarts == 0)
+        #expect(!store.transport.isRecording && !store.transport.isPlaying)
+        // A layer needs the song playing: refused for the recorder all the same, and FIRST.
+        store.play()
+        r = await send(router, "transport.recordLayer")
+        #expect(!r.ok)
+        #expect(r.error == Self.recorderOpen, "\(r.error ?? "nil")")
+        #expect(engine.layerStarts == 0)
+        #expect(!store.transport.isRecording)
+        store.stop()
+        // The card closes: the same verb records.
+        store.voiceRecorderOpenReason = nil
+        r = await send(router, "transport.record")
+        #expect(r.ok, "\(r.error ?? "nil")")
+        #expect(engine.ordinaryStarts == 1)
+        #expect(store.transport.isRecording)
+    }
 }

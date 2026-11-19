@@ -293,9 +293,20 @@ struct EffectEditorModelTests {
         // reddens this test instead of slipping through a hand-written skip
         // list, and the two lists cannot drift apart silently.
         var divergent: Set<String> = []
+        // m27-r: the ONE knob that DELIBERATELY left the oracle. The gain
+        // utility's `gainLinear` still DECLARES `.linear` (so `divergent`
+        // cannot see it), but its knob now takes the editor-only power taper
+        // that puts unity at half travel. Derived from the editor's own
+        // predicate and then PINNED, the same way as `divergent`, so a taper
+        // that leaks onto a second knob reddens here.
+        var editorTapered: Set<String> = []
         var checked = 0
         for kind in EffectDescriptor.Kind.allCases {
             for spec in EffectParamSpec.specs(for: kind) {
+                if EffectEditorModel.usesGainTravelTaper(spec) {
+                    editorTapered.insert("\(kind.rawValue).\(spec.name)")
+                    continue
+                }
                 let oracleIsLogarithmic = spec.unit == "Hz" && spec.range.lowerBound > 0
                 if (spec.curve == .logarithmic) != oracleIsLogarithmic {
                     divergent.insert("\(kind.rawValue).\(spec.name)")
@@ -360,6 +371,8 @@ struct EffectEditorModelTests {
         let mid = EffectEditorModel.value(forFraction: 0.5, spec: depth)
         #expect(abs(mid - (0.1 * 10).squareRoot()) < 1e-12,
                 "half travel on flanger.depthMs is \(mid), not the geometric mean")
+        #expect(editorTapered == ["gain.gainLinear"],
+                "knobs that left the oracle on purpose: \(editorTapered.sorted())")
         // Non-vacuity: a loop over an empty roster would also pass silently.
         // 64 specs x 11 travel points, measured 2026-09-19; append-only.
         #expect(checked >= 704, "only \(checked) travel points compared")
@@ -1012,5 +1025,146 @@ struct EffectEditorModelTests {
         model.prepare(trackID: track.id, effectID: eq.id, targetLabel: "on Test")
         #expect(!model.delaySyncActive)
         #expect(model.syncedDelayTimeMs == nil)
+    }
+
+    // MARK: - m27-r: the gain utility's knob travels in decibels
+
+    /// The gain insert's one row, read from the shipping table (never rebuilt
+    /// by hand, so a range change reaches these tests).
+    private static var gainLinearSpec: EffectParamSpec {
+        EffectParamSpec.specs(for: .gain).first { $0.name == "gainLinear" }!
+    }
+
+    private static func db(_ v: Double) -> Double { 20 * log10(v) }
+
+    @Test("m27-r: the gain knob's travel round-trips position to value and back")
+    func gainKnobTravelRoundTrips() {
+        let spec = Self.gainLinearSpec
+        #expect(EffectEditorModel.usesGainTravelTaper(spec),
+                "the shipping gain range must pass the taper's guard, not fall back silently")
+        for step in 0...100 {
+            let p = Double(step) / 100
+            let v = EffectEditorModel.value(forFraction: p, spec: spec)
+            let back = EffectEditorModel.fraction(forValue: v, spec: spec)
+            #expect(abs(back - p) < 1e-12, "p=\(p) -> v=\(v) -> p=\(back)")
+        }
+        for v in [0, 1e-6, 0.001, 0.5, 1, 2, 4, 8, 15.99, 16] as [Double] {
+            let p = EffectEditorModel.fraction(forValue: v, spec: spec)
+            let back = EffectEditorModel.value(forFraction: p, spec: spec)
+            #expect(abs(back - v) <= max(v, 1e-300) * 1e-12, "v=\(v) -> p=\(p) -> v=\(back)")
+        }
+    }
+
+    @Test("m27-r: the gain knob's ends are silence and x16, exactly, and it only climbs")
+    func gainKnobTravelEnds() {
+        let spec = Self.gainLinearSpec
+        #expect(spec.range == 0...16)
+        #expect(EffectEditorModel.value(forFraction: 0, spec: spec) == 0)
+        #expect(EffectEditorModel.value(forFraction: 1, spec: spec) == 16)
+        #expect(EffectEditorModel.fraction(forValue: 0, spec: spec) == 0)
+        #expect(EffectEditorModel.fraction(forValue: 16, spec: spec) == 1)
+        // Out of range clamps on both sides, never NaN.
+        #expect(EffectEditorModel.value(forFraction: -1, spec: spec) == 0)
+        #expect(EffectEditorModel.value(forFraction: 2, spec: spec) == 16)
+        #expect(EffectEditorModel.fraction(forValue: -3, spec: spec) == 0)
+        #expect(EffectEditorModel.fraction(forValue: 99, spec: spec) == 1)
+        var previous = -1.0
+        for step in 0...100 {
+            let v = EffectEditorModel.value(forFraction: Double(step) / 100, spec: spec)
+            #expect(v > previous, "travel must climb at step \(step): \(v) after \(previous)")
+            previous = v
+        }
+    }
+
+    @Test("m27-r: unity sits at half travel, straight up on the knob")
+    func gainKnobUnityAtHalfTravel() {
+        let spec = Self.gainLinearSpec
+        let unity = EffectEditorModel.fraction(forValue: 1, spec: spec)
+        #expect(abs(unity - 0.5) < 1e-12, "unity at \(unity)")
+        #expect(abs(EffectEditorModel.value(forFraction: 0.5, spec: spec) - 1) < 1e-12)
+        // 270 degrees is straight up on the 270-degree knob (KnobControl draws
+        // through this same function).
+        #expect(abs(MixerMath.knobAngleDegrees(forFraction: unity) - 270) < 1e-9)
+        // BEFORE: the declared linear curve (still the wire's and modulation's
+        // domain) puts unity at 1/16 of the travel.
+        #expect(spec.curve == .linear)
+        #expect(spec.curve.fraction(forValue: 1, in: spec.range) == 0.0625)
+        // Double-click reset lands on the spec default, which is unity.
+        #expect(spec.defaultValue == 1)
+    }
+
+    @Test("m27-r: one percent of travel at unity moves about 0.7 dB, down from 1.3-1.5 dB")
+    func gainKnobSensitivityAtUnity() {
+        let spec = Self.gainLinearSpec
+        // AFTER (the knob's mapping).
+        let up = Self.db(EffectEditorModel.value(forFraction: 0.51, spec: spec))
+        let down = Self.db(EffectEditorModel.value(forFraction: 0.49, spec: spec))
+        #expect(abs(up - 0.688) < 0.001, "up 1% from unity: \(up) dB")
+        #expect(abs(down - -0.702) < 0.001, "down 1% from unity: \(down) dB")
+        // BEFORE (the declared linear curve the knob used to ride).
+        let u0 = spec.curve.fraction(forValue: 1, in: spec.range)
+        let upBefore = Self.db(spec.curve.value(forFraction: u0 + 0.01, in: spec.range))
+        let downBefore = Self.db(spec.curve.value(forFraction: u0 - 0.01, in: spec.range))
+        #expect(abs(upBefore - 1.289) < 0.001, "before, up 1%: \(upBefore) dB")
+        #expect(abs(downBefore - -1.514) < 0.001, "before, down 1%: \(downBefore) dB")
+        #expect(abs(up) < abs(upBefore) / 1.8 && abs(down) < abs(downBefore) / 2)
+    }
+
+    @Test("m27-r: every other knob travels bit-identically to its declared curve")
+    func gainTaperTouchesNoOtherKnob() {
+        var skipped: [String] = []
+        var checked = 0
+        for kind in EffectDescriptor.Kind.allCases {
+            for spec in EffectParamSpec.specs(for: kind) {
+                let id = "\(kind.rawValue).\(spec.name)"
+                // The literal, NOT the editor's predicate: this control must
+                // not share the implementation's notion of which knob moved.
+                if id == "gain.gainLinear" { skipped.append(id); continue }
+                for step in -5...25 {
+                    let f = Double(step) / 20
+                    #expect(EffectEditorModel.value(forFraction: f, spec: spec)
+                            == spec.curve.value(forFraction: f, in: spec.range), "\(id) f=\(f)")
+                    let v = spec.range.lowerBound
+                        + Double(step) / 20 * (spec.range.upperBound - spec.range.lowerBound)
+                    #expect(EffectEditorModel.fraction(forValue: v, spec: spec)
+                            == spec.curve.fraction(forValue: v, in: spec.range), "\(id) v=\(v)")
+                    checked += 1
+                }
+                #expect(EffectEditorModel.fraction(forValue: -1e9, spec: spec)
+                        == spec.curve.fraction(forValue: -1e9, in: spec.range), "\(id) -1e9")
+                #expect(EffectEditorModel.fraction(forValue: 1e9, spec: spec)
+                        == spec.curve.fraction(forValue: 1e9, in: spec.range), "\(id) 1e9")
+            }
+        }
+        #expect(skipped == ["gain.gainLinear"])
+        // The polarity switch shares the gain insert and the "linear" unit.
+        let polarity = EffectParamSpec.specs(for: .gain).first { $0.name == "invertPolarity" }!
+        #expect(!EffectEditorModel.usesGainTravelTaper(polarity))
+        // Non-vacuity: 64 specs x 31 points is the floor measured at m39-a.
+        #expect(checked >= 64 * 31, "only \(checked) points compared")
+    }
+
+    @Test("m27-r: only gain.gainLinear takes the gain knob taper")
+    func gainTaperCensus() {
+        var tapered: Set<String> = []
+        for kind in EffectDescriptor.Kind.allCases {
+            for spec in EffectParamSpec.specs(for: kind) where EffectEditorModel.usesGainTravelTaper(spec) {
+                tapered.insert("\(kind.rawValue).\(spec.name)")
+            }
+        }
+        #expect(tapered == ["gain.gainLinear"], "tapered: \(tapered.sorted())")
+    }
+
+    @Test("m27-r: the readout at the gain knob's marks still speaks dB")
+    func gainKnobReadoutAtMarks() {
+        let spec = Self.gainLinearSpec
+        func readout(atFraction f: Double) -> String {
+            let r = EffectEditorModel.readout(
+                value: EffectEditorModel.value(forFraction: f, spec: spec), spec: spec)
+            return r.text + " " + r.unit
+        }
+        #expect(readout(atFraction: 0.5) == "0.0 dB")
+        #expect(readout(atFraction: 1) == "24.1 dB")
+        #expect(readout(atFraction: 0) == "-∞ dB")
     }
 }

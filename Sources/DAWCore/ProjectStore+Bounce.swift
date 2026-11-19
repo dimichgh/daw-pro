@@ -72,6 +72,12 @@ extension ProjectStore {
     ///   semantics: undo un-references it but never deletes media — a redo, or a
     ///   later save fold, still needs it).
     /// - `name` overrides the default `<source> (Bounced)` track/clip name.
+    /// - The bounce belongs to the song that was open when it started
+    ///   (m39-render-pass-race). Its tracks and song-level inputs
+    ///   (`SessionRenderInputs`) are captured before the first await, and when
+    ///   another song was opened (New, Open, a recovery) while it rendered it
+    ///   refuses with `.bounceInPlaceSongChanged`: no file is written, nothing
+    ///   is added to either song, no undo step, no dirty flag.
     ///
     /// Blocking on the main actor while the offline render runs (~one stem's
     /// worth), the `render.stems` precedent — v0 accepts the stall.
@@ -104,6 +110,12 @@ extension ProjectStore {
         // last-saved patch instead of the one playing would land clip material
         // the user never heard, permanently.
         let liveTracks = tracksWithLiveAudioUnitState()
+        // m39-render-pass-race: EVERY song-level input (tempo and meter maps,
+        // the pan rule of W9-PLRT R1, the master volume) and the song's
+        // generation, captured beside the tracks and BEFORE the compensation
+        // probe's await. The render, the landed clip's length and the landing
+        // check below read only this value.
+        let inputs = sessionRenderInputs()
         let targets = await engine.offlineCompensationTargets(tracks: liveTracks)
         // STEM class (m13-d, design §2): a track bounce must never bake the
         // master bus into clip material — byte==stem stays BY CONSTRUCTION.
@@ -111,10 +123,12 @@ extension ProjectStore {
         // baked fade would double-apply when the landed clip plays back
         // through the live master fade. Master modulation likewise (m39-e-2):
         // a baked master tremolo would double-apply through the live master
-        // LFO.
+        // LFO. The meter map is not class-dependent (m39-w4-4a): a synced
+        // step source on the bounced track restarts where the song's does.
         let audio = try await engine.renderOffline(
             tracks: StemPlan.passTracks(for: descriptor, session: liveTracks),
-            tempoMap: transport.tempoMap, masterVolume: masterVolume,
+            tempoMap: inputs.tempoMap, meterMap: inputs.meterMap, panLaw: inputs.panLaw,
+            masterVolume: inputs.masterVolume,
             masterEffects: [],
             masterAutomation: [],
             masterModulationSources: [],
@@ -123,6 +137,19 @@ extension ProjectStore {
             forcedCompensationTargets: targets
         )
         let measurement = await Loudness.measureDetached(audio)
+
+        // m39-render-pass-race: that was the LAST await; nothing below
+        // suspends, so this one check covers the file write and the edit. If
+        // another song was opened while the bounce waited (New, Open, a
+        // recovery: each bumps `projectGeneration`), the bounced track belongs
+        // to a song that is no longer open. Refuse BEFORE the file is written,
+        // so nothing lands in either song and no unused file is left behind. A
+        // sung take keeps its file on the same refusal
+        // (`SungVocalLandingError.projectChanged`) because it is slow to make
+        // again; a bounce is one offline render, so it keeps nothing.
+        guard projectGeneration == inputs.projectGeneration else {
+            throw ProjectError.bounceInPlaceSongChanged
+        }
 
         // 3. Write into the project-stable media home (survives temp sweeps and
         //    undo/redo resurrection, and folds into the .dawproj media/ on save
@@ -138,8 +165,9 @@ extension ProjectStore {
         // 4. Build the new track + clip OUTSIDE the edit body (the
         //    importGeneration discipline). Length in beats is the inverse
         //    integral of the authoritative on-disk duration from the landing
-        //    beat (m12-b, design row 32).
-        let lengthBeats = transport.tempoMap.beat(
+        //    beat (m12-b, design row 32), under the tempo map the bounce
+        //    RENDERED at (the captured one, m39-render-pass-race).
+        let lengthBeats = inputs.tempoMap.beat(
             from: startBeat, elapsedSeconds: info.durationSeconds) - startBeat
         let resolvedName = name?.isEmpty == false ? name! : "\(descriptor.name) (Bounced)"
         let clip = Clip(name: resolvedName, startBeat: startBeat,

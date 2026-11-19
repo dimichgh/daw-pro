@@ -12,6 +12,8 @@ public enum TrackHeaderMenuAction: String, Sendable, CaseIterable {
     case toggleAutomation
     case bounceInPlace
     case exportMIDI
+    /// m39-tpl-8: "Save Track as Template…" — Pro only (design §9.1).
+    case saveAsTemplate
     case removeTrack
 }
 
@@ -66,9 +68,13 @@ public enum TrackHeaderMenu {
     ///     item's presence is a WIDTH-BUDGET decision (see below).
     ///   - isAutomationExpanded: Whether this track's automation rows are open,
     ///     which flips the automation item's title but not its presence.
+    ///   - isPro: The arrange's density is Pro (m39-tpl-8): only then does the
+    ///     list offer "Save Track as Template…" (design §9.1). Defaults to Simple,
+    ///     so every list a Simple arrange shows is exactly what it was.
     public static func items(track: Track,
                              sidebarWidth: CGFloat,
-                             isAutomationExpanded: Bool) -> [TrackHeaderMenuItem] {
+                             isAutomationExpanded: Bool,
+                             isPro: Bool = false) -> [TrackHeaderMenuItem] {
         // Discoverability twin of the double-click rename (beta m10-i) — always
         // offered, on every kind.
         var items = [TrackHeaderMenuItem(action: .rename, title: "Rename Track")]
@@ -114,6 +120,17 @@ public enum TrackHeaderMenu {
         // That is what earns HIDE over disable: there is nothing to explain.
         if track.canExportMIDI {
             items.append(TrackHeaderMenuItem(action: .exportMIDI, title: "Export MIDI…"))
+        }
+
+        // m39-tpl-8 (design §9.1): keep this track's sound as a template of your
+        // own. Every kind can be saved (a bus it plays into comes along), so the
+        // item is never hidden for a reason a person would have to guess — only
+        // by density: it is a Pro control. The title names the ONE track it is
+        // on, because this app has no track selection (`ArrangeTrackSelection`);
+        // the Save card it opens lets you tick more.
+        if isPro {
+            items.append(TrackHeaderMenuItem(action: .saveAsTemplate,
+                                             title: TemplatePickerCopy.saveTrackMenuItem))
         }
 
         // Destructive, so it goes last and wears the role.

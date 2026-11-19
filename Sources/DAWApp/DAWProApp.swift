@@ -2551,6 +2551,17 @@ final class AppModel {
             // W7-TTM3 — the Tune to Melody card: a scrimmed centred modal over an AUDIO clip,
             // where an unguarded ⌫ would delete the vocal it is about to tune.
             || tuneToMelodyDoor.card != nil
+            // m39-tpl-8 — the template picker and its Save as Template card: scrimmed
+            // centred modals, opened over a song whose clips may be selected, where an
+            // unguarded ⌫ would delete them behind the card.
+            || templatePicker.isOpen
+            // p2-sing-f — the Sing sheet, the voice recorder and the singing-engine consent card:
+            // scrimmed centred modals. The sheet opens over a selected MIDI clip, where an
+            // unguarded ⌫ would delete the very notes it is about to sing. (The results card is
+            // a passive corner card, like the engine notices, and is deliberately NOT here.)
+            || singSheet.isOpen
+            || singRecorder.isOpen
+            || singConsent.isOpen
             // m23-ap I1 UI hooks, item 8 (found by I7b-2) — THE CRASH-RECOVERY
             // OFFER, the OUTERMOST scrimmed modal (`RecoveryOfferView`), was
             // never listed either: Escape with it up went to the editor behind it
@@ -2708,6 +2719,25 @@ final class AppModel {
         return true
     }
 
+    /// THE KEY MONITOR'S RETURN (p2-sing-pr-words): hand the key to the OPEN roll's word field, or pass it on.
+    /// Returns whether it was handed over — the monitor swallows exactly then.
+    ///
+    /// `WordFieldKeyMonitorRouting.route` decides from the open-pane verdict (Escape's rule: the surface on screen,
+    /// never engagement, never focus), the roll's REPORTED selection and lane, and Escape's ONE `blocked` term — a
+    /// modal (the template card's `.defaultAction` included), a live text field, the explain mode. The roll then opens
+    /// the field with its LIVE selection (`PianoRollWordsModel.openField(selection:)`).
+    func handleReturnFromKeyMonitor() -> Bool {
+        let routed = WordFieldKeyMonitorRouting.route(
+            open: openEditorSurface.reason,
+            rollHasSelection: pianoRollNoteSelection.hasSelection,
+            rollShowsWords: pianoRollNoteSelection.wordsShown,
+            blocked: escapeIsOwnedElsewhere)
+        wordFieldKeyMonitorRouted = routed
+        guard routed else { return false }
+        pianoRollNoteSelection.requestWordField()
+        return true
+    }
+
     // MARK: - The DELETE key's ONE entry point (m23-cf, second pass)
 
     /// HOW MANY TIMES `handleDeleteKey` HAS RUN — the ONE observable that
@@ -2820,6 +2850,17 @@ final class AppModel {
     @ObservationIgnored private(set) var escapeKeyMonitorSeq = 0
     @ObservationIgnored private(set) var escapeKeyMonitorRefusedBy: EscapeKeyMonitorRefusal?
     @ObservationIgnored private(set) var escapeKeyMonitorTarget: EscapeKeyMonitorTarget?
+
+    /// p2-sing-pr-words — THE RETURN MONITOR'S TIER (the sixth key class), Escape's twin: how many Return / keypad
+    /// Enter key-downs reached the `NSEvent` monitor, which guard refused the last one, and whether the last ELIGIBLE
+    /// one was handed to the roll's word field (`false` = passed on untouched). ARRIVALS and a route, never a verdict:
+    /// "the field opened" is the roll's state. `.otherKey` never appears here.
+    /// TODO(p2-sing-pr-words Lane B): echo these three beside `escapeKeyMonitorSeq` in `debug.arrangeSelection`'s
+    /// reply — Lane A was held to the key branch in this file (Wave 10 ownership), so until then they are readable
+    /// only in a debugger.
+    @ObservationIgnored private(set) var wordFieldKeyMonitorSeq = 0
+    @ObservationIgnored private(set) var wordFieldKeyMonitorRefusedBy: WordFieldKeyMonitorRefusal?
+    @ObservationIgnored private(set) var wordFieldKeyMonitorRouted = false
 
     /// WHICH SURFACE OWNS A DELETE KEYSTROKE — resolved by `DeleteMenuPolicy`,
     /// never here.
@@ -3519,6 +3560,22 @@ final class AppModel {
     /// `TuneToMelodyStaging.swift`.
     let tuneToMelodyDoor = TuneToMelodyDoor()
 
+    /// m39-tpl-8: the template picker ("Start with a band") and its Save as Template card,
+    /// over the SAME store and the same saved-templates folder (`TemplateLibrary.standard`)
+    /// every `template.*` verb uses. Behaviour in DAWAppKit's `TemplatePickerModel`; the
+    /// doors and the mount in `TemplatePicker/TemplatePickerMount.swift`.
+    let templatePicker: TemplatePickerModel
+
+    /// p2-sing-f: the singing services the router holds (the ONE `SingJobCoordinator`, consent
+    /// broker, install coordinator and voice library), and the four Sing cards over them. Every
+    /// card press is the call its `sing.*` verb makes. Doors, mount and `debug.singScreens` in
+    /// `Sing/SingMount.swift`.
+    let singServices: SingWireServices
+    let singConsent: SingConsentModel
+    let singSheet: SingSheetModel
+    let singRecorder: SingVoiceRecorderModel
+    let singTakes: SingTakeModel
+
     /// p2-ren Stage B″(c) — what the pitch editor's clip is PLAYING, polled
     /// while the pane is open (`pollPitchEditorRenderAudible`), keyed by the
     /// clip it was read for so a clip switch can never show the last clip's
@@ -3802,6 +3859,11 @@ final class AppModel {
     /// arrows 123–126, and none of `MusicalTypingRouting.allCaps`'s layout keys
     /// (`escapeIsDisjointFromEveryOtherMonitorKey` pins Escape's half) — so the
     /// order below remains documentation rather than arbitration.
+    ///
+    /// ⭐ SIX SINCE p2-sing-pr-words: RETURN / keypad Enter (36 / 76) opens the
+    /// piano roll's word field. Disjoint from all five above and from every pad
+    /// key (`returnIsDisjointFromEveryOtherMonitorKey`), so its place after
+    /// Escape's branch is documentation too, never arbitration.
     func handleKeyDownEvent(_ event: NSEvent) -> NSEvent? {
         let deleteDecision = DeleteKeyMonitorRouting.decide(
             keyCode: event.keyCode,
@@ -3907,6 +3969,30 @@ final class AppModel {
             escapeKeyMonitorTarget = nil
             guard escapeDecision.eligible else { return event }
             return handleEscapeFromKeyMonitor() ? nil : event
+        }
+        // ⭐ RETURN (p2-sing-pr-words) — THE SIXTH KEY CLASS: with notes selected
+        // and the Words lane shown, Return opens the roll's word field. It rides
+        // the monitor for Escape's reason (the roll's `.onKeyPress` is measurably
+        // unreliable) and is Escape-shaped: predict from the roll's REPORTED
+        // facts, hand the key over through its bridge, swallow only then.
+        //
+        // ⚠️ SWALLOW ONLY THE ONE STATE THE FEATURE IS FOR; PASS EVERYTHING ELSE.
+        // `.textEditing` is the load-bearing refusal — Return inside the word
+        // field (or a rename field) is the FIELD'S, and commits it. A chord, a
+        // repeat, another window, a modal, the explain mode, no open roll, no
+        // selection, a hidden lane: each returns the event untouched.
+        let wordFieldDecision = WordFieldKeyMonitorRouting.decide(
+            keyCode: event.keyCode,
+            modifiers: Self.transportKeyModifiers(event.modifierFlags),
+            isRepeat: event.isARepeat,
+            responder: Self.transportKeyResponder(event.window?.firstResponder),
+            window: transportKeyWindow(event.window))
+        if wordFieldDecision.refusedBy != .otherKey {
+            wordFieldKeyMonitorSeq += 1
+            wordFieldKeyMonitorRefusedBy = wordFieldDecision.refusedBy
+            wordFieldKeyMonitorRouted = false
+            guard wordFieldDecision.eligible else { return event }
+            return handleReturnFromKeyMonitor() ? nil : event
         }
         let decision = TransportKeyRouting.decide(
             keyCode: event.keyCode,
@@ -4669,7 +4755,9 @@ final class AppModel {
     private static var captureCounter = 0
 
     init() {
-        let store = ProjectStore()
+        // m39-panlaw-new: the launch song is a NEW song (opening a file or
+        // recovering one replaces the rule with the file's).
+        let store = ProjectStore(panLaw: PanLaw.newSong)
         let engine = AudioEngine()
         store.engine = engine
         // Save-time Audio Unit state capture: each save/autosave refreshes
@@ -4709,6 +4797,8 @@ final class AppModel {
         engine.wipeDeadProvisionalSessions()
         self.store = store
         self.pitchEditorAudition = PitchEditorAuditionRouter(doors: store)
+        // m39-tpl-8: the picker presses through THIS store, the one the wire drives.
+        self.templatePicker = TemplatePickerModel(store: store)
         self.engine = engine
         // If a crash left restorable unsaved work, stage the launch offer (the
         // sheet reads this; nil = no offer). `recoveryStatus()` also confirms the
@@ -4808,6 +4898,87 @@ final class AppModel {
         self.voiceConversionManager = voiceConversionManager
         self.voiceConversionClient = voiceConversionClient
 
+        // p2-sing-e part 2 — the THIRD local model: the singing engine (SoulX,
+        // port 8004, loopback only) and the app's ONE `SingJobCoordinator`
+        // (design §4.1), shared with the router (sing.* verbs) and, later, the
+        // Sing sheet (item f), so the wire and the window see one job registry.
+        // The phrase cache MUST be the manager's own cacheDir: it is one of the
+        // folders the facade is allowed to read and write. The speech
+        // transcriber is the router's ONE `WhisperTranscriber` too (handed to
+        // it below), so the words check and clip.transcribe share one model;
+        // with no speech model installed `SingSpeech.transcribe` answers nil
+        // and the check reads "skipped", never an error.
+        // Synthesis timeout 120 s, not the client's 60 s default: one unit is
+        // at most `SingPlanner.unitCapSeconds` (20 s) plus 0.24 s lead and
+        // 0.24 s trail = 20.48 s of audio; at the slow end of the measured
+        // warm real-time factor (0.51, `SingJobCoordinator.Configuration`)
+        // that is 10.4 s; four times that for a slower Mac or a loaded one is
+        // 41.8 s; and the first unit after a boot can also pay the 20 s cold
+        // start (design §2.6), 61.8 s, already past 60 s. 120 s covers it with
+        // room. A unit that needs longer is a stuck engine, which the job's
+        // own retry and watchdog handle.
+        let singingManager = SingingSidecarManager(configuration: .resolved())
+        let speechTranscriber = WhisperTranscriber()
+        let singPitch: @Sendable (URL, Double) async throws -> [ClipPitchFrame] = { [engine] url, seconds in
+            try await engine.detectPitch(
+                inFileAt: url, fromSeconds: 0, durationSeconds: seconds,
+                confidenceThreshold: PitchDetectionDefaults.defaultConfidenceThreshold,
+                silenceFloorDbfs: PitchDetectionDefaults.defaultSilenceFloorDbfs).frames
+        }
+        let singTranscribe: @Sendable (URL) async throws -> String? = { url in
+            try await SingSpeech.transcribe(speechTranscriber, url)
+        }
+        let singJobs = SingJobCoordinator(
+            store: store, engine: singingManager,
+            synthesizer: SingingSynthesisClient(baseURL: singingManager.engineConfig.baseURL, timeoutSeconds: 120),
+            lifecycle: .shared,
+            cache: SingPhraseCache(
+                directory: singingManager.engineConfig.cacheDir ?? AppDirectories.applicationSupport(.singingCache)),
+            detectPitch: { url in try await singPitch(url, try SingVoiceAudioDecoder.durationSeconds(of: url)) },
+            transcribe: singTranscribe)
+        // Consent is a human act (design §2.5, the user's ruling "Ask me
+        // first"): an install or uninstall asked for over the wire waits in
+        // this broker for the window's click (item f). The staging flag
+        // DAWPRO_SING_TEST_AUTO_CONSENT=1 is read HERE, once, at launch, and
+        // never over the wire.
+        let singServices = SingWireServices(
+            engine: singingManager, jobs: singJobs, install: SingingEngineInstallCoordinator(),
+            consent: SingConsentBroker(
+                autoConsent: SingConsentBroker.autoConsentFromEnvironment(ProcessInfo.processInfo.environment)),
+            voices: SingVoiceLibrary(
+                root: singingManager.engineConfig.voicesDir ?? AppDirectories.applicationSupport(.singingVoices)),
+            engineFiles: SingEngineFiles(config: singingManager.engineConfig), lifecycle: .shared,
+            detectPitch: singPitch, transcribe: singTranscribe)
+        // p2-sing-f: the Sing cards hold the SAME objects the router is handed (one store, one
+        // coordinator, one broker, one install coordinator, one voice library). Wired to the
+        // broker and the router at the tail of `init` (`wireSing()`).
+        self.singServices = singServices
+        // p2-sing-x8 (part B): the install pre-check `sing.installEngine` makes, from the same three inputs
+        // (SingWire `installEngine`), run before the window ever offers the download.
+        let singPreflightFiles = singServices.engineFiles
+        let singPreflightRuntime = singServices.engine.engineConfig.runtimeDir
+        let singPreflightFreeDisk = singServices.freeDiskBytes
+        self.singConsent = SingConsentModel(
+            broker: singServices.consent, install: singServices.install,
+            preflight: {
+                SingInstallPreflight.check(engineFiles: singPreflightFiles, runtimeDir: singPreflightRuntime,
+                                           freeDiskBytes: singPreflightFreeDisk)
+            })
+        self.singSheet = SingSheetModel(
+            store: store, lyrics: store, transposer: store, jobs: singJobs,
+            engineStatus: { [singingManager] in await singingManager.status() },
+            library: singServices.voices,
+            // p2-sing-x8 (part B): "Write words for me", the key chain's writer at each use (the Workshop's shape).
+            makeWriter: {
+                try resolveLyricsWriter(environment: ProcessInfo.processInfo.environment, store: KeychainKeyStore())
+            })
+        self.singRecorder = SingVoiceRecorderModel(
+            capture: SingEngineCapture(engine: engine), transport: store, player: SingAudioPreviewPlayer(),
+            saver: SingVoicePreparationSaver(
+                library: singServices.voices, detectPitch: singServices.detectPitch,
+                guides: singServices.voiceCheckGuides, transcribe: singServices.transcribe))
+        self.singTakes = SingTakeModel(jobs: singJobs)
+
         // ⭐ m23-dl — THE ONE REGISTRATION SITE for the model lifecycle manager.
         // Until this runs, `ModelLifecycleCoordinator.shared` knows no models and
         // is entirely inert: no residency tracking, no single-flight, no
@@ -4844,6 +5015,11 @@ final class AppModel {
             await ModelLifecycleCoordinator.shared.register(
                 ModelRegistry.rvc(baseURL: voiceConversionManager.config.baseURL),
                 evictor: voiceConversionManager)
+            // p2-sing-e part 2: the singing engine, same rule (its own
+            // baseURL; the manager is its evictor).
+            await ModelLifecycleCoordinator.shared.register(
+                ModelRegistry.soulxSinger(baseURL: singingManager.engineConfig.baseURL),
+                evictor: singingManager)
         }
 
         // The Voice panel model (m10-p-5): datasets under app support
@@ -4907,8 +5083,16 @@ final class AppModel {
         // through it is loop-free, and it lets a terminal poll from the card close
         // the job.
         let generationPresence = GenerationPresenceModel(
-            status: { [songGenerator] jobID in
-                try await songGenerator.generationStatus(jobID: jobID)
+            status: { [songGenerator, singJobs] jobID in
+                // p2-sing-e part 2: a sing row's id starts "sing-" and is
+                // answered by the sing coordinator, never sent to ACE. The
+                // bridge never answers queued (the card would paint ACE's boot
+                // on it) and never throws (a throw asks ACE's sidecar whether
+                // the job died with it).
+                if SingPresenceBridge.isSingJob(jobID) {
+                    return await SingPresenceBridge.lookup(jobID: jobID) { try await singJobs.status(jobID: $0) }
+                }
+                return try await songGenerator.generationStatus(jobID: jobID)
             },
             sidecarStatus: { [sidecarManager] in await sidecarManager.status() },
             notify: { [weak engine] message in
@@ -5407,6 +5591,9 @@ final class AppModel {
             // the import seam gets its own "import"-tagged wrapper. Both wrap
             // the SAME `songGenerator`, so job state stays unified.
             songGenerator: wireGenerator,
+            // p2-sing-e part 2: the ONE speech transcriber, shared with the
+            // sing job's word check (see `speechTranscriber` above).
+            transcriber: speechTranscriber,
             // m34-c: THE SAME actor the instrument picker drives (constructed
             // above). See its own doc for why one instance is load-bearing.
             soundBankDownloads: soundBankDownloads,
@@ -5417,7 +5604,10 @@ final class AppModel {
             connectionInfo: ControlConnectionInfo(
                 port: port, source: portResolution.source.rawValue,
                 defaultPort: ControlPortConfig.defaultPort),
-            importGenerator: importGenerator)
+            importGenerator: importGenerator,
+            // p2-sing-e part 2: the singing verbs (sing.*, clip.setLyrics,
+            // clip.getLyrics, project.transpose) over the ONE coordinator.
+            singServices: singServices)
         // m18-b: the wedge monitor must exist before the server so the queue
         // tier can consult it on every frame. Strong capture is cycle-free
         // (server → closure → monitor; the monitor references nothing back).
@@ -5439,6 +5629,17 @@ final class AppModel {
             livenessSnapshot: { livenessMonitor.snapshot() },
             auPrepareInFlight: { [engine] in engine.auPrepareInFlight() })
         self.router = router
+        // p2-sing-e part 2: every job sing.render submits joins the unified
+        // progress card under its own "sing-" id (the card's status closure
+        // above routes that prefix to the sing coordinator).
+        // p2-sing-f: design §5.5 — an agent's job shows "AGENT", the person's
+        // shows "SING" (`.forSingJob`, one home for that choice; `.singAgent`
+        // is NOT `.wire`, which would adopt an open ACE boot row).
+        router.singJobSubmitted = { [weak generationPresence] status, label in
+            generationPresence?.registerSubmission(
+                jobID: status.jobID, origin: .forSingJob(fromAgent: status.fromAgent),
+                label: label, state: .running)
+        }
         // Two-phase, no-retain-cycle wiring (the appCommandHandler precedent):
         // the engine strongly captures `router` via the dispatch closure; the
         // router only holds the engine back weakly (`copilotEngine`).
@@ -5491,6 +5692,7 @@ final class AppModel {
         onboardingAdapter = OnboardingSignalAdapter(store: store, model: onboarding)
         onboardingAdapter.start()
         wireReferencePanel()
+        wireSing()
         wireMIDIControlPump()
         installDebugCommands()
         // Space-bar transport toggle (m17-d): the app-wide key monitor. Last —
@@ -5580,6 +5782,15 @@ final class AppModel {
             self.breathPadHardware.refresh(map: self.store.midiControlMap,
                                            isSubscribed: self.store.midiControl.isSubscribed)
         }
+    }
+
+    /// p2-sing-f: hand the broker's requests to the ONE consent card, register the voice recorder on the
+    /// router (`sing.openVoiceRecorder` opens the same window the voice menu does), and connect the Sing cards to
+    /// each other (`wireSingCards`, `Sing/SingMount.swift`).
+    private func wireSing() {
+        singServices.consent.onRequest = { [weak self] request in self?.singConsent.present(request) }
+        router.singVoiceRecorder = self
+        wireSingCards()
     }
 
     private func wireReferencePanel() {
@@ -5862,6 +6073,8 @@ final class AppModel {
                 return try self.samplerEditorDebug(params)
             case "debug.breathPad":
                 return self.breathPadDebug(params)
+            case "debug.singScreens":
+                return try self.singScreensDebug(params)
             case "debug.explainMode":
                 return try self.setExplainMode(params)
             case "debug.explainFrames":
@@ -10999,7 +11212,7 @@ final class AppModel {
             }
             let originRaw = seed["origin"]?.stringValue ?? GenerationJobOrigin.wire.rawValue
             guard let origin = GenerationJobOrigin(rawValue: originRaw) else {
-                throw DebugError("unknown origin \"\(originRaw)\" — expected sketchpad|wire|import")
+                throw DebugError("unknown origin \"\(originRaw)\" — expected sketchpad|wire|import|sing")
             }
             let elapsed = seed["elapsedSeconds"]?.doubleValue ?? 0
             var job = GenerationPresenceJob(
@@ -12749,7 +12962,15 @@ final class AppModel {
         TrackHeaderMenu.items(
             track: track,
             sidebarWidth: panelLayout.sidebarWidth,
-            isAutomationExpanded: expandedAutomationTrackIDs.contains(track.id))
+            isAutomationExpanded: expandedAutomationTrackIDs.contains(track.id),
+            // m39-tpl-8: "Save Track as Template…" is a Pro arrange control.
+            isPro: isArrangePro)
+    }
+
+    /// m39-tpl-8: the arrange's density, the one input `trackHeaderMenuItems`
+    /// and `debug.trackMenu`'s echo both read.
+    var isArrangePro: Bool {
+        panelDensity.density(forPanel: TimelineLanesView.panelID) == .pro
     }
 
     /// `debug.trackMenu {trackId}` — echoes the arrange track-header context
@@ -12786,6 +13007,8 @@ final class AppModel {
             "sidebarWidth": .number(Double(panelLayout.sidebarWidth)),
             "automationExpanded": .bool(expandedAutomationTrackIDs.contains(track.id)),
             "canExportMIDI": .bool(track.canExportMIDI),
+            // m39-tpl-8: Pro adds "Save Track as Template…".
+            "arrangePro": .bool(isArrangePro),
             // Bare identifiers for a one-line assertion, plus the full entries
             // (titles carry state — "Show" vs "Hide" — so they are worth seeing).
             "actions": .array(items.map { .string($0.action.rawValue) }),

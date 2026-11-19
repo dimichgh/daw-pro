@@ -1,6 +1,8 @@
+import AVFAudio
 import Foundation
 import Testing
 import DAWCore
+import DAWEngine
 @testable import DAWControl
 
 // m25-z: audio.profileFile — windowed peak/RMS profile of an ARBITRARY file
@@ -396,5 +398,281 @@ struct AudioProfileFileCommandTests {
         #expect(store.reference == slotBefore)
         let importsAfter = try FileManager.default.contentsOfDirectory(atPath: imports.path)
         #expect(Set(importsAfter) == Set(importsBefore))
+    }
+}
+
+// MARK: - m27-k: the opt-in loudness reading (one meter, a second door)
+//
+// m27-k (dogfood): `audio_profile_file` reported no LUFS, so the documented
+// way to check a bounce's loudness was `reference_import`, which COPIES the
+// file into the References library (three checks left 243 MB behind). The
+// fix is an OPT-IN `loudness` flag on this verb that calls the SAME meter
+// `reference.import`/`reference.analyze` use. These wire tests run the REAL
+// `AudioEngine` (headless: assigning `store.engine` never calls `prepare()`,
+// so no device is opened). The DSP-level proofs live in
+// `DAWEngineTests/FileProfileLoudnessTests.swift`.
+
+/// Deinterleaved Float32 WAV, so read-back is bit-exact (the
+/// ReferenceAnalyzerTests idiom).
+private func m27kWriteFloat32Wav(_ channels: [[Float]], sampleRate: Double, to url: URL) throws {
+    struct FixtureError: Error {}
+    guard let format = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32, sampleRate: sampleRate,
+        channels: AVAudioChannelCount(channels.count), interleaved: false) else { throw FixtureError() }
+    let file = try AVAudioFile(
+        forWriting: url,
+        settings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels.count,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ],
+        commonFormat: .pcmFormatFloat32, interleaved: false)
+    let frames = channels.map(\.count).min() ?? 0
+    guard let buffer = AVAudioPCMBuffer(
+        pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else { throw FixtureError() }
+    for (index, channel) in channels.enumerated() {
+        channel.withUnsafeBufferPointer {
+            buffer.floatChannelData![index].update(from: $0.baseAddress!, count: frames)
+        }
+    }
+    buffer.frameLength = AVAudioFrameCount(frames)
+    try file.write(from: buffer)
+}
+
+/// The byte-pin program: values EXACT in Float so the golden is hand-checkable
+/// and immune to summation order — 2 s of a +-0.5 square (24-sample half
+/// periods, 1 kHz at 48 k), 1 s of a +-0.125 square, 0.5 s of digital silence
+/// (the honest-absence window). Peak and RMS of a square equal its amplitude.
+private func m27kPinProgram() -> [Float] {
+    var samples: [Float] = []
+    for (amplitude, seconds) in [(Float(0.5), 2.0), (Float(0.125), 1.0)] {
+        let count = Int(seconds * 48_000)
+        samples += (0..<count).map { ($0 / 24) % 2 == 0 ? amplitude : -amplitude }
+    }
+    samples += [Float](repeating: 0, count: 24_000)
+    return samples
+}
+
+/// The wire `result` in CANONICAL form. `JSONValue.object` is a dictionary, so
+/// the live server's key order is not fixed; sorted keys make the bytes a
+/// stable function of the reply's content.
+private func m27kCanonical(_ value: JSONValue?) throws -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    return String(decoding: try encoder.encode(value), as: UTF8.self)
+}
+
+/// CAPTURED FROM THE TREE BEFORE THE m27-k EDIT (W8-M27K, 2026-10-07): the
+/// no-flag reply for `m27kPinProgram()` (stereo, float32, 48 k) at
+/// windowSeconds 1. Hand-check: 20*log10(0.5) = -6.0206 for peak AND rms of
+/// the first two windows, 20*log10(0.125) = -18.0618 for the third, and the
+/// silent half-second window carries NO peakDb/rmsDb.
+private let m27kNoFlagGolden = #"{"bitDepth":32,"channelCount":2,"durationSeconds":3.5,"isFloat":true,"sampleRateHz":48000,"windows":[{"durationSeconds":1,"peakDb":-6.020599913279624,"rmsDb":-6.020599913279624,"startSeconds":0},{"durationSeconds":1,"peakDb":-6.020599913279624,"rmsDb":-6.020599913279624,"startSeconds":1},{"durationSeconds":1,"peakDb":-18.06179973983887,"rmsDb":-18.06179973983887,"startSeconds":2},{"durationSeconds":0.5,"startSeconds":3}]}"#
+
+extension AudioProfileFileCommandTests {
+
+    @Test("m27-k pin: the reply WITHOUT the loudness flag stays byte-identical (sorted-key golden captured before the edit, real engine)")
+    func m27kNoFlagReplyIsByteIdentical() async throws {
+        let engine = AudioEngine()
+        defer { engine.shutdown() }
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        store.engine = engine
+        let router = CommandRouter(store: store)
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("m27k-pin-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let wav = base.appendingPathComponent("pin.wav")
+        let program = m27kPinProgram()
+        try m27kWriteFloat32Wav([program, program], sampleRate: 48_000, to: wav)
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "audio.profileFile",
+            params: ["path": .string(wav.path), "windowSeconds": .number(1.0)]))
+        #expect(response.ok, "audio.profileFile failed: \(response.error ?? "?")")
+        let bytes = try m27kCanonical(response.result)
+        print("[measured] m27-k no-flag canonical reply: \(bytes)")
+        #expect(bytes == m27kNoFlagGolden)
+    }
+}
+
+/// A real headless engine on a store whose References library is an EMPTY
+/// directory this test owns (never the real library), plus a stereo
+/// -20 dBFS 1 kHz, 10 s float32 file to profile. The caller keeps `engine`
+/// alive (`store.engine` is weak) and shuts it down.
+@MainActor
+private func m27kRealEngineHarness() throws
+    -> (engine: AudioEngine, store: ProjectStore, router: CommandRouter, wav: URL, imports: URL, base: URL) {
+    let engine = AudioEngine()
+    let store = ProjectStore()
+    store.media = FakeMedia()
+    store.engine = engine
+    let base = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("m27k-wire-\(UUID().uuidString.prefix(8))", isDirectory: true)
+    let imports = base.appendingPathComponent("References", isDirectory: true)
+    try FileManager.default.createDirectory(at: imports, withIntermediateDirectories: true)
+    store.referenceImportsDirectory = imports
+    let tone = (0..<480_000).map { Float(0.1 * sin(2 * Double.pi * 1_000 * Double($0) / 48_000)) }
+    let wav = base.appendingPathComponent("bounce.wav")
+    try m27kWriteFloat32Wav([tone, tone], sampleRate: 48_000, to: wav)
+    return (engine, store, CommandRouter(store: store), wav, imports, base)
+}
+
+/// The References library as {file name: byte size} — the invariance snapshot.
+private func m27kLibrarySnapshot(_ imports: URL) throws -> [String: Int] {
+    var snapshot: [String: Int] = [:]
+    for name in try FileManager.default.contentsOfDirectory(atPath: imports.path) {
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: imports.appendingPathComponent(name).path)
+        snapshot[name] = (attributes[.size] as? NSNumber)?.intValue ?? -1
+    }
+    return snapshot
+}
+
+extension AudioProfileFileCommandTests {
+
+    @Test("m27-k: loudness:false reads the SAME golden bytes as no flag")
+    func m27kExplicitFalseIsTheNoFlagReply() async throws {
+        let engine = AudioEngine()
+        defer { engine.shutdown() }
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        store.engine = engine
+        let router = CommandRouter(store: store)
+        let base = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("m27k-false-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let wav = base.appendingPathComponent("pin.wav")
+        let program = m27kPinProgram()
+        try m27kWriteFloat32Wav([program, program], sampleRate: 48_000, to: wav)
+
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "audio.profileFile",
+            params: ["path": .string(wav.path), "windowSeconds": .number(1.0),
+                     "loudness": .bool(false)]))
+        #expect(response.ok, "audio.profileFile failed: \(response.error ?? "?")")
+        #expect(try m27kCanonical(response.result) == m27kNoFlagGolden)
+    }
+
+    @Test("m27-k: loudness:true reports the file's BS.1770 reading, and reference.import of the SAME file reads the SAME numbers (one meter, two doors)")
+    func m27kLoudnessMatchesReferenceImport() async throws {
+        let h = try m27kRealEngineHarness()
+        defer {
+            h.engine.shutdown()
+            try? FileManager.default.removeItem(at: h.base)
+        }
+
+        let response = await h.router.handle(ControlRequest(
+            id: "1", command: "audio.profileFile",
+            params: ["path": .string(h.wav.path), "windowSeconds": .number(1.0),
+                     "loudness": .bool(true)]))
+        #expect(response.ok, "audio.profileFile failed: \(response.error ?? "?")")
+        let loudness = try #require(response.result?["loudness"], "loudness:true must attach a reading")
+        let integrated = try #require(loudness["integratedLufs"]?.doubleValue)
+        let truePeak = try #require(loudness["truePeakDbtp"]?.doubleValue)
+        print("[measured] m27-k wire: stereo -20 dBFS 1 kHz -> integrated \(integrated) LUFS, true peak \(truePeak) dBTP")
+        // BS.1770 sums the channels and is transparent at 1 kHz: -20 dBFS on
+        // both channels reads -20.0 LUFS (the LoudnessTests calibration).
+        #expect(abs(integrated - -20.0) <= 0.1)
+        #expect(abs(truePeak - -20.0) <= 0.1)
+        // The windows are still there, unchanged in kind.
+        #expect(response.result?["windows"]?.arrayValue?.count == 10)
+
+        // Door two: the documented-but-leaky path, into this test's own library.
+        let imported = await h.router.handle(ControlRequest(
+            id: "2", command: "reference.import", params: ["path": .string(h.wav.path)]))
+        #expect(imported.ok, "reference.import failed: \(imported.error ?? "?")")
+        let analysis = try #require(h.store.reference?.analysis)
+        #expect(integrated == analysis.integratedLufs)
+        #expect(truePeak == analysis.truePeakDbtp)
+        #expect(loudness["maxMomentaryLufs"]?.doubleValue == analysis.maxMomentaryLufs)
+        #expect(loudness["maxShortTermLufs"]?.doubleValue == analysis.maxShortTermLufs)
+        #expect(loudness["loudnessRangeLu"]?.doubleValue == analysis.loudnessRangeLu)
+    }
+
+    @Test("m27-k invariance: loudness:true copies nothing and never touches the reference slot (empty library, then a loaded one; snapshot before/after)")
+    func m27kLoudnessLeavesReferencesUntouched() async throws {
+        let h = try m27kRealEngineHarness()
+        defer {
+            h.engine.shutdown()
+            try? FileManager.default.removeItem(at: h.base)
+        }
+        let sourceBytes = try Data(contentsOf: h.wav)
+        func profile(_ path: String) async -> ControlResponse {
+            await h.router.handle(ControlRequest(
+                id: "p", command: "audio.profileFile",
+                params: ["path": .string(path), "windowSeconds": .number(2.0),
+                         "loudness": .bool(true)]))
+        }
+
+        // 1. The defect's own shape: an EMPTY library and an EMPTY slot.
+        #expect(try m27kLibrarySnapshot(h.imports).isEmpty)
+        #expect(h.store.reference == nil)
+        for _ in 0..<2 {
+            let response = await profile(h.wav.path)
+            #expect(response.ok, "audio.profileFile failed: \(response.error ?? "?")")
+            #expect(response.result?["loudness"]?["integratedLufs"]?.doubleValue != nil)
+        }
+        #expect(try m27kLibrarySnapshot(h.imports).isEmpty,
+                "checking loudness must never copy the file into the References library")
+        #expect(h.store.reference == nil, "checking loudness must never occupy the reference slot")
+
+        // 2. A loaded slot: import once (the positive control: the library
+        // CAN grow, and this snapshot sees it), then profile both the source
+        // and the imported copy.
+        let imported = await h.router.handle(ControlRequest(
+            id: "i", command: "reference.import", params: ["path": .string(h.wav.path)]))
+        #expect(imported.ok, "reference.import failed: \(imported.error ?? "?")")
+        let slotBefore = try #require(h.store.reference)
+        let libraryBefore = try m27kLibrarySnapshot(h.imports)
+        #expect(libraryBefore.count == 1, "the positive control: an import DOES land a copy here")
+        for path in [h.wav.path, slotBefore.sourcePath] {
+            let response = await profile(path)
+            #expect(response.ok, "audio.profileFile failed: \(response.error ?? "?")")
+        }
+        #expect(h.store.reference == slotBefore)
+        #expect(try m27kLibrarySnapshot(h.imports) == libraryBefore)
+        #expect(try Data(contentsOf: h.wav) == sourceBytes, "the profiled file is never modified")
+    }
+
+    @Test("m27-k: an engine without the loudness capability refuses loudness:true (never a profile missing the reading it was asked for); the no-flag request still works")
+    func m27kIncapableEngineRefusesLoudness() async throws {
+        let engine = FakeProfileEngine()
+        engine.result = cannedProfile()
+        let (router, _, profilePath) = try makeHarness(engine: engine)
+
+        let flagged = await router.handle(ControlRequest(
+            id: "1", command: "audio.profileFile",
+            params: ["path": .string(profilePath), "windowSeconds": .number(1.0),
+                     "loudness": .bool(true)]))
+        #expect(!flagged.ok)
+        #expect(flagged.error == "audio engine not available")
+        #expect(engine.capturedCalls.isEmpty, "the protocol default refuses before forwarding")
+
+        let plain = await router.handle(ControlRequest(
+            id: "2", command: "audio.profileFile",
+            params: ["path": .string(profilePath), "windowSeconds": .number(1.0)]))
+        #expect(plain.ok)
+        #expect(engine.capturedCalls.count == 1)
+        #expect(plain.result?["loudness"] == nil)
+    }
+
+    @Test("m27-k: loudness must be a boolean; a string is refused before the engine is called")
+    func m27kLoudnessMustBeBoolean() async throws {
+        let engine = FakeProfileEngine()
+        engine.result = cannedProfile()
+        let (router, _, profilePath) = try makeHarness(engine: engine)
+        let response = await router.handle(ControlRequest(
+            id: "1", command: "audio.profileFile",
+            params: ["path": .string(profilePath), "windowSeconds": .number(1.0),
+                     "loudness": .string("yes")]))
+        #expect(!response.ok)
+        #expect(response.error?.contains("'loudness' must be a boolean") == true)
+        #expect(engine.capturedCalls.isEmpty)
     }
 }

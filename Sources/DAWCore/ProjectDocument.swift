@@ -92,6 +92,18 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
     /// `reference` value failed to decode and was dropped. The open path
     /// surfaces it as a warning.
     public var referenceDroppedOnLoad: Bool = false
+    /// The song's pan rule (m39-panlaw-new) — see `PanLaw`. Additive and
+    /// optional, and nil (key OMITTED) for `.balance`, so a song with the
+    /// original rule re-saves byte-identical (the `masterEffects`
+    /// omit-when-default rule, no schemaVersion bump) and an absent key always
+    /// reads as the original rule (`runtimePanLaw`). Decoded TOLERANTLY: a
+    /// value this build cannot read (a file from a later build) reads as the
+    /// original rule plus a load warning — never a failed open.
+    public var panLaw: PanLaw?
+    /// Transient decode fact, NOT coded (no CodingKey): the raw pan-rule value
+    /// this build could not read; nil when there was none. The open path
+    /// surfaces it as a warning.
+    public var panLawUnreadOnLoad: String?
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, savedAt, name, masterVolume, transport, tracks, grooveTemplates, markers
@@ -101,6 +113,7 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         case masterModulationSources, masterModulationRoutes
         case copilotChats
         case reference
+        case panLaw
     }
 
     /// Builds a document from runtime state. `mediaRefs` maps each clip id to
@@ -121,9 +134,13 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
         copilotChats: [CopilotChatDocument] = [],
         reference: ReferenceSlot? = nil,
         masterModulationSources: [ModulationSource] = [],
-        masterModulationRoutes: [ModulationRoute] = []
+        masterModulationRoutes: [ModulationRoute] = [],
+        panLaw: PanLaw = PanLaw.savedSongDefault
     ) {
         self.schemaVersion = ProjectBundle.currentSchemaVersion
+        // m39-panlaw-new: the original rule persists as nil → the key is
+        // omitted and a song with that rule stays byte-identical.
+        self.panLaw = panLaw == PanLaw.savedSongDefault ? nil : panLaw
         self.savedAt = Date()
         self.name = name
         self.masterVolume = masterVolume
@@ -227,7 +244,25 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                 referenceDroppedOnLoad = true
             }
         }
+        // Additive optional (m39-panlaw-new): a song saved before the setting
+        // existed has no key → nil → the original rule. TOLERANT like
+        // `reference`: a value this build cannot read keeps the original rule
+        // and records the raw text for the open path's warning.
+        if c.contains(.panLaw) {
+            let raw = try? c.decode(String.self, forKey: .panLaw)
+            if let raw, let law = PanLaw(rawValue: raw) {
+                panLaw = law
+            } else {
+                panLaw = nil
+                panLawUnreadOnLoad = raw ?? "(not text)"
+            }
+        }
     }
+
+    /// The song's pan rule as the store restores it on open and on crash
+    /// recovery (m39-panlaw-new): the stored rule, or the ORIGINAL rule when
+    /// the file has none — every song made before the setting existed.
+    public var runtimePanLaw: PanLaw { panLaw ?? PanLaw.savedSongDefault }
 
     /// Restores runtime state, resolving each clip's media reference against
     /// `bundleURL`. Relative refs must live under `media/` and never escape it
@@ -287,7 +322,12 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
                     // Lyrics (p2-sing-d1b): absent reads as none; blank text
                     // and an audio clip's stray key normalise to nil in
                     // `Clip.init`.
-                    lyrics: cd.lyrics
+                    lyrics: cd.lyrics,
+                    // Singing style (p2-sing-x5): absent reads as none; an
+                    // all-default style and an audio clip's stray key
+                    // normalise to nil in `Clip.init`. Verbatim otherwise:
+                    // nothing prunes per-note choices at load.
+                    singStyle: cd.singStyle
                 )
             }
             let instrument = td.instrument.map { instDoc in
@@ -449,6 +489,12 @@ public struct ProjectDocument: Codable, Sendable, Equatable {
             } else if rd.media == nil {
                 warnings.append("reference '\(rd.name)' has no media reference — slot dropped")
             }
+        }
+        // m39-panlaw-new: a pan setting from a later build plays with the
+        // original pan knobs, and says so.
+        if let unread = panLawUnreadOnLoad {
+            warnings.append("this song's pan setting '\(unread)' comes from a newer version of DAW Pro — "
+                + "its pan knobs use the original setting instead")
         }
         return (runtimeTracks, runtimeTransport, masterVolume, runtimeMasterEffects,
                 runtimeMasterAutomation, runtimeReference, warnings)
@@ -1009,16 +1055,16 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
     /// `DrumKitDocument` mirror, following `SoundBankConfig`/`AutomationLane`
     /// rather than `SamplerDocument`. The mirror exists for the sampler because
     /// a zone holds a live `URL` that must become a bundle-relative `media/…`
-    /// ref; a drum kit is 75 numbers and eight optional ints with no file
+    /// ref; a drum kit is 77 numbers and eight optional ints with no file
     /// reference anywhere, so a mirror would be a second hand-maintained list
-    /// of 75 names whose only function is to drift from the first.
+    /// of 77 names whose only function is to drift from the first.
     public var drumKit: DrumKitParams?
 
     // ⛔⛔ m39-dm — A KEY MISSING FROM THIS ENUM IS THE QUIETEST DEFECT IN THE
     // WHOLE PERSISTENCE PATH. `CodingKeys` is hand-written; omitting `drumKit`
     // produces NO compile error, NO runtime error and NO warning — the kit is
     // simply never written and never read, and every in-memory test passes.
-    // `DrumKitPersistenceTests` round-trips all 75 names through a real bundle
+    // `DrumKitPersistenceTests` round-trips all 77 names through a real bundle
     // for exactly this reason, and plant P12 deletes this key to prove it.
     private enum CodingKeys: String, CodingKey {
         case kind, polySynth, sampler, audioUnit, soundBank, drumKit
@@ -1096,7 +1142,10 @@ public struct InstrumentDocument: Codable, Sendable, Equatable {
                     // m32-d: absent (every pre-m32-d project) -> nil -> forward.
                     reverse: zd.reverse,
                     // m32-f: absent -> nil -> no choke.
-                    chokeGroup: zd.chokeGroup)
+                    chokeGroup: zd.chokeGroup,
+                    // m39-w4-6: absent, or a role this version does not
+                    // know -> nil -> no drum row for that zone.
+                    drumRole: zd.drumRole.flatMap(DrumVoice.init(rawValue:)))
             }
             return SamplerParams(zones: zones, oneShot: s.oneShot,
                                  attack: s.attack, release: s.release, gain: s.gain,
@@ -1374,6 +1423,10 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
     public var reverse: Bool?
     // m32-f per-zone choke group -- nil never encodes.
     public var chokeGroup: Int?
+    // m39-w4-6 drum role (`DrumVoice` raw value) -- nil never encodes. String
+    // typed like `loopMode`: a role from a newer version stays readable here
+    // and resolves to nil at the converter instead of failing the open.
+    public var drumRole: String?
 
     /// ⚠️ EVERY field of this struct is enumerated by hand THREE more times
     /// below — in `CodingKeys`, in `init(from decoder:)` and in `encode(to:)` —
@@ -1391,6 +1444,7 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         case crossfade
         case reverse
         case chokeGroup
+        case drumRole
     }
 
     init(from z: SamplerZone, media: String?) {
@@ -1423,6 +1477,7 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         crossfade = z.crossfade
         reverse = z.reverse
         chokeGroup = z.chokeGroup
+        drumRole = z.drumRole?.rawValue
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1456,6 +1511,7 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         crossfade = try c.decodeIfPresent(SamplerCrossfade.self, forKey: .crossfade)
         reverse = try c.decodeIfPresent(Bool.self, forKey: .reverse)
         chokeGroup = try c.decodeIfPresent(Int.self, forKey: .chokeGroup)
+        drumRole = try c.decodeIfPresent(String.self, forKey: .drumRole)
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -1491,6 +1547,7 @@ public struct SamplerZoneDocument: Codable, Sendable, Equatable {
         try c.encodeIfPresent(crossfade, forKey: .crossfade)
         try c.encodeIfPresent(reverse, forKey: .reverse)
         try c.encodeIfPresent(chokeGroup, forKey: .chokeGroup)
+        try c.encodeIfPresent(drumRole, forKey: .drumRole)
     }
 }
 
@@ -1563,6 +1620,13 @@ public struct ClipDocument: Codable, Sendable, Equatable {
     /// mirror-DTO lesson as `pitchEdits`: threaded through `init(from clip:)`,
     /// encode, decode AND both `ClipDocument`→`Clip` reconstructions.
     public var lyrics: ClipLyrics?
+    /// Singing style (p2-sing-x5, design `2026-10-06-p2-sing-expansion.md`
+    /// §5.3) — additive optional, the omit-when-nil rule: stored ONLY when the
+    /// clip has a style, so a project without any stays byte-identical across
+    /// a round trip (design §9 S2); absent reads as none. Same m12-f
+    /// mirror-DTO lesson: threaded through `init(from clip:)`, encode, decode
+    /// AND both `ClipDocument`→`Clip` reconstructions.
+    public var singStyle: SingStyle?
     /// Take-group marker (M5 iii-a) — additive optional, same omit-when-nil rule.
     /// Set only on comp member clips; a pre-take clip has no key and stays
     /// byte-identical across a round trip.
@@ -1574,6 +1638,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         case stretchRatio, pitchShiftSemitones, formantPreserve, gainEnvelope, controllerLanes, takeGroupId
         case pitchEdits
         case lyrics
+        case singStyle
     }
 
     init(from clip: Clip, media: String?) {
@@ -1603,6 +1668,9 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         // Lyrics (p2-sing-d1b): `Clip.init` already normalised blank text to
         // nil, so a clip without lyrics carries no key here either.
         lyrics = clip.lyrics
+        // Singing style (p2-sing-x5): the one spelling `Clip.encode` writes
+        // too (nil for an audio clip or an all-default style).
+        singStyle = clip.singStyleToWrite
         takeGroupId = clip.takeGroupID
     }
 
@@ -1628,6 +1696,7 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         controllerLanes = try c.decodeIfPresent([MIDIControllerLane].self, forKey: .controllerLanes)
         pitchEdits = try c.decodeIfPresent(PitchEditSet.self, forKey: .pitchEdits)
         lyrics = try c.decodeIfPresent(ClipLyrics.self, forKey: .lyrics)
+        singStyle = try c.decodeIfPresent(SingStyle.self, forKey: .singStyle)
         takeGroupId = try c.decodeIfPresent(UUID.self, forKey: .takeGroupId)
     }
 
@@ -1668,6 +1737,9 @@ public struct ClipDocument: Codable, Sendable, Equatable {
         // Lyrics (p2-sing-d1b): omitted when nil, so a clip without lyrics
         // never grows a key.
         try c.encodeIfPresent(lyrics, forKey: .lyrics)
+        // Singing style (p2-sing-x5): omitted when nil, so a clip without one
+        // never grows a key.
+        try c.encodeIfPresent(singStyle, forKey: .singStyle)
         try c.encodeIfPresent(takeGroupId, forKey: .takeGroupId)
     }
 }
@@ -1740,7 +1812,10 @@ public struct TakeGroupDocument: Codable, Sendable, Equatable {
                 pitchEdits: cd.pitchEdits,
                 // p2-sing-d1b: the same second field list, so lyrics are
                 // threaded here too.
-                lyrics: cd.lyrics)
+                lyrics: cd.lyrics,
+                // p2-sing-x5: and the singing style, verbatim (no pruning at
+                // load).
+                singStyle: cd.singStyle)
             // TakeLane.init strips any stray takeGroupID (payloads never nest).
             return TakeLane(id: ld.id, name: ld.name, clip: clip)
         }

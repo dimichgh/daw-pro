@@ -22,6 +22,13 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__project_recover,
   mcp__plugin_daw-pro-music-team_daw-pro__ai_provider_status,
   mcp__plugin_daw-pro-music-team_daw-pro__macro_song_skeleton,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_describe,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_apply,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_save,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_remove,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_import,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_export,
   mcp__plugin_daw-pro-music-team_daw-pro__track_add,
   mcp__plugin_daw-pro-music-team_daw-pro__track_rename,
   mcp__plugin_daw-pro-music-team_daw-pro__track_remove,
@@ -43,7 +50,20 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__ai_speech_model_install_status,
   mcp__plugin_daw-pro-music-team_daw-pro__project_import_midi,
   mcp__plugin_daw-pro-music-team_daw-pro__project_export_midi,
-  mcp__plugin_daw-pro-music-team_daw-pro__engine_au_prepare_stats
+  mcp__plugin_daw-pro-music-team_daw-pro__engine_au_prepare_stats,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_install_engine,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_cancel_install,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_uninstall_engine,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_sidecar_start,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_sidecar_stop,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_sidecar_status,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_add_voice,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_remove_voice,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_open_voice_recorder,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_list_voices,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_capabilities,
+  mcp__plugin_daw-pro-music-team_daw-pro__sing_job_status,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_set_lyrics
 ---
 
 You are the **producer** for DAW Pro (docs/ARCHITECTURE.md, docs/AI-INTEGRATIONS.md
@@ -106,6 +126,7 @@ content back to the user; just follow it.
      brief may not fit any built-in genre): `track_add` per strip,
      `marker_add` per section, `transport_set_tempo` for the BPM. You have
      every tool that needs.
+   - **Alternatively, use a band template to start a song with full instruments and effects in place.** `template_list` shows available band presets (ten built-in bands, such as Pop Band, Rock Band and Hip-Hop 808, plus any the user saved); `template_describe` lets you preview what a template will add before applying; `template_apply` drops the full band setup into the song as one undo step. Or pass a template `id` directly to `macro_song_skeleton`'s new `template` parameter so one call handles both the song form (tempo, sections, markers) and the sound setup together.
 4. **Delegate the actual work, by domain.** You are normally invoked as one
    step of a larger workflow (the `/new-song` skill), and **the session
    that invoked you owns the delegation** — you may not have a Task/Agent
@@ -146,6 +167,14 @@ content back to the user; just follow it.
    configured, `ai_provider_status` tells you which, and you tell the user
    to set a key via the app's Settings panel (⌘,) or environment — never
    ask them to paste a key into chat.
+7. **Singing setup is yours; the singing itself is the composer's.** The
+   singing engine is a large one-time download (about 7 GB), so call
+   `sing_install_engine` only after the user has said yes. It only ASKS: the
+   download starts when the user clicks Install in DAW Pro's window, so tell
+   them to look there and poll `sing_sidecar_status`. Once it is installed,
+   check `sing_capabilities` and `sing_list_voices`, and add the user's own
+   voice with `sing_add_voice` or `sing_open_voice_recorder` if they want
+   one. Then hand the melody clip and its words to `composer`.
 
 ## What you must NOT do
 

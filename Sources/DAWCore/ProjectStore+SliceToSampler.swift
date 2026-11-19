@@ -44,11 +44,16 @@ public struct SliceToSamplerResult: Codable, Sendable, Equatable {
     /// FALSE. A surface that inferred audibility from `mutedTrackId` would tell
     /// a user to go mute a track that is already silent.
     public var sourceTrackMuted: Bool
+    /// m39-w4-6, `mapping: "kit"` only: one sentence saying how the hits were
+    /// sorted ("Sorted into 4 kicks, 3 snares, 8 closed hats, 1 open hat and 2
+    /// other hits."). Absent from a chromatic chop.
+    public var kitSummary: String?
 
     public init(trackId: UUID, createdTrackId: UUID?, midiClipId: UUID?,
                 sampleRate: Double, frameCount: Int, sliceCount: Int,
                 headSeconds: Double, slices: [SliceReport], warnings: [String],
-                mutedTrackId: UUID? = nil, sourceTrackMuted: Bool = false) {
+                mutedTrackId: UUID? = nil, sourceTrackMuted: Bool = false,
+                kitSummary: String? = nil) {
         self.trackId = trackId
         self.createdTrackId = createdTrackId
         self.midiClipId = midiClipId
@@ -60,6 +65,7 @@ public struct SliceToSamplerResult: Codable, Sendable, Equatable {
         self.warnings = warnings
         self.mutedTrackId = mutedTrackId
         self.sourceTrackMuted = sourceTrackMuted
+        self.kitSummary = kitSummary
     }
 }
 
@@ -249,9 +255,10 @@ extension ProjectStore {
             }
         }
 
-        // Refuse BEFORE paying for the PCM pass.
+        // Refuse BEFORE paying for the PCM pass. (`planSettings` is `settings`
+        // itself in a chromatic chop; see its doc for `mapping: "kit"`.)
         try SliceToSamplerPlan.validateSliceCount(
-            boundaryCount: rawBoundaries.count, settings: settings, clipId: clipId)
+            boundaryCount: rawBoundaries.count, settings: settings.planSettings, clipId: clipId)
 
         // --- The ONE engine seam: seconds in, frames + the rate they are in
         //     out. Nothing above or below this line ever divides by a rate it
@@ -261,13 +268,45 @@ extension ProjectStore {
             snapWindowSeconds: settings.effectiveSnapWindowSeconds)
 
         // Re-locate again: `resolveSliceBoundaries` is an await too.
-        guard let (t2, c2) = locateSliceClip(clipId) else {
+        guard var (t2, c2) = locateSliceClip(clipId) else {
             throw ProjectError.clipNotFound(clipId)
         }
-        let clip = tracks[t2].clips[c2]
-        let plan = try SliceToSamplerPlan.compute(
+        var clip = tracks[t2].clips[c2]
+        var plan = try SliceToSamplerPlan.compute(
             clip: clip, geometry: geometry, strengths: strengths,
-            settings: settings, tempoMap: transport.tempoMap)
+            settings: settings.planSettings, tempoMap: transport.tempoMap)
+
+        // --- m39-w4-6: `mapping: "kit"` — measure each slice, then sort it ---
+        // ONE more engine call (off the render thread), then pure DAWCore:
+        // `DrumHitClassifier` per slice, `KitSliceLayout` for the notes. A
+        // chromatic chop never reaches this, so it never pays for the read.
+        var kitSummary: String?
+        if settings.mapping == .kit {
+            let spans = plan.slices.map { SliceFrameSpan(start: $0.startFrame, end: $0.endFrame) }
+            let timbres = try await resolvedEngine.analyzeSliceTimbres(
+                inFileAt: sourceURL, frameRanges: spans)
+            // Re-locate after this await too, and re-plan against the clip as
+            // it is NOW: if it was trimmed meanwhile, the measurements describe
+            // slices that no longer exist, so refuse rather than mislabel.
+            guard let (t3, c3) = locateSliceClip(clipId) else {
+                throw ProjectError.clipNotFound(clipId)
+            }
+            (t2, c2) = (t3, c3)
+            clip = tracks[t2].clips[c2]
+            let replanned = try SliceToSamplerPlan.compute(
+                clip: clip, geometry: geometry, strengths: strengths,
+                settings: settings.planSettings, tempoMap: transport.tempoMap)
+            guard replanned.slices.map(\.startFrame) == spans.map(\.start),
+                  replanned.slices.map(\.endFrame) == spans.map(\.end) else {
+                throw ProjectError.invalidClipEdit(
+                    "clip \(clipId.uuidString) changed while its hits were being measured, so the "
+                    + "measurements no longer match its slices. Nothing was changed. Run the chop again")
+            }
+            let kit = try KitSliceLayout.apply(to: replanned, timbres: timbres,
+                                               overrides: settings.roleOverrides, clipId: clipId)
+            plan = kit.plan
+            kitSummary = kit.summary
+        }
 
         // --- ONE edit: track (maybe), zones, and the reconstruction clip ----
         var warnings = plan.warnings
@@ -357,8 +396,11 @@ extension ProjectStore {
                 // another explicit initialiser call, so omitting it would take
                 // the nil default and CHOPPING A CLIP TO A SAMPLER WOULD WIPE
                 // THE USER'S DRUM KIT — with a success response, on a track
-                // they were not editing the drums of.
-                drumKit: current.drumKit)
+                // they were not editing the drums of. W9-DRUMDEF: through the
+                // one kind-change rule, so a saved song's never-edited drum
+                // machine chopped over keeps the kit it played (the factory kit,
+                // pad keys) for when it is picked again.
+                drumKit: current.drumKitCarried(into: .sampler))
 
             if settings.generateMIDI && !plan.notes.isEmpty {
                 let midiClip = Clip(
@@ -416,7 +458,8 @@ extension ProjectStore {
             // ⚠️ READ BACK OUT OF THE STORE AFTER THE EDIT, never assembled from
             // what was requested. That is the whole reason this field exists as
             // its own measurement — see its doc.
-            sourceTrackMuted: tracks.first { $0.id == sourceTrackID }?.isMuted ?? false)
+            sourceTrackMuted: tracks.first { $0.id == sourceTrackID }?.isMuted ?? false,
+            kitSummary: kitSummary)
     }
 
     /// The clip's source window in SOURCE-FILE seconds — the chop region.

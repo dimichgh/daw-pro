@@ -338,11 +338,15 @@ struct NaturalTuningDigestTests {
     /// A field that exists but whose digest slot has not landed. Empty since
     /// NT-C C2; the mechanism stays for the next set-level field.
     static let pending: [String] = []
+    /// vf-18 (W9-SLFX): hashed only where it can render, inside slot 9 (a SOFT
+    /// set, `usesSoftJoins`). Its row must NOT re-key the census's non-soft
+    /// base and MUST re-key the same base made soft.
+    static let hashedWhenSoft = ["slideFollowRule"]
 
     @Test("G8 census: every set-level field is hashed, exempt, or pending with its owner named")
     func setLevelCensus() {
         let fields = Mirror(reflecting: PitchEditSet.empty).children.compactMap(\.label)
-        let listed = Self.hashed + Self.exempt + Self.pending
+        let listed = Self.hashed + Self.exempt + Self.pending + Self.hashedWhenSoft
         #expect(Set(fields) == Set(listed) && fields.count == listed.count,
                 """
                 PitchEditSet's set-level fields \(fields) are not exactly the census \
@@ -368,6 +372,7 @@ struct NaturalTuningDigestTests {
             "autoCorrectReplaceableStamp": { $0.autoCorrectReplaceableStamp = "stamp" },
             "consonantProtection": { $0.consonantProtection = .on },
             "transitionSlopeCentsPerSecond": { $0.transitionSlopeCentsPerSecond = 3000 },
+            "slideFollowRule": { $0.slideFollowRule = .holdAtOpenSide },
         ]
         #expect(Set(rows.keys) == Set(listed), "every listed name needs a mutation row")
         for name in Self.hashed {
@@ -382,6 +387,18 @@ struct NaturalTuningDigestTests {
                     '\(name)' re-keys: its digest slot has landed. Move it to `hashed` \
                     (and its owner's block test is what proves the slot).
                     """)
+        }
+        // vf-18: the base is not soft, so a slide-follow rule renders nothing
+        // there and must not re-key it; the same base made soft must re-key.
+        #expect(!base.usesSoftJoins, "premise: the census base is not soft")
+        var softBase = base
+        softBase.transitionSlopeCentsPerSecond = PitchEditSet.defaultTransitionSlope
+        let softBaseHex = PitchEditSetDigest.hex(softBase)
+        for name in Self.hashedWhenSoft {
+            #expect(rows[name].map(rekeys) == false, "'\(name)' re-keys a set that is not soft")
+            var copy = softBase
+            rows[name]?(&copy)
+            #expect(PitchEditSetDigest.hex(copy) != softBaseHex, "'\(name)' does not re-key a soft set")
         }
 
         // NT-C2-F1 (W7-D2): `consonantProtection`'s RECORD half must NOT re-key

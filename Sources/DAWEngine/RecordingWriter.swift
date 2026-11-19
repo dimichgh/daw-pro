@@ -97,6 +97,20 @@ final class RecordingWriter: @unchecked Sendable {
     /// Reused channel-mapping scratch buffer; reallocated only on growth.
     private var scratch: AVAudioPCMBuffer?
 
+    // MARK: Input-only capture (p2-sing-e), queue-confined like the rest
+
+    /// Stop writing once this many frames are in the file: the buffer that
+    /// crosses the limit is TRIMMED to it (never dropped), later buffers are
+    /// ignored, and `onEnded` fires once. nil (every take) = no limit, and the
+    /// take path is unchanged.
+    private var frameLimit: Int64?
+    /// Fired ONCE, on this queue, when nothing more will ever be written: the
+    /// frame limit was reached, or a write failed.
+    private var onEnded: (@Sendable () -> Void)?
+    private var endedSignalled = false
+    /// Folded over the frames actually written; nil (every take) = no work.
+    private var levelMeter: InputLevelMeter?
+
     /// Opens the take file (creating parent directories) for the given
     /// device-native input format. Throws with no file left behind on failure.
     init(url: URL, inputFormat: AVAudioFormat) throws {
@@ -159,6 +173,25 @@ final class RecordingWriter: @unchecked Sendable {
         setAcceptWindow(reference: hostTime, start: hostTime, end: nil)
     }
 
+    /// Input-only capture (p2-sing-e): caps the file at `frames` frames and
+    /// calls `onEnded` once, on the writer queue, when the cap is reached or a
+    /// write fails. Call it before the first `append`: the queue is FIFO, so a
+    /// call made before the tap starts lands before any delivery. First call
+    /// wins.
+    func setFrameLimit(_ frames: Int64, onEnded: @escaping @Sendable () -> Void) {
+        queue.async { [self] in
+            guard frameLimit == nil else { return }
+            frameLimit = max(0, frames)
+            self.onEnded = onEnded
+        }
+    }
+
+    /// Input-only capture (p2-sing-e): folds the peak of every written chunk
+    /// into `meter`. Call it before the first `append`.
+    func setLevelMeter(_ meter: InputLevelMeter) {
+        queue.async { [self] in levelMeter = meter }
+    }
+
     /// One tap delivery crossing onto the writer queue. `@unchecked Sendable`
     /// justification: the tap hands over a freshly allocated buffer it never
     /// touches again, and exactly one consumer (the serial queue) reads it.
@@ -210,6 +243,22 @@ final class RecordingWriter: @unchecked Sendable {
                 channelCount: fileChannels,
                 startOffsetSeconds: startOffsetSeconds
             )))
+        }
+    }
+
+    /// Input-only capture's failed start (p2-sing-e): closes and deletes the
+    /// file BEFORE returning, so the caller's immediate retry at the same URL
+    /// cannot race a delete still pending on this queue. Blocks on the writer
+    /// queue; only called before any delivery, so only the setup blocks are
+    /// ahead of it. Idempotent with `finalize` (whichever runs first wins).
+    func discardNow() {
+        queue.sync {
+            guard !finalized else { return }
+            finalized = true
+            pendingBuffers = []
+            pendingFrames = 0
+            autoreleasepool { file = nil }
+            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -331,7 +380,30 @@ final class RecordingWriter: @unchecked Sendable {
         // window end.
         // TODO(hardening): detect input dropouts (host-time gaps between
         // consecutive buffers) and insert silence to keep alignment.
+        //
+        // Input-only capture's frame limit (nil for every take): trim the
+        // buffer that crosses it, ignore everything after it.
+        if let limit = frameLimit {
+            let remaining = limit - framesWritten
+            guard remaining > 0 else {
+                signalEndedOnce()
+                return
+            }
+            if Int64(keepFrames) > remaining {
+                keepFrames = Int(remaining)
+            }
+        }
         write(buffer, from: skipFrames, count: keepFrames)
+        if writeError != nil || frameLimit.map({ framesWritten >= $0 }) == true {
+            signalEndedOnce()
+        }
+    }
+
+    /// Fires `onEnded` at most once; a no-op without one (every take).
+    private func signalEndedOnce() {
+        guard !endedSignalled, let onEnded else { return }
+        endedSignalled = true
+        onEnded()
     }
 
     /// Once per take: input keeps arriving after the punch-out point, and
@@ -383,6 +455,20 @@ final class RecordingWriter: @unchecked Sendable {
         }
         scratch.frameLength = AVAudioFrameCount(frames)
 
+        if let levelMeter {
+            // Input-only capture's level (nil for every take): the peak of the
+            // frames going into the file. Non-finite samples never reach it.
+            var peak: Float = 0
+            for channel in 0..<fileChannels {
+                let samples = destination[channel]
+                for frame in 0..<frames {
+                    let magnitude = samples[frame].magnitude
+                    if magnitude > peak, magnitude.isFinite { peak = magnitude }
+                }
+            }
+            levelMeter.fold(peak: peak, frames: frames)
+        }
+
         do {
             // Per-call pool: ObjC write machinery autoreleases into the
             // queue's root pool, which drains at unspecified times — bound
@@ -396,5 +482,60 @@ final class RecordingWriter: @unchecked Sendable {
                 "RecordingWriter: write failed, dropping the rest of the take: \(error)\n".utf8
             ))
         }
+    }
+}
+
+/// The input-only capture's level meter (p2-sing-e, "Add your voice").
+/// Folded on the writer queue over the frames actually written; read by the
+/// main actor at UI rate.
+///
+/// It publishes the highest magnitude of each completed window of at least
+/// `windowFrames` (about 50 ms); a tap buffer that long publishes on its own.
+/// So a ~30 Hz reader never misses a peak, whatever size the device delivers
+/// in, and two readers never steal each other's reading (nothing resets on
+/// read). Peak hold and decay are the meter view's job.
+///
+/// Sendable: all mutable state sits behind one unfair lock, taken once per
+/// written chunk on the writer queue and once per read on the main actor;
+/// neither is the render thread.
+final class InputLevelMeter: Sendable {
+    /// The reading for silence, and before the first window completes.
+    static let floorDbfs: Double = -120
+
+    let windowFrames: Int
+
+    private struct State {
+        var published: Float = 0
+        var windowPeak: Float = 0
+        var windowFill = 0
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    init(sampleRate: Double, windowSeconds: Double = 0.05) {
+        windowFrames = max(1, Int((sampleRate * windowSeconds).rounded()))
+    }
+
+    /// One written chunk: its peak magnitude and its length. Non-finite peaks
+    /// never enter the meter (NaN guard: the reading stays a number).
+    func fold(peak: Float, frames: Int) {
+        guard frames > 0 else { return }
+        let window = windowFrames
+        state.withLock { meter in
+            if peak > meter.windowPeak, peak.isFinite { meter.windowPeak = peak }
+            meter.windowFill += frames
+            if meter.windowFill >= window {
+                meter.published = meter.windowPeak
+                meter.windowPeak = 0
+                meter.windowFill = 0
+            }
+        }
+    }
+
+    /// The latest completed window's peak in dBFS, floored at `floorDbfs`.
+    var peakDbfs: Double {
+        let peak = state.withLock { $0.published }
+        guard peak > 0 else { return Self.floorDbfs }
+        return max(Self.floorDbfs, 20 * log10(Double(peak)))
     }
 }

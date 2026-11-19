@@ -369,7 +369,7 @@ extension AppModel: ViewUIControlling {
             // rather than opening the wrong panel or failing silently.
             throw DebugError(
                 "track \"\(track.name)\" plays the drum machine, which has no editor card yet — "
-                + "its 75 parameters are on the wire. Read them with "
+                + "its \(MIDIControllerRouting.drumParameterCount) parameters are on the wire. Read them with "
                 + "instrument.describeDrumKit, set one with "
                 + "instrument.setDrumParam {name:\"kick.decay\", value:0.9}, and load a factory "
                 + "kit with instrument.loadDrumPreset {name:\"909\"}.")

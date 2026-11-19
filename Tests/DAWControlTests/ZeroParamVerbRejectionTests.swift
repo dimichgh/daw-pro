@@ -189,6 +189,24 @@ struct ZeroParamVerbRejectionTests {
         // per-file problems under `unreadable` rather than throwing — no
         // store mutation, no device, no sidecar.
         "template.list",
+        // m39-w4-10. DRIVEN, not excluded: the ready-made drum beats are a
+        // compile-time list in DAWCore (DrumPatternLibrary) — no store state,
+        // no device, no sidecar, no filesystem. Its sibling
+        // clip.addDrumPattern is absent on purpose: it REQUIRES trackId and pattern.
+        "pattern.list",
+        // p2-sing-e. All five DRIVEN, not excluded: `rejectUnknownKeys` runs
+        // first in each case, so an unknown key is refused before anything
+        // else happens. This suite's bare router has no singing engine wired
+        // in (no `singServices`) and no voice-recorder window, so even a
+        // well-formed call would only refuse; nothing here can start an
+        // engine, download anything, or open a window.
+        "sing.sidecarStart", "sing.installEngine", "sing.cancelInstall",
+        "sing.listVoices", "sing.openVoiceRecorder",
+        // p2-sing-x7 part A. DRIVEN, not excluded: sing.capabilities reads the
+        // language list and, with an engine wired in, the install marker; this
+        // suite's bare router has none, so it answers from LyricLanguage alone.
+        // It never starts, installs or downloads anything.
+        "sing.capabilities",
     ]
 
     /// AudioComponent enumeration verbs, present in `zeroParamVerbs` (they
@@ -347,7 +365,7 @@ struct ZeroParamVerbRejectionTests {
         let sourceVerbs = try Self.zeroParamVerbsInSource()
         #expect(!sourceVerbs.isEmpty, "the source scan itself must find something, or this test is vacuously green")
         #expect(Set(Self.zeroParamVerbs) == sourceVerbs)
-        #expect(Self.zeroParamVerbs.count == 54)   // 54 at m39-tpl-6 (template.list, DRIVEN — reads the template library's files, writes nothing) <- 53 at m39-dm (instrument.listDrumPresets, DRIVEN — a compile-time preset list with no store, device or sidecar behind it) <- 52 at m39-e (mod.describeKinds, DRIVEN — a static catalogue read that touches no store state, no device and no sidecar) <- 51 at m34-h-1 (looper.undoLayer + looper.status + looper.end, all DRIVEN; the deck's other four verbs all take params) <- 48 at m34-c (instrument.listDownloadableSoundBanks + instrument.soundBankDownloadStatus + instrument.cancelSoundBankDownload, all DRIVEN; instrument.downloadSoundBank is NOT here — it requires `id`) <- 45 at m34-h <- 39 at m23-af (transport.panic) -> 40 at m20-j (output.listDevices) -> 41 at m23-br-1 (engine.auPrepareStats) -> 42 at m28-knob (midi.getControlMap) -> 43 at m24-n (project.embeddedVoices) -> 45 at m34-h (transport.recordLayer + transport.finishLayer, both DRIVEN)
+        #expect(Self.zeroParamVerbs.count == 61)   // 61 at m39-w4-10 (pattern.list, DRIVEN — a compile-time list of drum beats, no store, device or sidecar) <- 60 at p2-sing-x7 part A (sing.capabilities, DRIVEN — no engine is touched) <- 59 at p2-sing-e (sing.sidecarStart, sing.installEngine, sing.cancelInstall, sing.listVoices, sing.openVoiceRecorder, all DRIVEN — the unknown key is refused before the engine, the consent request or the window is reached) <- 54 at m39-tpl-6 (template.list, DRIVEN — reads the template library's files, writes nothing) <- 53 at m39-dm (instrument.listDrumPresets, DRIVEN — a compile-time preset list with no store, device or sidecar behind it) <- 52 at m39-e (mod.describeKinds, DRIVEN — a static catalogue read that touches no store state, no device and no sidecar) <- 51 at m34-h-1 (looper.undoLayer + looper.status + looper.end, all DRIVEN; the deck's other four verbs all take params) <- 48 at m34-c (instrument.listDownloadableSoundBanks + instrument.soundBankDownloadStatus + instrument.cancelSoundBankDownload, all DRIVEN; instrument.downloadSoundBank is NOT here — it requires `id`) <- 45 at m34-h <- 39 at m23-af (transport.panic) -> 40 at m20-j (output.listDevices) -> 41 at m23-br-1 (engine.auPrepareStats) -> 42 at m28-knob (midi.getControlMap) -> 43 at m24-n (project.embeddedVoices) -> 45 at m34-h (transport.recordLayer + transport.finishLayer, both DRIVEN)
     }
 
     /// NOTE: this compares against the SOURCE SCRAPE, not `Self.zeroParamVerbs`
@@ -367,7 +385,7 @@ struct ZeroParamVerbRejectionTests {
                 "a typo'd verb name in the exclusion set would silently shrink drivenVerbs without anyone noticing")
         #expect(Set(Self.drivenVerbs).isDisjoint(with: Self.notDrivenForFlakeReasons))
         #expect(Set(Self.drivenVerbs).union(Self.notDrivenForFlakeReasons) == sourceVerbs)
-        #expect(Self.drivenVerbs.count == 52)   // 52 at m39-tpl-6 (template.list) <- 51 at m39-dm (instrument.listDrumPresets) <- 50 at m39-e (mod.describeKinds) <- 49 at m34-h-1 (looper.undoLayer + looper.status + looper.end — DRIVEN: with no deck session open each one refuses or answers null without reaching the transport, a device or a sidecar) <- 46 at m34-c (the three no-param sound-bank download verbs, all DRIVEN — catalogue read, status read and a cancel that refuses when nothing runs) <- 43 at m34-h <- 37 at m23-af (transport.panic) -> 38 at m20-j (output.listDevices) -> 39 at m23-br-1 (engine.auPrepareStats) -> 40 at m28-knob (midi.getControlMap — DRIVEN: reading the map is passive and opens no device) -> 41 at m24-n (project.embeddedVoices — DRIVEN: a model read plus a few fileExists calls, no device and no sidecar) -> 43 at m34-h (transport.recordLayer + transport.finishLayer — DRIVEN: rejectUnknownKeys runs before the store call, so no take can start)
+        #expect(Self.drivenVerbs.count == 59)   // 59 at m39-w4-10 (pattern.list) <- 58 at p2-sing-x7 part A (sing.capabilities) <- 57 at p2-sing-e (the five no-param singing verbs) <- 52 at m39-tpl-6 (template.list) <- 51 at m39-dm (instrument.listDrumPresets) <- 50 at m39-e (mod.describeKinds) <- 49 at m34-h-1 (looper.undoLayer + looper.status + looper.end — DRIVEN: with no deck session open each one refuses or answers null without reaching the transport, a device or a sidecar) <- 46 at m34-c (the three no-param sound-bank download verbs, all DRIVEN — catalogue read, status read and a cancel that refuses when nothing runs) <- 43 at m34-h <- 37 at m23-af (transport.panic) -> 38 at m20-j (output.listDevices) -> 39 at m23-br-1 (engine.auPrepareStats) -> 40 at m28-knob (midi.getControlMap — DRIVEN: reading the map is passive and opens no device) -> 41 at m24-n (project.embeddedVoices — DRIVEN: a model read plus a few fileExists calls, no device and no sidecar) -> 43 at m34-h (transport.recordLayer + transport.finishLayer — DRIVEN: rejectUnknownKeys runs before the store call, so no take can start)
     }
 
     /// m23-n2h durable-win sweep: every one of the 162 `allCommands` reaches

@@ -1217,6 +1217,48 @@ struct SamplerZoneIdentityWireTests {
                                      modelReads: { $0.chokeGroup.map { .number(Double($0)) } })
     }
 
+    @Test("m39-w4-6: `drumRole` survives zones → save → open → describeSampler → zonePatches")
+    func drumRoleFieldMakesTheFullRoundTrip() async throws {
+        try await roundTripZoneField(set: .string("kick"), then: .string("openHat"), key: "drumRole",
+                                     modelReads: { $0.drumRole.map { .string($0.rawValue) } })
+    }
+
+    @Test("m39-w4-6: a zonePatches `drumRole: \"other\"` CLEARS the role; an unknown word is refused by path")
+    func drumRoleOtherClearsAndUnknownIsRefused() async throws {
+        let (router, store) = makeRouter()
+        let trackID = store.addTrack(kind: .instrument).id.uuidString
+        let set = await router.handle(ControlRequest(
+            id: "1", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["zones": .array([
+                         .object(["path": .string(Self.pingPath), "drumRole": .string("snare")]),
+                     ])])]))
+        #expect(set.ok, "\(set.error ?? "-")")
+        let zoneID = try #require(store.tracks.first { $0.id.uuidString == trackID }?
+            .instrument?.sampler?.zones.first?.id)
+        #expect(store.tracks.first { $0.id.uuidString == trackID }?
+            .instrument?.sampler?.zones.first?.drumRole == .snare, "control: the role was set")
+        let cleared = await router.handle(ControlRequest(
+            id: "2", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["zonePatches": .array([
+                         .object(["id": .string(zoneID.uuidString), "drumRole": .string("other")]),
+                     ])])]))
+        #expect(cleared.ok, "\(cleared.error ?? "-")")
+        #expect(store.tracks.first { $0.id.uuidString == trackID }?
+            .instrument?.sampler?.zones.first?.drumRole == nil)
+        #expect(cleared.result?["sampler"]?["zones"]?.arrayValue?.first?["drumRole"] == nil,
+                "a zone with no role does not report one")
+        let refused = await router.handle(ControlRequest(
+            id: "3", command: "track.setInstrument",
+            params: ["trackId": .string(trackID), "kind": .string("sampler"),
+                     "sampler": .object(["zonePatches": .array([
+                         .object(["id": .string(zoneID.uuidString), "drumRole": .string("cowbell")]),
+                     ])])]))
+        #expect(!refused.ok)
+        #expect(refused.error?.contains("sampler.zonePatches[0].drumRole") == true, "\(refused.error ?? "-")")
+    }
+
     @Test("m32-f: `chokeGroup` clamps into 0...63 through the model, on BOTH zone paths")
     func chokeGroupClampsOnBothPaths() async throws {
         let (router, store) = makeRouter()

@@ -1,4 +1,5 @@
 import SwiftUI
+import AIServices
 import DAWAppKit
 
 /// The unified generation-progress card (m17-h) — the app's CANONICAL violet
@@ -14,14 +15,23 @@ import DAWAppKit
 /// violet glowing progress bar under a slow shimmer (the ClipShimmer "working"
 /// cue, never a spinner). FAILED flips the row's accent red and shows the
 /// reason VERBATIM with a dismiss ✕; DONE reads green and clears itself after
-/// a short linger. There is NO cancel button — ACE-Step's upstream job API has
-/// no abort route, and offering a lie is worse than offering nothing.
+/// a short linger. There is NO cancel button on a SONG row — ACE-Step's upstream
+/// job API has no abort route, and offering a lie is worse than offering nothing.
+///
+/// A SING row is different (p2-sing-x8, base design §5.5): the sing coordinator
+/// CAN stop a take at the next line, so a sing row (SING or AGENT) shows its ETA
+/// ("about 1:05 left", SF Mono) and [Cancel], which becomes "Stopping after this
+/// line…". Both come from `SingTakeModel` (`liveRow`, `cancel(jobID:)` →
+/// `SingJobCoordinator.cancel`, what `sing.cancelJob` calls); a refused cancel
+/// (`jobFinished` once landing has started) shows in its own words.
 ///
 /// All state + transitions live in the headless `GenerationPresenceModel`
 /// (DAWAppKit); this view owns only the 1 s poll cadence (a `.task` loop — the
 /// SketchpadView split) and dies with the card when the registry empties.
 struct GenerationPresenceCard: View {
     var presence: GenerationPresenceModel
+    /// The sing rows' ETA and [Cancel] (nil: song rows only, the card as it was).
+    var singTakes: SingTakeModel? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -33,6 +43,7 @@ struct GenerationPresenceCard: View {
                     percent: GenerationPresenceModel.percentText(for: job.phase),
                     fraction: GenerationPresenceModel.progressFraction(for: job.phase),
                     elapsed: presence.elapsedText(for: job),
+                    sing: singLine(for: job),
                     onDismiss: { presence.dismiss(job.id) })
             }
         }
@@ -52,9 +63,21 @@ struct GenerationPresenceCard: View {
         .task {
             while !Task.isCancelled {
                 await presence.poll()
+                if let singTakes {
+                    await singTakes.refreshLive(jobIDs: presence.rows.compactMap(\.jobID))
+                }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
+    }
+
+    /// A sing row's ETA, [Cancel] and refused-cancel line; nil for any other row.
+    private func singLine(for job: GenerationPresenceJob) -> SingPresenceLine? {
+        guard let singTakes, let jobID = job.jobID, SingPresenceBridge.isSingJob(jobID) else { return nil }
+        let row = singTakes.liveRow(jobID: jobID)
+        return SingPresenceLine(eta: row?.eta, cancelTitle: row?.cancelTitle, cancelEnabled: row?.cancelEnabled ?? false,
+                                refusal: singTakes.cancelRefusals[jobID],
+                                onCancel: { Task { await singTakes.cancel(jobID: jobID) } })
     }
 
     private var header: some View {
@@ -74,12 +97,22 @@ struct GenerationPresenceCard: View {
 
 /// One job row — the SketchpadCandidateRow lifecycle body, generalized to the
 /// origin-tagged presence registry.
+/// A sing row's extra line (p2-sing-x8): the ETA, [Cancel] and a refused cancel, in their own words.
+struct SingPresenceLine {
+    var eta: String?
+    var cancelTitle: String?
+    var cancelEnabled: Bool
+    var refusal: String?
+    var onCancel: () -> Void
+}
+
 private struct GenerationPresenceRow: View {
     var job: GenerationPresenceJob
     var stage: String
     var percent: String?
     var fraction: Double?
     var elapsed: String
+    var sing: SingPresenceLine? = nil
     var onDismiss: () -> Void
 
     private var accent: Color {
@@ -97,6 +130,7 @@ private struct GenerationPresenceRow: View {
             identityLine
             statusLine
             if isWorking { progressBar }
+            if let sing { singControls(sing) }
             if case .failed(let reason) = job.phase { failureReason(reason) }
         }
         .padding(9)
@@ -181,6 +215,43 @@ private struct GenerationPresenceRow: View {
             }
         }
         .frame(height: 4)
+    }
+
+    /// ETA (SF Mono) and [Cancel] / "Stopping after this line…" while the take can still be stopped; a refused
+    /// cancel's words under them.
+    @ViewBuilder
+    private func singControls(_ sing: SingPresenceLine) -> some View {
+        if isWorking, sing.eta != nil || sing.cancelTitle != nil {
+            HStack(spacing: 8) {
+                if let eta = sing.eta {
+                    Text(eta)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(DAWTheme.textSecondary)
+                }
+                Spacer(minLength: 4)
+                if let title = sing.cancelTitle {
+                    Button(action: sing.onCancel) {
+                        Text(title)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(sing.cancelEnabled ? DAWTheme.textPrimary : DAWTheme.textDim)
+                            .padding(.horizontal, 8)
+                            .frame(height: 20)
+                            .background(DAWTheme.background.opacity(0.6))
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!sing.cancelEnabled)
+                    .help(title)
+                }
+            }
+        }
+        if let refusal = sing.refusal {
+            Text(refusal)
+                .font(.system(size: 10))
+                .foregroundStyle(DAWTheme.record)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private func failureReason(_ reason: String) -> some View {

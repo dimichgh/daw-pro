@@ -1,4 +1,5 @@
 import AVFAudio
+import CryptoKit
 import DAWCore
 import Foundation
 import Testing
@@ -196,5 +197,138 @@ struct DelayTempoSyncEngineTests {
               + "(expected 24000), @90 \(String(describing: echo90)) (expected 32000)")
         #expect(echo120 == 24_000)
         #expect(echo90 == 32_000)
+    }
+
+    // MARK: - m39-c byte gate (generalising the resolver may not change tone)
+
+    /// sha256 over the raw Float32 samples, channel by channel — the TONE,
+    /// never a file's header bytes.
+    private func sampleHash(_ audio: RenderedAudio) -> String {
+        var hasher = SHA256()
+        for channel in audio.channelData {
+            channel.withUnsafeBytes { hasher.update(bufferPointer: $0) }
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// m39-c: five offline bounces through the real `OfflineRenderer` intake
+    /// seams (track chain AND master chain) — a synced delay at two tempos,
+    /// the SAME delay unsynced, a strip with no delay, and a synced delay on
+    /// the master. Every render is made twice and must match itself
+    /// (determinism: without it a byte gate means nothing); every axis must
+    /// change the bytes (an axis that changes nothing proves nothing); and
+    /// the first echo must land on the frame the division says (the physics).
+    /// With `M39C_BYTEGATE_OUT` set, the `name sha256` lines and the WAVs are
+    /// written there, so a capture before and after a resolver change can be
+    /// compared byte for byte.
+    @Test("m39-c byte gate: synced, unsynced and delay-free bounces land where the tempo says")
+    func m39cByteGate() throws {
+        let impulse = try writeImpulseWAV(seconds: 1.5)
+        defer { try? FileManager.default.removeItem(at: impulse) }
+        let clip = Clip(name: "i", startBeat: 0, lengthBeats: 4, audioFileURL: impulse)
+        // a and b differ ONLY in `sync`: the stored 350 ms is what an
+        // unsynced (or wrongly unresolved) delay plays.
+        func delay(sync: Bool, division: NoteDivision) -> EffectDescriptor {
+            EffectDescriptor(kind: .delay,
+                             delay: DelayParams(timeMs: 350, feedback: 0.45, mix: 0.5,
+                                                sync: sync, division: division))
+        }
+        func track(_ effects: [EffectDescriptor]) -> Track {
+            var track = Track(name: "Echo", kind: .audio, effects: effects)
+            track.clips = [clip]
+            return track
+        }
+        // (name, tracks, master chain, BPM, expected first-echo frame; nil = none)
+        let variants: [(String, [Track], [EffectDescriptor], Double, Int?)] = [
+            // 1/8d @ 120 = 375 ms = 18 000 frames.
+            ("a120-synced-1-8d", [track([delay(sync: true, division: .eighthDotted)])], [], 120, 18_000),
+            // 1/8d @ 90 = 500 ms = 24 000 frames.
+            ("a90-synced-1-8d", [track([delay(sync: true, division: .eighthDotted)])], [], 90, 24_000),
+            // Unsynced: the stored 350 ms = 16 800 frames.
+            ("b120-unsynced", [track([delay(sync: false, division: .eighthDotted)])], [], 120, 16_800),
+            // No delay anywhere: nothing after the impulse.
+            ("c120-no-delay", [track([EffectDescriptor(kind: .eq)])], [], 120, nil),
+            // The MASTER intake seam: 1/4 @ 120 = 500 ms = 24 000 frames.
+            ("m120-master-synced-1-4", [track([])], [delay(sync: true, division: .quarter)], 120, 24_000),
+        ]
+
+        var hashes: [String: String] = [:]
+        var lines: [String] = []
+        let outDir = ProcessInfo.processInfo.environment["M39C_BYTEGATE_OUT"].map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        }
+        for (name, tracks, master, bpm, expectedEcho) in variants {
+            func bounce() throws -> RenderedAudio {
+                try OfflineRenderer().render(tracks: tracks, tempoMap: TempoMap(constantBPM: bpm),
+                                             durationSeconds: 1.0, masterEffects: master)
+            }
+            let first = try bounce()
+            let second = try bounce()
+            let hash = sampleHash(first)
+            // Determinism: the same program bounced twice is the same bytes.
+            #expect(sampleHash(second) == hash, "\(name) is not deterministic")
+            #expect(first.frameCount == 48_000, "\(name): \(first.frameCount) frames")
+            // No NaN/inf anywhere (the render-path guard).
+            #expect(first.channelData.allSatisfy { $0.allSatisfy { $0.isFinite } },
+                    "\(name) carries a non-finite sample")
+            // The dry impulse is there (the render is not silence).
+            let dryPeak = first.channelData[0].prefix(64).map { abs($0) }.max() ?? 0
+            #expect(dryPeak > 0.1, "\(name): dry peak \(dryPeak)")
+            // The physics: where the first echo lands, past the dry impulse.
+            let tail = first.channelData[0][1_000...]
+            let echo = tail.firstIndex { abs($0) > 0.1 }
+            let tailPeak = tail.map { abs($0) }.max() ?? 0
+            print("[measured] m39-c byte gate \(name): sha256 \(hash), first echo "
+                  + "\(String(describing: echo)) (expected \(String(describing: expectedEcho))), "
+                  + "tail peak \(tailPeak)")
+            if let expectedEcho {
+                #expect(echo == expectedEcho, "\(name): echo at \(String(describing: echo))")
+            } else {
+                #expect(tailPeak < 0.05, "\(name): tail peak \(tailPeak) with no delay")
+            }
+            hashes[name] = hash
+            lines.append("\(name) \(hash)")
+            if let outDir {
+                try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+                try writeFloatWAV(first, to: outDir.appendingPathComponent("\(name).wav"))
+            }
+        }
+        // Every axis changes the bytes (positive controls for the gate).
+        #expect(hashes["a120-synced-1-8d"] != hashes["a90-synced-1-8d"], "tempo axis did nothing")
+        #expect(hashes["a120-synced-1-8d"] != hashes["b120-unsynced"], "sync axis did nothing")
+        #expect(hashes["b120-unsynced"] != hashes["c120-no-delay"], "delay axis did nothing")
+        #expect(hashes["m120-master-synced-1-4"] != hashes["c120-no-delay"], "master axis did nothing")
+        if let outDir {
+            try (lines.joined(separator: "\n") + "\n").write(
+                to: outDir.appendingPathComponent("hashes.txt"), atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Writes a rendered program as a stereo Float32 WAV (the byte gate's
+    /// listenable record; the gate itself compares sample hashes).
+    private func writeFloatWAV(_ audio: RenderedAudio, to url: URL) throws {
+        let channels = audio.channelData.count
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                                sampleRate: audio.sampleRate,
+                                                channels: AVAudioChannelCount(channels),
+                                                interleaved: false))
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(audio.frameCount)))
+        let data = try #require(buffer.floatChannelData)
+        for (index, samples) in audio.channelData.enumerated() {
+            for (frame, sample) in samples.enumerated() { data[index][frame] = sample }
+        }
+        buffer.frameLength = AVAudioFrameCount(audio.frameCount)
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: audio.sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        try file.write(from: buffer)
     }
 }

@@ -26,11 +26,25 @@ round-trips exactly) therefore reproduces the spike's floats bit for bit. `build
 
 Standard library only; Python 3.9 compatible. The phonemizer is injected: `phonemize(word) -> [ARPAbet tokens]`
 (already filtered the spike's way: `[t for t in g2p(word.lower()) if t.strip() and t[0].isalpha()]`).
+
+facadeVersion 2 (design docs/design/2026-10-06-p2-sing-expansion.md §6.4): `langs` (one per word, default all "en")
+and an injected `lexicon` (`syllables(lang, chars) -> [syllable or None per character]`, `tone_rank(lang, base) ->
+tones, most common first`). English words take today's path, call for call, so an all-English phrase builds today's
+bytes (tests P2/P5). A zh/yue word is ONE token, `zh_`/`yue_` + its tonal syllable:
+  * a run of consecutive Chinese-character words of one language is phonemised in ONE call (a character with two
+    readings needs its neighbours), and mapped back one syllable per character;
+  * a typed syllable (ni3, lu:4 or lv4, nei5) passes through, lower-cased;
+  * a syllable whose tone the phone set lacks becomes the same syllable's most common tone that IS in the set
+    (the lexicon ranks; ties and unranked tones go lowest number first), and is reported in
+    info["substitutions"] = [{word, asked, used}] (each distinct triple once);
+  * no syllable at all (an unknown character, a two-syllable reading), or no tone of it in the set: `unknownPhone`,
+    naming the character. The metadata's `language` becomes the first non-English word's language name.
 """
 from __future__ import annotations
 
 import json
 
+from . import langs as L
 from .refusals import Refusal
 
 SP = "<SP>"
@@ -64,21 +78,90 @@ class _Phonemes:
         return tok
 
 
+def _syllable_token(lang, word, syl, phoneset, lexicon, subs):
+    """One Chinese word's token (see the module docstring); appends to `subs` when the tone is substituted."""
+    pre = L.PREFIX[lang]
+    if not L.is_syllable(lang, syl):
+        raise Refusal("unknownPhone", "I don't know how to sing %r in %s: there is no single sung syllable for it "
+                      "(got %r). Try a different character, or type its %s."
+                      % (word, L.NAME[lang], syl, L.EXAMPLE[lang]))
+    tok = pre + syl
+    if phoneset is None or tok in phoneset:
+        return tok
+    base, tone = L.split_tone(syl)
+    present = [t for t in L.TONES[lang] if pre + base + t in phoneset]
+    if not present:
+        raise Refusal("unknownPhone", "The word %r is sung %r in %s, and the singing engine knows no tone of %r."
+                      % (word, syl, L.NAME[lang], base))
+    order = list(lexicon.tone_rank(lang, base)) if lexicon is not None else []
+    ranked = [t for t in order if t in present] + [t for t in present if t not in order]
+    used = base + ranked[0]
+    entry = {"word": word, "asked": syl, "used": used}
+    if entry not in subs:
+        subs.append(entry)
+    return pre + used
+
+
+def chinese_tokens(words, langs, lexicon, phoneset=None):
+    """-> ({word index: token} for every non-English word, substitutions). English words are left to _Phonemes."""
+    toks, subs = {}, []
+    j = 0
+    while j < len(words):
+        lang = langs[j]
+        if lang == L.DEFAULT:
+            j += 1
+            continue
+        if lang not in L.TONES:
+            raise Refusal("languageNotSupported", "The word %r asks for language %r, which this singing engine does "
+                          "not sing." % (words[j][0], lang))
+        text = words[j][0]
+        if L.is_cjk_char(text):
+            if lexicon is None:
+                raise Refusal("languageNotSupported", "This singing engine has no %s phonemiser." % L.NAME[lang])
+            k = j + 1
+            while k < len(words) and langs[k] == lang and L.is_cjk_char(words[k][0]):
+                k += 1
+            run = "".join(w for w, _ in words[j:k])
+            syl = list(lexicon.syllables(lang, run))
+            if len(syl) != k - j:
+                raise Refusal("badRequest", "Internal: the %s phonemiser gave %d syllables for the %d characters %r."
+                              % (L.NAME[lang], len(syl), k - j, run))
+            for m in range(j, k):
+                toks[m] = _syllable_token(lang, words[m][0], syl[m - j], phoneset, lexicon, subs)
+            j = k
+        else:
+            syl = L.romanised(lang, text)
+            if syl is None:
+                raise Refusal("badRequest", "The word %r is marked %s, but it is not one Chinese character or one "
+                              "syllable typed as %s." % (text, L.NAME[lang], L.EXAMPLE[lang]))
+            toks[j] = _syllable_token(lang, text, syl, phoneset, lexicon, subs)
+            j += 1
+    return toks, subs
+
+
 def build_meta(notes, words, lead=DEFAULT_LEAD, trail=DEFAULT_TRAIL, phonemize=None, phoneset=None,
-               pitch_offset=0, f0_const=None, language="English"):
+               pitch_offset=0, f0_const=None, language="English", langs=None, lexicon=None):
     """notes: [(midi, start_s, end_s)] unit-relative seconds, sorted and non-overlapping (callers validate;
     the asserts here are the spike's own). words: [(text, [note indices])], covering every note exactly once.
+    langs (v2): one language code per word (None = every word English); lexicon: see the module docstring.
 
     Returns (meta, info) exactly as the spike's build() did, except that `meta` is the dict itself (the spike
-    returned [meta]). `dump_meta_list([meta])` gives the spike's file bytes.
+    returned [meta]). `dump_meta_list([meta])` gives the spike's file bytes. info["substitutions"] lists the tone
+    substitutions (always [] for an all-English phrase).
     """
     ph = _Phonemes(phonemize, phoneset)
     word_of = {}
-    for w, idx in words:
+    for j, (w, idx) in enumerate(words):
         for k, i in enumerate(idx):
-            word_of[i] = (w, 2 if k == 0 else 3)
+            word_of[i] = (w, 2 if k == 0 else 3, j)
     if sorted(word_of) != list(range(len(notes))):
         raise Refusal("wordsDoNotCoverNotes", "Every note needs exactly one word.")
+    other, subs = {}, []
+    if langs is not None and any(lang != L.DEFAULT for lang in langs):
+        if len(langs) != len(words):
+            raise Refusal("badRequest", "Internal: %d languages for %d words." % (len(langs), len(words)))
+        other, subs = chinese_tokens(words, langs, lexicon, phoneset)
+        language = L.NAME[next(lang for lang in langs if lang != L.DEFAULT)]
     # boundaries in seconds (spike: ev = [("<SP>", 0.0, LEAD, 0, 1, "<SP>")])
     ev = [(SP, 0.0, lead, 0, 1, SP)]
     t_prev_end = lead
@@ -88,8 +171,8 @@ def build_meta(notes, words, lead=DEFAULT_LEAD, trail=DEFAULT_TRAIL, phonemize=N
             raise Refusal("notesOverlap", "Note %d starts before the previous note ends." % i)
         if st > t_prev_end + 1e-9:
             ev.append((SP, t_prev_end, st, 0, 1, SP))
-        w, ty = word_of[i]
-        ev.append((ph.token(w), st, en, p + pitch_offset, ty, w))
+        w, ty, j = word_of[i]
+        ev.append((other[j] if j in other else ph.token(w), st, en, p + pitch_offset, ty, w))
         t_prev_end = en
     ev.append((SP, t_prev_end, t_prev_end + trail, 0, 1, SP))
     bounds = [round(x[1] * 100) / 100 for x in ev] + [round(ev[-1][2] * 100) / 100]
@@ -128,7 +211,7 @@ def build_meta(notes, words, lead=DEFAULT_LEAD, trail=DEFAULT_TRAIL, phonemize=N
         raise Refusal("badRequest", "Internal: durations %r vs span %d ms." % (sum(durs), total_ms))
     info = {"entries": lengths[0], "notes": len(notes), "total_ms": total_ms, "mel_frames": n_frames,
             "score_notes_s": [(round(lead + s, 3), round(lead + e, 3), p + pitch_offset) for p, s, e in notes],
-            "bounds_s": bounds_of(meta)}
+            "bounds_s": bounds_of(meta), "substitutions": subs}
     return meta, info
 
 

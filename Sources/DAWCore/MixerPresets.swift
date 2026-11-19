@@ -352,6 +352,40 @@ public enum MixerPresetCatalog {
 
 // MARK: - Apply (store method)
 
+/// What `applyMixerPreset` did (m39-tpl-f9, design §5.4 / §16 F-9): the strip
+/// after the edit, and every sidechain key the REPLACED chain carried. A
+/// preset's own chain never carries a key (`freshChain` copies no
+/// `sidechainSourceTrackID`), so the only routing a preset can change is a key
+/// it removes along with the effect that held it.
+///
+/// TODO(TPL-F9 wire, W8-SE2 owns `Commands.swift`): `mixer.applyPreset`'s reply
+/// (`fxResult`, `{trackId, effects}`) gains ONE additive field,
+/// `removedSidechainKeys: [{effectId, kind, sourceTrackId, sourceTrackName,
+/// message}]` — always present, `[]` when nothing was keyed;
+/// `sourceTrackName` is null when no track in the song has that id. The MCP
+/// tool `mixer_apply_preset` in `mcp-server/src/server.ts` documents the field
+/// and the mid-take refusal.
+public struct MixerPresetApplyResult: Sendable, Equatable {
+    /// One sidechain key the preset removed: the replaced effect that held it,
+    /// and the track it listened to.
+    public struct RemovedSidechainKey: Sendable, Equatable {
+        /// The replaced effect's id. It no longer exists after the apply.
+        public let effectID: UUID
+        public let effectKind: EffectDescriptor.Kind
+        /// The track the effect listened to (the key's source).
+        public let sourceTrackID: UUID
+        /// That track's name, or nil when no track in the song has that id.
+        public let sourceTrackName: String?
+        /// One plain sentence naming the strip, the source and the preset.
+        public let message: String
+    }
+
+    /// The strip after the apply; its new chain is `track.effects`.
+    public let track: Track
+    /// Every key the replaced chain carried, in chain order; empty when none.
+    public let removedSidechainKeys: [RemovedSidechainKey]
+}
+
 extension ProjectStore {
     /// Applies a curated mixer preset to a track/bus strip: the preset's insert
     /// chain REPLACES the strip's current chain as ONE undoable edit
@@ -361,12 +395,18 @@ extension ProjectStore {
     ///
     /// Guards OUTSIDE the edit body (the fx.* precedent): unknown track →
     /// `trackNotFound`; unknown preset → `mixerPresetNotFound` whose message
-    /// lists every valid preset name. The replacement publishes through the same
-    /// atomic `performEdit` snapshot the fx.* commands use — never a piecemeal
-    /// live-graph mutation (M4 convention). Returns the updated track so the
-    /// control layer / callers can echo the resulting chain.
+    /// lists every valid preset name; then (m39-tpl-f9) a chain holding a
+    /// sidechain-keyed effect while recording → `transportBusy`, through
+    /// `requireRoutingMutationAllowed`. That is `removeEffect`'s rule exactly:
+    /// replacing the chain removes the keyed effect, which clears a key edge
+    /// (a routing change, refused mid-take); a chain with no key is a plain
+    /// chain publish and stays legal mid-take. The replacement publishes
+    /// through the same atomic `performEdit` snapshot the fx.* commands use —
+    /// never a piecemeal live-graph mutation (M4 convention). Returns the
+    /// updated track and every sidechain key the replaced chain carried
+    /// (`MixerPresetApplyResult`).
     @discardableResult
-    public func applyMixerPreset(trackID: UUID, presetName: String) throws -> Track {
+    public func applyMixerPreset(trackID: UUID, presetName: String) throws -> MixerPresetApplyResult {
         guard let ti = tracks.firstIndex(where: { $0.id == trackID }) else {
             throw ProjectError.trackNotFound(trackID)
         }
@@ -375,11 +415,44 @@ extension ProjectStore {
             throw ProjectError.mixerPresetNotFound(
                 "unknown mixer preset '\(presetName)' — valid: \(valid)")
         }
+        // m39-tpl-f9: the SAME predicate `removeEffect` guards on (a set
+        // `sidechainSourceTrackID`, bypassed or not), applied to every effect
+        // the preset replaces. Guarded exactly when keyed, never always.
+        let keyed = tracks[ti].effects.filter { $0.sidechainSourceTrackID != nil }
+        if !keyed.isEmpty {
+            try requireRoutingMutationAllowed("apply a preset that removes a sidechain-keyed effect")
+        }
+        let stripName = tracks[ti].name
+        let removedKeys: [MixerPresetApplyResult.RemovedSidechainKey] = keyed.compactMap { effect in
+            guard let sourceID = effect.sidechainSourceTrackID else { return nil }
+            let sourceName = tracks.first(where: { $0.id == sourceID })?.name
+            return .init(effectID: effect.id, effectKind: effect.kind, sourceTrackID: sourceID,
+                         sourceTrackName: sourceName,
+                         message: Self.removedSidechainKeyMessage(
+                            stripName: stripName, kind: effect.kind, sourceName: sourceName,
+                            presetDisplayName: preset.displayName))
+        }
         let newChain = preset.freshChain()
         performEdit("Apply Preset '\(preset.displayName)'") {
             tracks[ti].effects = newChain
             engine?.tracksDidChange(tracks)
         }
-        return tracks[ti]
+        return MixerPresetApplyResult(track: tracks[ti], removedSidechainKeys: removedKeys)
+    }
+
+    /// The sentence for one removed key, in the words `TemplateCapture` uses
+    /// for a dropped one (a gate "opens and closes with" its source; any other
+    /// keyed effect "ducks").
+    static func removedSidechainKeyMessage(stripName: String, kind: EffectDescriptor.Kind,
+                                           sourceName: String?, presetDisplayName: String) -> String {
+        let effect = "The \(stripName) \(TemplateCapture.effectNoun(kind))"
+        guard let sourceName else {
+            return "\(effect) listened to a track that is no longer in the song, "
+                + "and '\(presetDisplayName)' replaced it."
+        }
+        let follows = kind == .gate
+            ? "\(stripName) will no longer open and close with \(sourceName)"
+            : "\(stripName) will no longer duck when \(sourceName) plays"
+        return "\(effect) listened to \(sourceName), and '\(presetDisplayName)' replaced it, so \(follows)."
     }
 }

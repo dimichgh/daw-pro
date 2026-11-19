@@ -1,0 +1,3938 @@
+[
+  {
+    "alternativeScoreBits" : [
+      "3fe9d6eec6a9f406",
+      "3fe725c55e62732a",
+      "3fe28f77ec04397a"
+    ],
+    "confidenceBits" : "3fedf935e99eda26",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.8074869041589643,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.723360714287627,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5800132379243188,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 0.936671215334006,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "C"
+    },
+    "name" : "audio: C major I-IV-V-I"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe8d83073341da1",
+      "3fe31857946b80dd",
+      "3fe15f68c8d5a407"
+    ],
+    "confidenceBits" : "3fed95c1348caf06",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.7763902902669778,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5967214487864357,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5428966448354239,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.9245306040151895,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "D"
+    },
+    "name" : "audio: D major ii-V-I"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fea2b23fd1fbd8a",
+      "3fe77659e3129f69",
+      "3fe201502da72d08"
+    ],
+    "confidenceBits" : "3fedc2fe3b3a3c5d",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.8177661842182016,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.7331971583380269,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5626603023205528,
+          "tonic" : "D#"
+        }
+      ],
+      "confidence" : 0.9300528675829686,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F#"
+    },
+    "name" : "audio: F# major I-IV-V-I"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe38612ed70c80a",
+      "3fe1fca4c29e9048",
+      "3fe0540518439a11"
+    ],
+    "confidenceBits" : "3feccf44ac38089b",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6101164472113407,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5620902825508063,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5102563356311426,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 0.9003013003969217,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A"
+    },
+    "name" : "audio: A minor i-iv-V-i"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe38c7d45783d61",
+      "3fe1e8e31e2d3700",
+      "3fe049ce96dba4f8"
+    ],
+    "confidenceBits" : "3fecd7fb4f610a25",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6108995777921501,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5596786107432479,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5090096422619856,
+          "tonic" : "G#"
+        }
+      ],
+      "confidence" : 0.901364951169232,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "C#"
+    },
+    "name" : "audio: C# minor i-iv-V-i"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe393c8d42362d7",
+      "3fe249a2f4522de1",
+      "3fe0a9e53a6c39fd"
+    ],
+    "confidenceBits" : "3fec9e22dd608079",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.61179009850738,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5714888355154778,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5207391873425987,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.8943037341851002,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "G"
+    },
+    "name" : "audio: G minor i-iv-V-i"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd04487cabae6be",
+      "3fca8e5f5fc7786e",
+      "3fc94ba976fa6418"
+    ],
+    "confidenceBits" : "3fb61341871d8809",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.2541827659402819,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.20746986557691421,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.19762152013279954,
+          "tonic" : "G#"
+        }
+      ],
+      "confidence" : 0.08623132275309343,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "F"
+    },
+    "name" : "audio: percussion"
+  },
+  {
+    "alternativeScoreBits" : [
+      "0000000000000000",
+      "0000000000000000",
+      "0000000000000000"
+    ],
+    "confidenceBits" : "0000000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "audio: silence"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5a1b4ddf55d6b",
+      "3fe2250ff252ccee",
+      "3fe015a72aacef66"
+    ],
+    "confidenceBits" : "3feba6d61cd22a47",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6759895644308193,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5670242054824521,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.502643187857285,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.8641157687100723,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "E"
+    },
+    "name" : "chroma: uniform 0"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdd9ab65c0008ce",
+      "3fdac692b52d23f3",
+      "3fd7dab1c635422e"
+    ],
+    "confidenceBits" : "3fdca97dd43e50cd",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.46256789192569847,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.41836993878365475,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3727230487466241,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.44784494139572645,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: uniform 1"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdead41c6592e29",
+      "3fd6d7f30047f60d",
+      "3fd68c90fbfb5ed5"
+    ],
+    "confidenceBits" : "3fdd7e91a0587846",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.47932476396519746,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.35693049457026477,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.3523294888268372,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.460850149714933,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: uniform 2"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd9f546c68b4d54",
+      "3fd9175ffc6f7d32",
+      "3fd7ed0019aacc99"
+    ],
+    "confidenceBits" : "3fe39900dd72dd8a",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.40559548749043484,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.39205169345764823,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.37384035593567827,
+          "tonic" : "A#"
+        }
+      ],
+      "confidence" : 0.6124271702928337,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: uniform 3"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd5a5492290f73b",
+      "3fd4e86d6bf29c57",
+      "3fd45eccad3d87c4"
+    ],
+    "confidenceBits" : "3fe21ec6d009174c",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.33821323752987426,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.32668624440925015,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3182861034202882,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 0.566256910628661,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "D"
+    },
+    "name" : "chroma: uniform 4"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd91ee250bd2c76",
+      "3fd8e800c8d33a77",
+      "3fd805249437a5f1"
+    ],
+    "confidenceBits" : "3f8cc5024fa0a518",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.39251001248039274,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3891603432829593,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3753138968882857,
+          "tonic" : "C"
+        }
+      ],
+      "confidence" : 0.014047639899291073,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "G"
+    },
+    "name" : "chroma: uniform 5"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd030e6ef99051b",
+      "3fce19895c296fdb",
+      "3fcb9b820d80ab6f"
+    ],
+    "confidenceBits" : "3fa4280019854ebb",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.252984746915972,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.23515431404200524,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2156832281046621,
+          "tonic" : "D#"
+        }
+      ],
+      "confidence" : 0.0393676787522543,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: uniform 6"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd70d04bc0783f5",
+      "3fd5204d153087da",
+      "3fd30174f6a60639"
+    ],
+    "confidenceBits" : "3fa219b379306458",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.3601695858215515,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.33009650296491844,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.29696392142077205,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.03535233358724871,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "D"
+    },
+    "name" : "chroma: uniform 7"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fcd03d5b69c9f9f",
+      "3fc867aabfedd691",
+      "3fc26084c3060e30"
+    ],
+    "confidenceBits" : "3fd9091dc5074eff",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.22667952934830013,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.19066366550002958,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.14357051394118647,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.3911814140421796,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "C#"
+    },
+    "name" : "chroma: uniform 8"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe2e0f10f4da946",
+      "3fdf96cf2cd3c616",
+      "3fda0ba746aa29e6"
+    ],
+    "confidenceBits" : "3fdb2cfff534eb82",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.589958696259864,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4935796678319958,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.406961268433092,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.42462157197922334,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A"
+    },
+    "name" : "chroma: uniform 9"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd4db536ae4b624",
+      "3fd3e65b6d098664",
+      "3fd3c213b423a349"
+    ],
+    "confidenceBits" : "3fd603a26b20b268",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.3258865875130559,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.3109348835770105,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.30872051803321604,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.34397182904903056,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: uniform 10"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd811a14b3b9277",
+      "3fd610ce409cee0e",
+      "3fd2d04a56ebefee"
+    ],
+    "confidenceBits" : "3fcdf83d3ed33b93",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.3760760531134006,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.34477573690284735,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.29396303642692956,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 0.23413816039689248,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "G"
+    },
+    "name" : "chroma: uniform 11"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe444f6160aa12f",
+      "3fdfb771e8dd51d0",
+      "3fdf69e7b1ae07f5"
+    ],
+    "confidenceBits" : "3fc1f7c8ce62ef93",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6334181242464519,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.49557159176518173,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.49083893157523956,
+          "tonic" : "D#"
+        }
+      ],
+      "confidence" : 0.14037427976097358,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: uniform 12"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fcfbeca51a67b57",
+      "3fce391170e7a842",
+      "3fcd9fdc45cf35bd"
+    ],
+    "confidenceBits" : "3fdb5334a489c810",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.24800995814163215,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.23611658108649364,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.23144105347311764,
+          "tonic" : "G#"
+        }
+      ],
+      "confidence" : 0.4269534689730117,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: uniform 13"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd8f348558da79a",
+      "3fd7811bcfc01a0d",
+      "3fd322a006f68dbe"
+    ],
+    "confidenceBits" : "3fe00b85c8f7cb30",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.38984878878420093,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3672551659405208,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.29898834877004876,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.5014065671115073,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "G#"
+    },
+    "name" : "chroma: uniform 14"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdbf8bf3bf14001",
+      "3fd7a16927008201",
+      "3fd26758078a97e5"
+    ],
+    "confidenceBits" : "3fe1541826222071",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.43705731252430274,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.36922673043048354,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2875576089521686,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.5415154213706171,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F"
+    },
+    "name" : "chroma: uniform 15"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd51525db0fd7b6",
+      "3fd2bdbbad13b5e5",
+      "3fccd4bf569e764f"
+    ],
+    "confidenceBits" : "3fe2213128685c15",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.3294157637859557,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.2928303899960539,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.22524253587191587,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.5665517605983746,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "C"
+    },
+    "name" : "chroma: uniform 16"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd68a5ac9bbd2c1",
+      "3fd28850590ca636",
+      "3fcee7b1ba9ec70b"
+    ],
+    "confidenceBits" : "3fc53e98c3e38d07",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.35219449711375367,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.289569937670055,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.24144574749293954,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.1659728008736254,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: uniform 17"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe16e1349028b02",
+      "3fdcb8d36724ad1f",
+      "3fd7fcb6aeb0f0cf"
+    ],
+    "confidenceBits" : "3fcd720869de6f68",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5446869302726045,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.44878087112984305,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.37479941425023083,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.2300425068796088,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: uniform 18"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe1e8fed44cd191",
+      "3fdfc66d25330039",
+      "3fdeff4f815a44b2"
+    ],
+    "confidenceBits" : "3fe33eddccc2736d",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5596918245778842,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4964859832070974,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.48433292038050546,
+          "tonic" : "F"
+        }
+      ],
+      "confidence" : 0.6014241217813897,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: uniform 19"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdcee0445d6e446",
+      "3fdca6e7faa9c3c3",
+      "3fd6416505e779f1"
+    ],
+    "confidenceBits" : "3fe2031c5db9d60c",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.4520273859048455,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4476871440775165,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3477413709314581,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.5628797369560643,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A"
+    },
+    "name" : "chroma: uniform 20"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd5a5e1b531946b",
+      "3fd5407744d2d53f",
+      "3fd4c77b045bda9d"
+    ],
+    "confidenceBits" : "3fdc51626fdb2ebc",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.33824961371130396,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.3320596859078541,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.32467532563843254,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.44246731685118923,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: uniform 21"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdc2288b70056d9",
+      "3fdc178eb273c913",
+      "3fdb84f310f54279"
+    ],
+    "confidenceBits" : "3fd36c969943d013",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.43960779067252315,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4389378302286257,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4299895921331323,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.30350270240092064,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "C#"
+    },
+    "name" : "chroma: uniform 22"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd36dfc62e4a40f",
+      "3fd03dd86ed309d1",
+      "3fcf9e7e142d6bff"
+    ],
+    "confidenceBits" : "3fde146a7e5ebc3e",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.3035880056145865,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.2537747461575722,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.24702430711008103,
+          "tonic" : "C"
+        }
+      ],
+      "confidence" : 0.46999609318567426,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "F"
+    },
+    "name" : "chroma: uniform 23"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe3964a05de304b",
+      "3fe02064dd6fcc69",
+      "3fdde50ff3a940c4"
+    ],
+    "confidenceBits" : "3f9b073eaacd6238",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6120958437545679,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5039543461738393,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.46710585398706095,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.026394824194854588,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "E"
+    },
+    "name" : "chroma: uniform 24"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdbc43286048f93",
+      "3fd2e904a2c3411d",
+      "3fd00215ad44ab38"
+    ],
+    "confidenceBits" : "3fb9f5fa2db3f1c9",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.4338499363677723,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2954722966651547,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.25012723847128226,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 0.10140956512254386,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: uniform 25"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe1b3cda0150c7a",
+      "3fe070d24f350c68",
+      "3fdfa334bc9fb759"
+    ],
+    "confidenceBits" : "3fe782941a5d46b9",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5531986357313052,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5137721583381678,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.49433630390455147,
+          "tonic" : "F"
+        }
+      ],
+      "confidence" : 0.7346897616318621,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "F"
+    },
+    "name" : "chroma: uniform 26"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe0fe737256a1e7",
+      "3fdf40f402cc19d9",
+      "3fde8f4413a4b05b"
+    ],
+    "confidenceBits" : "3fcbdb9e3d7e1918",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5310609086200743,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4883394267384609,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4774942581013925,
+          "tonic" : "F"
+        }
+      ],
+      "confidence" : 0.21763971331183352,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: uniform 27"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd160889f91a6e3",
+      "3fcedf93e2606292",
+      "3fcb8d41a27ae9e8"
+    ],
+    "confidenceBits" : "3fe134c081411c42",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.2715169485369257,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.24119804910221326,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.21524830278015306,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 0.5376894497393396,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "B"
+    },
+    "name" : "chroma: uniform 28"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd368c834e1923e",
+      "3fd271f6970ffd37",
+      "3fd19fb673dc6893"
+    ],
+    "confidenceBits" : "3fe065f75ba11702",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.30327038921521765,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.28820576431458583,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.275373089929084,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 0.5124470510133678,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A"
+    },
+    "name" : "chroma: uniform 29"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd19bee50e5a4b7",
+      "3fd16b9ed4813489",
+      "3fcd09eb924666c1"
+    ],
+    "confidenceBits" : "3fc8038c7fd243f3",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.27514226818182,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.2721936297646797,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.22686524050077675,
+          "tonic" : "C"
+        }
+      ],
+      "confidence" : 0.18760830155636618,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: uniform 30"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe37841f8ba3a18",
+      "3fdd596441c38949",
+      "3fd92feac196a131"
+    ],
+    "confidenceBits" : "3fe47812546a3aeb",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6084298952062595,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4585810320114843,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.39354962258450416,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.6396571778039662,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "G#"
+    },
+    "name" : "chroma: uniform 31"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdabc0725de4895",
+      "3fd55c231880af97",
+      "3fd4fe17d61b2fa3"
+    ],
+    "confidenceBits" : "3fe284c6118ebb14",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.4177263135726517,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.3337486018451669,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.3280086127167527,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 0.5787077277107948,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "B"
+    },
+    "name" : "chroma: uniform 32"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe0058d9589de87",
+      "3fda032d7def3d9f",
+      "3fd4d7d93d85ac26"
+    ],
+    "confidenceBits" : "3fa6e5aafc5b3ad1",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.5006778641390647,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.406443951590484,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.32567435272238965,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.044720977120609746,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: uniform 33"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd6ae8f0fc21423",
+      "3fd059f0e5e5f7a8",
+      "3fd038f7283caf1e"
+    ],
+    "confidenceBits" : "3fb071c54ab0354d",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.3544042257202042,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2554895634747205,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.25347689561270836,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 0.06423600266881131,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "D"
+    },
+    "name" : "chroma: uniform 34"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe2a5139683799a",
+      "3fddb7190bcd8e67",
+      "3fd17dedfb079210"
+    ],
+    "confidenceBits" : "3fd113ebe35331ab",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5826509418218848,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4643004050505852,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2733111335240048,
+          "tonic" : "G#"
+        }
+      ],
+      "confidence" : 0.26684090804772137,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "F"
+    },
+    "name" : "chroma: uniform 35"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe03e2490c3983e",
+      "3fd8e6469499e0b2",
+      "3fd857c204399445"
+    ],
+    "confidenceBits" : "3fe932af8bafcb79",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5075857951567355,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.389054913633582,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.38035631573285783,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.7874372223144369,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: uniform 36"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd805f58b077613",
+      "3fd74e9687aa6dab",
+      "3fd7161f7201f2d4"
+    ],
+    "confidenceBits" : "3fc1e0f55f8a4734",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.37536371781411154,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.3641716313229277,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.36072527059131443,
+          "tonic" : "C"
+        }
+      ],
+      "confidence" : 0.1396776882652887,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "F"
+    },
+    "name" : "chroma: uniform 37"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd034ff6775c8a4",
+      "3fcce753eee73482",
+      "3fcb45a6f96e5450"
+    ],
+    "confidenceBits" : "3fa614c18a4f6e86",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.2532347212173909,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.22580956616585374,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.21306311778303888,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 0.04312710584028161,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "A"
+    },
+    "name" : "chroma: uniform 38"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd7fa46e3f2ceb5",
+      "3fd10229551009d3",
+      "3fcf35e76feb835f"
+    ],
+    "confidenceBits" : "3fd51706c412c1ac",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.3746506906565899,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.2657569246950093,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.24383252110331008,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 0.3295304217126851,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "C#"
+    },
+    "name" : "chroma: uniform 39"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd1db0e0ce526d7",
+      "3fd136f5fb35ee8e",
+      "3fcb8d68ba36a362"
+    ],
+    "confidenceBits" : "3fbba50216c31ee5",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.2789950490883774,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.26897954494754905,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.21525296299412405,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.10798657470433744,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "E"
+    },
+    "name" : "chroma: uniform 40"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe57becd3c64efd",
+      "3fdc19f92b4d185d",
+      "3fd9e77cd4f43abf"
+    ],
+    "confidenceBits" : "3fc8f6a9a4012b75",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.671377576467847,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4390852854597876,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4047538833264461,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.19502754695926297,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: uniform 41"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe17795eedbd834",
+      "3fdff0aa320eee6b",
+      "3fd5ced8e774215b"
+    ],
+    "confidenceBits" : "3fc570f8dddcbd7e",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5458478608331974,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4990640152788958,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3407499561585802,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 0.16751013596647718,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: uniform 42"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fda41512695d9e4",
+      "3fd99c33bf688c07",
+      "3fd33dd3944e4794"
+    ],
+    "confidenceBits" : "3fcd8e33eb8f2edb",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.4102366329965703,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.40015882198548564,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.300648588971961,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 0.23090218545836802,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: uniform 43"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd7f9b1cb30f8b1",
+      "3fd5127da4c9dbb9",
+      "3fd1cf67b979995f"
+    ],
+    "confidenceBits" : "3fa59954c28273e4",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.3746151432313907,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3292535886061461,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.27828400719444873,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.04218544840225727,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: uniform 44"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd390bb5c718fed",
+      "3fcfad7e7829a1e0",
+      "3fcf3cffd2b9c923"
+    ],
+    "confidenceBits" : "3f9f26424df68009",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.30570873286910577,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.24748211734119163,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.24404905118314799,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 0.030419384010770077,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "G#"
+    },
+    "name" : "chroma: uniform 45"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe01bb93bf9ac2c",
+      "3fdc7175d780eb94",
+      "3fd756194c31c1a4"
+    ],
+    "confidenceBits" : "3fe661a4909ab221",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5033842250244382,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4444250683333675,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.36463005486350597,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.699419290952907,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: uniform 46"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd975fc1a167869",
+      "3fd5e2ef4d11bdcf",
+      "3fd4292650e44e08"
+    ],
+    "confidenceBits" : "3fe454c44df1b182",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.3978262190593172,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3419759991292865,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.3150115766486299,
+          "tonic" : "G#"
+        }
+      ],
+      "confidence" : 0.6353475115152352,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: uniform 47"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe0c33d74e28149",
+      "3fdedbe007df7bf7",
+      "3fd706954f095837"
+    ],
+    "confidenceBits" : "3fdd86573a160083",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5238330157190286,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4821701123127577,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.35977680891426495,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 0.46132450745063397,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A"
+    },
+    "name" : "chroma: sparse 0"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd9e123fe6e024d",
+      "3fd6b80264046694",
+      "3fd2c67020cbd3a1"
+    ],
+    "confidenceBits" : "3fdb7b34140e5d0c",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.40436649176266287,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.3549810387354253,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2933616943621989,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.42939474066356875,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: sparse 1"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdfa65146ebbf1a",
+      "3fd9453e7a79d160",
+      "3fd1cacd140978b6"
+    ],
+    "confidenceBits" : "3fdbe289a46ab0af",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.4945262138926282,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.39485132179767923,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.2780029960321245,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.43570176178287573,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: sparse 2"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd9af940848bcfb",
+      "3fcf00d5a35bad43",
+      "3fcda01d86d02e25"
+    ],
+    "confidenceBits" : "3fa5fe313374a106",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.4013414460086577,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.24221296764822328,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.23144883234668714,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.04295495751495264,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "F"
+    },
+    "name" : "chroma: sparse 3"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd130605655b406",
+      "3fce07392444dc26",
+      "3fcddd7ff198015d"
+    ],
+    "confidenceBits" : "3fcadd35e4b36ce6",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.26857765608912165,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.23459543486544127,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.23332213684626427,
+          "tonic" : "A#"
+        }
+      ],
+      "confidence" : 0.20987580935511757,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: sparse 4"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd86cf6aee3219d",
+      "3fcca704bf826df3",
+      "3fcc14a57c024a8b"
+    ],
+    "confidenceBits" : "3fca60fab06b21a9",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.38165061072188583,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.22384700156258894,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.21938007884144314,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.2060845719736453,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: sparse 5"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd5aa6948fec8b6",
+      "3fd5337a0c919b92",
+      "3fd05195714dfc8b"
+    ],
+    "confidenceBits" : "3fb84b9fed462f5f",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.3385260784954299,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.331266891740989,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2549794775477003,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.09490394156290226,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "D"
+    },
+    "name" : "chroma: sparse 6"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdbc91c460fc211",
+      "3fd9811a7d6f08e6",
+      "3fd32aa95e8402dc"
+    ],
+    "confidenceBits" : "3fd78cb376c33394",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.4341498073763726,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.39850485085857057,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.299478857326944,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.3679627094068618,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "G"
+    },
+    "name" : "chroma: sparse 7"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe16d92f29ad415",
+      "3fdd495d1fcdf7e0",
+      "3fd5a699a1bf15e7"
+    ],
+    "confidenceBits" : "3fe70db2abffea37",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.544625734174249,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.45760276895441443,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.33829346461820226,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.7204221114510067,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "D"
+    },
+    "name" : "chroma: sparse 8"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdc41081baf9d3b",
+      "3fda1c65034e386a",
+      "3fd40a3d26174f64"
+    ],
+    "confidenceBits" : "3fe454279f9ad17b",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.441469218289473,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.407983067730021,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.31312493057088475,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.6352728001861999,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "D"
+    },
+    "name" : "chroma: sparse 9"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd730ce67d1edf8",
+      "3fcdf0d6f88cc170",
+      "3fcc8d223d8d0757"
+    ],
+    "confidenceBits" : "3fb70bf810f675ac",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.3623538984172394,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.2339123452779961,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.2230570602933379,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.09002638258103585,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "A"
+    },
+    "name" : "chroma: sparse 10"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe3a1d60cf86a94",
+      "3fe1f4131c56505d",
+      "3fdef214a6b0091a"
+    ],
+    "confidenceBits" : "3fe8fb596b6629e1",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6135053876235639,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5610442689380865,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.48352543142404303,
+          "tonic" : "D#"
+        }
+      ],
+      "confidence" : 0.780682286990949,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: sparse 11"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe16254e42e4935",
+      "3fd8cf0464e42986",
+      "3fd645e68a560595"
+    ],
+    "confidenceBits" : "3febbf5ceed57437",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5432533699661578,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3876353249803731,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.34801639088990416,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.8671097435686822,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: sparse 12"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe3441a4dcbd105",
+      "3fe1184d98f4892b",
+      "3fdaabc11743f317"
+    ],
+    "confidenceBits" : "3fea1903b46e1cbf",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6020633239227499,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5342166888624765,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4167330481721349,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.8155535244012738,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "A"
+    },
+    "name" : "chroma: sparse 13"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdd53b51c25e67d",
+      "3fdd452f3592182d",
+      "3fdba6c98c844609"
+    ],
+    "confidenceBits" : "3fc61215d91bb4e8",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.4582340979464801,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4573476813460527,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4320548889382683,
+          "tonic" : "G#"
+        }
+      ],
+      "confidence" : 0.17242692090022804,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "G#"
+    },
+    "name" : "chroma: sparse 14"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe090b24f59960d",
+      "3fdd254d97b475f9",
+      "3fd9e9b73f002584"
+    ],
+    "confidenceBits" : "3fd36fcf01671e14",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.5176631498149519,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.45540180029806226,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4048898806800809,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 0.30369925629608585,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "C#"
+    },
+    "name" : "chroma: sparse 15"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fdeb1c34f75e371",
+      "3fddcdfafac06645",
+      "3fd8d43f7c4e2288"
+    ],
+    "confidenceBits" : "3fe44401571bbb78",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.47959978828253386,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4656970452066143,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.3879545892637357,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.6333014203390652,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: signed 0"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd813fb6a070e3e",
+      "3fd16809de1d4394",
+      "3fce96f51327d469"
+    ],
+    "confidenceBits" : "3fb7d3fc58b4059b",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.37621960977796565,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2719750088772852,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.23898185191470425,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 0.0930783955154965,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: signed 1"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fddf2a7a5a73cc5",
+      "3fdcabc9aa86bdec",
+      "3fd7b14bd75287a7"
+    ],
+    "confidenceBits" : "3fd74cae4bb2694d",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.4679354779918408,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4479850926681752,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.37019630458427816,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.3640552272060134,
+      "mode" : "minor",
+      "tonal" : true,
+      "tonic" : "G#"
+    },
+    "name" : "chroma: signed 2"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd13cc2e0903fab",
+      "3fd0a401617ff2af",
+      "3fcbf3005c6a80a0"
+    ],
+    "confidenceBits" : "3fd9176922b09966",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.26933357172037614,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.2600100948473409,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.21835331451894024,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.3920538748519874,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: signed 3"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe2e942b9a7c29c",
+      "3fe2e942b9a7c29a"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559896,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749101,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749098,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "C"
+    },
+    "name" : "chroma: major profile on 0"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe1276a24fc36a0",
+      "3fe06364c770091c"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559896,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165888,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348712,
+          "tonic" : "C"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: minor profile on 0"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe2e942b9a7c29d",
+      "3fe2e942b9a7c29c"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559896,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749102,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749101,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "C#"
+    },
+    "name" : "chroma: major profile on 1"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c5",
+      "3fe1276a24fc36a0",
+      "3fe06364c770091e"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559895,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165888,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348714,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "C#"
+    },
+    "name" : "chroma: minor profile on 1"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c4",
+      "3fe2e942b9a7c29b",
+      "3fe2e942b9a7c29b"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559894,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "D"
+    },
+    "name" : "chroma: major profile on 2"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c5",
+      "3fe1276a24fc36a0",
+      "3fe06364c770091c"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559895,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165888,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348712,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "D"
+    },
+    "name" : "chroma: minor profile on 2"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe2e942b9a7c29b",
+      "3fe2e942b9a7c29b"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559896,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "A#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: major profile on 3"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe1276a24fc36a0",
+      "3fe06364c770091d"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559896,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165888,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348713,
+          "tonic" : "D#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: minor profile on 3"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c5",
+      "3fe2e942b9a7c29d",
+      "3fe2e942b9a7c29c"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559895,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749102,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749101,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "E"
+    },
+    "name" : "chroma: major profile on 4"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe1276a24fc369e",
+      "3fe06364c770091c"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559896,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165885,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348712,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "E"
+    },
+    "name" : "chroma: minor profile on 4"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c5",
+      "3fe2e942b9a7c29c",
+      "3fe2e942b9a7c29b"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559895,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749101,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "A#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F"
+    },
+    "name" : "chroma: major profile on 5"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe1276a24fc36a0",
+      "3fe06364c770091d"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559896,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165888,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348713,
+          "tonic" : "F"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "F"
+    },
+    "name" : "chroma: minor profile on 5"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe2e942b9a7c29c",
+      "3fe2e942b9a7c29a"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559896,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749101,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749098,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: major profile on 6"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe1276a24fc369f",
+      "3fe06364c770091d"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559896,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165886,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348713,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: minor profile on 6"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe2e942b9a7c29b",
+      "3fe2e942b9a7c29a"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559896,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749098,
+          "tonic" : "C"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "G"
+    },
+    "name" : "chroma: major profile on 7"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c7",
+      "3fe1276a24fc369f",
+      "3fe06364c770091d"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559897,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165886,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348713,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "G"
+    },
+    "name" : "chroma: minor profile on 7"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe2e942b9a7c29d",
+      "3fe2e942b9a7c29b"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559896,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749102,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "D#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "G#"
+    },
+    "name" : "chroma: major profile on 8"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe1276a24fc369f",
+      "3fe06364c770091d"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559896,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165886,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348713,
+          "tonic" : "G#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "G#"
+    },
+    "name" : "chroma: minor profile on 8"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe2e942b9a7c29c",
+      "3fe2e942b9a7c29b"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559896,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749101,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "A"
+    },
+    "name" : "chroma: major profile on 9"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe1276a24fc36a0",
+      "3fe06364c770091d"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559896,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165888,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348713,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "A"
+    },
+    "name" : "chroma: minor profile on 9"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c7",
+      "3fe2e942b9a7c29b",
+      "3fe2e942b9a7c29b"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559897,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.59097419987491,
+          "tonic" : "F"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: major profile on 10"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe1276a24fc369f",
+      "3fe06364c770091d"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559896,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165886,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348713,
+          "tonic" : "A#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: minor profile on 10"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c6",
+      "3fe2e942b9a7c29d",
+      "3fe2e942b9a7c29a"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6496481389559896,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749102,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5909741998749098,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "B"
+    },
+    "name" : "chroma: major profile on 11"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe4c9eae4d724c4",
+      "3fe1276a24fc36a0",
+      "3fe06364c770091e"
+    ],
+    "confidenceBits" : "3ff0000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.6496481389559894,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5360613558165888,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5121330161348714,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 1,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: minor profile on 11"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f140b",
+      "3fdbea76771ca31f",
+      "3fda15cc9586c492"
+    ],
+    "confidenceBits" : "3f5f921dc985442e",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312887,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.43618547088640186,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.40758051492873293,
+          "tonic" : "F"
+        }
+      ],
+      "confidence" : 0.0019269266977810606,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "C"
+    },
+    "name" : "chroma: one-hot 0"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f140b",
+      "3fdbea76771ca31e",
+      "3fda15cc9586c491"
+    ],
+    "confidenceBits" : "3f5f921dc985367c",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312887,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4361854708864018,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4075805149287329,
+          "tonic" : "F#"
+        }
+      ],
+      "confidence" : 0.0019269266977803004,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "C#"
+    },
+    "name" : "chroma: one-hot 1"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f140a",
+      "3fdbea76771ca31f",
+      "3fda15cc9586c492"
+    ],
+    "confidenceBits" : "3f5f921dc985442c",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312886,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.43618547088640186,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.40758051492873293,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 0.0019269266977810602,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "D"
+    },
+    "name" : "chroma: one-hot 2"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f1409",
+      "3fdbea76771ca31d",
+      "3fda15cc9586c492"
+    ],
+    "confidenceBits" : "3f5f921dc98528c7",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312885,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.43618547088640175,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.40758051492873293,
+          "tonic" : "G#"
+        }
+      ],
+      "confidence" : 0.0019269266977795395,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "D#"
+    },
+    "name" : "chroma: one-hot 3"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f1408",
+      "3fdbea76771ca31d",
+      "3fda15cc9586c491"
+    ],
+    "confidenceBits" : "3f5f921dc9853677",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312883,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.43618547088640175,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4075805149287329,
+          "tonic" : "A"
+        }
+      ],
+      "confidence" : 0.0019269266977802993,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "E"
+    },
+    "name" : "chroma: one-hot 4"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f140a",
+      "3fdbea76771ca31d",
+      "3fda15cc9586c492"
+    ],
+    "confidenceBits" : "3f5f921dc98528c8",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312886,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.43618547088640175,
+          "tonic" : "D"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.40758051492873293,
+          "tonic" : "A#"
+        }
+      ],
+      "confidence" : 0.0019269266977795397,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F"
+    },
+    "name" : "chroma: one-hot 5"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f1409",
+      "3fdbea76771ca31d",
+      "3fda15cc9586c490"
+    ],
+    "confidenceBits" : "3f5f921dc985442b",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312885,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.43618547088640175,
+          "tonic" : "D#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4075805149287328,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.00192692669778106,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "F#"
+    },
+    "name" : "chroma: one-hot 6"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f1409",
+      "3fdbea76771ca31d",
+      "3fda15cc9586c48f"
+    ],
+    "confidenceBits" : "3f5f921dc98551dd",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312885,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.43618547088640175,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.40758051492873276,
+          "tonic" : "C"
+        }
+      ],
+      "confidence" : 0.0019269266977818202,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "G"
+    },
+    "name" : "chroma: one-hot 7"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f1409",
+      "3fdbea76771ca31e",
+      "3fda15cc9586c491"
+    ],
+    "confidenceBits" : "3f5f921dc98551dd",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312885,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4361854708864018,
+          "tonic" : "F"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4075805149287329,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0.0019269266977818202,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "G#"
+    },
+    "name" : "chroma: one-hot 8"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f140a",
+      "3fdbea76771ca31c",
+      "3fda15cc9586c490"
+    ],
+    "confidenceBits" : "3f5f921dc985367a",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312886,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4361854708864017,
+          "tonic" : "F#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4075805149287328,
+          "tonic" : "D"
+        }
+      ],
+      "confidence" : 0.0019269266977803,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "A"
+    },
+    "name" : "chroma: one-hot 9"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f1409",
+      "3fdbea76771ca31c",
+      "3fda15cc9586c490"
+    ],
+    "confidenceBits" : "3f5f921dc985442b",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312885,
+          "tonic" : "A#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.4361854708864017,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4075805149287328,
+          "tonic" : "D#"
+        }
+      ],
+      "confidence" : 0.00192692669778106,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "A#"
+    },
+    "name" : "chroma: one-hot 10"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe5e4e4e41f1408",
+      "3fdbea76771ca31b",
+      "3fda15cc9586c490"
+    ],
+    "confidenceBits" : "3f5f921dc98551db",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.6841911750312883,
+          "tonic" : "B"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.43618547088640164,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.4075805149287328,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 0.0019269266977818198,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "B"
+    },
+    "name" : "chroma: one-hot 11"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe6c9bf1e74e4dd",
+      "3fe5adb4d147fb3c",
+      "3fe2daa749f3ceda"
+    ],
+    "confidenceBits" : "3fd56f9662cfa593",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.712127265439587,
+          "tonic" : "A"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.6774543845675463,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.5891910976774526,
+          "tonic" : "E"
+        }
+      ],
+      "confidence" : 0.3349357571556421,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "C"
+    },
+    "name" : "chroma: C major scale"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fe853f40a38a80c",
+      "3fe1cec42cd7ac82",
+      "3fdb387b8674fa4f"
+    ],
+    "confidenceBits" : "3fe39eab5d7a2a17",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0.7602482032427829,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.5564900279836282,
+          "tonic" : "G"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.42532241945801713,
+          "tonic" : "C"
+        }
+      ],
+      "confidence" : 0.6131188226439147,
+      "mode" : "major",
+      "tonal" : true,
+      "tonic" : "C"
+    },
+    "name" : "chroma: C major triad"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fcf72635d6186d4",
+      "3fcde9d2b6dc5180",
+      "3fca60574fe96ac1"
+    ],
+    "confidenceBits" : "3fbcfb9b70d30c40",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.24567834910981523,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.23369821480504172,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.20606509592001568,
+          "tonic" : "G"
+        }
+      ],
+      "confidence" : 0.11321422104360668,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "D"
+    },
+    "name" : "chroma: cluster C-C#-D"
+  },
+  {
+    "alternativeScoreBits" : [
+      "0000000000000000",
+      "0000000000000000",
+      "0000000000000000"
+    ],
+    "confidenceBits" : "0000000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: all zero"
+  },
+  {
+    "alternativeScoreBits" : [
+      "0000000000000000",
+      "0000000000000000",
+      "0000000000000000"
+    ],
+    "confidenceBits" : "0000000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: flat"
+  },
+  {
+    "alternativeScoreBits" : [
+      "0000000000000000",
+      "0000000000000000",
+      "0000000000000000"
+    ],
+    "confidenceBits" : "0000000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: flat denormal"
+  },
+  {
+    "alternativeScoreBits" : [
+      "3fd302db8212e665",
+      "3fd18f41d7810b95",
+      "3fcd009758b7fbf6"
+    ],
+    "confidenceBits" : "3fbf6a5afde2bee3",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "major",
+          "score" : 0.29704940512201566,
+          "tonic" : "E"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0.274368725255209,
+          "tonic" : "G#"
+        },
+        {
+          "mode" : "major",
+          "score" : 0.2265805419155808,
+          "tonic" : "B"
+        }
+      ],
+      "confidence" : 0.1227166051710316,
+      "mode" : "minor",
+      "tonal" : false,
+      "tonic" : "B"
+    },
+    "name" : "chroma: denormal among normal"
+  },
+  {
+    "alternativeScoreBits" : [
+      "0000000000000000",
+      "0000000000000000",
+      "0000000000000000"
+    ],
+    "confidenceBits" : "0000000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: NaN entry"
+  },
+  {
+    "alternativeScoreBits" : [
+      "0000000000000000",
+      "0000000000000000",
+      "0000000000000000"
+    ],
+    "confidenceBits" : "0000000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: +inf entry"
+  },
+  {
+    "alternativeScoreBits" : [
+      "0000000000000000",
+      "0000000000000000",
+      "0000000000000000"
+    ],
+    "confidenceBits" : "0000000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : 0,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: -inf entry"
+  },
+  {
+    "alternativeScoreBits" : [
+      "0000000000000000",
+      "8000000000000000",
+      "8000000000000000"
+    ],
+    "confidenceBits" : "0000000000000000",
+    "estimate" : {
+      "alternatives" : [
+        {
+          "mode" : "minor",
+          "score" : 0,
+          "tonic" : "C"
+        },
+        {
+          "mode" : "major",
+          "score" : -0,
+          "tonic" : "C#"
+        },
+        {
+          "mode" : "minor",
+          "score" : -0,
+          "tonic" : "C#"
+        }
+      ],
+      "confidence" : 0,
+      "mode" : "major",
+      "tonal" : false,
+      "tonic" : "C"
+    },
+    "name" : "chroma: huge"
+  }
+]

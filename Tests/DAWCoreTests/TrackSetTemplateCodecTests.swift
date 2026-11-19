@@ -655,8 +655,14 @@ struct TrackSetTemplateCodecTests {
         synth.subWaveform = .square
         #expect(try instrument(#"{"kind": "polySynth", "cutoffHz": 400, "unisonVoices": 3, "subWaveform": "square"}"#)
                 == InstrumentDescriptor(kind: .polySynth, polySynth: synth))
-        #expect(try instrument(#"{"kind": "drumSynth"}"#) == InstrumentDescriptor(kind: .drumSynth))
-        let lofi = try #require(DrumKitParams.preset(named: "lofi")).params
+        // W9-DRUMDEF: a template's drum machine is a NEW drum machine — it is
+        // born with the user's picks (General MIDI notes, hats +23.4, cymbals
+        // +5.7), and a named preset keeps that layout (`applyingPreset`).
+        #expect(try instrument(#"{"kind": "drumSynth"}"#)
+                == InstrumentDescriptor(kind: .drumSynth, drumKit: .newDrumMachineKit))
+        let lofi = DrumKitParams.newDrumMachineKit
+            .applyingPreset(try #require(DrumKitParams.preset(named: "lofi")))
+        #expect(lofi.noteLayout == .gm && lofi.hatsLevelDb == 23.4 && lofi.cymbalsLevelDb == 5.7)
         #expect(try instrument(#"{"kind": "drumSynth", "drumPreset": "LoFi"}"#)
                 == InstrumentDescriptor(kind: .drumSynth, drumKit: lofi), "case-insensitive")
         var dialled = lofi

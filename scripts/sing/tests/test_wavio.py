@@ -10,7 +10,7 @@ import time
 import unittest
 import wave
 
-from _util import SPIKE, need_machine, sha256_path, temp_dir
+from _util import RUNTIME, need_machine, sha256_path, temp_dir
 
 from singlib import pins as spins
 from singlib import wavio
@@ -103,9 +103,12 @@ class Reader(unittest.TestCase):
         self.assertEqual(info["frames"], 7)
 
     def test_the_spikes_builtin_voice_file(self):
-        cut = os.path.join(SPIKE, "fixtures", "zh_prompt_cut.wav")
-        need_machine(os.path.isfile(cut), "the spike's %s" % cut)
+        # The installed runtime's built-in voice IS the spike's fixtures/zh_prompt_cut.wav, byte for byte (the pinned
+        # sha256 below; measured equal to the spike's file on 2026-10-06, before the spike folder was deleted).
         p = spins.load()
+        cut = os.path.join(RUNTIME, "voices", p["BUILTIN_VOICE_ID"], "prompt.wav")
+        need_machine(os.path.isfile(cut), "the installed runtime's built-in voice %s" % cut)
+        self.assertEqual(sha256_path(cut), p["BUILTIN_WAV_SHA256"])
         info, _ = wavio.read_wav(cut)
         self.assertEqual((info["format"], info["channels"], info["sample_rate"], info["bits"]), (3, 1, 48000, 32))
         self.assertEqual(info["chunks"], ["fmt ", "fact", "LIST", "data"])      # ffmpeg's LIST carries Lavf62.12.101

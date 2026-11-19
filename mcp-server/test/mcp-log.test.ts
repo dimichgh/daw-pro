@@ -118,7 +118,7 @@ function lastLogLine(): any {
 // Instrumentation coverage (both registration paths)
 // ---------------------------------------------------------------------------
 
-test("both registration paths are instrumented: 261 total, empty symmetric difference vs tools/list", async () => {
+test("both registration paths are instrumented: 293 total, empty symmetric difference vs tools/list", async () => {
   const instrumented = instrumentedToolNames();
   // m34-l: 208 -> 209 with `play_sustain`.
   // m34-h-1: 209 -> 216 with the seven-verb `looper_*` LIVE LOOPING family.
@@ -211,6 +211,11 @@ test("both registration paths are instrumented: 261 total, empty symmetric diffe
   // `clip_get_pitch_edits` add zero. Built, mirrored and instrumented ahead
   // of the render mix landing — NT-E2 has SINCE LANDED (2026-09-26) and the
   // mix is live in the product render.
+  // m39-tpl-7 MCP mirror (2026-10-06, W8-T67R, mcp-integration-engineer):
+  // 261 -> 268 with the seven `template_*` tools: `template_list` and
+  // `template_describe` through direct `server.registerTool` (read-only), the
+  // other five through the strict wrapper — instrumented the same way. The
+  // additive `template`/`dryRun` arguments of `macro_song_skeleton` add zero.
   // W7-WIRE2 MCP mirror (2026-09-27, mcp-integration-engineer): 260 -> 261
   // with `clip_set_note_shapes`, through the wrapper (the
   // `clip_set_note_shape` precedent) — instrumented the same way, both
@@ -226,7 +231,18 @@ test("both registration paths are instrumented: 261 total, empty symmetric diffe
   // (which per-note verbs upgrade a legacy vocal, and that this tool does
   // the same without one) adds zero, being a description change on an
   // already-instrumented tool.
-  assert.equal(instrumented.length, 261, `expected 261 instrumented registrations, got ${instrumented.length}`);
+  // 268 -> 285 at p2-sing-e (W8-SE2, mcp-integration-engineer): the 17
+  // singing tools, one per new wire verb. Five read-only ones register
+  // directly (`sing_sidecar_status`, `sing_list_voices`, `sing_propose_key`,
+  // `clip_get_lyrics`, `sing_job_status`); the other twelve go through the
+  // mutating wrapper. Both paths are instrumented, so all 17 count here.
+  // 285 -> 290 at p2-sing-x7 part A (W8-X7A): the five expansion tools. Three
+  // read-only ones register directly (`clip_get_sing_style`,
+  // `sing_propose_harmony`, `sing_capabilities`); `clip_set_note_word` and
+  // `clip_set_sing_style` go through the mutating wrapper. All five count here.
+  // 290 -> 291 at m27-f (W8-M27F): fx_get_params (read-only, registers through the same wrapper as clip_get_notes).
+  // 291 -> 293 at m39-w4-10 (W9-PATM): pattern_list (read-only, direct) and clip_add_drum_pattern (mutating wrapper).
+  assert.equal(instrumented.length, 293, `expected 293 instrumented registrations, got ${instrumented.length}`);
 
   const listed = await client.listTools();
   const listedNames = new Set(listed.tools.map((t) => t.name));

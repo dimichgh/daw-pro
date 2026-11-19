@@ -919,10 +919,11 @@ final class InstrumentRenderer: @unchecked Sendable {
             zeroFill(output, frameCount: Int(frameCount))
             if chain.hasPublishedChain {
                 // Effect-param automation stores before the tail walk too
-                // (M4 vii-c) — a published-schedule no-op when stopped.
-                automation.storeEffectParams(chain: chain, frameCount: Int(frameCount),
-                                             timestamp: timestamp)
-                chain.process(bufferList: audioBufferList, frameCount: Int(frameCount))
+                // (M4 vii-c; m39-d CR-1: through the control grid's one home)
+                // — a published-schedule no-op when stopped.
+                automation.renderChain(chain: chain, bufferList: audioBufferList,
+                                       frameCount: Int(frameCount), key: nil,
+                                       timestamp: timestamp)
                 // PDC ring keeps rolling on the idle path too (M4 viii-b):
                 // ring history stays continuous across idle quanta and the
                 // last `comp` samples drain instead of freezing. Bit-exact
@@ -942,6 +943,14 @@ final class InstrumentRenderer: @unchecked Sendable {
                 } else {
                     compensation.process(bufferList: audioBufferList,
                                          frameCount: Int(frameCount))
+                    // W9-PLRT R4a: the ring holds audio from BEFORE the knob
+                    // stage, so in a new song (its mixer node at centre) the
+                    // drained tail would play centred. The knob stage ALONE,
+                    // never the full `automation.apply` (that would start the
+                    // modulation stage on this drain and change the original
+                    // rule's sound); a no-op there, which publishes only 0.
+                    automation.applyKnobStage(bufferList: audioBufferList,
+                                              frameCount: Int(frameCount))
                     isSilence.pointee = false
                 }
             }
@@ -984,10 +993,12 @@ final class InstrumentRenderer: @unchecked Sendable {
 
         // 10. Effect-param automation stores (M4 vii-c), then the insert
         // chain, in place on the instrument's output (M4 ii) — the effects
-        // render this quantum with the automated values.
-        automation.storeEffectParams(chain: chain, frameCount: Int(frameCount),
-                                     timestamp: timestamp)
-        chain.process(bufferList: audioBufferList, frameCount: Int(frameCount))
+        // render this quantum with the automated values. m39-d CR-1: one call,
+        // stored once per 512-frame control cell counted from the roll start
+        // and split at a cell line (`AutomationRenderer.renderChain`).
+        automation.renderChain(chain: chain, bufferList: audioBufferList,
+                               frameCount: Int(frameCount), key: nil,
+                               timestamp: timestamp)
         // 10b. PDC compensation ring (M4 viii-b): post-chain, pre-fader —
         // same placement as ChainHostAU strips. Bit-exact no-op at target 0.
         compensation.process(bufferList: audioBufferList, frameCount: Int(frameCount))

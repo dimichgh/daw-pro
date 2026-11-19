@@ -68,43 +68,8 @@ struct InsertSpectrumChainTests {
     // FAILURE, never a skip: a silently absent allocation probe is exactly
     // the vacuity the leg exists to prevent.
 
-    private typealias MallocLoggerFn =
-        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
-
-    /// Heap cells, NOT Swift stored properties: the hook runs INSIDE malloc
-    /// with its locks held, so it must never allocate and never trip a lazy
-    /// global initializer.
-    private nonisolated(unsafe) static let eventCount =
-        UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private nonisolated(unsafe) static let watchedThread =
-        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-
-    private static let eventHook: MallocLoggerFn = { _, _, _, _, _, _ in
-        var tid: UInt64 = 0
-        pthread_threadid_np(nil, &tid)  // no allocation, safe under malloc
-        if tid == InsertSpectrumChainTests.watchedThread.pointee {
-            InsertSpectrumChainTests.eventCount.pointee &+= 1
-        }
-    }
-
-    private static func mallocLoggerSlot() -> UnsafeMutablePointer<MallocLoggerFn?>? {
-        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
-                              "malloc_logger") else { return nil }
-        return raw.assumingMemoryBound(to: MallocLoggerFn?.self)
-    }
-
-    /// malloc + free events raised BY THE CALLING THREAD while `body` runs.
-    private static func mallocEvents(
-        slot: UnsafeMutablePointer<MallocLoggerFn?>, _ body: () -> Void
-    ) -> Int {
-        pthread_threadid_np(nil, &watchedThread.pointee)
-        eventCount.pointee = 0
-        let previous = slot.pointee  // restore, don't assume it was nil
-        slot.pointee = eventHook
-        body()
-        slot.pointee = previous
-        return eventCount.pointee
-    }
+    // The hook, the counter cells and the process-wide window lock live in
+    // `Support/MallocProbe.swift` (m39-test-mallocprobe): one measurement at a time.
 
     // MARK: - Fixtures
 
@@ -411,7 +376,7 @@ struct InsertSpectrumChainTests {
 
     @Test("an armed chain walk allocates nothing across 10_000 quanta — transient AND retained — and the tap ran")
     func armedWalkIsAllocationFree() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — the transient-allocation probe cannot run, and this leg's entire value is seeing allocate-then-free. Treat this as a FAILURE, not a skip.")
             return
         }
@@ -446,7 +411,7 @@ struct InsertSpectrumChainTests {
         eventCounts.reserveCapacity(windows)
         var window = 0
         while window < windows {
-            let events = Self.mallocEvents(slot: slot) {
+            let events = MallocProbe.events(slot: slot) {
                 var call = 0
                 while call < perWindow {
                     chain.processor.process(bufferList: scratch.raw,
@@ -471,7 +436,7 @@ struct InsertSpectrumChainTests {
         disarmedCounts.reserveCapacity(windows)
         var disarmedWindow = 0
         while disarmedWindow < windows {
-            let events = Self.mallocEvents(slot: slot) {
+            let events = MallocProbe.events(slot: slot) {
                 var call = 0
                 while call < perWindow {
                     controlChain.processor.process(bufferList: scratch.raw,
@@ -492,7 +457,7 @@ struct InsertSpectrumChainTests {
         // nothing.
         var sink: [[Float]] = []
         sink.reserveCapacity(perWindow)  // outside the measured window
-        let controlEvents = Self.mallocEvents(slot: slot) {
+        let controlEvents = MallocProbe.events(slot: slot) {
             var call = 0
             while call < perWindow {
                 sink.append([Float](repeating: 0, count: 8))

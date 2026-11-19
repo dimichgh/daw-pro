@@ -136,10 +136,20 @@ extension ProjectStore {
         // STEM class (m13-d, design §2): region material for the repaint is
         // dry by contract ("master untouched") — never mastered, never
         // master-lane-faded (m15-c).
+        // W9-PFRT P2: the pan-carrying seam, its inputs STATED rather than
+        // left to a rule-less overload. The synthetic track's knob is centred
+        // (`Track`'s default pan), so the original rule renders it exactly as
+        // either rule would, and it carries no modulation, so the constant
+        // meter is what the rule-less call it replaces forwarded: the same
+        // bytes. `PanLawRenderCensusTests` holds DAWCore to zero rule-less
+        // offline renders.
         let rendered = try await engine.renderOffline(
-            tracks: [syntheticTrack], tempoMap: tempoMap, masterVolume: 1,
+            tracks: [syntheticTrack], tempoMap: tempoMap,
+            meterMap: MeterMap(constant: TimeSignature()), panLaw: .balance,
+            masterVolume: 1,
             masterEffects: [],
             masterAutomation: [],
+            masterModulationSources: [], masterModulationRoutes: [],
             fromBeat: windowStartBeat, durationSeconds: bounceSeconds,
             forcedCompensationTargets: nil)
         let bounceURL = Self.fixBounceDestination()

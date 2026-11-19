@@ -1032,3 +1032,196 @@ struct SongSkeletonTests {
         #expect(store.markers.map(\.beat) == store.markers.map(\.beat).sorted())
     }
 }
+
+// MARK: - m27-e: the Arrangement guide track is created MUTED
+
+/// m27-e (2026-10-07). The "Arrangement" guide track is a visual reference, not a part. It used to be created
+/// UNMUTED, so it sounded if anything wrote notes onto it and went into a bounce unless someone muted it. It is now
+/// created muted, in the ONE place it is built (`planSongSkeleton`), so the genre roster, a `tracks` override, a
+/// `template:` and the dry run all agree. The mute goes by POSITION (the guide track is always last), never by
+/// name: a roster track may be named "Arrangement" and stays unmuted. Nothing else about the created project
+/// changed: each of the 28 golden fixtures (`SkeletonGoldenTests`) moved by exactly one line, that track's
+/// `isMuted`. A project saved before m27-e opens exactly as it was saved.
+///
+/// ⚠️ An extension of the existing `@MainActor` suite, not a new suite (the `@MainActor` suite cap). Helpers carry
+/// an `m27e` prefix.
+extension SongSkeletonTests {
+    /// The guide track is last, is the result's `arrangementTrackID` (when given), is muted, and differs from a
+    /// default `Track` in nothing but its id, name, kind, clips and mute; and no roster track is muted.
+    func m27eExpectMutedGuideTrack(_ tracks: [Track], arrangementID: UUID?, _ context: String) {
+        guard let guide = tracks.last else {
+            Issue.record("\(context): the skeleton created no tracks")
+            return
+        }
+        if let arrangementID {
+            #expect(guide.id == arrangementID, "\(context): the guide track is not the last track")
+        }
+        #expect(guide.name == "Arrangement", "\(context)")
+        #expect(guide.isMuted, "\(context): the guide track must be created muted")
+        let expected = Track(id: guide.id, name: "Arrangement", kind: .instrument, isMuted: true,
+                             clips: guide.clips)
+        #expect(guide == expected, "\(context): the guide track changed in more than its mute")
+        let mutedRoster = tracks.dropLast().filter { $0.isMuted }.map(\.name)
+        #expect(mutedRoster.isEmpty, "\(context): roster tracks created muted: \(mutedRoster)")
+    }
+
+    /// The golden fixtures' `UUID-nnn` tokens back into fixed, valid UUIDs, so a fixture opens as the project file
+    /// it was normalised from (only digits, so the save path writes them back byte for byte).
+    static func m27eDenormalize(_ text: String) -> String {
+        let regex = try! NSRegularExpression(pattern: "UUID-([0-9]{3})")
+        let source = text as NSString
+        var output = ""
+        var cursor = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+            output += source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            output += "00000000-0000-0000-0000-000000000" + source.substring(with: match.range(at: 1))
+            cursor = match.range.location + match.range.length
+        }
+        output += source.substring(from: cursor)
+        return output
+    }
+
+    @Test("m27-e the guide track is created MUTED and only it: every genre, default and override roster")
+    func m27eGuideTrackIsCreatedMutedForEveryGenre() throws {
+        #expect(SongSkeletonCatalog.v1.count >= 14, "control: the 14 curated genres")
+        var checked = 0
+        for genre in SongSkeletonCatalog.v1 {
+            for override in [false, true] {
+                let store = ProjectStore()
+                let result = try store.applySongSkeleton(genre: genre.name,
+                                                         tracks: override ? Self.tpl3OverrideRoster : nil)
+                m27eExpectMutedGuideTrack(store.tracks, arrangementID: result.arrangementTrackID,
+                                          "\(genre.name)\(override ? ", override" : "")")
+                checked += 1
+            }
+        }
+        #expect(checked == 2 * SongSkeletonCatalog.v1.count)
+    }
+
+    @Test("m27-e the template path mutes the guide track the same way (every built-in template)")
+    func m27eTemplatePathMutesTheGuideTrack() throws {
+        let listing = BuiltInTemplateCatalog.load()
+        #expect(listing.unreadable.isEmpty, "control: \(listing.unreadable)")
+        #expect(listing.templates.count == BuiltInTemplateCatalog.ids.count, "control: every built-in was read")
+        for entry in listing.templates {
+            let genre = try #require(entry.template.genres.first, "\(entry.id) names no genre")
+            let store = ProjectStore()
+            let result = try store.applySongSkeleton(genre: genre, template: entry.template)
+            #expect(store.tracks.count > 1, "\(entry.id): the template's tracks and the guide track")
+            m27eExpectMutedGuideTrack(store.tracks, arrangementID: result.arrangementTrackID, "template \(entry.id)")
+        }
+    }
+
+    @Test("m27-e the dry run plans the guide track muted, as the real call builds it, and changes nothing")
+    func m27eDryRunPlansTheGuideTrackMuted() throws {
+        let store = ProjectStore()
+        let template = try #require(BuiltInTemplateCatalog.load().templates.first).template
+        let templateGenre = try #require(template.genres.first)
+        let plans: [(String, SongSkeletonPlan)] = [
+            ("default", try store.planSongSkeleton(genre: "pop")),
+            ("override", try store.planSongSkeleton(genre: "pop", tracks: Self.tpl3OverrideRoster)),
+            ("template", try store.planSongSkeleton(genre: templateGenre, template: template)),
+        ]
+        for (name, plan) in plans {
+            m27eExpectMutedGuideTrack(plan.tracks, arrangementID: plan.arrangementTrack?.id, "dry run, \(name)")
+        }
+        #expect(store.tracks.isEmpty, "a dry run adds no track")
+        #expect(store.journal.undoStack.isEmpty, "a dry run journals nothing")
+    }
+
+    @Test("m27-e a roster track NAMED Arrangement stays unmuted; the mute goes by position, not by name")
+    func m27eMuteGoesByPositionNotByName() throws {
+        let store = ProjectStore()
+        let first = try store.applySongSkeleton(
+            genre: "pop",
+            tracks: [SongSkeletonTrack(name: "Arrangement", kind: .audio),
+                     SongSkeletonTrack(name: "Cello", kind: .instrument)])
+        #expect(store.tracks.map(\.name) == ["Arrangement", "Cello", "Arrangement"])
+        #expect(store.tracks.map(\.isMuted) == [false, false, true])
+        #expect(store.tracks.last?.id == first.arrangementTrackID)
+
+        // ADDITIVE: someone unmutes the first guide track, then scaffolds again. Their choice stands; only the
+        // NEW guide track is created muted.
+        #expect(store.setTrackMute(id: first.arrangementTrackID, muted: false))
+        let second = try store.applySongSkeleton(genre: "house")
+        let firstGuide = try #require(store.tracks.first { $0.id == first.arrangementTrackID })
+        #expect(!firstGuide.isMuted, "a second skeleton must not touch a guide track already in the project")
+        #expect(store.tracks.last?.id == second.arrangementTrackID)
+        #expect(store.tracks.last?.isMuted == true)
+        let mutedIDs = store.tracks.filter { $0.isMuted }.map { $0.id }
+        #expect(mutedIDs == [second.arrangementTrackID])
+    }
+
+    @Test("m27-e one undo removes the muted guide track; redo brings it back muted")
+    func m27eOneUndoRemovesTheMutedGuideTrack() throws {
+        let store = ProjectStore()
+        _ = store.addTrack(name: "Existing", kind: .audio)
+        let tracksBefore = store.tracks
+        let depthBefore = store.journal.undoStack.count
+
+        let result = try store.applySongSkeleton(genre: "pop")
+        #expect(store.journal.undoStack.count == depthBefore + 1, "the mute is part of the ONE scaffold step")
+        #expect(store.undoLabel == "Song Skeleton 'Pop'")
+        #expect(store.tracks.last?.isMuted == true)
+
+        _ = try store.undo()
+        #expect(store.tracks == tracksBefore)
+        #expect(!store.tracks.contains { $0.id == result.arrangementTrackID })
+        #expect(store.journal.undoStack.count == depthBefore)
+
+        _ = try store.redo()
+        let guide = try #require(store.tracks.last)
+        #expect(guide.id == result.arrangementTrackID)
+        #expect(guide.isMuted, "redo brings the guide track back muted")
+    }
+
+    @Test("m27-e a project saved before m27-e, guide track UNMUTED, opens unchanged")
+    func m27eOldUnmutedGuideTrackOpensUnchanged() throws {
+        // The two files are the PRE-m27-e golden fixtures (`pop-default`, `pop-override`), copied verbatim into
+        // their own folder: the bytes an older build saved, guide track unmuted. The override one also has a
+        // roster track named "Arrangement".
+        for name in ["pop-default", "pop-override"] {
+            let url = try #require(
+                Bundle.module.url(forResource: name, withExtension: "json",
+                                  subdirectory: "Fixtures/SkeletonGuideBefore"),
+                "the pre-m27-e fixture Fixtures/SkeletonGuideBefore/\(name).json is not in the test bundle")
+            let normalized = try String(contentsOf: url, encoding: .utf8)
+            #expect(normalized.contains("\"isMuted\" : false"), "precondition: \(name) has tracks")
+            #expect(!normalized.contains("\"isMuted\" : true"), "precondition: \(name) predates m27-e")
+            let text = Self.m27eDenormalize(normalized)
+            #expect(!text.contains("UUID-"), "control: every id token was restored")
+            let bytes = Data(text.utf8)
+
+            // The reader the open path uses.
+            let document = try ProjectDocumentFidelityTests.s2Open(bytes, "m27e-\(name)")
+            #expect(document.tracks.last?.name == "Arrangement")
+            #expect(document.tracks.last?.isMuted == false, "\(name): an old unmuted guide track must read UNMUTED")
+            #expect(document.tracks.allSatisfy { !$0.isMuted })
+            let again = try ProjectDocumentFidelityTests.bundleBytes(of: document)
+            #expect(again == bytes, "\(name): \(ProjectDocumentFidelityTests.firstDifference(again, bytes))")
+
+            // The store's own open path.
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("m27e-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let bundle = directory.appendingPathComponent("Old Song.dawproj", isDirectory: true)
+            try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+            try bytes.write(to: bundle.appendingPathComponent("project.json"))
+            let store = ProjectStore()
+            _ = try store.openProject(at: bundle.path)
+            #expect(store.tracks.map(\.name) == document.tracks.map(\.name))
+            #expect(store.tracks.last?.name == "Arrangement")
+            #expect(store.tracks.map(\.isMuted) == document.tracks.map(\.isMuted),
+                    "\(name): the store opened a track with a different mute than the file holds")
+            #expect(store.tracks.allSatisfy { !$0.isMuted }, "\(name): nothing may be muted on open")
+        }
+
+        // Positive control: the same reads see a muted guide track where the file has one (the current fixture).
+        let current = try #require(Bundle.module.url(forResource: "pop-default", withExtension: "json",
+                                                     subdirectory: "Fixtures/SkeletonGolden"))
+        let currentBytes = Data(Self.m27eDenormalize(try String(contentsOf: current, encoding: .utf8)).utf8)
+        let currentDocument = try ProjectDocumentFidelityTests.s2Open(currentBytes, "m27e-current")
+        #expect(currentDocument.tracks.last?.isMuted == true, "control: a muted guide track in the file reads muted")
+        #expect(currentDocument.tracks.dropLast().allSatisfy { !$0.isMuted })
+    }
+}

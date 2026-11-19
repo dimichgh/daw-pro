@@ -186,6 +186,13 @@ final class InsertSpectrumTap: @unchecked Sendable {
     /// Must be 0 for any fixture that compares band values.
     var droppedFrames: UInt64 { daw_atomic_u64_load(dropped) }
 
+    /// Frames the analyzer has actually processed (m27-j, W8-M27J). CONSUMER
+    /// ONLY, like `drainAndSnapshot()` — never read on the render thread.
+    /// Exact by construction: `readIndex` only ever advances by frames that
+    /// were either fed to the analyzer or counted into `dropped` (drop-oldest
+    /// and tear discards alike), so the difference is the analyzed count.
+    var framesAnalyzed: UInt64 { readIndex &- daw_atomic_u64_load(dropped) }
+
     // MARK: - Render side
 
     /// PRODUCER ONLY — the ENTIRE render-thread surface of this feature.

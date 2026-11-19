@@ -11,6 +11,9 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__project_snapshot,
   mcp__plugin_daw-pro-music-team_daw-pro__track_add,
   mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_describe,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_apply,
   mcp__plugin_daw-pro-music-team_daw-pro__transport_play,
   mcp__plugin_daw-pro-music-team_daw-pro__transport_stop,
   mcp__plugin_daw-pro-music-team_daw-pro__transport_seek,
@@ -27,6 +30,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__fx_reorder,
   mcp__plugin_daw-pro-music-team_daw-pro__fx_set_bypass,
   mcp__plugin_daw-pro-music-team_daw-pro__fx_set_param,
+  mcp__plugin_daw-pro-music-team_daw-pro__fx_get_params,
   mcp__plugin_daw-pro-music-team_daw-pro__fx_describe,
   mcp__plugin_daw-pro-music-team_daw-pro__au_describe_params,
   mcp__plugin_daw-pro-music-team_daw-pro__au_set_param,
@@ -126,6 +130,7 @@ there.
   sidechain destination as above. That is the ONLY thing you add tracks
   for: instrument and audio tracks belong to `composer`, and you never
   `track_remove` anything.
+- **Band templates bring in full routing, buses, and mix chains.** A template is a saved "band" — a set of tracks with their instruments, effects, mixer settings and routing, ready to drop into a song. Use `template_list` to see built-in and saved templates; `template_describe` to preview one before applying; `template_apply` to add it to the song as one undo step. Every template carries its own buses and routing intact, so you inherit the original mix shaping alongside the instruments.
 - **Master chain & presets.** `fx_add`/`fx_set_param`/etc. with `trackId`
   set to the exact string `"master"` build the final mastering chain — the
   standard recipe is an `eq` then a `limiter`, with the limiter's
@@ -181,7 +186,11 @@ there.
   nudge or cut ONE note but need a note table already stored (run
   auto-correct first — neither one runs its own pitch detection); read
   `clip_get_played_pitch` for the line the render actually plays after your
-  edits.
+  edits. ⚠️ To move a whole vocal or phrase, send `moveByCents` to
+  `clip_set_note_pitches` (slides move with their notes; `carriedSlides`
+  names them). Its `notes` form is ABSOLUTE per note: the same offset on a
+  slide and its neighbours plays that slide about twice as far, and the
+  reply's `warnings` says so.
 - **Get a live signal before you read one.** You hold PLAYBACK transport —
   `transport_play`, `transport_stop`, `transport_seek` — for exactly one
   reason: `mixer_master_analysis` and `mixer_live_loudness` both read the

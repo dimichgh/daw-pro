@@ -13,7 +13,8 @@ import DAWAppKit
 ///
 /// ## The density split
 ///
-/// **Simple** = what the mode is, how finely, and the mute decision.
+/// **Simple** = what the mode is, how finely, the drum-kit sort (m39-w4-8), and
+/// the mute decision.
 /// **Pro** adds the pad ceiling, where pad 1 sits, and the head.
 ///
 /// ⚠️ **THE MUTE TOGGLE IS IN *SIMPLE*, AND THAT IS THE POINT OF PUTTING IT
@@ -38,6 +39,7 @@ struct ChopToPadsPanel: View {
             sourceLine
             modeRow
             amountRow
+            kitRow
             if isPro { proRow }
             muteRow
             if let refusal = model.blockingRefusal, refusal != .busy {
@@ -75,8 +77,9 @@ struct ChopToPadsPanel: View {
             Spacer(minLength: 8)
             SimpleProToggle(
                 store: densityStore, panelID: Self.panelID,
-                help: "Simple picks where the cuts go. Pro sets the pad ceiling, "
-                    + "where pad 1 sits, and whether the lead-in becomes a pad.")
+                help: "Simple picks where the cuts go, and whether to sort the hits into a "
+                    + "drum kit. Pro sets the pad ceiling, where pad 1 sits, and whether the "
+                    + "lead-in becomes a pad.")
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
@@ -194,6 +197,31 @@ struct ChopToPadsPanel: View {
         ("1/16", 0.25), ("1/8", 0.5), ("1/4", 1), ("1/2", 2), ("BAR", 4),
     ]
 
+    // MARK: - The drum-kit sort (m39-w4-8)
+
+    /// ⭐ **IN SIMPLE, BECAUSE THE PERSON IT IS FOR IS STANDING IN SIMPLE.**
+    /// The design's novice (§5.1) drops a drum loop, opens Chop to Pads and
+    /// ticks this box — and then a beat written for a drum kit plays the
+    /// loop's own kick, snare and hats. The chop goes through the SAME store
+    /// function the wire's `clip.sliceToSampler` calls, with `mapping: .kit`
+    /// (`PadChopSettings.settings()`); the card adds no path of its own.
+    private var kitRow: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            checkRow(isOn: model.chop.sortIntoKit,
+                     label: PadChopSettings.sortIntoKitLabel,
+                     help: PadChopSettings.sortIntoKitHelp) {
+                model.chop.sortIntoKit.toggle()
+            }
+            if model.chop.sortIntoKit {
+                Text(PadChopSettings.sortIntoKitNote)
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(PadChopSettings.sortIntoKitHelp)
+            }
+        }
+    }
+
     // MARK: - Pro controls
 
     private var proRow: some View {
@@ -207,6 +235,11 @@ struct ChopToPadsPanel: View {
                           + "is the ceiling — six banks.") {
                 model.chop.maxSlices = Int($0.rounded())
             }
+            // ⭐ m39-w4-8: LIVE BUT DIM WHILE THE KIT SORT IS ON — the lead-in
+            // precedent below (DESIGN-LANGUAGE, "a setting that cannot reach the
+            // sound stays live, goes dim, and says so"). A kit puts each hit on
+            // its drum's note, so this slider reaches nothing then; the wire
+            // refuses `baseNote` with `mapping: "kit"` for the same reason.
             sliderRow(label: "Pad 1 plays note",
                       readout: Fundamental.noteName(midiNote: model.chop.baseNote),
                       value: Double(model.chop.baseNote), range: 0...111,
@@ -218,8 +251,15 @@ struct ChopToPadsPanel: View {
                       // a panel ends up disagreeing with its own readout.
                       help: "Note 36 is the MPC's own pad-1 note, and it is where every "
                           + "drum kit puts its kick. Move it only to sit beside an "
-                          + "existing keymap.") {
+                          + "existing keymap.",
+                      dimmed: !model.chop.baseNoteIsEffective) {
                 model.chop.baseNote = Int($0.rounded())
+            }
+            if let note = model.chop.baseNoteInertNote {
+                Text(note)
+                    .font(.system(size: 10))
+                    .foregroundStyle(DAWTheme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             // ⭐ LIVE IN EVERY MODE, DIM WHERE IT CANNOT REACH THE CHOP (m33-d).
             // "Equal pieces" and "On the beat" always start pad 1 at the clip's
@@ -312,8 +352,12 @@ struct ChopToPadsPanel: View {
             .foregroundStyle(DAWTheme.textDim)
     }
 
+    /// `dimmed` (m39-w4-8) draws the readout in `textFaint` with no accent and
+    /// fades the slider — still draggable. The "cannot reach the sound" state,
+    /// as `checkRow`'s `dimmed` is; not a disabled one.
     private func sliderRow(label: String, readout: String, value: Double,
                            range: ClosedRange<Double>, help: String,
+                           dimmed: Bool = false,
                            onChange: @escaping (Double) -> Void) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack {
@@ -322,10 +366,11 @@ struct ChopToPadsPanel: View {
                 // SF Mono for every numeric readout (Foundations).
                 Text(readout)
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(DAWTheme.playback)
+                    .foregroundStyle(dimmed ? DAWTheme.textFaint : DAWTheme.playback)
             }
             ValueSlider(value: value, range: range, onChange: onChange)
                 .frame(height: 18)
+                .opacity(dimmed ? 0.45 : 1)
         }
         .help(help)
     }

@@ -80,8 +80,10 @@ class Validate(unittest.TestCase):
             self.refused(o, "badRequest", contains=k)
 
     def test_facade_version(self):
-        for fv in (2, 0, True, "1", 1.0):
-            self.refused(base(facadeVersion=fv), "badRequest", contains="facadeVersion")
+        for fv in (3, 0, True, "1", 1.0, 2.0, "2", None):
+            self.refused(base(facadeVersion=fv), "badRequest", contains="facadeVersion must be 1 or 2")
+        self.assertEqual(schema.validate(base()).facade_version, 1)
+        self.assertEqual(schema.validate(base(facadeVersion=2)).facade_version, 2)     # design 2026-10-06 §7.1
 
     def test_note_values(self):
         for field, value in (("midi", 0), ("midi", 128), ("midi", 60.5), ("midi", True), ("startS", -0.1),
@@ -193,6 +195,128 @@ class Validate(unittest.TestCase):
         for bad in ({"hz": 0, "frames": "full"}, {"hz": 220.0, "frames": 0}, {"hz": 220.0, "frames": "half"},
                     {"hz": 220.0}, {"hz": 220.0, "frames": True}):
             self.refused(base(voice=own(), testPromptF0=bad), "badRequest", hooks=True)
+
+
+def v2(**over):
+    return base(facadeVersion=2, **over)
+
+
+def zh_body(chars, lang="zh", **over):
+    """One Chinese character (or typed syllable) per note of T2's five notes."""
+    o = v2(**over)
+    o["phrase"]["words"] = [{"text": c, "noteIndices": [i], "lang": lang} for i, c in enumerate(chars)]
+    return o
+
+
+class V2Validate(unittest.TestCase):
+    """facadeVersion 2's optional keys (design docs/design/2026-10-06-p2-sing-expansion.md §7.2, §7.4)."""
+    refused = Validate.refused
+
+    def test_v2_with_and_without_its_keys(self):
+        r = schema.validate(v2())
+        self.assertEqual((r.facade_version, r.control, r.word_langs, r.note_vibratos, r.voice.prompt_f0),
+                         (2, "score", ["en"] * 3, [None] * 5, None))
+        o = v2(control="score")
+        o["phrase"]["words"][1]["lang"] = "en"
+        r = schema.validate(o)
+        self.assertEqual((r.control, r.word_langs), ("score", ["en", "en", "en"]))
+        r = schema.validate(zh_body("我爱你好吗"))
+        self.assertEqual(r.word_langs, ["zh"] * 5)
+        self.assertEqual(r.words[0], ("我", [0]))
+        r = schema.validate(zh_body(["ngo5", "oi3", "nei5", "hou2", "maa3"], lang="yue"))
+        self.assertEqual(r.word_langs, ["yue"] * 5)
+
+    def test_v2_keys_under_v1_are_unknown_and_name_the_version(self):
+        cases = [("the request", "control", lambda o: o.update(control="score")),
+                 ("phrase.words[0]", "lang", lambda o: o["phrase"]["words"][0].update(lang="en")),
+                 ("phrase.notes[2]", "vibrato", lambda o: o["phrase"]["notes"][2].update(
+                     vibrato={"rateHz": 5.5, "depthCents": 40, "onsetS": 0.2}))]
+        for where, key, mutate in cases:
+            o = base()
+            mutate(o)
+            e = self.refused(o, "badRequest", contains="Unknown key in %s: %s. Allowed: " % (where, key))
+            self.assertTrue(e.message.endswith(" '%s' needs facadeVersion 2." % key), e.message)
+        v = own()
+        v["prompt"]["f0"] = {"fps": 50, "hz": [220.0] * 10}
+        e = self.refused(base(voice=v), "badRequest", contains="Unknown key in voice.prompt: f0.")
+        self.assertTrue(e.message.endswith(" 'f0' needs facadeVersion 2."), e.message)
+        o = base(extra=1)                      # control: a key that is in NO version gets no version sentence
+        e = self.refused(o, "badRequest", contains="Unknown key in the request: extra.")
+        self.assertNotIn("facadeVersion 2", e.message)
+
+    def test_unknown_keys_are_still_refused_at_every_level_under_v2(self):
+        for where, mutate in (("the request", lambda o: o.update(extra=1)),
+                              ("phrase", lambda o: o["phrase"].update(lang="zh")),
+                              ("phrase.notes[0]", lambda o: o["phrase"]["notes"][0].update(velocity=90)),
+                              ("phrase.words[0]", lambda o: o["phrase"]["words"][0].update(language="zh")),
+                              ("voice", lambda o: o["voice"].update(lang="zh"))):
+            o = v2()
+            mutate(o)
+            e = self.refused(o, "badRequest", contains=where)
+            self.assertNotIn("needs facadeVersion", e.message)
+        v = own()
+        v["prompt"]["notes"][0]["lang"] = "zh"                 # prompt notes carry no language in v2 either
+        self.refused(v2(voice=v), "badRequest", contains="voice.prompt.notes[0]")
+
+    def test_control(self):
+        for c in ("melody", "Score", "", 1, None, True):
+            self.refused(v2(control=c), "badRequest", contains="control must be \"score\"")
+        self.assertEqual(schema.validate(v2(control="score")).control, "score")
+
+    def test_lang(self):
+        for lang in ("es", "fr", "EN", "Mandarin", ""):
+            o = v2()
+            o["phrase"]["words"][2]["lang"] = lang
+            e = self.refused(o, "languageNotSupported", contains=repr(lang))
+            self.assertIn("now", e.message)                    # names the word too
+        for lang in (None, 7, ["zh"]):
+            o = v2()
+            o["phrase"]["words"][2]["lang"] = lang
+            self.refused(o, "badRequest", contains="phrase.words[2].lang")
+
+    def test_a_chinese_word_is_one_sung_syllable(self):
+        ok = (("zh", "你"), ("zh", "ni3"), ("zh", "NI3"), ("zh", "lü4"), ("zh", "lv4"), ("zh", "lu:e4"), ("zh", "a5"),
+              ("yue", "閃"), ("yue", "nei5"), ("yue", "sim2"), ("zh", "𠮶"))
+        for lang, text in ok:
+            o = v2()
+            o["phrase"]["words"][0].update(text=text, lang=lang)
+            self.assertEqual(schema.validate(o).word_langs[0], lang, text)
+        bad = (("zh", "你好"), ("zh", "hello"), ("zh", "ni"), ("zh", "ni6"), ("zh", "，"), ("zh", "3"), ("yue", "nei7"),
+               ("yue", "ni3x"), ("zh", "ni3a"), ("yue", "a"))
+        for lang, text in bad:
+            o = v2()
+            o["phrase"]["words"][0].update(text=text, lang=lang)
+            self.refused(o, "badRequest", contains="Send each character as its own word")
+        o = v2()
+        o["phrase"]["words"][0].update(text="hello", lang="en")       # control: the same word in English is fine
+        schema.validate(o)
+
+    def test_vibrato_is_checked_then_refused_in_score_mode(self):
+        good = {"rateHz": 5.5, "depthCents": 45, "onsetS": 0.25}
+        for bad in ({"rateHz": 2.9, "depthCents": 45, "onsetS": 0.25}, {"rateHz": 9.1, "depthCents": 45, "onsetS": 0},
+                    {"rateHz": 5.5, "depthCents": -1, "onsetS": 0}, {"rateHz": 5.5, "depthCents": 150.5, "onsetS": 0},
+                    {"rateHz": 5.5, "depthCents": 45, "onsetS": 2.01}, {"rateHz": 5.5, "depthCents": 45},
+                    {"rateHz": "5", "depthCents": 45, "onsetS": 0}, dict(good, extra=1), [5.5, 45, 0.25]):
+            o = v2()
+            o["phrase"]["notes"][3]["vibrato"] = bad
+            self.refused(o, "badRequest", contains="phrase.notes[3].vibrato")
+        for edge in (good, {"rateHz": 3, "depthCents": 0, "onsetS": 0}, {"rateHz": 9, "depthCents": 150, "onsetS": 2}):
+            o = v2()
+            o["phrase"]["notes"][3]["vibrato"] = edge
+            self.refused(o, "vibratoNeedsMelody", contains="phrase.notes[3].vibrato")
+
+    def test_prompt_f0_is_checked_then_refused_in_score_mode(self):
+        def with_f0(f0):
+            v = own()
+            v["prompt"]["f0"] = f0
+            return v2(voice=v)
+        for bad in ({"fps": 100, "hz": [220.0]}, {"fps": 50.0, "hz": [220.0]}, {"fps": True, "hz": [220.0]},
+                    {"fps": 50, "hz": []}, {"fps": 50, "hz": [220.0, -1]}, {"fps": 50, "hz": [2000.5]},
+                    {"fps": 50, "hz": ["220"]}, {"fps": 50, "hz": [220.0] * (schema.MAX_PROMPT_F0_FRAMES + 1)},
+                    {"fps": 50}, {"fps": 50, "hz": [220.0], "extra": 1}):
+            self.refused(with_f0(bad), "badRequest", contains="voice.prompt.f0")
+        for good in ({"fps": 50, "hz": [0, 220.0, 2000]}, {"fps": 50, "hz": [0.0] * schema.MAX_PROMPT_F0_FRAMES}):
+            self.refused(with_f0(good), "badRequest", contains="only used when control is \"melody\"")
 
 
 class Resolve(unittest.TestCase):

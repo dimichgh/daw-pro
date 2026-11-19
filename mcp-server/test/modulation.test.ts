@@ -35,7 +35,20 @@ import assert from "node:assert/strict";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { DawBridge } from "../src/bridge.js";
+
+function findRoot(startDir: string): string {
+  let dir = startDir;
+  for (let i = 0; i < 8; i++) {
+    if (existsSync(join(dir, "package.json")) && existsSync(join(dir, "src", "server.ts"))) return dir;
+    dir = dirname(dir);
+  }
+  throw new Error(`Could not locate mcp-server/ from ${startDir}`);
+}
 
 // ---------------------------------------------------------------------------
 // Stub the bridge BEFORE any tool call runs.
@@ -655,16 +668,56 @@ test("mod_describe_kinds is named in every one of the other eight tool descripti
   }
 });
 
-test("mod_add_source's params schema teaches tempo sync is NOT AVAILABLE (syncDivision/stepDivision) and the envelope-follower's non-determinism", async () => {
+test("mod_add_source's params schema teaches stepDivision works, the LFO syncDivision stays refused, and the envelope-follower's non-determinism", async () => {
   const { tools } = await client.listTools();
   const tool = tools.find((t) => t.name === "mod_add_source");
   const paramsSchema = (tool!.inputSchema as any).properties.params;
   const syncDesc = paramsSchema.properties.syncDivision.description as string;
   const stepSyncDesc = paramsSchema.properties.stepDivision.description as string;
-  assert.match(syncDesc, /NOT AVAILABLE/);
-  assert.match(syncDesc, /m39-c/);
-  assert.match(stepSyncDesc, /NOT AVAILABLE/);
+  const rateDesc = paramsSchema.properties.rateHz.description as string;
+  // The LFO refusal is kept, in plain words, with no internal ticket names.
+  assert.match(syncDesc, /REFUSED/);
+  assert.match(syncDesc, /modulationTempoSyncUnavailable/);
+  assert.doesNotMatch(syncDesc, /m39-c|when sync lands/);
+  // stepDivision is available and explained.
+  assert.doesNotMatch(stepSyncDesc, /NOT AVAILABLE/);
+  assert.match(stepSyncDesc, /stepDivision: "1\/16"/);
+  assert.match(stepSyncDesc, /step 1 is always on the bar line/);
+  assert.match(stepSyncDesc, /time-signature change/);
+  assert.match(stepSyncDesc, /`rateHz` is unused/);
+  assert.match(stepSyncDesc, /`null` to clear/);
+  assert.match(rateDesc, /ignores it while `stepDivision` is set/);
+  assert.doesNotMatch(rateDesc, /NOT AVAILABLE/);
   assert.match(tool!.description ?? "", /render history/, "envelopeFollower's non-determinism is taught");
+  assert.match(tool!.description ?? "", /stepDivision/);
+});
+
+test("mod_set_source, mod_describe_kinds and mod_describe teach stepDivision and the tempoSync block", async () => {
+  const { tools } = await client.listTools();
+  const text = (name: string) => tools.find((t) => t.name === name)!.description ?? "";
+  assert.match(text("mod_set_source"), /`stepDivision`/);
+  assert.match(text("mod_set_source"), /`rateHz` is unused/);
+  assert.match(text("mod_describe_kinds"), /`stepDivision` param lists every allowed note length in its `values`/);
+  assert.match(text("mod_describe"), /`tempoSync` block/);
+  for (const key of ["stepDivision", "stepsPerBar", "meter", "restart", "rateHzNote"]) {
+    assert.match(text("mod_describe"), new RegExp(key), `mod_describe names tempoSync.${key}`);
+  }
+});
+
+test("DRIFT: the stepDivision enum equals the Swift NoteDivision raw values, in the same order", async () => {
+  const swift = readFileSync(
+    join(findRoot(dirname(fileURLToPath(import.meta.url))), "..", "Sources", "DAWCore", "TempoMap.swift"),
+    "utf8"
+  );
+  const block = swift.slice(swift.indexOf("public enum NoteDivision"));
+  const body = block.slice(0, block.indexOf("public var beats"));
+  const swiftValues = [...body.matchAll(/case\s+\w+\s*=\s*"([^"]+)"|,\s*\w+\s*=\s*"([^"]+)"/g)].map((m) => m[1] ?? m[2]);
+  assert.equal(swiftValues.length, 18, "positive control: the scan found all 18 Swift divisions");
+  const { tools } = await client.listTools();
+  const tool = tools.find((t) => t.name === "mod_add_source");
+  const field = (tool!.inputSchema as any).properties.params.properties.stepDivision;
+  const values = (field.enum ?? field.anyOf?.find((b: any) => b.enum)?.enum).filter((v: unknown) => v !== null);
+  assert.deepEqual(values, swiftValues);
 });
 
 test("the instrumentParam target's description states the automation-lane boundary and points at mod_add_route", async () => {

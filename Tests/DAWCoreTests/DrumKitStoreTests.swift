@@ -239,7 +239,7 @@ struct DrumKitStoreTests {
     func noDiscreteParamsAndNotHosted() {
         #expect(InstrumentParamSpec.discreteParamNames(for: .drumSynth).isEmpty)
         #expect(InstrumentParamSpec.isHosted(.drumSynth) == false)
-        #expect(InstrumentParamSpec.specs(for: .drumSynth).count == 75)
+        #expect(InstrumentParamSpec.specs(for: .drumSynth).count == 77)
         #expect(InstrumentParamSpec.specs(for: .drumSynth).allSatisfy {
             $0.modulatable == .yes
         })

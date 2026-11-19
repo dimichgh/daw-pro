@@ -29,6 +29,8 @@
 import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -162,6 +164,9 @@ test("clip_slice_to_sampler forwards {clipId} (bare) and omits every unset optio
     // bare call started muting a track the caller never named, which is the
     // exact behaviour change the app-side FALSE default exists to prevent.
     "muteSourceTrack",
+    // m39-w4-7: "kit" is opt-in; a bare call must stay the chromatic chop.
+    "mapping",
+    "roles",
   ]) {
     assert.equal(
       calls[0]!.params[key],
@@ -228,6 +233,8 @@ test("clip_slice_to_sampler forwards every parameter explicitly", async () => {
     atBeat: 16,
     velocityFromStrength: true,
     muteSourceTrack: true,
+    mapping: undefined,
+    roles: undefined,
   });
 });
 
@@ -439,4 +446,168 @@ test("⭐ clip_slice_to_sampler's description names the CHOP use case, the veloc
   );
   // And the neighbour it must not be confused with.
   assert.match(description, /clip_quantize_audio/);
+});
+
+// ---------------------------------------------------------------------------
+// m39-w4-7 — kit-aware slicing: `mapping: "kit"` + `roles`
+// ---------------------------------------------------------------------------
+
+/** A kit-mapped reply: the extra per-slice `role`/`confidence` and `kitSummary`. */
+function makeStubbedKitChop() {
+  const base = makeStubbedChop();
+  return {
+    ...base,
+    slices: [
+      { ...base.slices[0]!, pitch: 36, role: "kick", confidence: 0.93 },
+      { ...base.slices[1]!, pitch: 38, role: "snare", confidence: 1 },
+      { ...base.slices[2]!, pitch: 42, role: "closedHat", confidence: 0.61 },
+    ],
+    kitSummary: "Sorted into 1 kick, 1 snare and 1 closed hat.",
+  };
+}
+
+test("⭐ clip_slice_to_sampler forwards mapping \"kit\" and roles verbatim, and the kit reply round-trips (m39-w4-7)", async () => {
+  const clipId = randomUUID();
+  const stubbed = makeStubbedKitChop();
+  queuedResult = stubbed;
+
+  const result = await client.callTool({
+    name: "clip_slice_to_sampler",
+    arguments: { clipId, mapping: "kit", roles: { "1": "snare", "12": "openHat" }, muteSourceTrack: true },
+  });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.sliceToSampler");
+  assert.equal(calls[0]!.params["mapping"], "kit");
+  assert.deepEqual(calls[0]!.params["roles"], { "1": "snare", "12": "openHat" });
+  assert.equal(calls[0]!.params["baseNote"], undefined, "kit never gets a baseNote from this layer");
+
+  const parsed = parseJSON(result as any);
+  assert.equal(parsed.slices[1].role, "snare");
+  assert.equal(parsed.slices[1].confidence, 1);
+  assert.match(parsed.kitSummary, /^Sorted into/);
+  assert.deepEqual(parsed, stubbed, "role, confidence and kitSummary survive the boundary");
+});
+
+test("clip_slice_to_sampler forwards mapping \"chromatic\" explicitly and a default call stays free of kit keys", async () => {
+  const clipId = randomUUID();
+  queuedResult = makeStubbedChop();
+  const result = await client.callTool({
+    name: "clip_slice_to_sampler",
+    arguments: { clipId, mapping: "chromatic", baseNote: 48 },
+  });
+  assert.equal(calls[0]!.params["mapping"], "chromatic");
+  assert.equal(calls[0]!.params["baseNote"], 48);
+  assert.equal(calls[0]!.params["roles"], undefined);
+  const parsed = parseJSON(result as any);
+  for (const slice of parsed.slices) {
+    assert.ok(!("role" in slice) && !("confidence" in slice), "a chromatic reply carries no role fields");
+  }
+  assert.ok(!("kitSummary" in parsed), "a chromatic reply carries no kitSummary");
+});
+
+test("clip_slice_to_sampler's mapping and roles guards fire at the schema layer, before the bridge", async () => {
+  const clipId = randomUUID();
+  const bad: Array<[string, Record<string, unknown>]> = [
+    ["an unknown mapping", { mapping: "drumkit" }],
+    ["a non-string mapping", { mapping: 1 }],
+    ["an unknown role", { mapping: "kit", roles: { "0": "tom" } }],
+    ["a non-numeric slice key", { mapping: "kit", roles: { first: "kick" } }],
+    ["a negative slice key", { mapping: "kit", roles: { "-1": "kick" } }],
+    ["a zero-padded slice key (the app counts \"01\" as not a slice number)", { mapping: "kit", roles: { "01": "kick" } }],
+    ["roles as an array", { mapping: "kit", roles: ["kick"] }],
+  ];
+  for (const [label, extra] of bad) {
+    const result = (await client.callTool({
+      name: "clip_slice_to_sampler",
+      arguments: { clipId, ...extra },
+    })) as any;
+    assert.ok(result.isError, `${label} must be rejected`);
+  }
+  assert.equal(calls.length, 0, "every one refused before the bridge");
+});
+
+test("clip_slice_to_sampler surfaces the app's kit refusals verbatim (baseNote with kit, roles outside kit, bad index, overflow)", async () => {
+  const messages = [
+    "clip.sliceToSampler: 'baseNote' only applies to mapping 'chromatic' — mapping 'kit' puts each hit on its General MIDI drum note",
+    "clip.sliceToSampler: 'roles' only applies to mapping 'kit' — pass mapping: \"kit\" to sort the hits into a drum kit",
+    "roles names slice 9, but this chop made 4 slices (0–3). Nothing was changed",
+    "sorting clip 11111111-1111-4111-8111-111111111111 into a drum kit would put 50 hits on the extra pads from note 84, which needs note 133 — MIDI stops at 127. Nothing was changed.",
+  ];
+  const argsList: Array<Record<string, unknown>> = [
+    { mapping: "kit", baseNote: 36 },
+    { roles: { "0": "kick" } }, // the schema lets this through: only the app knows the mapping default
+    { mapping: "kit", roles: { "9": "kick" } },
+    { mapping: "kit", maxSlices: 96 },
+  ];
+  for (let i = 0; i < messages.length; i++) {
+    calls = [];
+    queuedError = new Error(messages[i]!);
+    const result = (await client.callTool({
+      name: "clip_slice_to_sampler",
+      arguments: { clipId: randomUUID(), ...argsList[i]! },
+    })) as any;
+    assert.ok(result.isError, `refusal ${i} must be a tool error`);
+    assert.ok((result.content[0].text as string).includes(messages[i]!), `refusal ${i} must arrive verbatim`);
+    assert.equal(calls.length, 1, `refusal ${i} came from the app, so the call reached the bridge`);
+  }
+});
+
+test("⭐ clip_slice_to_sampler's description teaches the kit sort: notes, best-guess, measured limits, roles", async () => {
+  const { tools } = (await client.listTools()) as any;
+  const tool = tools.find((t: any) => t.name === "clip_slice_to_sampler");
+  const description = tool.description as string;
+  assert.match(description, /mapping: "kit"/);
+  for (const note of ["36", "38", "42", "46", "84"]) assert.match(description, new RegExp(`\\b${note}\\b`));
+  assert.match(description, /best guess/i);
+  assert.match(description, /confidence/);
+  assert.match(description, /kitSummary/);
+  assert.match(description, /CLOSED hat can be sorted as\s+OPEN|CLOSED hat can be sorted as OPEN/);
+  assert.match(description, /velocity 100 only/);
+  assert.match(description, /roles/);
+  assert.match(description, /choke group 0/);
+  assert.match(description, /baseNote.*REFUSED|REFUSED together/);
+  const props = tool.inputSchema.properties;
+  assert.ok(props.mapping && props.roles, "mapping and roles are in the advertised schema");
+  assert.deepEqual(props.mapping.enum, ["chromatic", "kit"]);
+});
+
+/**
+ * DRIFT: the MCP tool's parameter names are exactly the wire's. The wire's list
+ * is the `rejectUnknownKeys` array of the `clip.sliceToSampler` case in
+ * Commands.swift (the app refuses any other key, so it IS the contract); read
+ * here from source and compared with (a) the advertised MCP schema and (b) the
+ * keys the tool really forwards when every parameter is supplied.
+ */
+test("⭐ DRIFT: clip_slice_to_sampler's parameters equal the wire's accepted keys, advertised and forwarded", async () => {
+  const swift = readFileSync(
+    fileURLToPath(new URL("../../../Sources/DAWControl/Commands.swift", import.meta.url)),
+    "utf8"
+  );
+  const caseStart = swift.indexOf('case "clip.sliceToSampler":');
+  assert.ok(caseStart > 0, "the wire case must be found (a moved case fails loudly, not silently)");
+  const after = swift.slice(caseStart);
+  const match = /rejectUnknownKeys\(\s*\[([^\]]*)\]/.exec(after);
+  assert.ok(match, "the wire's accepted-key list must be found");
+  const wireKeys = [...match![1]!.matchAll(/"([A-Za-z]+)"/g)].map((m) => m[1]!).sort();
+  assert.ok(wireKeys.includes("clipId") && wireKeys.includes("mapping") && wireKeys.includes("roles"));
+
+  const { tools } = (await client.listTools()) as any;
+  const tool = tools.find((t: any) => t.name === "clip_slice_to_sampler");
+  assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), wireKeys, "advertised schema == wire keys");
+
+  const clipId = randomUUID();
+  queuedResult = makeStubbedChop();
+  await client.callTool({
+    name: "clip_slice_to_sampler",
+    arguments: {
+      clipId, targetTrackId: randomUUID(), mode: "transients", sensitivity: 0.5, divisions: undefined,
+      minSliceSeconds: 0.05, maxSlices: 8, includeHead: false, snapWindowMs: 3, generateMIDI: true,
+      atBeat: 0, velocityFromStrength: false, muteSourceTrack: false, mapping: "kit", roles: { "0": "kick" },
+    },
+  });
+  const forwarded = Object.keys(calls[0]!.params).sort();
+  for (const key of forwarded) assert.ok(wireKeys.includes(key), `forwarded key ${key} is not a wire key`);
+  // every wire key except the mode-scoped / kit-exclusive ones is forwarded when supplied
+  for (const key of wireKeys) assert.ok(forwarded.includes(key), `wire key ${key} is never forwarded by the tool`);
 });

@@ -327,6 +327,14 @@ struct SingingSidecarManagerWatchdogTests {
             }
             #expect(capBytes == 512 * 1_048_576, "the cap this test configured")
             #expect(bytes > capBytes, "the measured footprint must be OVER the cap, not merely present")
+            // The watchdog RECORDS its kill before it signals (`SingingSidecarWatchdog` loop: `recordSample`
+            // sets `lastKillTrigger`, THEN `config.kill` runs its identity check and SIGKILLs), and a killed
+            // child answers `kill(pid, 0)` until it is reaped. So death is POLLED with a deadline, never sampled
+            // once the instant the classification appears (an in-run red under load, W8-X7D 10-07).
+            let deathDeadline = Date().addingTimeInterval(5)
+            while kill(pid, 0) == 0, Date() < deathDeadline {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
             #expect(kill(pid, 0) != 0, "the tree must actually be dead, not just classified as killed")
         } catch {
             _ = try? await manager.stop()

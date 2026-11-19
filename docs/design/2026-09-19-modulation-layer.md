@@ -688,7 +688,7 @@ Four kinds in v1. `sampleHold` is an LFO **waveform**, not a fifth kind — it i
 |---|---|---|---|---|---|---|
 | `waveform` | string | `sine` \| `triangle` \| `sawUp` \| `sawDown` \| `square` \| `sampleHold` | `sine` | - | - | `sawUp` rises then resets; `sawDown` falls. Named unambiguously on purpose |
 | `rateHz` | number | 0.01 ... 40 | 1.0 | Hz | **logarithmic** | ignored when `syncDivision` is set |
-| `syncDivision` | string \| null | any `NoteDivision` raw value (`"1/4"`, `"1/8t"`, `"1/16d"`, 18 in all) | `null` | - | - | **requires m39-c** (see 7.2.1) |
+| `syncDivision` | string \| null | any `NoteDivision` raw value (`"1/4"`, `"1/8t"`, `"1/16d"`, 18 in all) | `null` | - | - | **NOT BUILT for the LFO**: any non-null value is refused (see 7.2.1); only the step sequencer's `stepDivision` syncs |
 | `phaseDeg` | number | 0 ... 360 | 0 | deg | linear | phase at transport position 0 |
 | `pulseWidth` | number | 0.01 ... 0.99 | 0.5 | - | linear | `square` only; warned and ignored otherwise |
 | `edgeMs` | number | 0 ... 100 | 2.0 | ms | logarithmic | raised-cosine edge width for `square` / `sampleHold`; ignored on continuous waveforms |
@@ -700,7 +700,7 @@ Four kinds in v1. `sampleHold` is an LFO **waveform**, not a fifth kind — it i
 | param | type | range | default | unit | curve | notes |
 |---|---|---|---|---|---|---|
 | `steps` | array of number | each -1 ... 1; length 1 ... 64 | `[1, 0, 1, 0]` | - | linear | offsets, NOT levels — see the polarity amendment below. A sweep is any ramp |
-| `stepDivision` | string | `NoteDivision` raw | `"1/16"` | - | - | **requires m39-c** |
+| `stepDivision` | string or null | `NoteDivision` raw (`1/1` ... `1/32`, with `d` dotted and `t` triplet) | null (free-running) | - | - | **SHIPPED (m39-w4-4)**: locks the steps to the song's beat; `rateHz` is unused while it is set (the reply warns) |
 | `edgeMs` | number | 0 ... 100 | 2.0 | ms | logarithmic | raised-cosine edge between steps |
 
 ### `envelopeFollower` — output **unipolar** `[0, 1]`. The one stateful source
@@ -768,6 +768,11 @@ layer's per-sample path. This convention is the contract for the highest-payoff 
 whole item.
 
 ### 7.2.1 Tempo sync is m39-c's job, and m39-e must not hand-roll a second resolver
+
+> **Update 2026-10-11 (m39-w4-4):** the gate below has been met for the step sequencer. `stepDivision` is now
+> accepted and follows the song's own clock (`ModulationSnapshotClock`), verified live == export (G8). The LFO's
+> `syncDivision` still refuses with `modulationTempoSyncUnavailable`. The text below is the decision as written at
+> the time.
 
 `syncDivision` / `stepDivision` are resolved to `samplesPerCycle` **on the main actor**, through
 m39-c's generalised resolver, and published in the snapshot. The render thread does no tempo maths —
@@ -884,7 +889,7 @@ keeps its existing behaviour; changing that is out of scope here and is noted as
 | `modulationTargetUnsupported` | the target's verdict is `refused` | the target, and a `reason` from the frozen set below |
 | `modulationLimitExceeded` | a strip cap would be exceeded | which cap, its value, the current count, and — for routes — the lane/route split |
 | `modulationStepsInvalid` | `steps` empty, longer than 64, or containing a non-finite value | the offending length or index |
-| `modulationTempoSyncUnavailable` | `syncDivision` used before m39-c landed | that m39-c is the prerequisite |
+| `modulationTempoSyncUnavailable` | a non-null `syncDivision` on an LFO (an LFO cannot lock to the beat yet; a step sequencer's `stepDivision` can) | the field, and that `rateHz` is the free-running rate |
 
 **Frozen `reason` set for `modulationTargetUnsupported`** — an agent branches on these, so they are
 part of the contract:
@@ -1252,7 +1257,7 @@ target class rather than by modulator character.
 |---|---|---|
 | **m39-a** (`EffectParamSpec.curve`) | **HARD** — the depth law is defined in terms of `curve` (§7.3, §10 H5) | do not start L1. Shipping the depth law without declared curves bakes a musical error into a frozen contract |
 | **m39-b** (`AutomationTarget.instrumentParam`) | **CO-DESIGNED** — §4 freezes the case shape; the two items share P1's delivery path | land the enum case as part of L1 rather than duplicating it |
-| **m39-c** (tempo-sync resolver) | **SOFT** — gates `syncDivision` / `stepDivision` only | ship `rateHz` only; `syncDivision` refuses with `modulationTempoSyncUnavailable` (§7.2.1) |
+| **m39-c** (tempo-sync resolver) | **SOFT** — gated `syncDivision` / `stepDivision`. LANDED for the step sequencer (m39-w4-4): `stepDivision` works. | the LFO's `syncDivision` still refuses with `modulationTempoSyncUnavailable` (§7.2.1) |
 | **m39-d** (live/offline block measurement) | **GATES SYNCED EFFECTS**, not the layer | the layer ships; no tempo-synced *effect* ships (§8.3) |
 
 ### 11.1 The legs, in order, with file paths

@@ -459,6 +459,52 @@ public final class AudioEngine: AudioEngineControlling {
 
     private var activeTake: ActiveTake?
 
+    // MARK: Input-only capture state (p2-sing-e, "Add your voice")
+
+    /// Everything a running input-only capture owns. Separate from
+    /// `ActiveTake` on purpose: it has no transport, no anchor, no MIDI side
+    /// and no track. It shares only the capture discipline (`InputCapture`'s
+    /// own input-only engine feeding a `RecordingWriter`).
+    private struct ActiveInputOnlyCapture {
+        let generation: UInt64
+        let source: any InputCaptureSource
+        let writer: RecordingWriter
+        let meter: InputLevelMeter
+        let url: URL
+        let completion: @MainActor (InputOnlyCaptureOutcome) -> Void
+    }
+
+    private var activeInputOnlyCapture: ActiveInputOnlyCapture?
+    /// Bumped by every start. Each asynchronous end signal (frame limit,
+    /// watchdog, device change) carries the value it was armed with, so a
+    /// late signal can never end a NEWER capture.
+    private var inputOnlyCaptureGeneration: UInt64 = 0
+    private var inputOnlyCaptureWatchdog: Task<Void, Never>?
+    /// W8-RTFIX (RT review F3) — the wall-clock BACKSTOP. The watchdog above
+    /// covers only the time BEFORE the first buffer, and the frame limit
+    /// counts frames WRITTEN, so an input that stops delivering after its
+    /// first buffer (a "benign" reconfigure that silently killed the tap, a
+    /// sleep/wake) would otherwise leave the capture running forever. Armed
+    /// by every start, cancelled by `endInputOnlyCapture`.
+    private var inputOnlyCaptureBackstop: Task<Void, Never>?
+
+    /// Builds the capture source. The real engine records through
+    /// `InputCapture`, exactly as a take does. Tests replace it with a
+    /// synthetic source that feeds the writer directly: no microphone, no TCC
+    /// prompt, no device.
+    var makeInputCaptureSource: @MainActor () -> any InputCaptureSource = { InputCapture() }
+    /// How long an input-only capture may run with ZERO deliveries before it
+    /// fails (the take path's `firstBufferWatchdogSeconds`). Tests change it.
+    var inputOnlyCaptureFirstBufferSeconds: Double = AudioEngine.firstBufferWatchdogSeconds
+    /// How long past `maxSeconds` (wall clock, from the start) the backstop
+    /// waits before it ends a capture that has not reached its length. 3 s,
+    /// twice the first-buffer watchdog: a healthy first buffer lands within
+    /// the watchdog's 1.5 s (later, and the watchdog fails the capture), and
+    /// the tap hands audio over in 4 096-frame blocks (0.09 s at 44.1 kHz), so
+    /// a healthy capture reaches its frame limit by about `maxSeconds` + 1.6 s.
+    /// Tests change it.
+    var inputOnlyCaptureStallGraceSeconds: Double = AudioEngine.firstBufferWatchdogSeconds * 2
+
     // MARK: MIDI input (M3 vii)
 
     /// Lazily created on the first instrument-track arm or the first
@@ -642,6 +688,13 @@ public final class AudioEngine: AudioEngineControlling {
     /// republish exactly like `lastMasterAutomation`.
     private var lastMasterModulationSources: [ModulationSource] = []
     private var lastMasterModulationRoutes: [ModulationRoute] = []
+
+    /// The song's pan rule (m39-panlaw-new), cached from `panLawChanged` /
+    /// `setPanLaw` for every LIVE graph this engine builds (`wireGraphHooks`).
+    /// Never read by an offline render: an export takes the rule as an input
+    /// (the pan-carrying `renderOffline`, W9-PLRT R1). Default `.balance`, the
+    /// original rule, until a store says otherwise.
+    private(set) var panLaw: PanLaw = .balance
 
     // MARK: Reference monitor state (m22-g P2 — cached like the metronome)
 
@@ -923,6 +976,9 @@ public final class AudioEngine: AudioEngineControlling {
         // user is holding would silently stop working after a rebuild.
         graph.masterModulationSources = lastMasterModulationSources
         graph.masterModulationRoutes = lastMasterModulationRoutes
+        // m39-panlaw-new: the song's pan rule, the same republish — a rebuilt
+        // graph must pan the knobs by the song's rule, not the default.
+        graph.panLaw = panLaw
         graph.manualMasterVolume = masterVolume
         // Per-insert spectrum arms (m23-r2a): the `masterEffects` republish
         // twin. The intent lives HERE (`spectrumArms`) and the graph only
@@ -1183,6 +1239,9 @@ public final class AudioEngine: AudioEngineControlling {
         if activeTake != nil {
             stopRecording()  // finalizes the take (and stops playback) first
         }
+        // p2-sing-e: a running input-only capture ends CANCELLED (its file is
+        // deleted); its completion still fires, exactly once.
+        cancelInputOnlyCapture()
         if currentAnchor != nil {
             stopPlayback()
         }
@@ -1341,7 +1400,7 @@ public final class AudioEngine: AudioEngineControlling {
         // m22-f: resolve tempo-synced delays at the intake seam — everything
         // downstream (reconcile, parameter passes, rebuilds) sees a final
         // timeMs and the render thread never meets a tempo.
-        let tracks = DelayTempoSync.resolved(tracks: tracks, tempoBPM: delaySyncTempoBPM)
+        let tracks = TempoSync.resolved(tracks: tracks, tempoBPM: delaySyncTempoBPM)
         lastTracks = tracks
         // m16-a Leg 1: reconcile + rebuild under the exception barrier — the
         // audit's storm-flavored raises (a player attached-but-not-yet-
@@ -3358,6 +3417,21 @@ public final class AudioEngine: AudioEngineControlling {
         }.value
     }
 
+    /// m27-k: `profileFile` plus the OPT-IN loudness reading for the profiled
+    /// range (`FileProfiler` feeding `Loudness.Stream` in the same pass), on
+    /// the same kind of detached task: zero render-thread involvement, zero
+    /// live-graph involvement, read-only. The 4-argument twin above is the
+    /// no-flag path and is untouched.
+    public func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                            durationSeconds: Double?, measuringLoudness: Bool) async throws -> FileProfile {
+        try await Task.detached(priority: .userInitiated) {
+            try FileProfiler.profile(
+                fileAt: url, windowSeconds: windowSeconds,
+                fromSeconds: fromSeconds, durationSeconds: durationSeconds,
+                measuringLoudness: measuringLoudness)
+        }.value
+    }
+
     /// Offline per-frame pitch detection (m23-ap-3): `ClipPitchAnalyzer`,
     /// which owns the `PitchTracker` construction + conversion, on a
     /// detached task — zero render-thread involvement, zero live-graph
@@ -3482,6 +3556,21 @@ public final class AudioEngine: AudioEngineControlling {
                                                           effectID: effectID))
     }
 
+    /// m27-j (W8-M27J): one armed insert's consumer-side frame counters (nil
+    /// `trackID` = the master chain; nil result = not armed). Main actor only;
+    /// touches no render-thread state but the tap's own atomic counter. The
+    /// chain lookup mirrors `PlaybackGraph.analysisChainState(forTrack:)`
+    /// (private there; this lane does not edit PlaybackGraph).
+    public func insertAnalysisCoverage(trackID: UUID?, effectID: UUID) -> InsertAnalysisCoverage? {
+        let state: EffectChainState?
+        if let trackID {
+            state = graph.effectChainState(forTrack: trackID)
+        } else {
+            state = graph.masterChainState
+        }
+        return state?.insertAnalysisCoverage(forEffect: effectID)
+    }
+
     public func masterVolumeChanged(_ volume: Double) {
         masterVolume = volume.clamped(to: Track.volumeRange)
         // mainMixerNode exists (and holds parameters) whether or not the
@@ -3500,7 +3589,7 @@ public final class AudioEngine: AudioEngineControlling {
     /// transport interruption (the live-add gate BY CONSTRUCTION).
     public func masterEffectsChanged(_ effects: [EffectDescriptor]) {
         // m22-f: the master-chain twin of the tracksDidChange intake resolve.
-        let effects = DelayTempoSync.resolved(effects: effects, tempoBPM: delaySyncTempoBPM)
+        let effects = TempoSync.resolved(effects: effects, tempoBPM: delaySyncTempoBPM)
         lastMasterEffects = effects
         graph.masterEffects = effects
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
@@ -3536,6 +3625,26 @@ public final class AudioEngine: AudioEngineControlling {
         graph.masterModulationSources = sources
         graph.masterModulationRoutes = routes
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+    }
+
+    /// m39-panlaw-new — the song's pan rule for the LIVE graph (the attach
+    /// push). Cache it (rebuilds read the cache), hand it to the live graph,
+    /// and run ONE parameter pass, which moves every knob to the node or to
+    /// the render stage. Never a topology change, never a transport
+    /// interruption.
+    public func panLawChanged(_ law: PanLaw) {
+        setPanLaw(law)
+        graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+    }
+
+    /// W9-PLRT R5 — the project-boundary push: the cache and the live graph's
+    /// rule, NO parameter pass. The store pushes the incoming tracks next, and
+    /// that pass (or the rebuild it triggers, which reads this cache in
+    /// `wireGraphHooks`) moves the knobs; a pass here would re-pan the
+    /// outgoing song's strips under the incoming rule for nothing.
+    public func setPanLaw(_ law: PanLaw) {
+        panLaw = law
+        graph.panLaw = law
     }
 
     /// `masterEffects` defaults `[]` on the CONCRETE class only (the
@@ -3586,7 +3695,9 @@ public final class AudioEngine: AudioEngineControlling {
     /// m39-e-2 — the format-aware mixdown carrying the MASTER strip's
     /// modulation (`render.mixdown`'s seam: here the engine renders AND writes).
     /// No default argument anywhere, for the disambiguation reason above; the
-    /// render class is the caller's to state.
+    /// render class is the caller's to state. m39-w4-4a: it carries no meter
+    /// map, so it inherits the meter-less render's refusal of a routed
+    /// tempo-synced source; `render.mixdown` uses the meter-carrying twin below.
     public func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
                               masterEffects: [EffectDescriptor],
                               masterAutomation: [AutomationLane],
@@ -3603,6 +3714,60 @@ public final class AudioEngine: AudioEngineControlling {
         // (design §2.1; master modulation since m39-e-2).
         let audio = try await renderOffline(
             tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: nil
+        )
+        return try writeAudioFile(audio, to: url, format: format)
+    }
+
+    /// m39-w4-4a — the format-aware, master-modulation mixdown carrying the
+    /// project's meter map: `render.mixdown`'s seam, where the engine renders
+    /// AND writes (the m23-m2 lesson), so the meter needs its own crossing
+    /// here. The composition above, over the meter-carrying render. No default
+    /// argument anywhere, for the disambiguation reason above. W9-PLRT R1: it
+    /// carries no pan rule, so it renders the original rule (the meter-carrying
+    /// render's); `render.mixdown` uses the pan-carrying twin below.
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                              masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL,
+                              format: DeliveryFormat) async throws -> AudioFileInfo {
+        let audio = try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, meterMap: meterMap, masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: nil
+        )
+        return try writeAudioFile(audio, to: url, format: format)
+    }
+
+    /// W9-PLRT R1 — `render.mixdown`'s seam carrying the song's pan rule: the
+    /// composition above over the pan-carrying render. No default argument
+    /// anywhere, for the disambiguation reason above.
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                              panLaw: PanLaw,
+                              masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL,
+                              format: DeliveryFormat) async throws -> AudioFileInfo {
+        let audio = try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, meterMap: meterMap, panLaw: panLaw,
+            masterVolume: masterVolume,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
             masterModulationSources: masterModulationSources,
@@ -3634,7 +3799,79 @@ public final class AudioEngine: AudioEngineControlling {
     /// which the fresh `OfflineRenderer` sets on its own graph before the
     /// pre-start parameter pass. No defaults: the render class (MASTERED passes
     /// the project's sources/routes, STEM passes `[]`) is the caller's to state.
+    ///
+    /// m39-w4-4a: this signature carries NO meter map. It renders with the
+    /// constant map `OfflineRenderer` always defaulted to (byte-identical to
+    /// its pre-meter body), and it REFUSES (`engineUnavailable`) any render in
+    /// which an enabled route reads a tempo-synced step source: such a render
+    /// depends on the meter, and an overload that cannot see the meter cannot
+    /// tell whether dropping it changes the bytes. (The cached transport meter
+    /// is no answer: it is stale exactly when it matters, W8-W44R N1 (a).)
+    /// Every session render uses the meter-carrying overload below.
     public func renderOffline(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
+        guard !OfflineMeterSeam.readsSyncedSource(
+            tracks: tracks, masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, meterMap: MeterMap(constant: TimeSignature()),
+            masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: forcedCompensationTargets)
+    }
+
+    /// m39-w4-4a — the offline render carrying the project's METER MAP next to
+    /// its tempo map (W8-W44R N1): where a tempo-synced step pattern restarts.
+    /// Before it, `renderCooperatively` was never handed a meter, so every
+    /// bounce, mixdown and stem compiled pattern origin 0 everywhere and, after
+    /// the first time-signature change, a synced pattern sounded different
+    /// live and in the export. The meter reaches nothing else on this path (no
+    /// click renders here; a strip without a synced source compiles no clock).
+    /// No defaults: the store passes `transport.meterMap` on every session
+    /// render, and the render class is the caller's to state (m39-e-2).
+    ///
+    /// W9-PLRT R1: this signature carries NO pan rule. It renders the ORIGINAL
+    /// rule (`.balance`, the offline renderer's own default: byte-identical to
+    /// every render through it before m39-panlaw-new) and NEVER the engine's
+    /// cached rule. That cache is the live graph's; an export that read it
+    /// after the stretch await rendered a saved song on a new song's rule.
+    /// Every store session render uses the pan-carrying overload below.
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                              masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
+        try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, meterMap: meterMap, panLaw: .balance,
+            masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: forcedCompensationTargets)
+    }
+
+    /// W9-PLRT R1 — the offline render carrying the song's PAN RULE, an input
+    /// like the tracks and the meter: the store captures it ONCE per operation
+    /// and hands every pass the same value. It reaches the fresh renderer from
+    /// the ARGUMENT, so no project boundary that lands during the stretch
+    /// await below can move it. No defaults (the render class is the caller's).
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                              panLaw: PanLaw,
+                              masterVolume: Double,
                               masterEffects: [EffectDescriptor],
                               masterAutomation: [AutomationLane],
                               masterModulationSources: [ModulationSource],
@@ -3669,6 +3906,10 @@ public final class AudioEngine: AudioEngineControlling {
         // Offline pulls stamp THIS engine's telemetry context (M9 perf-b):
         // a headless bounce is render work and counts in performanceStats.
         renderer.performance = performance
+        // m39-panlaw-new / W9-PLRT R1: the rule this render was HANDED (the
+        // parameter, never `self.panLaw`, the live graph's cache): the offline
+        // graph is a separate graph and would otherwise pan by its own default.
+        renderer.panLaw = panLaw
         // Pure cache lookup — every render either committed above or failed
         // (nil → the clip bounces silent; never wrong-speed audio).
         renderer.stretchedFileProvider = { [stretchCache] clip in
@@ -3699,7 +3940,10 @@ public final class AudioEngine: AudioEngineControlling {
                 masterEffects: masterEffects,
                 masterAutomation: masterAutomation,
                 masterModulationSources: masterModulationSources,
-                masterModulationRoutes: masterModulationRoutes
+                masterModulationRoutes: masterModulationRoutes,
+                // m39-w4-4a: the project's meter, never the renderer's
+                // constant fallback (that parameter has no default now).
+                meterMap: meterMap
             )
         } catch {
             postEngineExceptionNotice(error)
@@ -4188,8 +4432,23 @@ public final class AudioEngine: AudioEngineControlling {
     /// Stopped transport → cache-only (state is read at the next start);
     /// recording keeps its committed click schedule (the store refuses the
     /// toggle mid-take — this guard is defense in depth).
+    ///
+    /// m39-w4-4d: "schedules are NEVER touched" still holds, but this intent
+    /// is also how a METER edit (and its undo/redo) reaches the engine, so it
+    /// restages the graph's roll meter map and, while a roll is armed and the
+    /// map changed, republishes the modulation snapshots of strips with a
+    /// tempo-synced step source (every other strip's publish key carries no
+    /// clock, so nothing else rebuilds). A plain toggle leaves the map equal:
+    /// nothing republishes, and clip output stays byte-identical.
     public func metronomeChanged(_ transport: TransportState) {
         cacheTransportFlags(from: transport)
+        // m39-w4-4d (W8-W44R N3): BEFORE the anchor guard. A meter-only edit
+        // never restarts the transport, so without this a synced pattern kept
+        // its old origin until the next seek, tempo edit or stop/play. The
+        // pass is the one `adoptDelayTempo` already makes while rolling.
+        if graph.restageRollMeterMap(clickMeterMap) {
+            graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
+        }
         guard let anchor = currentAnchor, activeTake == nil else { return }
         // m16-a Leg 1: the click player's own play(at:) is the same AVFAudio
         // raise family — barrier the click-local work like every other
@@ -4915,6 +5174,14 @@ public final class AudioEngine: AudioEngineControlling {
     private func beginTake(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
                            joiningPlayback: Bool,
                            completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws {
+        // W8-RTFIX (RT review F2): one recording at a time, in BOTH directions
+        // (`startInputOnlyCapture` already refuses while a take rolls). This is
+        // the one choke point for `startTake`, `startTakeInPlayback` (so
+        // `looper.*` too) and `startRecording`, and the refusal comes before
+        // anything changes: no audition stopped, no input opened, no playback.
+        guard activeInputOnlyCapture == nil else {
+            throw EngineError.recordingFailed("Your voice is being recorded. Stop that recording first.")
+        }
         // I1: both take starts pass here; a take starts with no clip-note
         // audition sounding or being read.
         stopClipSpanAudition()
@@ -5263,6 +5530,253 @@ public final class AudioEngine: AudioEngineControlling {
         return true
     }
 
+    // MARK: - Input-only capture (p2-sing-e, "Add your voice")
+
+    /// Longest input-only capture accepted. The recorder asks for about 15 s;
+    /// the bound exists because a RIFF/WAV file tops out at 4 GiB, which
+    /// 32-bit float stereo reaches in under an hour at 384 kHz.
+    static let inputOnlyCaptureMaxSecondsCeiling: Double = 600
+
+    /// How an input-only capture is being ended. Every end goes through
+    /// `endInputOnlyCapture`, the ONE place the completion is armed.
+    /// Internal (not private) only so the mapping below is testable.
+    enum InputOnlyCaptureEnding: Sendable {
+        case stopped
+        /// The writer reached the frame limit, or a write failed — its
+        /// finalize result says which.
+        case writerEnded
+        case cancelled
+        case failed(String)
+        /// W8-RTFIX (RT review F3): the wall-clock backstop fired. Carries the
+        /// frame limit so the mapping can tell a capture that DID reach its
+        /// length (the limit's own signal was still on its way to the main
+        /// actor) from one whose input stopped partway.
+        case stalled(frameLimit: Int64)
+    }
+
+    /// The take path's capture, without the playback half (design §5.4): the
+    /// SAME `InputCapture` (its own input-only `AVAudioEngine`, tap on
+    /// AVFoundation's tap queue) feeding the SAME `RecordingWriter` (serial
+    /// writer queue), with no accept-window anchor. Nothing here touches the
+    /// playback engine, the transport, the anchor or any render callback.
+    public func startInputOnlyCapture(to url: URL, maxSeconds: Double,
+                                      completion: @escaping @MainActor (InputOnlyCaptureOutcome) -> Void) throws {
+        guard activeTake == nil else {
+            throw InputOnlyCaptureError(kind: .busy, message:
+                "A recording is already running. Stop it, then record your voice.")
+        }
+        guard activeInputOnlyCapture == nil else {
+            throw InputOnlyCaptureError(kind: .busy, message:
+                "Your voice is already being recorded. Stop that recording first.")
+        }
+        guard maxSeconds.isFinite, maxSeconds > 0,
+              maxSeconds <= Self.inputOnlyCaptureMaxSecondsCeiling else {
+            throw InputOnlyCaptureError(kind: .invalidRequest, message:
+                "A voice recording can last from a moment up to 10 minutes.")
+        }
+        guard url.isFileURL else {
+            throw InputOnlyCaptureError(kind: .invalidRequest, message:
+                "The recording has to be saved as a file on this Mac.")
+        }
+        // Never overwrite: a cancel or a failure deletes the file at `url`,
+        // so overwriting first would turn either into data loss.
+        guard !FileManager.default.fileExists(atPath: url.path) else {
+            throw InputOnlyCaptureError(kind: .invalidRequest, message:
+                "There's already a file called “\(url.lastPathComponent)” there, "
+                + "so I didn't record over it. Choose a new name.")
+        }
+
+        inputOnlyCaptureGeneration &+= 1
+        let generation = inputOnlyCaptureGeneration
+        let source = makeInputCaptureSource()
+        source.deviceUID = selectedInputUID  // the take path's input, never a device change
+        var writer: RecordingWriter?
+        var meter: InputLevelMeter?
+        var reachedFileStage = false
+        var frameLimitFrames: Int64 = 0  // for the backstop (W8-RTFIX F3)
+        do {
+            // The m16-a barrier, as for a take: an AVFAudio raise during the
+            // start becomes an ordinary thrown error.
+            try withObjCExceptionBarrier("voice recording start") {
+                let format = try source.prepare()
+                reachedFileStage = true
+                let newWriter = try RecordingWriter(url: url, inputFormat: format)
+                reachedFileStage = false
+                writer = newWriter
+                let newMeter = InputLevelMeter(sampleRate: format.sampleRate)
+                meter = newMeter
+                // All three land on the writer's FIFO queue before the tap
+                // exists, so no delivery is ever processed ahead of them.
+                newWriter.setTargetHostTime(nil)  // no anchor: keep from the first frame
+                newWriter.setLevelMeter(newMeter)
+                let frameLimit = max(1, Int64((maxSeconds * format.sampleRate).rounded()))
+                frameLimitFrames = frameLimit
+                newWriter.setFrameLimit(frameLimit) { [weak self] in
+                    Task { @MainActor in
+                        self?.endInputOnlyCapture(generation: generation, .writerEnded)
+                    }
+                }
+                try source.start(writer: newWriter)
+            }
+        } catch {
+            source.stop()  // idempotent; safe on a source that never started
+            // Closed and deleted BEFORE the throw returns, so a caller's
+            // immediate retry at the same URL is neither refused as "already
+            // a file" nor raced by a delete still pending on the writer queue.
+            writer?.discardNow()
+            FileHandle.standardError.write(Data(
+                "AudioEngine: input-only capture did not start — \(error)\n".utf8))
+            if let refusal = error as? InputOnlyCaptureError { throw refusal }
+            if reachedFileStage {
+                throw InputOnlyCaptureError(kind: .fileUnavailable, message:
+                    "The recording couldn't be saved there. Choose another place, then try again.")
+            }
+            throw InputOnlyCaptureError(kind: .inputUnavailable, message:
+                "The microphone couldn't start. Check that a microphone is connected "
+                + "and chosen in Settings → Audio Input, then try again.")
+        }
+        guard let writer, let meter else {  // unreachable: both are set before start
+            source.stop()
+            throw InputOnlyCaptureError(kind: .inputUnavailable, message:
+                "The microphone couldn't start. Try again.")
+        }
+
+        activeInputOnlyCapture = ActiveInputOnlyCapture(
+            generation: generation, source: source, writer: writer, meter: meter,
+            url: url, completion: completion)
+        // A change that really killed capture (device unplugged; the source
+        // already filters the benign post-pin reconfigure) fails the capture:
+        // a voice sample cut off partway is not one to keep.
+        source.configurationChangeHandler = { [weak self] in
+            self?.endInputOnlyCapture(generation: generation, .failed(
+                "The microphone stopped working partway through. "
+                + "Check that it's still connected, then record again."))
+        }
+        // The take path's no-input watchdog: zero deliveries is dead input
+        // plumbing, not silence (a silent input still delivers buffers).
+        let watchdogSeconds = inputOnlyCaptureFirstBufferSeconds
+        inputOnlyCaptureWatchdog?.cancel()
+        inputOnlyCaptureWatchdog = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(watchdogSeconds))
+            guard !Task.isCancelled, let self, !writer.hasReceivedAudio else { return }
+            self.endInputOnlyCapture(generation: generation, .failed(
+                "No sound is reaching DAW Pro from the microphone. Check that a microphone "
+                + "is connected and chosen in Settings → Audio Input, then try again."))
+        }
+        // W8-RTFIX (RT review F3): the backstop for an input that stops
+        // delivering AFTER its first buffer, through the same one end path.
+        // Wall clock: `Task.sleep` runs on the continuous clock, which keeps
+        // counting through a system sleep.
+        let backstopSeconds = maxSeconds + inputOnlyCaptureStallGraceSeconds
+        let limit = frameLimitFrames
+        inputOnlyCaptureBackstop?.cancel()
+        inputOnlyCaptureBackstop = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(backstopSeconds))
+            guard !Task.isCancelled, let self else { return }
+            self.endInputOnlyCapture(generation: generation, .stalled(frameLimit: limit))
+        }
+    }
+
+    @discardableResult
+    public func stopInputOnlyCapture() -> Bool {
+        guard let generation = activeInputOnlyCapture?.generation else { return false }
+        endInputOnlyCapture(generation: generation, .stopped)
+        return true
+    }
+
+    @discardableResult
+    public func cancelInputOnlyCapture() -> Bool {
+        guard let generation = activeInputOnlyCapture?.generation else { return false }
+        endInputOnlyCapture(generation: generation, .cancelled)
+        return true
+    }
+
+    public func inputOnlyCapturePeakDbfs() -> Double? {
+        activeInputOnlyCapture?.meter.peakDbfs
+    }
+
+    /// The ONE end path. Exactly-once by construction: the capture is taken
+    /// out of `activeInputOnlyCapture` on the main actor BEFORE anything else,
+    /// so whichever end arrives first (stop, cancel, the frame limit, the
+    /// watchdog, a fatal device change, shutdown) owns the only finalize, and
+    /// every later one finds nothing (or a newer generation) and returns. The
+    /// writer drains every delivery already queued before it closes the file
+    /// (its queue is FIFO), so a stop never drops the last buffer.
+    private func endInputOnlyCapture(generation: UInt64, _ ending: InputOnlyCaptureEnding) {
+        guard let capture = activeInputOnlyCapture, capture.generation == generation else { return }
+        activeInputOnlyCapture = nil
+        inputOnlyCaptureWatchdog?.cancel()
+        inputOnlyCaptureWatchdog = nil
+        inputOnlyCaptureBackstop?.cancel()
+        inputOnlyCaptureBackstop = nil
+        capture.source.configurationChangeHandler = nil
+        capture.source.stop()
+        let completion = capture.completion
+        let url = capture.url
+        capture.writer.finalize { @Sendable result in
+            let outcome = Self.inputOnlyCaptureOutcome(for: ending, result: result)
+            // Only `.recorded` keeps a file. The writer has already deleted an
+            // EMPTY one, and deleting that path a second time could remove a
+            // file a newer capture has since created there.
+            var writerDeletedIt = false
+            if case .success(let take) = result, take.framesWritten == 0 { writerDeletedIt = true }
+            if case .recorded = outcome {} else if !writerDeletedIt {
+                try? FileManager.default.removeItem(at: url)
+            }
+            Task { @MainActor in
+                completion(outcome)
+            }
+        }
+    }
+
+    /// Maps how a capture ended plus the writer's finalize result onto the
+    /// caller's outcome. Pure; runs on the writer queue. Internal (not
+    /// private) only so `InputOnlyCaptureTests` can pin the backstop's arm.
+    nonisolated static func inputOnlyCaptureOutcome(
+        for ending: InputOnlyCaptureEnding,
+        result: Result<RecordingWriter.Result, Error>
+    ) -> InputOnlyCaptureOutcome {
+        switch ending {
+        case .cancelled:
+            return .cancelled
+        case .failed(let reason):
+            return .failed(reason: reason)
+        case .stalled(let frameLimit):
+            // W8-RTFIX (F3). `.failed`, the engine's own rule for a capture
+            // cut off partway (the fatal device change above). But a file that
+            // DID reach its length is kept exactly as the limit's own signal
+            // would have kept it, and a write failure keeps its own sentence:
+            // only a SHORT file is the stall.
+            if case .success(let take) = result, take.framesWritten < frameLimit {
+                return .failed(reason:
+                    "The microphone stopped sending sound partway through. "
+                    + "Check that it's still connected, then record again.")
+            }
+            return inputOnlyCaptureOutcome(for: .writerEnded, result: result)
+        case .stopped, .writerEnded:
+            switch result {
+            case .failure:
+                return .failed(reason:
+                    "The recording couldn't be saved on this Mac. "
+                    + "Check that there's free space, then record again.")
+            case .success(let take) where take.framesWritten == 0:
+                return .failed(reason: "Nothing was recorded. Press Record, sing, then press Stop.")
+            case .success(let take):
+                let endedBy: InputOnlyCaptureEnd
+                if case .writerEnded = ending { endedBy = .reachedMaxSeconds } else { endedBy = .stopped }
+                return .recorded(InputOnlyCaptureRecording(
+                    fileURL: take.url,
+                    info: AudioFileInfo(
+                        durationSeconds: take.sampleRate > 0
+                            ? Double(take.framesWritten) / take.sampleRate : 0,
+                        sampleRate: take.sampleRate,
+                        channelCount: take.channelCount),
+                    frameCount: take.framesWritten,
+                    endedBy: endedBy))
+            }
+        }
+    }
+
     /// Snapshots the loop region AND metronome state from any transport
     /// intent. Called first thing in every intent that receives a
     /// `TransportState`, before its own guards, so restarts that carry no
@@ -5295,15 +5809,14 @@ public final class AudioEngine: AudioEngineControlling {
         let bpm = transport.tempoMap.bpm(atBeat: lastKnownBeats)
         guard bpm != delaySyncTempoBPM else { return }
         delaySyncTempoBPM = bpm
-        let tracksSynced = DelayTempoSync.containsSyncedDelay(tracks: lastTracks)
-        let masterSynced = DelayTempoSync.containsSyncedDelay(effects: lastMasterEffects)
+        let tracksSynced = TempoSync.containsSynced(tracks: lastTracks)
+        let masterSynced = TempoSync.containsSynced(effects: lastMasterEffects)
         guard tracksSynced || masterSynced else { return }
         if tracksSynced {
-            lastTracks = DelayTempoSync.resolved(tracks: lastTracks, tempoBPM: bpm)
+            lastTracks = TempoSync.resolved(tracks: lastTracks, tempoBPM: bpm)
         }
         if masterSynced {
-            lastMasterEffects = DelayTempoSync.resolved(effects: lastMasterEffects,
-                                                        tempoBPM: bpm)
+            lastMasterEffects = TempoSync.resolved(effects: lastMasterEffects, tempoBPM: bpm)
             graph.masterEffects = lastMasterEffects
         }
         graph.applyParameters(tracks: lastTracks, playheadBeat: lastKnownBeats)
@@ -5425,7 +5938,8 @@ public final class AudioEngine: AudioEngineControlling {
                                           headSeconds: headSeconds, cycleSeconds: cycleSeconds)
             }
         }
-        graph.scheduleAll(fromBeat: beats, tempoMap: tempoMap, loop: loopWindow, cause: cause)
+        graph.scheduleAll(fromBeat: beats, tempoMap: tempoMap, loop: loopWindow, cause: cause,
+                          meterMap: clickMeterMap)
         if loopContext != nil {
             // Initial coverage: eager +2 cycles and the C6 horizon — all
             // pre-queued anchored segments, the L-0 spike's proven shape.

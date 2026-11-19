@@ -1280,6 +1280,28 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
     /// picks). Codable key `transitionSlope`, written only when non-zero.
     public var transitionSlopeCentsPerSecond: Double
 
+    /// §4 ERRATUM vf-18 (W9-SLFX, design `$S/w9/SLRV/REVIEW.md` §3.1): which
+    /// notes a followed slide's TILT reads (`SlideFollowRule` argues each
+    /// case). `.sungAtOpenSide` = LEGACY, today's rule, and what every set
+    /// saved before 2026-10-12 decodes to.
+    ///  * Codable key `slideFollowRule`, written ONLY for `.holdAtOpenSide`. An
+    ///    ABSENT key and an UNKNOWN value (a newer build's case) both decode as
+    ///    `.sungAtOpenSide`, the `NoteOrigin(storedValue:)` precedent, so a
+    ///    newer file still opens. ⚠️ An older build that re-saves such a file
+    ///    DROPS the unknown value (a byte gate cannot see a decode default),
+    ///    and the newer build then reopens it on the legacy rule.
+    ///  * ⛔ NOT an identity input (`isIdentity`, `isPitchIdentity`,
+    ///    `predatesNaturalTuning`, `usesSoftJoins` never read it), the §4.b.1
+    ///    rule slope and follow keep: with every offset at 0 a rule bends
+    ///    nothing.
+    ///  * Hashed in digest slot 9 (`PitchEditSetDigest`'s slide-follow marker)
+    ///    ONLY when it is not legacy, so every legacy key stays as it was.
+    ///  * WRITTEN BY: `afterHandEdit(from:)` (adopted inside a hand edit only
+    ///    when adopting changes no sample the set already plays,
+    ///    `isSlideFollowRuleInert`) and `upgradedToNaturalTuning()` (the
+    ///    explicit update). NEVER by a seed or a preset.
+    public var slideFollowRule: SlideFollowRule
+
     /// §1(c): the correction a NEW set starts with. Provisional: the 1(h)
     /// listening round picks the final value, and this is the one line.
     public static let newSetFormantCorrection: Double = 1.0
@@ -1410,8 +1432,10 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
                 retuneMs: Double = PitchEditSet.engineMinimumRetuneMs,
                 formantCorrection: Double? = nil,
                 keepsConsonantsUntuned: Bool = false,
-                transitionSlopeCentsPerSecond: Double = 0) {
+                transitionSlopeCentsPerSecond: Double = 0,
+                slideFollowRule: SlideFollowRule = .sungAtOpenSide) {
         self.analysisVersion = analysisVersion
+        self.slideFollowRule = slideFollowRule
         self.retuneMs = PitchCorrectionMath
             .finite(retuneMs, default: Self.engineMinimumRetuneMs)
             .clamped(to: Self.retuneMsRange)
@@ -1462,6 +1486,7 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
         case autoCorrectReplaceableStamp
         case formantCorrection, keepsConsonantsUntuned
         case transitionSlopeCentsPerSecond = "transitionSlope"
+        case slideFollowRule
     }
 
     public init(from decoder: any Decoder) throws {
@@ -1489,6 +1514,10 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
         // the replace question reads as today's whole-set rule.
         self.autoCorrectReplaceableStamp = try c.decodeIfPresent(
             String.self, forKey: .autoCorrectReplaceableStamp)
+        // vf-18: absent (every set saved before 2026-10-12) OR a value this
+        // build does not know reads as the legacy rule, never a decode failure.
+        self.slideFollowRule = SlideFollowRule(
+            storedValue: try c.decodeIfPresent(String.self, forKey: .slideFollowRule))
     }
 
     /// `retuneMs` is omitted at the floor and `autoCorrectStamp` when nil, the
@@ -1516,6 +1545,11 @@ public struct PitchEditSet: Codable, Sendable, Equatable {
         }
         if transitionSlopeCentsPerSecond != 0 {
             try c.encode(transitionSlopeCentsPerSecond, forKey: .transitionSlopeCentsPerSecond)
+        }
+        // vf-18: the legacy rule is the absent key, so every set that never
+        // adopted the hold rule keeps its bytes and its `contentStamp`.
+        if slideFollowRule != .sungAtOpenSide {
+            try c.encode(slideFollowRule.rawValue, forKey: .slideFollowRule)
         }
     }
 }
@@ -1546,6 +1580,39 @@ extension PitchEditSet {
         /// had wrote `true` or nothing. A preset re-run and the
         /// natural-tuning update (`upgradedToNaturalTuning`) both keep it.
         case offByChoice
+    }
+
+    /// §4 ERRATUM vf-18 (W9-SLFX): which notes a followed slide's TILT reads
+    /// (`slideFollowRule`). NOT an identity input. The raw strings are FILE
+    /// values (and the wire's echo): additive only, never rename one.
+    ///
+    /// Why a second rule exists: a GROUP move by Δ stores `own + (1 − g)·Δ` on
+    /// a followed slide whose anchors move with it (`groupMoveCarry`), which is
+    /// exact when BOTH ends of its tilt move by Δ. Under the legacy rule a
+    /// one-sided slide (a lead-in or tail-off facing a gap) reads 0 at its
+    /// open side, so no carry can make it exact. If the open side is any
+    /// affine `f(a) = αa + β` of the present anchor `a`, exactness for every Δ
+    /// needs `f(a + Δ) − f(a) = Δ` (α = 1) and an unmoved table must bend
+    /// nothing (`f(0) = 0`, β = 0): `f(a) = a`, HOLD. The legacy tilt toward
+    /// the sung pitch (α = 0) is exactly the rule that cannot be made exact.
+    public enum SlideFollowRule: String, Sendable, Equatable, Codable, CaseIterable {
+        /// LEGACY: the absent key, never written. The bridge reads the
+        /// previous and next SOFT-joined curve notes' own offsets, whatever
+        /// they are (a followed neighbour included); a side with none reads 0
+        /// (the singer's own pitch at the open side).
+        case sungAtOpenSide
+        /// The bridge reads only HELD soft neighbours (`glideFollow == 0`). A
+        /// side with none (a gap, the clip edge, or a followed neighbour)
+        /// COPIES the other side's anchor; with none on either side the
+        /// bridge is 0, as legacy ("alone between gaps").
+        case holdAtOpenSide
+
+        /// The healing read (the `NoteOrigin(storedValue:)` precedent): a
+        /// missing value or one this build does not know is the legacy rule,
+        /// never a decode failure.
+        public init(storedValue: String?) {
+            self = storedValue.flatMap(SlideFollowRule.init(rawValue:)) ?? .sungAtOpenSide
+        }
     }
 
     /// Which product seam is minting a NEW set. The seed values differ in
@@ -1675,6 +1742,19 @@ extension PitchEditSet {
     /// (`PitchCorrectionCurve.bridge`), `joinKind` or
     /// `consonantMinimumGapSeconds` changes: none of them is in the digest
     /// as a value.
+    ///
+    /// ⛔ **vf-18 (2026-10-12) DID NOT BUMP IT, ON PURPOSE. DO NOT BUMP IT FOR
+    /// THE SLIDE-FOLLOW RULE.** Which notes a followed slide reads is a
+    /// stored, versioned field (`slideFollowRule`, absent = legacy), keyed by
+    /// its OWN marker in slot 9 (`PitchEditSetDigest.slideFollowMarker`),
+    /// emitted only for a set that is not on the legacy rule. A bump here
+    /// would re-key EVERY soft set on the machine (one redundant render each)
+    /// for a change that reaches only the sets that adopted the new rule. A
+    /// change to the HOLD rule's own anchors or edge values
+    /// (`slideAnchorCents`, `slideEdgeValueCents`) bumps that marker's
+    /// version (`PitchEditSetDigest.slideFollowRuleVersion`), never this one;
+    /// a change to the legacy rule's lines is a change to every soft set and
+    /// does bump this one.
     public static let transitionRenderVersion: Int = 1
 
     /// The shortest hole between two curve notes that counts as a GAP rather
@@ -1771,6 +1851,134 @@ extension PitchEditSet {
         return SoftJoin(edgeSeconds: edge, halfWidthSeconds: half)
     }
 
+    // MARK: vf-18: the slide-follow rule's anchors (W9-SLFX, REVIEW §3.3)
+
+    /// The ONE WIDTH RULE given each side's value at the join, cents. The
+    /// HOLD rule (`SlideFollowRule.holdAtOpenSide`) calls this with
+    /// `slideEdgeValueCents`. ⛔ **THE LEGACY RULE NEVER DOES:** it keeps
+    /// calling `softJoin(left:right:retuneMs:slopeCentsPerSecond:)`, whose
+    /// edge lines are today's bit for bit (branch on the rule, never by
+    /// algebra; the §A lesson). The width, half and edge lines below repeat
+    /// that function's; `SlideBridgeTests` holds the two to the same answer
+    /// when this one is fed the legacy edge values, so they cannot drift.
+    public static func softJoin(left: NoteSegment, right: NoteSegment,
+                                leftEdgeValueCents: Double, rightEdgeValueCents: Double,
+                                retuneMs: Double, slopeCentsPerSecond: Double) -> SoftJoin? {
+        let widthMs: Double
+        if left.transitionOutMs > 0 {
+            widthMs = left.transitionOutMs
+        } else if slopeCentsPerSecond > 0 {
+            widthMs = max(retuneMs,
+                          1000 * abs(leftEdgeValueCents - rightEdgeValueCents) / slopeCentsPerSecond)
+        } else {
+            return nil
+        }
+        let half = min(widthMs / 2000, left.durationSeconds / 2, right.durationSeconds / 2)
+        let edge = left.endSeconds == right.startSeconds
+            ? left.endSeconds : (left.endSeconds + right.startSeconds) / 2
+        return SoftJoin(edgeSeconds: edge, halfWidthSeconds: half)
+    }
+
+    /// A note's value at a soft join under the HOLD rule, cents: its own
+    /// offset, plus, when it FOLLOWS (`glideFollow` g > 0), g × its OWN anchor
+    /// at that edge (`to` at its end, `from` at its start, from
+    /// `slideAnchorCents`). So at a slide|slide join each side reads its own
+    /// held anchor, never the other slide's own offset.
+    public static func slideEdgeValueCents(_ note: NoteSegment, anchorCents: Double) -> Double {
+        var value = note.pitchOffsetCents
+        if note.glideFollow > 0 { value += note.glideFollow * anchorCents }
+        return value
+    }
+
+    /// True when `neighbour` is an ANCHOR under `rule`: a note whose own
+    /// offset a followed slide next to it (across a soft join) reads.
+    /// `.sungAtOpenSide` reads every such neighbour; `.holdAtOpenSide` only a
+    /// HELD one (`glideFollow == 0`). The carry (`groupMoveCarry`) asks this
+    /// too, so it and the curve agree on which notes a slide reads.
+    public static func isSlideAnchor(_ neighbour: NoteSegment, rule: SlideFollowRule) -> Bool {
+        switch rule {
+        case .sungAtOpenSide: return true
+        case .holdAtOpenSide: return neighbour.glideFollow == 0
+        }
+    }
+
+    /// ⭐ **THE ANCHORS HELPER** (REVIEW §3.3): the `(from, to)` a followed
+    /// slide's bridge reads under `rule`, cents, given its previous and next
+    /// curve notes across SOFT joins (nil on a side with none: a gap or the
+    /// clip edge).
+    ///  * `.sungAtOpenSide`: each neighbour's own offset, 0 on a side with
+    ///    none. ⚠️ READ ONLY BY `isSlideFollowRuleInert`: the curve's legacy
+    ///    branch keeps today's lines verbatim (`softened`), and this case is
+    ///    held to them by `SlideBridgeTests`' inertness fuzz.
+    ///  * `.holdAtOpenSide`: only HELD neighbours count (`isSlideAnchor`); a
+    ///    side with none COPIES the other side's anchor, and with none on
+    ///    either side both are 0.
+    public static func slideAnchorCents(previous: NoteSegment?, next: NoteSegment?,
+                                        rule: SlideFollowRule) -> (from: Double, to: Double) {
+        switch rule {
+        case .sungAtOpenSide:
+            return (previous?.pitchOffsetCents ?? 0, next?.pitchOffsetCents ?? 0)
+        case .holdAtOpenSide:
+            let held = { (note: NoteSegment?) -> Double? in
+                note.flatMap { Self.isSlideAnchor($0, rule: .holdAtOpenSide) ? $0.pitchOffsetCents : nil }
+            }
+            let heldPrevious = held(previous)
+            let heldNext = held(next)
+            return (heldPrevious ?? heldNext ?? 0, heldNext ?? heldPrevious ?? 0)
+        }
+    }
+
+    /// The previous and next curve notes of the curve note at `index` across
+    /// SOFT joins (R15), nil on a side with none.
+    func softCurveNeighbours(ofSegmentAt index: Int) -> (previous: Int?, next: Int?) {
+        let previous = previousCurveNoteIndex(before: index)
+            .flatMap { joinKind(between: $0, and: index) == .soft ? $0 : nil }
+        let next = nextCurveNoteIndex(after: index)
+            .flatMap { joinKind(between: index, and: $0) == .soft ? $0 : nil }
+        return (previous, next)
+    }
+
+    /// `slideAnchorCents(previous:next:rule:)` for the note at `index`, or nil
+    /// when it does not enter the curve (it has no span to tilt). The curve's
+    /// hold branch (`softened`), the wire's join reading and the inertness
+    /// predicate all read it.
+    public func slideAnchorCents(ofSegmentAt index: Int,
+                                 rule: SlideFollowRule) -> (from: Double, to: Double)? {
+        guard segments.indices.contains(index), segments[index].entersPitchCurve else { return nil }
+        let neighbours = softCurveNeighbours(ofSegmentAt: index)
+        return Self.slideAnchorCents(previous: neighbours.previous.map { segments[$0] },
+                                     next: neighbours.next.map { segments[$0] }, rule: rule)
+    }
+
+    /// True when the two rules read the same anchors, BIT FOR BIT, for every
+    /// followed curve note (REVIEW §3.4's `ruleInert`; trivially true with no
+    /// follower). Then the curve, the joins and the render are the same under
+    /// either rule, so adopting `.holdAtOpenSide` changes no sample this set
+    /// plays (`afterHandEdit(from:)` judges it on the set BEFORE the edit).
+    public var isSlideFollowRuleInert: Bool {
+        segments.indices.allSatisfy { index in
+            guard segments[index].glideFollow > 0,
+                  let legacy = slideAnchorCents(ofSegmentAt: index, rule: .sungAtOpenSide),
+                  let hold = slideAnchorCents(ofSegmentAt: index, rule: .holdAtOpenSide)
+            else { return true }
+            return legacy.from.bitPattern == hold.from.bitPattern
+                && legacy.to.bitPattern == hold.to.bitPattern
+        }
+    }
+
+    /// The hold rule's soft join between the curve notes at `leftIndex` and
+    /// `rightIndex` (a join the caller found soft): each side's edge value
+    /// from its own anchors.
+    func holdSoftJoin(leftAt leftIndex: Int, rightAt rightIndex: Int) -> SoftJoin? {
+        let left = segments[leftIndex], right = segments[rightIndex]
+        let leftAnchor = slideAnchorCents(ofSegmentAt: leftIndex, rule: .holdAtOpenSide)?.to ?? 0
+        let rightAnchor = slideAnchorCents(ofSegmentAt: rightIndex, rule: .holdAtOpenSide)?.from ?? 0
+        return Self.softJoin(left: left, right: right,
+                             leftEdgeValueCents: Self.slideEdgeValueCents(left, anchorCents: leftAnchor),
+                             rightEdgeValueCents: Self.slideEdgeValueCents(right, anchorCents: rightAnchor),
+                             retuneMs: retuneMs, slopeCentsPerSecond: transitionSlopeCentsPerSecond)
+    }
+
     /// What the join to a note's RIGHT is, as the curve applies it: the
     /// wire's `joinToNext` and `effectiveTransitionMs` (§4.e), and the pitch
     /// editor's slide caption (R12).
@@ -1808,11 +2016,21 @@ extension PitchEditSet {
             return JoinReading(kind: .gap, nextSegmentId: right.id, appliedWidthMs: nil,
                                isAuto: isAuto)
         }
-        let applied = usesSoftJoins
-            ? Self.softJoin(left: left, right: right, retuneMs: retuneMs,
-                            slopeCentsPerSecond: transitionSlopeCentsPerSecond)
-                .map { $0.halfWidthSeconds * 2000 }
-            : nil
+        // vf-18: the LEGACY rule keeps today's call verbatim; the hold rule
+        // reads each side's edge value from its own anchors, as `softened`.
+        let applied: Double?
+        switch slideFollowRule {
+        case .sungAtOpenSide:
+            applied = usesSoftJoins
+                ? Self.softJoin(left: left, right: right, retuneMs: retuneMs,
+                                slopeCentsPerSecond: transitionSlopeCentsPerSecond)
+                    .map { $0.halfWidthSeconds * 2000 }
+                : nil
+        case .holdAtOpenSide:
+            applied = usesSoftJoins
+                ? holdSoftJoin(leftAt: index, rightAt: next).map { $0.halfWidthSeconds * 2000 }
+                : nil
+        }
         return JoinReading(kind: .soft, nextSegmentId: right.id, appliedWidthMs: applied,
                            isAuto: isAuto)
     }
@@ -1979,6 +2197,14 @@ extension PitchEditSet {
     /// keeps them off through the tap AND through D4-1's first hand edit.
     /// That state did not exist before the choice was recorded, so no vocal
     /// that could be updated before it updates differently now.
+    ///
+    /// ⚠️ **vf-18: A VOCAL WITH A FOLLOWED SLIDE TAKES THE HOLD RULE**
+    /// (`slideFollowRule = .holdAtOpenSide`, REVIEW §3.4), unconditionally:
+    /// this is the explicit "update this vocal" door, and the one way onto
+    /// the rule for a set whose slides a hand edit cannot switch without a
+    /// change the user would hear (`afterHandEdit(from:)` adopts only when
+    /// inaudible). A vocal with no followed slide keeps the legacy value: the
+    /// rule reads nothing there, so writing it would only change the file.
     public func upgradedToNaturalTuning() -> PitchEditSet {
         var copy = self
         copy.formantCorrection = Self.newSetFormantCorrection
@@ -1987,6 +2213,9 @@ extension PitchEditSet {
         }
         if copy.transitionSlopeCentsPerSecond == 0 {
             copy.transitionSlopeCentsPerSecond = Self.defaultTransitionSlope
+        }
+        if copy.segments.contains(where: { $0.glideFollow > 0 }) {
+            copy.slideFollowRule = .holdAtOpenSide
         }
         return copy
     }
@@ -2029,8 +2258,45 @@ extension PitchEditSet {
     /// census. A draft built any other way must call it too, or the line
     /// drawn during a FIRST drag on an old vocal differs from what plays after
     /// the release.
+    ///
+    /// ⭐ **vf-18: THE SLIDE-FOLLOW RULE IS ADOPTED HERE TOO** (REVIEW §3.4).
+    /// After the update above, a set still on the legacy rule that carries a
+    /// followed slide takes `.holdAtOpenSide` when `before` is
+    /// `isSlideFollowRuleInert`: every followed slide in it read the same
+    /// anchors under both rules, so the switch changes no sample the set
+    /// already played. Only the edit's own neighbourhood then renders under
+    /// the new rule. A set that is NOT inert (a note beside a one-sided or
+    /// adjacent followed slide already moved) stays legacy; its door is
+    /// `upgradedToNaturalTuning()`. A no-op adopts nothing (first bullet).
+    /// The bare `afterHandEdit()` is unchanged, so `pitchDragReach`'s
+    /// "would a real edit update this old vocal" keeps its meaning.
     public func afterHandEdit(from before: PitchEditSet) -> PitchEditSet {
-        segments == before.segments ? self : afterHandEdit()
+        guard segments != before.segments else { return self }
+        var updated = afterHandEdit()
+        if updated.slideFollowRule == .sungAtOpenSide,
+           updated.segments.contains(where: { $0.glideFollow > 0 }),
+           before.isSlideFollowRuleInert {
+            updated.slideFollowRule = .holdAtOpenSide
+        }
+        return updated
+    }
+
+    /// vf-18: the slide-follow rule a hand edit that CHANGES a note stores on
+    /// this set, adoption and D4-1's update included: read through
+    /// `afterHandEdit(from: self)` itself on a probe that bends one note (the
+    /// `setADragStores` method), so the carry (`groupMoveCarry`) and the home
+    /// can never disagree about which anchors a slide reads. Whether the home
+    /// updates or adopts depends on whether a note changed and on this set,
+    /// never on which note or how far.
+    /// ⚠️ One edge, stated: on a set with no voice amount, a move that lands
+    /// EVERY note back on exactly 0 stores a set that does not predate natural
+    /// tuning, so the home does not update it, while this probe answered for
+    /// one that does. Such a set bends nothing, so no sample depends on it.
+    public func ruleAfterHandEdit() -> SlideFollowRule {
+        guard let first = segments.indices.first else { return slideFollowRule }
+        var bent = self
+        bent.segments[first].pitchOffsetCents = abs(segments[first].pitchOffsetCents) + 100
+        return bent.afterHandEdit(from: self).slideFollowRule
     }
 }
 
@@ -2315,7 +2581,8 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
         /// §4.b.2 step 3, the TILT of a sung slide that follows its
         /// neighbours (`NoteSegment.glideFollow`): the previous and next
         /// SOFT-joined curve notes' own offsets, semitones (0 across a gap),
-        /// and the follow amount. `bridgeAmount` EXACTLY 0 means no tilt,
+        /// and the follow amount. (Under the vf-18 hold rule, the anchors
+        /// `PitchEditSet.slideAnchorCents` gives; `softened` fills both.) `bridgeAmount` EXACTLY 0 means no tilt,
         /// and both evaluators branch on it rather than adding a zero (the
         /// generator's rule; see the `-0.0` note in `semitones`).
         var bridgeFromSemitones: Double
@@ -3094,7 +3361,11 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
     ///    protection: a join facing a silence or a sound is never widened).
     ///  * Each note with `glideFollow > 0` gets its bridge: the previous and
     ///    next curve notes' OWN offsets across SOFT joins (0 across a gap or
-    ///    at an end), never their bridged values (no recursion).
+    ///    at an end), never their bridged values (no recursion). That is the
+    ///    LEGACY rule (`PitchEditSet.SlideFollowRule.sungAtOpenSide`); a set
+    ///    on `.holdAtOpenSide` reads `PitchEditSet.slideAnchorCents` instead
+    ///    (held neighbours only, an open side copying the other), and its
+    ///    joins compare each side's own edge value (vf-18).
     /// O(n), once per curve; the per-hop evaluators only read the result.
     fileprivate static func softened(_ spans: [Span], notes: [NoteSegment],
                                      editSet: PitchEditSet) -> [Span] {
@@ -3107,21 +3378,62 @@ public struct PitchCorrectionCurve: Sendable, Equatable {
                 leftEndSeconds: notes[index].endSeconds,
                 rightStartSeconds: notes[index + 1].startSeconds) == .soft
         }
-        for index in 0..<count where notes[index].glideFollow > 0 {
-            out[index].bridgeFromSemitones = index > 0 && softAfter[index - 1]
-                ? notes[index - 1].pitchOffsetCents / 100 : 0
-            out[index].bridgeToSemitones = softAfter[index]
-                ? notes[index + 1].pitchOffsetCents / 100 : 0
-            out[index].bridgeAmount = notes[index].glideFollow
-        }
-        for index in 0..<(count - 1) where softAfter[index] {
-            guard let join = PitchEditSet.softJoin(
-                left: notes[index], right: notes[index + 1], retuneMs: editSet.retuneMs,
-                slopeCentsPerSecond: editSet.transitionSlopeCentsPerSecond) else { continue }
-            out[index].halfRampOut = join.halfWidthSeconds
-            out[index].fallCentreSeconds = join.edgeSeconds
-            out[index + 1].halfRampIn = join.halfWidthSeconds
-            out[index + 1].riseCentreSeconds = join.edgeSeconds
+        // vf-18 (REVIEW §3.3): ⛔ BRANCH ON THE RULE, NEVER BY ALGEBRA. The
+        // legacy case is today's two loops VERBATIM (B1 in
+        // `SlideBridgeRenderTests` holds its curve and key to captures taken
+        // before this branch existed); only a set that adopted the hold rule
+        // reaches the second case.
+        switch editSet.slideFollowRule {
+        case .sungAtOpenSide:
+            for index in 0..<count where notes[index].glideFollow > 0 {
+                out[index].bridgeFromSemitones = index > 0 && softAfter[index - 1]
+                    ? notes[index - 1].pitchOffsetCents / 100 : 0
+                out[index].bridgeToSemitones = softAfter[index]
+                    ? notes[index + 1].pitchOffsetCents / 100 : 0
+                out[index].bridgeAmount = notes[index].glideFollow
+            }
+            for index in 0..<(count - 1) where softAfter[index] {
+                guard let join = PitchEditSet.softJoin(
+                    left: notes[index], right: notes[index + 1], retuneMs: editSet.retuneMs,
+                    slopeCentsPerSecond: editSet.transitionSlopeCentsPerSecond) else { continue }
+                out[index].halfRampOut = join.halfWidthSeconds
+                out[index].fallCentreSeconds = join.edgeSeconds
+                out[index + 1].halfRampIn = join.halfWidthSeconds
+                out[index + 1].riseCentreSeconds = join.edgeSeconds
+            }
+        case .holdAtOpenSide:
+            // The HOLD rule: each curve note's anchors through the ONE helper
+            // (`PitchEditSet.slideAnchorCents(ofSegmentAt:rule:)`, which the
+            // wire's join reading also calls), on the segment each curve note
+            // came from: `make` appends exactly the `entersPitchCurve`
+            // segments, in order. Each soft join's width from each side's own
+            // edge value (`slideEdgeValueCents`).
+            let curveIndices = editSet.segments.indices.filter { editSet.segments[$0].entersPitchCurve }
+            guard curveIndices.count == count else { return spans }
+            var anchors = [(from: Double, to: Double)](repeating: (0, 0), count: count)
+            for index in 0..<count {
+                anchors[index] = editSet.slideAnchorCents(ofSegmentAt: curveIndices[index],
+                                                          rule: .holdAtOpenSide) ?? (0, 0)
+            }
+            for index in 0..<count where notes[index].glideFollow > 0 {
+                out[index].bridgeFromSemitones = anchors[index].from / 100
+                out[index].bridgeToSemitones = anchors[index].to / 100
+                out[index].bridgeAmount = notes[index].glideFollow
+            }
+            for index in 0..<(count - 1) where softAfter[index] {
+                guard let join = PitchEditSet.softJoin(
+                    left: notes[index], right: notes[index + 1],
+                    leftEdgeValueCents: PitchEditSet.slideEdgeValueCents(
+                        notes[index], anchorCents: anchors[index].to),
+                    rightEdgeValueCents: PitchEditSet.slideEdgeValueCents(
+                        notes[index + 1], anchorCents: anchors[index + 1].from),
+                    retuneMs: editSet.retuneMs,
+                    slopeCentsPerSecond: editSet.transitionSlopeCentsPerSecond) else { continue }
+                out[index].halfRampOut = join.halfWidthSeconds
+                out[index].fallCentreSeconds = join.edgeSeconds
+                out[index + 1].halfRampIn = join.halfWidthSeconds
+                out[index + 1].riseCentreSeconds = join.edgeSeconds
+            }
         }
         return out
     }

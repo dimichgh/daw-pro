@@ -105,12 +105,15 @@ public enum AutomationTarget: Hashable, Sendable, Codable {
             guard !paramName.isEmpty,
                   let effect = track.effects.first(where: { $0.id == effectID })
             else { return nil }
-            // m22-f: the delay's sync/division are control-plane-only (the
-            // effective time derives from the tempo OFF the render thread,
+            // m22-f / m39-c: tempo-sync params are control-plane-only (the
+            // effective value derives from the tempo OFF the render thread,
             // which can't do tempo math) — a lane on them would be a silent
-            // dead lane (`DelayEffect.storeAutomatedParam` guards slots 0…4),
-            // so lane creation refuses them here like an unknown name.
-            if effect.kind == .delay, paramName == "sync" || paramName == "division" {
+            // dead lane (e.g. `DelayEffect.storeAutomatedParam` guards slots
+            // 0…4, so the delay's `sync`/`division` never land), so lane
+            // creation refuses them here like an unknown name. WHICH params
+            // those are lives in ONE home, `TempoSync.effectRegistrations`:
+            // never add a hand-named kind check here.
+            if TempoSync.isControlPlaneOnly(kind: effect.kind, paramName: paramName) {
                 return nil
             }
             // m39-ad: the saturator's `oversampling` is refused for the same
