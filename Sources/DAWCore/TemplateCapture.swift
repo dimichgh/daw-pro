@@ -268,7 +268,7 @@ public enum TemplateCapture {
                 name: sourceName(source.name, kind: source.kind,
                                  path: "\(path).modulation.sources[\(index)].name",
                                  warnings: &warnings),
-                params: source.params))
+                params: normalizedSourceParams(source.params)))
         }
         var targeted: Set<Int> = []
         var pending: [(source: String, effectIndex: Int?, target: TemplateTarget, route: ModulationRoute)] = []
@@ -493,8 +493,15 @@ public enum TemplateCapture {
             return synth == PolySynthParams() ? nil : InstrumentDescriptor(kind: .polySynth,
                                                                            polySynth: synth)
         case .drumSynth:
+            // W9-DRUMDEF: ALWAYS an explicit kit — the one this drum machine
+            // PLAYS (`resolvedDrumKit`), folded to the factory kit's spelling.
+            // A template drum machine with no kit is read as a NEW drum machine
+            // (the user's picks), so a captured never-edited one (nil, which
+            // plays the factory kit) must name the kit it plays to come back as
+            // itself.
             return InstrumentDescriptor(kind: .drumSynth,
-                                        drumKit: descriptor.drumKit.flatMap(normalizedKit))
+                                        drumKit: normalizedKit(descriptor.resolvedDrumKit)
+                                            ?? DrumKitParams())
         case .soundBank:
             return InstrumentDescriptor(kind: .soundBank,
                                         soundBank: descriptor.soundBank.map(normalizedBank))
@@ -658,7 +665,8 @@ public enum TemplateCapture {
             let name = source.name ?? source.kind.defaultName
             spec.modulationSources.append(TemplateModSource(
                 key: sourceKeys[index], kind: source.kind,
-                name: name == source.kind.defaultName ? nil : name, params: source.params))
+                name: name == source.kind.defaultName ? nil : name,
+                params: normalizedSourceParams(source.params)))
         }
         var targeted: Set<Int> = []
         for route in track.modulationRoutes {
@@ -766,7 +774,12 @@ public enum TemplateCapture {
                 }
             }
         case .drumSynth:
-            if let kit = instrument.drumKit { object["drumKit"] = drumKitObject(kit) }
+            // W9-DRUMDEF: ALWAYS written — `{}` for the factory kit. A template
+            // drum machine with neither `drumKit` nor `drumPreset` reads as a NEW
+            // drum machine (the user's picks), so a captured factory kit (a saved
+            // song's never-edited drum machine, which `normalizedKit` folds to
+            // nil) must name itself to come back as itself.
+            object["drumKit"] = drumKitObject(instrument.drumKit ?? DrumKitParams())
         case .soundBank:
             if let bank = instrument.soundBank {
                 var entry: [String: TemplateJSON] = [
@@ -839,6 +852,20 @@ public enum TemplateCapture {
         return .object(object)
     }
 
+    /// What a template keeps of a source's settings: a step sequencer locked to a
+    /// note division drops its unused `rateHz` back to the default (see
+    /// `sourceParams`), and a division string the app does not know — which runs
+    /// free — is dropped. Every other source is unchanged.
+    static func normalizedSourceParams(_ params: ModulationSourceParams) -> ModulationSourceParams {
+        guard case .stepSequencer(var step) = params else { return params }
+        if step.syncedDivision != nil {
+            step.rateHz = StepSequencerSourceParams().rateHz
+        } else {
+            step.stepDivision = nil
+        }
+        return .stepSequencer(step)
+    }
+
     static func sourceObject(_ source: TemplateModSource) -> TemplateJSON {
         var object: [String: TemplateJSON] = [
             "key": .string(source.key),
@@ -851,8 +878,13 @@ public enum TemplateCapture {
     }
 
     /// A source's settings that differ from its kind's defaults, by the names
-    /// `ModulationSourceParams.apply(_:to:)` reads. The tempo-sync divisions are
-    /// never written: v1 refuses them, so a source can never hold one.
+    /// `ModulationSourceParams.apply(_:to:)` reads. A step sequencer's
+    /// `stepDivision` IS written (a synced source must come back synced). Its
+    /// `rateHz` is then NOT written: a synced source ignores it, and writing both
+    /// would make every read of the template warn that the rate is unused. The
+    /// cost, stated: clearing the sync later falls back to the default 4 steps
+    /// a second, not the unused rate the source held. The LFO's `syncDivision`
+    /// is never written (an LFO cannot sync).
     static func sourceParams(_ params: ModulationSourceParams) -> [String: TemplateJSON] {
         var out: [String: TemplateJSON] = [:]
         func number(_ name: String, _ value: Double, _ fresh: Double) {
@@ -869,7 +901,11 @@ public enum TemplateCapture {
             number("seed", Double(p.seed), Double(d.seed))
         case (.stepSequencer(let p), .stepSequencer(let d)):
             if p.steps != d.steps { out["steps"] = .array(p.steps.map { .number($0) }) }
-            number("rateHz", p.rateHz, d.rateHz)
+            if let division = p.syncedDivision {
+                out["stepDivision"] = .string(division.rawValue)
+            } else {
+                number("rateHz", p.rateHz, d.rateHz)
+            }
             number("edgeMs", p.edgeMs, d.edgeMs)
         case (.envelopeFollower(let p), .envelopeFollower(let d)):
             if p.detector != d.detector { out["detector"] = .string(p.detector.rawValue) }

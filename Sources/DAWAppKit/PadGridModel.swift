@@ -49,6 +49,12 @@ public struct PadChopSettings: Equatable, Sendable {
     /// ⚠️ **DEFAULT TRUE IN THE UI, DEFAULT FALSE ON THE WIRE — and the split is
     /// deliberate.** See `PadGridModel.muteSourceTrack`.
     public var muteSourceTrack: Bool = true
+    /// m39-w4-8 — "Sort the hits into a drum kit": the card's door onto
+    /// `clip.sliceToSampler`'s `mapping: "kit"` (m39-w4-6). OFF by default, and
+    /// OFF sends `mapping: .chromatic` — the chop exactly as it was before the
+    /// toggle existed (`PadGridTests` pins the whole settings struct against a
+    /// literal written before this field).
+    public var sortIntoKit: Bool = false
 
     public init() {}
 
@@ -56,6 +62,12 @@ public struct PadChopSettings: Equatable, Sendable {
     /// reconstruction clip is the single most valuable thing a chop produces
     /// (it null-tests 28 dB under the source), and a user who does not want it
     /// can delete one clip.
+    ///
+    /// m39-w4-8: with the kit sort on, `baseNote` is sent as the DEFAULT, not
+    /// the slider's value — the wire's own rule (`clip.sliceToSampler` refuses
+    /// `baseNote` with `mapping: "kit"`, because a kit puts each hit on its
+    /// drum's note). The store would ignore it anyway (`planSettings`), so this
+    /// changes no sound; it keeps the card's request identical to an agent's.
     public func settings() -> SliceToSamplerSettings {
         SliceToSamplerSettings(
             mode: mode,
@@ -64,8 +76,41 @@ public struct PadChopSettings: Equatable, Sendable {
             gridBeats: mode == .grid ? gridBeats : nil,
             maxSlices: maxSlices,
             includeHead: includeHead,
-            baseNote: baseNote,
-            generateMIDI: true)
+            baseNote: sortIntoKit ? SliceToSamplerSettings.defaultBaseNote : baseNote,
+            generateMIDI: true,
+            mapping: sortIntoKit ? .kit : .chromatic)
+    }
+
+    /// The kit toggle's label — ONE home, read by the card's checkbox and the
+    /// refusal vocabulary map, so a sentence that names the box names the box
+    /// the card draws. The design's own words (§5.1).
+    public static let sortIntoKitLabel = "Sort the hits into a drum kit"
+
+    /// The line under the toggle while it is ON: what it does, in the grid's
+    /// own words (banks are lettered A–D on the grid). The extras start at note
+    /// 84, the first pad of bank D, when the grid sits at its default base —
+    /// which is where a kit chop puts it (`PadGridModel.kitGridBase`).
+    /// ⚠️ No pad numbers for the drums themselves: a second kick lands on 35,
+    /// below pad 1, so "kicks go on pad 1" would be true of one kick only. The
+    /// pads name their own drums once the chop lands.
+    public static let sortIntoKitNote =
+        "Kick, snare and hi-hats each get their own pad, so a drum beat plays the "
+        + "right sounds. Hits it can't name go on bank D."
+
+    /// The toggle's tooltip — what it does and its honest limit.
+    public static let sortIntoKitHelp =
+        "Listens to each hit and sorts it into kick, snare, closed hi-hat or open hi-hat, "
+        + "so a drum beat plays the right sounds on these pads. A closed hi-hat cuts off "
+        + "an open one, like a real kit. It can sort a hit wrong — every hit still gets a pad."
+
+    /// Does "Pad 1 plays note" reach the chop? Not while the kit sort is on:
+    /// the kit puts every hit on its drum's note (`settings()` above).
+    public var baseNoteIsEffective: Bool { !sortIntoKit }
+
+    /// The line under a DIMMED "Pad 1 plays note" slider, or nil while it is
+    /// live. ≤ 51 characters, the lead-in note's budget.
+    public var baseNoteInertNote: String? {
+        baseNoteIsEffective ? nil : "Sorting into a drum kit sets every pad's note."
     }
 
     /// Beginner-readable name for the boundary mode — the picker's label, and
@@ -150,10 +195,16 @@ public struct PadChopSummary: Equatable, Sendable {
     /// with `warnings`. See `PadGridModel.chopWarningsForHumans`. Required, with
     /// no fallback to `warnings`: a default would be the leak this field closes.
     public var warningsForHumans: [String]
+    /// m39-w4-8 — the store's own sentence for a kit-sorted chop ("Sorted into
+    /// 4 kicks, 3 snares, 8 closed hats, 1 open hat and 2 other hits."), or nil
+    /// for a plain chop. CARRIED FROM `SliceToSamplerResult.kitSummary`, never
+    /// from the toggle: it reports what the chop DID.
+    public var kitSummary: String?
 
     public init(sliceCount: Int, trackName: String, createdTrack: Bool,
                 mutedTrackName: String?, sourceStillAudible: Bool,
-                warnings: [String], warningsForHumans: [String]) {
+                warnings: [String], warningsForHumans: [String],
+                kitSummary: String? = nil) {
         self.sliceCount = sliceCount
         self.trackName = trackName
         self.createdTrack = createdTrack
@@ -161,6 +212,7 @@ public struct PadChopSummary: Equatable, Sendable {
         self.sourceStillAudible = sourceStillAudible
         self.warnings = warnings
         self.warningsForHumans = warningsForHumans
+        self.kitSummary = kitSummary
     }
 }
 
@@ -349,6 +401,15 @@ public final class PadGridModel {
     /// Runs the chop. Wired to `ProjectStore.sliceClipToSampler` — the wire's own
     /// funnel, so the panel and `clip.sliceToSampler` cannot diverge.
     private var chopAction: (UUID, SliceToSamplerSettings, Bool) async throws -> SliceToSamplerResult
+    /// m39-w4-8 — the pad target's INSTRUMENT, whatever kind it is, or nil when
+    /// there is no instrument track. Read FRESH like every seam here: an agent
+    /// switching the kit to `gm` over the wire must move the very next pad.
+    ///
+    /// ⚠️ **ONLY THE DRUM MACHINE READS IT.** The sampler pads keep coming
+    /// from `zonesProvider` (design §7: "the grid's zone provider stays
+    /// sampler-only"), so every sampler behaviour — and every existing test,
+    /// which never injects this — is exactly what it was.
+    private var instrumentProvider: () -> InstrumentDescriptor?
     /// Has `rebind` run? ⭐ **AN UNBOUND GRID IS A REAL, REACHABLE STATE AND IT
     /// LOOKS EXACTLY LIKE AN EMPTY KIT** — sixteen dim squares, `loadedCount`
     /// zero, every headless reading self-consistent. Recording the fact is what
@@ -416,6 +477,10 @@ public final class PadGridModel {
         ("minSliceSeconds", "the shortest-piece setting"),
         ("includeHead", "“\(PadChopSettings.leadInLabel)”"),
         ("baseNote", "“Pad 1 plays note”"),
+        // m39-w4-8: the kit sort's refusals (`KitSliceLayout`) offer a chromatic
+        // chop as the way out, in the wire's words. On this card that way out
+        // is the box, turned off.
+        ("mapping \"chromatic\"", "“\(PadChopSettings.sortIntoKitLabel)” turned off"),
     ]
 
     /// `uiTerms`, applied. The ONE loop both translations share.
@@ -504,7 +569,8 @@ public final class PadGridModel {
                 setOneShot: @escaping (Bool) -> String? = { _ in nil },
                 setZones: @escaping ([SamplerZone]) -> String? = { _ in nil },
                 chopAction: ((UUID, SliceToSamplerSettings, Bool) async throws
-                    -> SliceToSamplerResult)? = nil) {
+                    -> SliceToSamplerResult)? = nil,
+                instrument: @escaping () -> InstrumentDescriptor? = { nil }) {
         self.typing = typing
         self.zonesProvider = zones
         self.targetNameProvider = targetName
@@ -514,6 +580,7 @@ public final class PadGridModel {
         self.oneShotProvider = oneShot
         self.setOneShotAction = setOneShot
         self.setZonesAction = setZones
+        self.instrumentProvider = instrument
         // `nil` = the inert refusal, supplied HERE and never as the default argument: Swift 6.3.3
         // re-emits an async default-argument closure in every module that omits the argument
         // (two `DAWApp` call sites do), with a different async context size under one weak
@@ -521,6 +588,18 @@ public final class PadGridModel {
         self.chopAction = chopAction ?? { _, _, _ in
             throw ProjectError.engineUnavailable
         }
+        // m39-w4-8 — ⭐ THE LETTER KEYS ASK THIS MODEL WHICH NOTE A PAD PLAYS.
+        // `MusicalTypingController.padPitch(index:)` is the one home for
+        // pad → pitch (the keys, and `padDown` below), and it consults this
+        // seam first. Installed HERE, by the one object that knows the target's
+        // instrument, so it cannot be forgotten: a drum machine whose pads were
+        // labelled "Snare" while `X` still sent the rim would be the
+        // affordance-lies shape with every unit test green. Weak: the
+        // controller outlives a placeholder grid (`AppModel.padGrid`), and a
+        // dead grid must answer "no map", never keep a stale one alive.
+        // ⚠️ The LAST grid built over a controller owns its map. The app builds
+        // exactly one over its `musicalTyping` (`installPadGrid`).
+        typing.padNoteMap = { [weak self] in self?.drumPads?.map(\.note) }
     }
 
     /// Points an inert model at the live app.
@@ -543,7 +622,9 @@ public final class PadGridModel {
                        setOneShot: ((Bool) -> String?)? = nil,
                        setZones: (([SamplerZone]) -> String?)? = nil,
                        chopAction: ((UUID, SliceToSamplerSettings, Bool) async throws
-                                    -> SliceToSamplerResult)? = nil) {
+                                    -> SliceToSamplerResult)? = nil,
+                       instrument: (() -> InstrumentDescriptor?)? = nil) {
+        if let instrument { instrumentProvider = instrument }
         if let zones { zonesProvider = zones }
         if let targetName { targetNameProvider = targetName }
         if let targetIsAI { targetIsAIProvider = targetIsAI }
@@ -560,17 +641,61 @@ public final class PadGridModel {
     // MARK: - Live reads
 
     public var baseNote: Int { typing.padBaseNote }
-    public var bank: Int { typing.padBank }
+    /// The bank on show. ⚠️ Always 0 on a drum machine: it has ONE bank (its
+    /// eight drums on pads 1–8), whatever bank the controller was left on by
+    /// a sampler track — the bank is session state and survives a track
+    /// switch, so drawing it here would light chip "C" over the drums.
+    public var bank: Int { drumPads == nil ? typing.padBank : 0 }
     public var targetName: String? { targetNameProvider() }
 
     /// The zones, once per render pass. Every read below goes through this so a
     /// single body evaluation calls the injector ONCE rather than sixteen times.
     private var zones: [SamplerZone] { zonesProvider() }
 
-    /// How many banks the loaded keymap reaches. Always ≥ 1.
+    // MARK: - The drum machine (m39-w4-8)
+
+    /// The pad target's drum-machine pads, pad 1 first, or nil when the target
+    /// is not our drum machine. ONE derivation (`PadGridDrumMap`), read by the
+    /// drawing, by `padDown` and — through `typing.padNoteMap` — by the keys.
+    public var drumPads: [PadDrum]? {
+        PadGridDrumMap.drumMachinePads(for: instrumentProvider())
+    }
+
+    /// Is the pad target our drum machine?
+    public var isDrumMachine: Bool { drumPads != nil }
+
+    /// The header's noun after `loadedCount`: "drums" on a drum machine,
+    /// "slices loaded" on a sampler (exactly what the header said before).
+    public var loadedNoun: String {
+        if isDrumMachine { return loadedCount == 1 ? "drum" : "drums" }
+        return loadedCount == 1 ? "slice loaded" : "slices loaded"
+    }
+
+    /// The hint beside the bank chips. K / L do nothing on a drum machine (one
+    /// bank), so it says what the pads are instead of promising a bank switch.
+    public var bankHint: String {
+        isDrumMachine ? "Pads 1–8 are the drum machine's eight drums" : "K / L switches bank"
+    }
+
+    /// Why pads 9–16 of a drum machine are dark — their tooltip.
+    public static let pastLastDrumHelp =
+        "The drum machine has eight drums, on pads 1 to 8. This pad plays nothing."
+
+    /// Where the grid stands after a KIT-SORTED chop: the kick's first note —
+    /// General MIDI 36, which is also the MPC pad-1 note — so the kick is pad 1
+    /// and the extras from note 84 are bank D's first pad. DERIVED from the
+    /// layout's own table, never restated.
+    public static var kitGridBase: Int {
+        KitSliceLayout.roleNotes.first { $0.role == .kick }?.notes.first
+            ?? SliceToSamplerSettings.defaultBaseNote
+    }
+
+    /// How many banks the loaded keymap reaches. Always ≥ 1. A drum machine
+    /// has exactly one.
     public var bankCount: Int {
-        PadGridGeometry.bankCount(highestPitch: zones.map(\.rootPitch).max(),
-                                  baseNote: baseNote)
+        if isDrumMachine { return 1 }
+        return PadGridGeometry.bankCount(highestPitch: zones.map(\.rootPitch).max(),
+                                         baseNote: baseNote)
     }
 
     /// SLICES whose root sits BELOW pad 1 — unreachable on this grid.
@@ -603,7 +728,13 @@ public final class PadGridModel {
     /// spread is one extra zone, and counting it made the header say "9 slices
     /// loaded" over an 8-slice chop for as long as LEVELS was up — and forever
     /// after a relaunch.
-    public var loadedCount: Int { slices(in: zones).count }
+    ///
+    /// m39-w4-8: on a drum machine, its drums (8) — the header then reads
+    /// "8 drums" (`loadedNoun`), never "0 slices loaded" over a playable kit.
+    public var loadedCount: Int {
+        if let drums = drumPads { return drums.count }
+        return slices(in: zones).count
+    }
 
     /// The keymap's SLICES: every zone except a Sixteen Levels spread.
     ///
@@ -626,15 +757,22 @@ public final class PadGridModel {
     /// an SFZ library's multi-key zones do not, and a grid that only matched
     /// roots would draw an imported drum kit as almost entirely empty.
     public var pads: [PadState] {
+        if let drums = drumPads { return drumMachinePads(drums) }
         let live = zones
         let sounding = typing.soundingPitchSet
         let isAI = targetIsAIProvider()
+        let bank = typing.padBank
         // Ordinals are assigned over the WHOLE keymap in pitch order, so bank 2
         // pad 1 reads "slice 17". Computed once per pass, not per pad.
         // ⛔ SLICES ONLY (m39-levels-3): `sliceOrdinals` drops every spread by
         // shape; the grid's own spread is dropped by identity too (`slices(in:)`).
         let own = sessionSpread(in: live)?.id
         let ordinals = Self.sliceOrdinals(zones: live.filter { $0.id != own })
+        // m39-w4-8: a kit-sorted chop's drum names, by note (the step grid's
+        // own rows — empty for a plain chop, which therefore draws exactly what
+        // it drew before), and every zone's choke link, by zone id.
+        let drumLabels = PadGridDrumMap.samplerDrumLabels(zones: live)
+        let chokeLinks = Self.samplerChokeLinks(live, drumLabels: drumLabels, ordinals: ordinals)
         return PadGridGeometry.bankPadIndices.map { index in
             guard let pitch = PadGridGeometry.pitch(forPad: index,
                                                     baseNote: baseNote, bank: bank) else {
@@ -672,8 +810,67 @@ public final class PadGridModel {
                 sliceOrdinal: spread == nil ? zone.flatMap { ordinals[$0.id] } : nil,
                 startFrame: zone?.startFrame,
                 isAITouched: zone != nil && isAI,
-                levelsSemitones: spread)
+                levelsSemitones: spread,
+                // ⚠️ A SPREAD PAD NEVER CARRIES A DRUM NAME: it plays the slice
+                // transposed, and its interval is what it shows.
+                drumLabel: zone != nil && spread == nil ? drumLabels[pitch] : nil,
+                chokeLink: zone.flatMap { chokeLinks[$0.id] })
         }
+    }
+
+    /// The sixteen pads of a DRUM MACHINE (m39-w4-8): its eight drums on pads
+    /// 1–8, in the one order `PadGridDrumMap` decides, and eight pads that send
+    /// nothing. Bank and base note play no part — see `bank`.
+    ///
+    /// ⚠️ `isAITouched` is always false: violet means the SOUND came from a
+    /// generator, and the drum machine's sound is synthesis. A beat an agent
+    /// wrote is violet in the clip, where the notes are, not on the pads.
+    private func drumMachinePads(_ drums: [PadDrum]) -> [PadState] {
+        let sounding = typing.soundingPitchSet
+        let links = PadGridDrumMap.chokeLinks(groups: drums.map(\.chokeGroup),
+                                              names: drums.map(\.label),
+                                              keys: drums.map(\.note))
+        return PadGridGeometry.bankPadIndices.map { index in
+            guard drums.indices.contains(index) else {
+                return PadState(id: index, pitch: nil, noteName: "—",
+                                keyLabel: PadGridGeometry.keyLabel(forPad: index),
+                                isLoaded: false, isPlaying: false, sliceOrdinal: nil,
+                                startFrame: nil, isAITouched: false, isPastLastDrum: true)
+            }
+            let drum = drums[index]
+            return PadState(id: index, pitch: drum.note,
+                            noteName: Fundamental.noteName(midiNote: drum.note),
+                            keyLabel: PadGridGeometry.keyLabel(forPad: index),
+                            isLoaded: true, isPlaying: sounding.contains(drum.note),
+                            sliceOrdinal: nil, startFrame: nil, isAITouched: false,
+                            drumLabel: drum.label, chokeLink: links[index])
+        }
+    }
+
+    /// Each sampler zone's choke link, by zone id (m39-w4-8). A kit-sorted
+    /// chop puts both hi-hats in one group (`KitSliceLayout.hatChokeGroup`);
+    /// an agent can put any zones in any group (`sampler.zonePatches`). Read
+    /// off `chokeGroup`, the field the engine reads, and named the way each
+    /// partner's own pad reads: its drum, else "slice N", else its note.
+    private static func samplerChokeLinks(_ live: [SamplerZone], drumLabels: [Int: String],
+                                          ordinals: [UUID: Int]) -> [UUID: PadChokeLink] {
+        guard live.contains(where: { $0.chokeGroup != nil }) else { return [:] }
+        func key(_ zone: SamplerZone) -> Int {
+            min(max(zone.rootPitch, zone.minPitch), zone.maxPitch)
+        }
+        let names = live.map { zone -> String in
+            let note = key(zone)
+            if let label = drumLabels[note] { return label }
+            if let ordinal = ordinals[zone.id] { return "slice \(ordinal)" }
+            return Fundamental.noteName(midiNote: note)
+        }
+        let links = PadGridDrumMap.chokeLinks(groups: live.map(\.chokeGroup), names: names,
+                                              keys: live.map(key))
+        var byID: [UUID: PadChokeLink] = [:]
+        for (zone, link) in zip(live, links) {
+            if let link { byID[zone.id] = link }
+        }
+        return byID
     }
 
     /// zone id → 1-based ordinal in pitch order, over the SLICES. `static` and
@@ -711,9 +908,11 @@ public final class PadGridModel {
 
     public var canBankDown: Bool { bank > 0 }
     public var canBankUp: Bool {
+        // A drum machine has one bank (m39-w4-8).
+        guard !isDrumMachine else { return false }
         // ⚠️ Gated on MIDI, not on the loaded count: a user setting up an empty
         // kit must be able to move to bank 2 before anything is in it.
-        PadGridGeometry.pitch(forPad: 0, baseNote: baseNote, bank: bank + 1) != nil
+        return PadGridGeometry.pitch(forPad: 0, baseNote: baseNote, bank: bank + 1) != nil
     }
 
     public func setBank(_ value: Int) {
@@ -751,6 +950,13 @@ public final class PadGridModel {
     /// Why the row is dead, in a sentence, or nil when it is live.
     public var triggerModeUnavailableReason: String? {
         guard triggerMode == nil else { return nil }
+        // m39-w4-8: the drum machine's voices are one-shots — note-off is
+        // ignored (`DrumSynthInstrument`), so a tap always plays the whole hit.
+        // "Not playing the built-in Sampler, so it has no pads to hold" would be
+        // a wrong sentence over eight live pads.
+        if isDrumMachine {
+            return "The drum machine always plays each hit to its end, so there is nothing to set."
+        }
         guard let name = targetName else {
             return "Pick a track to choose what a pad does when you let go."
         }
@@ -1042,6 +1248,12 @@ public final class PadGridModel {
     /// Why LEVELS cannot be pressed, or nil when it can.
     public var levelsUnavailableReason: String? {
         guard levels == nil else { return nil }
+        // m39-w4-8: "chop something onto the pads first" over eight live drum
+        // pads would read as a broken grid. Say what LEVELS needs instead.
+        if isDrumMachine {
+            return "Sixteen Levels spreads a chopped slice, and the drum machine has none. "
+                + "Use it on a Sampler track you chopped a clip onto."
+        }
         // ⭐ A spread already on the kit is always reachable: LEVELS goes to it
         // (`toggleLevels`), which needs neither a slice nor a free window.
         guard waitingSpreads.isEmpty else { return nil }
@@ -1206,8 +1418,11 @@ public final class PadGridModel {
             enterLevels(fromPad: index)
             return
         }
-        guard let pitch = PadGridGeometry.pitch(forPad: index,
-                                                baseNote: baseNote, bank: bank) else { return }
+        // ⭐ THE CONTROLLER'S ONE HOME FOR PAD → PITCH (m39-w4-8), the same call
+        // the letter keys make — so a pad CLICKED and a pad TYPED cannot play
+        // different notes. On a sampler it is today's sum, unchanged; on a
+        // drum machine it is the drum's note (`padNoteMap`, installed in init).
+        guard let pitch = typing.padPitch(index: index) else { return }
         // ⚠️ VELOCITY FIRST, THEN THE NOTE. `push()` reads `velocity` at the
         // moment it sends, so setting it after `pointerDown` would sound this
         // hit at the PREVIOUS strike's level and only correct itself on the next
@@ -1318,7 +1533,15 @@ public final class PadGridModel {
             // so a panel value of 120 with 53 slices comes back lower — and a
             // grid based on the REQUEST would then draw empty pads over a
             // perfectly good chop, with every reading agreeing with the picture.
-            let landed = result.slices.first?.pitch ?? chop.settings().baseNote
+            // m39-w4-8: a KIT-SORTED chop (the store's answer — `kitSummary` is
+            // set only when it sorted) is laid out on General MIDI drum notes,
+            // and its first slice in TIME is whichever hit came first: a hat at
+            // 42, or an extra at 84. Basing pad 1 there would put a hat under
+            // the kick's key and the kick out of reach, so a kit is based on
+            // its kick note instead (`kitGridBase`).
+            let landed = result.kitSummary != nil
+                ? Self.kitGridBase
+                : (result.slices.first?.pitch ?? chop.settings().baseNote)
             typing.setPadBaseNote(landed)
             typing.setPadBank(0)
             lastChopTrackID = result.trackId
@@ -1335,7 +1558,8 @@ public final class PadGridModel {
                 sourceStillAudible: !result.sourceTrackMuted,
                 warnings: result.warnings,
                 // What the notice SHOWS — see `chopWarningsForHumans`.
-                warningsForHumans: Self.chopWarningsForHumans(result))
+                warningsForHumans: Self.chopWarningsForHumans(result),
+                kitSummary: result.kitSummary)
             bump()
             return true
         } catch {

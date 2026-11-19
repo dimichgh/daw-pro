@@ -601,4 +601,84 @@ struct PianoRollModelTests {
         #expect(m.rect(for: short).width == 3)
         #expect(CGFloat(short.lengthBeats) * m.pixelsPerBeat < 3)
     }
+
+    // MARK: - p2-sing-pr-words-f3: double-click ON an existing note (CHARACTERISATION)
+
+    // ⚠️ CHARACTERISATION TESTS: they pin TODAY's behaviour so a change to it is
+    // seen, and they rule nothing. Whether double-clicking a note should keep
+    // adding one is a separate call (design 2026-10-12-piano-roll-words §1.9 F3,
+    // §7.4). The roll's double-tap (`PianoRollView`'s `SpatialTapGesture(count: 2)`)
+    // calls `addNote(atBeat: model.beat(forX:), pitch: model.pitch(forY:),
+    // resolution: effectiveSnap, …)` with NO hit test, then submits the whole
+    // draft through `setClipNotes`. These tests feed `addNote` the points a
+    // double-click on a note produces, exactly as that handler does; the
+    // gesture's own dispatch is not run here (no window).
+
+    /// A store holding `notes` in one MIDI clip on an instrument track.
+    private func f3Store(notes: [MIDINote], length: Double = 8) throws -> (ProjectStore, Clip) {
+        let store = ProjectStore()
+        let track = store.addTrack(kind: .instrument)
+        let clip = try store.addMIDIClip(toTrack: track.id, atBeat: 0, lengthBeats: length, notes: notes)
+        return (store, clip)
+    }
+
+    // 31. The default snap (Simple density locks `.beat`, `SnapResolution.effective`):
+    //     a double-click on the LEFT half of a one-beat note snaps back to its start.
+    @Test("characterisation (p2-sing-pr-words-f3): a double-click on a note's left half stacks an exact duplicate, and the store keeps both")
+    func characterisationDoubleClickStacksADuplicate() throws {
+        let existing = MIDINote(pitch: 64, velocity: 100, startBeat: 2, lengthBeats: 1)
+        let (store, clip) = try f3Store(notes: [existing])
+        let m = makeModel(notes: [existing])
+        let r = m.rect(for: existing)
+        let point = CGPoint(x: r.minX + r.width * 0.25, y: r.midY)
+        #expect(m.hitTest(point)?.id == existing.id, "control: the double-click lands ON the note")
+        #expect(SnapResolution.effective(appSnap: .bar, density: .simple, picked: .sixteenth) == .beat,
+                "control: the roll's default snap is the beat")
+
+        let added = m.addNote(atBeat: m.beat(forX: point.x), pitch: m.pitch(forY: point.y), resolution: .beat)
+        #expect(m.draft.count == 2, "a second note is added; the first is not selected, moved or removed")
+        #expect(added.id != existing.id)
+        #expect(added.pitch == existing.pitch)
+        #expect(added.startBeat == existing.startBeat)
+        #expect(added.lengthBeats == existing.lengthBeats)
+        #expect(added.velocity == existing.velocity, "an exact duplicate: same pitch, start, length and velocity")
+
+        // The roll's commit funnel: the whole draft through `setClipNotes`.
+        let stored = try store.setClipNotes(clipID: clip.id, notes: m.buildSubmission(), extendToCover: [added.id])
+        let twins = (stored.notes ?? []).filter { $0.pitch == 64 && $0.startBeat == 2 && $0.lengthBeats == 1 }
+        #expect(twins.count == 2, "the store keeps both: nothing on the way merges a stacked note")
+        #expect(Set(twins.map(\.id)) == [existing.id, added.id])
+    }
+
+    // 32. Where the click lands decides what is added; it is always a NEW note.
+    @Test("characterisation (p2-sing-pr-words-f3): elsewhere on a note the double-click adds a neighbour or an overlapping note, never nothing")
+    func characterisationDoubleClickElsewhereOnANote() {
+        // Right half of a one-beat note, beat snap: the next beat — beside it, not on it.
+        let one = MIDINote(pitch: 64, startBeat: 2, lengthBeats: 1)
+        let a = makeModel(notes: [one])
+        let right = a.rect(for: one)
+        let rightPoint = CGPoint(x: right.minX + right.width * 0.75, y: right.midY)
+        #expect(a.hitTest(rightPoint)?.id == one.id, "control: on the note")
+        let beside = a.addNote(atBeat: a.beat(forX: rightPoint.x), pitch: a.pitch(forY: rightPoint.y), resolution: .beat)
+        #expect(a.draft.count == 2)
+        #expect(beside.pitch == 64 && beside.startBeat == 3 && beside.lengthBeats == 1)
+
+        // Inside a long note, beat snap: a one-beat note of the same pitch INSIDE it.
+        let long = MIDINote(pitch: 60, startBeat: 0, lengthBeats: 4)
+        let b = makeModel(notes: [long])
+        let longRect = b.rect(for: long)
+        let inside = CGPoint(x: longRect.minX + 1.7 * b.pixelsPerBeat, y: longRect.midY)
+        #expect(b.hitTest(inside)?.id == long.id, "control: on the note")
+        let overlapping = b.addNote(atBeat: b.beat(forX: inside.x), pitch: b.pitch(forY: inside.y), resolution: .beat)
+        #expect(b.draft.count == 2)
+        #expect(overlapping.pitch == 60 && overlapping.startBeat == 2 && overlapping.lengthBeats == 1)
+        #expect(overlapping.startBeat > long.startBeat && overlapping.endBeat <= long.endBeat, "wholly inside the long note")
+
+        // A Pro sixteenth snap, centre of a one-beat note: a sixteenth inside it.
+        let c = makeModel(notes: [one])
+        let centre = CGPoint(x: c.rect(for: one).midX, y: c.rect(for: one).midY)
+        let sixteenth = c.addNote(atBeat: c.beat(forX: centre.x), pitch: c.pitch(forY: centre.y), resolution: .sixteenth)
+        #expect(c.draft.count == 2)
+        #expect(sixteenth.pitch == 64 && sixteenth.startBeat == 2.5 && sixteenth.lengthBeats == 0.25)
+    }
 }

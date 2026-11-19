@@ -136,8 +136,15 @@ extension TemplateReader {
                                   message: (error as? LocalizedError)?.errorDescription
                                     ?? String(describing: error))
         }
+        // W9-W45: `apply` tells a caller who sets `stepDivision` that `rateHz` is
+        // unused. A template that names NO `rateHz` set no such value, so that
+        // sentence would only be noise on every read of a synced source; one
+        // that DOES carry both still hears it.
+        let unusedRateNote = values["rateHz"] == nil
+            ? TempoSync.inertRateNote(for: applied.params) : nil
         for warning in applied.warnings {
             let (code, sentence) = Self.splitModulationWarning(warning)
+            if code == ModulationWarning.paramIgnored, sentence == unusedRateNote { continue }
             if code == ModulationWarning.paramClamped {
                 try refuseOrSkip(
                     TemplateRefusal(code: .outOfRange, path: paramsPath,

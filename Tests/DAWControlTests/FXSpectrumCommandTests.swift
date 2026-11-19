@@ -238,7 +238,7 @@ struct FXSpectrumCommandTests {
         #expect(refusal.error?.contains("release") == true,
                 "the refusal must teach how to free a slot")
         #expect(engine.taps.count == 8, "the refused arm must not have recorded a 9th tap")
-        #expect(CommandRouter.allCommands.count == 263, "a cap-full refusal must not have touched allCommands")   // -> 263 at m39-tpl-6 (+7 template.* verbs, placed right after playbox.generate, NOT at the tail) -> 234 at m23-q (clip.autoCorrectPitch/clip.clearPitchEdits/clip.getPitchEdits, appended at the tail) -> 237 at p2-c (view.openPitchEditor next to view.openEditor; clip.setNotePitch/clip.splitNote next to clip.sliceToSampler, NOT at the tail) -> 239 at m39-levels-2 wire (instrument.spreadSlice/instrument.setSpreadDirection, placed next to instrument.describeSampler, NOT at the tail) -> 241 at I7a (clip.setNoteCleared, placed next to clip.getPlayedPitch in the per-note door cluster, NOT at the tail) -> 243 at the I4 wire leg (clip.setNotePitches, placed next to clip.setNoteGain in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two added since I7a — U-D's clip.setNoteGain landed 242 without a matching entry appended here, so this suffix continues from 241, not 242) -> 244 at the I1 wire leg (clip.auditionNote, placed immediately after clip.setNotePitches — a deliberate departure from the tail-of-cluster rule, since this verb is not a per-note WRITER like its neighbours and no dropLast(N)/suffix-window pin anywhere depends on it landing at the tail — still beside clip.sliceToSampler) -> 245 at UB-2 (clip.findUnpitchedSounds, placed immediately after clip.auditionNote, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail) -> 247 at C5a-3/NT-L3 (clip.setNoteVibrato/clip.setNoteVibratos, placed immediately after clip.findUnpitchedSounds, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two verbs land together) -> 252 at NT-W (clip.setNoteFormant/clip.setFormantCorrection/clip.setNoteTransition/clip.setPitchTransitionSmoothness/clip.setNoteGlideFollow, placed immediately after clip.setNoteVibratos, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; five verbs land together) -> 253 at NT-W over NT-C C2 (clip.setConsonantProtection, placed immediately after clip.setNoteGlideFollow, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; NT-E2 has since landed (2026-09-26) -- the render mix is live)
+        #expect(CommandRouter.allCommands.count == 288, "a cap-full refusal must not have touched allCommands")   // 286 -> 288 at m39-w4-10 (pattern.list + clip.addDrumPattern, W9-PAT, placed right after clip.addMIDI, NOT at the tail)  <- 285 -> 286 at m27-f (fx.getParams, W8-M27F)  <- -> 285 at p2-sing-x7 part A (+5 verbs: clip.setNoteWord, clip.setSingStyle, clip.getSingStyle, sing.proposeHarmony, sing.capabilities, placed right after project.transpose at the end of the singing block, NOT at the tail) -> 280 at p2-sing-e (+17 singing verbs: the sing.* family, clip.setLyrics/getLyrics and project.transpose, placed right after template.export, NOT at the tail) -> 263 at m39-tpl-6 (+7 template.* verbs, placed right after playbox.generate, NOT at the tail) -> 234 at m23-q (clip.autoCorrectPitch/clip.clearPitchEdits/clip.getPitchEdits, appended at the tail) -> 237 at p2-c (view.openPitchEditor next to view.openEditor; clip.setNotePitch/clip.splitNote next to clip.sliceToSampler, NOT at the tail) -> 239 at m39-levels-2 wire (instrument.spreadSlice/instrument.setSpreadDirection, placed next to instrument.describeSampler, NOT at the tail) -> 241 at I7a (clip.setNoteCleared, placed next to clip.getPlayedPitch in the per-note door cluster, NOT at the tail) -> 243 at the I4 wire leg (clip.setNotePitches, placed next to clip.setNoteGain in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two added since I7a — U-D's clip.setNoteGain landed 242 without a matching entry appended here, so this suffix continues from 241, not 242) -> 244 at the I1 wire leg (clip.auditionNote, placed immediately after clip.setNotePitches — a deliberate departure from the tail-of-cluster rule, since this verb is not a per-note WRITER like its neighbours and no dropLast(N)/suffix-window pin anywhere depends on it landing at the tail — still beside clip.sliceToSampler) -> 245 at UB-2 (clip.findUnpitchedSounds, placed immediately after clip.auditionNote, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail) -> 247 at C5a-3/NT-L3 (clip.setNoteVibrato/clip.setNoteVibratos, placed immediately after clip.findUnpitchedSounds, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two verbs land together) -> 252 at NT-W (clip.setNoteFormant/clip.setFormantCorrection/clip.setNoteTransition/clip.setPitchTransitionSmoothness/clip.setNoteGlideFollow, placed immediately after clip.setNoteVibratos, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; five verbs land together) -> 253 at NT-W over NT-C C2 (clip.setConsonantProtection, placed immediately after clip.setNoteGlideFollow, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; NT-E2 has since landed (2026-09-26) -- the render mix is live)
     }
 
     // MARK: - L4a/L4b: lease expiry — reporting vs cap-slot, deliberately split
@@ -470,7 +470,7 @@ struct FXSpectrumCommandTests {
         #expect(CommandRouter.allCommands.dropLast(2).last == "clip.autoCorrectPitch")
         #expect(CommandRouter.allCommands.dropLast().last == "clip.clearPitchEdits")
         #expect(CommandRouter.allCommands.last == "clip.getPitchEdits")
-        #expect(CommandRouter.allCommands.count == 263)   // 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes, NOT at the tail) -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail) -> 191 (m24-m leg A vc.convertClips, placed next to vc.convertVocals — its single-clip sibling — NOT at the tail) -> 193 (m24-n project.embeddedVoices next to project.snapshot/project.open, and vc.installEmbeddedVoice next to vc.importVoiceModel, both at the tail per the additive-at-end law) -> 194 (m23-ct note.play, placed next to note.audition/pad.previewEffort — the other 'sounds now, outside the timeline' verbs — NOT at the tail; a tail append reddened 19 end-relative assertions across 7 files on this item's first run) -> 195 (m23-cv chord.voice, a PURE read-only computation, placed next to note.play and NOT at the tail: LivePlayCommandTests pins note.play to pad.previewEffort + 1, so an insertion BEFORE it would redden that instead) -> 202 (m34-c instrument.listDownloadableSoundBanks/downloadSoundBank/soundBankDownloadStatus/cancelSoundBankDownload — the one-click SoundFont download, all four placed next to instrument.importSoundBank — their nearest sibling — and NOT at the tail, so every dropLast(N) window above stays true by construction; a tail placement was tried first and reddened 14 tests) -> 211 (m34-h-1 LIVE LOOPING looper.begin/armLayer/finishLayer/undoLayer/setLayerMuted/status/end, all seven placed immediately after transport.recordLayer/finishLayer — the verbs whose machinery the deck drives — and ~71 entries from the END, NOT at the tail, so every dropLast(N) window and suffix assertion above stays true by construction) -> 215 (M35 view.capture/view.selectClip/view.panelLayout/view.openEditor, the agent-facing VIEW surface, all four placed immediately after plugin.listOpenUIs and ~70 entries from the END, NOT at the tail) -> 218 (m39-f instrument.describeSynth, placed next to instrument.describeSampler, NOT at the tail) -> 231 at m39-dm (instrument.setDrumParam/describeDrumKit/listDrumPresets/loadDrumPreset — the drum machine's four verbs, placed next to instrument.describeSynth/describeSampler, their only siblings on this surface, and NOT at the tail, so every dropLast(N) window and suffix assertion stays true by construction) -> 234 at m23-q (clip.autoCorrectPitch/clip.clearPitchEdits/clip.getPitchEdits, appended at the tail) -> 237 at p2-c (view.openPitchEditor next to view.openEditor; clip.setNotePitch/clip.splitNote next to clip.sliceToSampler, NOT at the tail) -> 239 at m39-levels-2 wire (instrument.spreadSlice/instrument.setSpreadDirection, placed next to instrument.describeSampler, NOT at the tail) -> 241 at I7a (clip.setNoteCleared, placed next to clip.getPlayedPitch in the per-note door cluster, NOT at the tail) -> 243 at the I4 wire leg (clip.setNotePitches, placed next to clip.setNoteGain in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two added since I7a — U-D's clip.setNoteGain landed 242 without a matching entry appended here, so this suffix continues from 241, not 242) -> 244 at the I1 wire leg (clip.auditionNote, placed immediately after clip.setNotePitches — a deliberate departure from the tail-of-cluster rule, since this verb is not a per-note WRITER like its neighbours and no dropLast(N)/suffix-window pin anywhere depends on it landing at the tail — still beside clip.sliceToSampler) -> 245 at UB-2 (clip.findUnpitchedSounds, placed immediately after clip.auditionNote, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail) -> 247 at C5a-3/NT-L3 (clip.setNoteVibrato/clip.setNoteVibratos, placed immediately after clip.findUnpitchedSounds, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two verbs land together) -> 252 at NT-W (clip.setNoteFormant/clip.setFormantCorrection/clip.setNoteTransition/clip.setPitchTransitionSmoothness/clip.setNoteGlideFollow, placed immediately after clip.setNoteVibratos, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; five verbs land together) -> 253 at NT-W over NT-C C2 (clip.setConsonantProtection, placed immediately after clip.setNoteGlideFollow, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; NT-E2 has since landed (2026-09-26) -- the render mix is live) -> 263 at m39-tpl-6 (+7 template.* verbs: template.list/describe/apply/save/remove/import/export, placed right after playbox.generate, NOT at the tail)
+        #expect(CommandRouter.allCommands.count == 288)   // 286 -> 288 at m39-w4-10 (pattern.list + clip.addDrumPattern, W9-PAT, placed right after clip.addMIDI, NOT at the tail)  <- 285 -> 286 at m27-f (fx.getParams, W8-M27F)  <- 166 at m23-af -> 168 at m20-j -> 169 at m23-br-1 -> 171 at m23-aj-2 -> 173 at m23-dl -> 174 at m23-di-2a -> 175 at m25-d -> 176 at m25-z -> 177 at m23-ap-3 -> 178 (clip.getNotes) -> 179 (m26-i instrument.describeSampler) -> 180 (edit.pasteClips) -> 181 (m27 leg D clip.applyBreathContour, placed next to its controller-lane siblings, NOT at the tail) -> 182 (breath pad P1 clip.applyEffortShape, placed next to clip.applyBreathContour, NOT at the tail) -> 183 (breath pad P6 pad.previewEffort, placed next to note.audition — the other 'sounds now, outside the timeline, not an edit' verb — NOT at the tail) -> 186 (m28-knob midi.getControlMap/setControlMap/learnControl, placed next to midi.listInputs — their only sibling on this surface — and BEFORE transport.record, NOT at the tail) -> 187 (m31-f instrument.probeLiveness) -> 188 (m31-c clip.repeatNotes, placed next to clip.setNotes/clip.getNotes, NOT at the tail) -> 189 (m26-a/m27-n clip.patchNotes, placed next to clip.repeatNotes, NOT at the tail) -> 190 (m32-b2 clip.sliceToSampler, placed next to clip.detectTransients/clip.quantizeAudio, NOT at the tail) -> 191 (m24-m leg A vc.convertClips, placed next to vc.convertVocals — its single-clip sibling — NOT at the tail) -> 193 (m24-n project.embeddedVoices next to project.snapshot/project.open, and vc.installEmbeddedVoice next to vc.importVoiceModel, both at the tail per the additive-at-end law) -> 194 (m23-ct note.play, placed next to note.audition/pad.previewEffort — the other 'sounds now, outside the timeline' verbs — NOT at the tail; a tail append reddened 19 end-relative assertions across 7 files on this item's first run) -> 195 (m23-cv chord.voice, a PURE read-only computation, placed next to note.play and NOT at the tail: LivePlayCommandTests pins note.play to pad.previewEffort + 1, so an insertion BEFORE it would redden that instead) -> 202 (m34-c instrument.listDownloadableSoundBanks/downloadSoundBank/soundBankDownloadStatus/cancelSoundBankDownload — the one-click SoundFont download, all four placed next to instrument.importSoundBank — their nearest sibling — and NOT at the tail, so every dropLast(N) window above stays true by construction; a tail placement was tried first and reddened 14 tests) -> 211 (m34-h-1 LIVE LOOPING looper.begin/armLayer/finishLayer/undoLayer/setLayerMuted/status/end, all seven placed immediately after transport.recordLayer/finishLayer — the verbs whose machinery the deck drives — and ~71 entries from the END, NOT at the tail, so every dropLast(N) window and suffix assertion above stays true by construction) -> 215 (M35 view.capture/view.selectClip/view.panelLayout/view.openEditor, the agent-facing VIEW surface, all four placed immediately after plugin.listOpenUIs and ~70 entries from the END, NOT at the tail) -> 218 (m39-f instrument.describeSynth, placed next to instrument.describeSampler, NOT at the tail) -> 231 at m39-dm (instrument.setDrumParam/describeDrumKit/listDrumPresets/loadDrumPreset — the drum machine's four verbs, placed next to instrument.describeSynth/describeSampler, their only siblings on this surface, and NOT at the tail, so every dropLast(N) window and suffix assertion stays true by construction) -> 234 at m23-q (clip.autoCorrectPitch/clip.clearPitchEdits/clip.getPitchEdits, appended at the tail) -> 237 at p2-c (view.openPitchEditor next to view.openEditor; clip.setNotePitch/clip.splitNote next to clip.sliceToSampler, NOT at the tail) -> 239 at m39-levels-2 wire (instrument.spreadSlice/instrument.setSpreadDirection, placed next to instrument.describeSampler, NOT at the tail) -> 241 at I7a (clip.setNoteCleared, placed next to clip.getPlayedPitch in the per-note door cluster, NOT at the tail) -> 243 at the I4 wire leg (clip.setNotePitches, placed next to clip.setNoteGain in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two added since I7a — U-D's clip.setNoteGain landed 242 without a matching entry appended here, so this suffix continues from 241, not 242) -> 244 at the I1 wire leg (clip.auditionNote, placed immediately after clip.setNotePitches — a deliberate departure from the tail-of-cluster rule, since this verb is not a per-note WRITER like its neighbours and no dropLast(N)/suffix-window pin anywhere depends on it landing at the tail — still beside clip.sliceToSampler) -> 245 at UB-2 (clip.findUnpitchedSounds, placed immediately after clip.auditionNote, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail) -> 247 at C5a-3/NT-L3 (clip.setNoteVibrato/clip.setNoteVibratos, placed immediately after clip.findUnpitchedSounds, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; two verbs land together) -> 252 at NT-W (clip.setNoteFormant/clip.setFormantCorrection/clip.setNoteTransition/clip.setPitchTransitionSmoothness/clip.setNoteGlideFollow, placed immediately after clip.setNoteVibratos, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; five verbs land together) -> 253 at NT-W over NT-C C2 (clip.setConsonantProtection, placed immediately after clip.setNoteGlideFollow, in the same per-note pitch-editor door cluster beside clip.sliceToSampler, NOT at the tail; NT-E2 has since landed (2026-09-26) -- the render mix is live) -> 263 at m39-tpl-6 (+7 template.* verbs: template.list/describe/apply/save/remove/import/export, placed right after playbox.generate, NOT at the tail) -> 280 at p2-sing-e (+17 singing verbs: the sing.* family, clip.setLyrics/getLyrics and project.transpose, placed right after template.export, NOT at the tail) -> 285 at p2-sing-x7 part A (+5 verbs: clip.setNoteWord, clip.setSingStyle, clip.getSingStyle, sing.proposeHarmony, sing.capabilities, placed right after project.transpose at the end of the singing block, NOT at the tail)
         // -> 187 (m31-f instrument.probeLiveness, placed next to instrument.describeSampler — its read-only instrument.* sibling — NOT at the tail)
     }
 
@@ -547,5 +547,318 @@ struct FXSpectrumCommandTests {
         #expect(response.result?["bands"] == nil)
         #expect(response.result?["tapPoint"] != nil)
         #expect(response.result?["leaseSeconds"]?.doubleValue == 3)
+    }
+
+    // MARK: - m27-j (W8-M27J, 2026-10-07): the reply WITHOUT `audition` is pinned
+
+    /// The exact reply bytes (sorted-keys JSON of the whole `ControlResponse`)
+    /// CAPTURED from the tree BEFORE m27-j added `fx.spectrum`'s opt-in
+    /// `audition` parameter (capture run `$S/w8/M27J/capture.log`). The additive
+    /// law: a call that does not pass `audition` must answer byte-for-byte as
+    /// it did before. Covers the arm:true read, the arm:false release, and a
+    /// refusal.
+    private static let m27jPinArmTrue = #"{"id":"read","ok":true,"result":{"armed":true,"balance":0,"bands":[-79.99717,-79.99717,-79.99703,-79.996826,-79.996544,-79.99595,-79.99477,-79.99222,-79.98459,-79.96167,-79.829704,-76.75736,-14.593996,-29.199774,-79.829025,-79.997185,-80,-80,-80,-80,-80,-80,-80,-80],"centroidHz":784,"correlation":1,"flux":4.4382272e-05,"leaseSeconds":3,"levelDB":-9.612497,"peakDB":-6.0188627,"tapPoint":"postInsertPreFader","width":0}}"#
+    private static let m27jPinArmFalse = #"{"id":"release","ok":true,"result":{"armed":false,"balance":0,"bands":[-79.99717,-79.99717,-79.99703,-79.996826,-79.996544,-79.99595,-79.99477,-79.99222,-79.98459,-79.96167,-79.829704,-76.75736,-14.593996,-29.199774,-79.829025,-79.997185,-80,-80,-80,-80,-80,-80,-80,-80],"centroidHz":784,"correlation":1,"flux":4.4382272e-05,"leaseSeconds":3,"levelDB":-9.612497,"peakDB":-6.0188627,"tapPoint":"postInsertPreFader","width":0}}"#
+    private static let m27jPinTrackNotFound = #"{"error":"No track with id 00000000-0000-0000-0000-0000000000AA.","id":"missing","ok":false}"#
+
+    private func m27jEncoded(_ response: ControlResponse) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(response), as: UTF8.self)
+    }
+
+    @Test("m27-j PIN: without `audition`, fx.spectrum's arm:true read, arm:false release and a refusal are byte-identical to the pre-m27-j tree")
+    func m27jNoAuditionRepliesArePinned() async throws {
+        let (router, store, engine) = makeRouter()
+        let track = store.addTrack(name: "T")
+        let effect = try store.addEffect(toTrack: track.id, kind: .gain)
+        let target = InsertAnalysisTarget(trackID: track.id, effectID: effect.id)
+
+        let arm = await router.handle(spectrumRequest("arm", trackId: track.id.uuidString,
+                                                       effectId: effect.id.uuidString))
+        #expect(arm.ok, "fx.spectrum arm failed: \(arm.error ?? "?")")
+        engine.feed(target, hz: 1_000, quanta: 40)
+        let read = await router.handle(spectrumRequest("read", trackId: track.id.uuidString,
+                                                        effectId: effect.id.uuidString))
+        let release = await router.handle(spectrumRequest("release", trackId: track.id.uuidString,
+                                                           effectId: effect.id.uuidString, arm: false))
+        let missing = await router.handle(spectrumRequest(
+            "missing", trackId: "00000000-0000-0000-0000-0000000000AA",
+            effectId: effect.id.uuidString))
+
+        let readBytes = try m27jEncoded(read)
+        let releaseBytes = try m27jEncoded(release)
+        let missingBytes = try m27jEncoded(missing)
+        print("[pin] m27-j arm:true \(readBytes)")
+        print("[pin] m27-j arm:false \(releaseBytes)")
+        print("[pin] m27-j trackNotFound \(missingBytes)")
+        #expect(readBytes == Self.m27jPinArmTrue, "the arm:true reply changed without `audition`")
+        #expect(releaseBytes == Self.m27jPinArmFalse, "the arm:false reply changed without `audition`")
+        #expect(missingBytes == Self.m27jPinTrackNotFound, "the refusal changed without `audition`")
+    }
+
+    // MARK: - m27-j (W8-M27J wave 2): `audition` — play a note and measure it in ONE call
+
+    /// A fake engine whose taps are REAL (`InsertSpectrumTap` + the real
+    /// analyzer, the `FakeSpectrumEngine` design) and which also accepts note
+    /// auditions. `render(_:)` stands in for the audio thread: while an
+    /// audition holds, it writes a 440 Hz sine at the test tone's level
+    /// (velocity 127 → 0.25) into every armed tap; otherwise silence.
+    @MainActor
+    private final class M27jAuditionEngine: AudioEngineControlling {
+        private(set) var taps: [InsertAnalysisTarget: InsertSpectrumTap] = [:]
+        private(set) var armCallCount = 0
+        private(set) var auditionCalls = 0
+        private(set) var renderCalls = 0
+        private(set) var framesRendered = 0
+        private var heldPitches: [UInt8] = []
+        private var phase = 0.0
+
+        var maxArmedInsertAnalysis: Int { 8 }
+
+        @discardableResult
+        func setInsertAnalysisArmed(trackID: UUID?, effectID: UUID, armed: Bool) -> Bool {
+            armCallCount += 1
+            let target = InsertAnalysisTarget(trackID: trackID, effectID: effectID)
+            guard armed else {
+                taps.removeValue(forKey: target)
+                return true
+            }
+            if taps[target] == nil { taps[target] = InsertSpectrumTap(sampleRate: 48_000) }
+            return true
+        }
+
+        func insertAnalysis(trackID: UUID?, effectID: UUID) -> MasterAnalysisSnapshot? {
+            taps[InsertAnalysisTarget(trackID: trackID, effectID: effectID)]?.drainAndSnapshot()
+        }
+
+        func insertAnalysisCoverage(trackID: UUID?, effectID: UUID) -> InsertAnalysisCoverage? {
+            guard let tap = taps[InsertAnalysisTarget(trackID: trackID, effectID: effectID)] else { return nil }
+            return InsertAnalysisCoverage(framesAnalyzed: tap.framesAnalyzed, framesDropped: tap.droppedFrames)
+        }
+
+        func setAuditionPitches(trackID: UUID, pitches: [UInt8], velocity: UInt8) -> AuditionOutcome {
+            auditionCalls += 1
+            heldPitches = pitches
+            return .sounded
+        }
+
+        /// Writes `duration` worth of audio (48 kHz) into every armed tap, in
+        /// ≤ 512-frame quanta like the render thread.
+        func render(_ duration: Duration) {
+            renderCalls += 1
+            let components = duration.components
+            let frames = Int((Double(components.seconds) + Double(components.attoseconds) / 1e18) * 48_000)
+            let storage = UnsafeMutablePointer<Float>.allocate(capacity: 1_024)
+            defer { storage.deallocate() }
+            let list = AudioBufferList.allocate(maximumBuffers: 2)
+            defer { free(list.unsafeMutablePointer) }
+            var written = 0
+            while written < frames {
+                let count = min(512, frames - written)
+                for frame in 0..<count {
+                    let sample: Float = heldPitches.isEmpty ? 0 : Float(0.25 * sin(phase))
+                    storage[frame] = sample
+                    storage[512 + frame] = sample
+                    if !heldPitches.isEmpty { phase += 2 * .pi * 440 / 48_000 }
+                }
+                for channel in 0..<2 {
+                    list[channel] = AudioBuffer(mNumberChannels: 1,
+                                                mDataByteSize: UInt32(count * MemoryLayout<Float>.stride),
+                                                mData: UnsafeMutableRawPointer(storage + channel * 512))
+                }
+                for tap in taps.values { tap.write(buffers: list, frameCount: count) }
+                written += count
+            }
+            framesRendered += frames
+        }
+
+        // ---- Rest of AudioEngineControlling: the FakeSpectrumEngine boilerplate.
+        var meteringHandler: ((MeterFrame) -> Void)?
+        var trackMeteringHandler: ((UUID, MeterFrame) -> Void)?
+        var playheadHandler: ((Double) -> Void)?
+        var isRunning = false
+        func prepare() throws {}
+        func shutdown() {}
+        func tracksDidChange(_ tracks: [Track]) {}
+        func startPlayback(_ transport: TransportState) {}
+        func stopPlayback() {}
+        func seek(_ transport: TransportState) {}
+        func setTempo(_ transport: TransportState) {}
+        func loopChanged(_ transport: TransportState) {}
+        func masterVolumeChanged(_ volume: Double) {}
+        func renderMixdown(tracks: [Track], tempoMap: TempoMap, masterVolume: Double,
+                           masterEffects: [EffectDescriptor],
+                           masterAutomation: [AutomationLane],
+                           fromBeat: Double, durationSeconds: Double,
+                           to url: URL) async throws -> AudioFileInfo {
+            throw ProjectError.engineUnavailable
+        }
+        var recordPermission: RecordPermission { .granted }
+        func requestRecordPermission(_ completion: @escaping @MainActor (Bool) -> Void) {
+            completion(true)
+        }
+        func availableInputDevices() -> [AudioInputDevice] { [] }
+        func setInputDevice(uid: String?) throws {}
+        func startRecording(_ transport: TransportState, to url: URL,
+                            completion: @escaping @MainActor (Result<RecordingResult, Error>) -> Void) throws {
+            throw ProjectError.engineUnavailable
+        }
+        func stopRecording() {}
+    }
+
+    /// Router + store over `M27jAuditionEngine`, with the hold's pause replaced
+    /// by "render that long" — deterministic, no real sleeping. `store.engine`
+    /// is weak: callers keep `engine` bound.
+    private func m27jMakeRouter() -> (router: CommandRouter, store: ProjectStore,
+                                       engine: M27jAuditionEngine) {
+        let store = ProjectStore()
+        store.media = FakeMedia()
+        let engine = M27jAuditionEngine()
+        store.engine = engine
+        let router = CommandRouter(store: store, insertSpectrumLeases: InsertSpectrumLeases())
+        router.spectrumHoldWait = { [weak engine] duration in engine?.render(duration) }
+        return (router, store, engine)
+    }
+
+    private func m27jRequest(_ id: String, trackId: String, effectId: String,
+                             arm: Bool? = nil, audition: JSONValue?) -> ControlRequest {
+        var params: [String: JSONValue] = [
+            "trackId": .string(trackId), "effectId": .string(effectId),
+        ]
+        if let arm { params["arm"] = .bool(arm) }
+        if let audition { params["audition"] = audition }
+        return ControlRequest(id: id, command: "fx.spectrum", params: params)
+    }
+
+    private static let m27jFarBands: [Int] =
+        Array(0...MasterMixAnalyzer.bandIndex(containing: 100))
+        + Array(MasterMixAnalyzer.bandIndex(containing: 4_000)..<MasterAnalysisSnapshot.bandCount)
+
+    @Test("m27-j ONE call with `audition` plays the note, reads the insert while it sounds, and returns the per-band peak hold: the 440 Hz band near -16 dB, far bands at the floor, no gap")
+    func m27jOneCallAuditionReadsTheNote() async throws {
+        let (router, store, engine) = m27jMakeRouter()
+        let track = store.addTrack(name: "Keys", kind: .instrument)
+        let effect = try store.addEffect(toTrack: track.id, kind: .gain)
+
+        let response = await router.handle(m27jRequest(
+            "1", trackId: track.id.uuidString, effectId: effect.id.uuidString,
+            audition: .object(["pitches": .array([.number(69)]), "velocity": .number(127)])))
+        #expect(response.ok, "fx.spectrum audition failed: \(response.error ?? "?")")
+        let result = try #require(response.result)
+        let polls = AuditionSpectrumProbe.pollCount(durationMs: AuditionController.defaultDurationMs)
+        #expect(result["armed"]?.boolValue == true)
+        #expect(result["hold"]?.stringValue == "peakOverAudition")
+        #expect(result["reads"]?.doubleValue == Double(polls))
+        #expect(engine.renderCalls == polls, "the hold did not pause before every read")
+        #expect(engine.auditionCalls == 1, "the note was not started exactly once")
+        #expect(result["framesCovered"]?.doubleValue == Double(engine.framesRendered),
+                "framesCovered is not every frame the engine rendered during the hold")
+        #expect(result["framesMissed"]?.doubleValue == 0)
+        let bands = (result["bands"]?.arrayValue ?? []).compactMap(\.doubleValue)
+        #expect(bands.count == 24)
+        let toneBand = MasterMixAnalyzer.bandIndex(containing: 440)
+        let peak = try #require(bands.max())
+        #expect(bands.firstIndex(of: peak) == toneBand, "the held spectrum's loudest band is not 440 Hz")
+        #expect(abs(peak - (-16.3)) <= 1.5, "the 440 Hz band held \(peak) dB, not ~-16.3 dB")
+        for band in Self.m27jFarBands {
+            #expect(bands[band] <= -75, "far band \(band) held \(bands[band]) dB under a pure 440 Hz tone")
+        }
+        let audition = try #require(result["audition"])
+        #expect(audition["audible"]?.boolValue == true)
+        #expect(audition["pitches"]?.arrayValue?.compactMap(\.doubleValue) == [69])
+        #expect(audition["velocity"]?.doubleValue == 127)
+        #expect(audition["durationMs"]?.doubleValue == Double(AuditionController.defaultDurationMs))
+        #expect(audition["trackId"]?.stringValue == track.id.uuidString)
+        #expect(result["tapPoint"]?.stringValue == "postInsertPreFader")
+        print("[measured] m27-j one-call audition: reads \(result["reads"]?.doubleValue ?? -1), 440 band "
+              + "\(peak) dB, far max \(Self.m27jFarBands.map { bands[$0] }.max() ?? .nan) dB, framesCovered "
+              + "\(result["framesCovered"]?.doubleValue ?? -1), framesMissed \(result["framesMissed"]?.doubleValue ?? -1)")
+    }
+
+    @Test("m27-j a call WITHOUT `audition` never waits: the hold's pause is not touched and no note is started")
+    func m27jPlainCallNeverWaits() async throws {
+        let (router, store, engine) = m27jMakeRouter()
+        let track = store.addTrack(name: "Keys", kind: .instrument)
+        let effect = try store.addEffect(toTrack: track.id, kind: .gain)
+        for arm in [true, false] {
+            let response = await router.handle(m27jRequest(
+                "\(arm)", trackId: track.id.uuidString, effectId: effect.id.uuidString,
+                arm: arm, audition: nil))
+            #expect(response.ok)
+            #expect(response.result?["hold"] == nil)
+            #expect(response.result?["audition"] == nil)
+        }
+        #expect(engine.renderCalls == 0, "a plain fx.spectrum call paused")
+        #expect(engine.auditionCalls == 0, "a plain fx.spectrum call played a note")
+    }
+
+    @Test("m27-j a bad `audition` is refused with note.audition's OWN sentence for the same values, and arms nothing and plays nothing")
+    func m27jBadAuditionRefusesLikeNoteAudition() async throws {
+        let (router, store, engine) = m27jMakeRouter()
+        let keys = store.addTrack(name: "Keys", kind: .instrument)
+        let keysFX = try store.addEffect(toTrack: keys.id, kind: .gain)
+        let audio = store.addTrack(name: "Vox", kind: .audio)
+        let audioFX = try store.addEffect(toTrack: audio.id, kind: .gain)
+        let note: (Double) -> JSONValue = { .number($0) }
+        let cases: [(label: String, values: [String: JSONValue], onAudio: Bool)] = [
+            ("pitches missing", [:], false),
+            ("pitches not an array", ["pitches": .string("C4")], false),
+            ("a fractional pitch", ["pitches": .array([note(60.5)])], false),
+            ("pitch 200", ["pitches": .array([note(200)])], false),
+            ("nine pitches", ["pitches": .array((60...68).map { note(Double($0)) })], false),
+            ("velocity 0", ["pitches": .array([note(69)]), "velocity": note(0)], false),
+            ("fractional velocity", ["pitches": .array([note(69)]), "velocity": note(1.5)], false),
+            ("durationMs 5", ["pitches": .array([note(69)]), "durationMs": note(5)], false),
+            ("durationMs 5001", ["pitches": .array([note(69)]), "durationMs": note(5_001)], false),
+            ("an audio track", ["pitches": .array([note(69)])], true),
+        ]
+        for testCase in cases {
+            let trackID = testCase.onAudio ? audio.id : keys.id
+            let effectID = testCase.onAudio ? audioFX.id : keysFX.id
+            var direct = testCase.values
+            direct["trackId"] = .string(trackID.uuidString)
+            let viaNote = await router.handle(ControlRequest(id: "n", command: "note.audition", params: direct))
+            let viaSpectrum = await router.handle(m27jRequest(
+                "s", trackId: trackID.uuidString, effectId: effectID.uuidString,
+                audition: .object(testCase.values)))
+            #expect(!viaNote.ok && !viaSpectrum.ok, "\(testCase.label): one of the two calls succeeded")
+            #expect(viaSpectrum.error == viaNote.error,
+                    "\(testCase.label): fx.spectrum said \(viaSpectrum.error ?? "nil"), note.audition said \(viaNote.error ?? "nil")")
+        }
+        #expect(engine.armCallCount == 0, "a refused audition armed a tap")
+        #expect(engine.auditionCalls == 0, "a refused audition played a note")
+    }
+
+    @Test("m27-j the `audition` shape refusals: arm:false, not an object, an unknown key inside it, and the master chain without its own trackId — then a master insert WITH one works")
+    func m27jAuditionShapeRefusals() async throws {
+        let (router, store, engine) = m27jMakeRouter()
+        let keys = store.addTrack(name: "Keys", kind: .instrument)
+        let keysFX = try store.addEffect(toTrack: keys.id, kind: .gain)
+        let master = try store.addMasterEffect(kind: .gain)
+        let a69: JSONValue = .object(["pitches": .array([.number(69)])])
+
+        let withArmFalse = await router.handle(m27jRequest(
+            "1", trackId: keys.id.uuidString, effectId: keysFX.id.uuidString, arm: false, audition: a69))
+        #expect(withArmFalse.error?.contains("arm:false") == true, "\(withArmFalse.error ?? "nil")")
+        let notObject = await router.handle(m27jRequest(
+            "2", trackId: keys.id.uuidString, effectId: keysFX.id.uuidString, audition: .string("C4")))
+        #expect(notObject.error?.contains("'audition' must be an object") == true, "\(notObject.error ?? "nil")")
+        let unknownKey = await router.handle(m27jRequest(
+            "3", trackId: keys.id.uuidString, effectId: keysFX.id.uuidString,
+            audition: .object(["pitches": .array([.number(69)]), "bogus": .number(1)])))
+        #expect(unknownKey.error?.contains("'bogus'") == true, "\(unknownKey.error ?? "nil")")
+        #expect(unknownKey.error?.contains("inside 'audition'") == true, "\(unknownKey.error ?? "nil")")
+        let masterNoTrack = await router.handle(m27jRequest(
+            "4", trackId: "master", effectId: master.id.uuidString, audition: a69))
+        #expect(masterNoTrack.error?.contains("trackId") == true, "\(masterNoTrack.error ?? "nil")")
+        #expect(engine.armCallCount == 0 && engine.auditionCalls == 0, "a refused audition armed or played")
+
+        let masterWithTrack = await router.handle(m27jRequest(
+            "5", trackId: "master", effectId: master.id.uuidString,
+            audition: .object(["pitches": .array([.number(69)]), "trackId": .string(keys.id.uuidString)])))
+        #expect(masterWithTrack.ok, "\(masterWithTrack.error ?? "nil")")
+        #expect(masterWithTrack.result?["tapPoint"]?.stringValue == "postInsertPostFader")
+        #expect(masterWithTrack.result?["audition"]?["trackId"]?.stringValue == keys.id.uuidString)
     }
 }

@@ -199,8 +199,8 @@ public extension InstrumentParamSpec {
                     note: "Takes effect at the next note-on."),
             ]
         case .drumSynth:
-            // ⭐ m39-dm — 75 rows, DERIVED FROM `DrumKitParams.paramSpecs`
-            // rather than re-typed. Two hand-maintained lists of 75 names would
+            // ⭐ m39-dm — 77 rows, DERIVED FROM `DrumKitParams.paramSpecs`
+            // rather than re-typed. Two hand-maintained lists of 77 names would
             // have diverged on the first edit; this one cannot, and the
             // `describeDrumKit` verb reads the same table again rather than a
             // third copy.

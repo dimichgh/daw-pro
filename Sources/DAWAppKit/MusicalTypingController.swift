@@ -90,10 +90,28 @@ public final class MusicalTypingController {
     /// Which bank of 16 the grid is showing, 0-based.
     public private(set) var padBank = 0
 
+    /// m39-w4-8 — THE TARGET'S OWN PAD MAP, when it has one: pad index (0-based)
+    /// → the MIDI note that pad plays, or nil for the base-note arithmetic
+    /// below. Our drum machine answers it (pad i plays drum i, in either note
+    /// layout — `PadGridDrumMap`); a sampler never does.
+    ///
+    /// ⚠️ INSTALLED BY `PadGridModel.init`, the one object that knows the
+    /// target's instrument; nothing else writes it. Not observed: it is a seam,
+    /// read at the moment a pad is struck, like `sink`.
+    @ObservationIgnored public var padNoteMap: (() -> [Int]?)?
+
     /// The pitch a pad of the CURRENT bank fires — the ONE home for that sum,
-    /// shared by the letter keys here and by `PadGridModel`'s drawing.
+    /// shared by the letter keys here and by `PadGridModel`'s mouse.
+    ///
+    /// m39-w4-8: a target with its own pad map (the drum machine) answers
+    /// from the map — one bank, no base note, nil past its last drum, so a
+    /// pad with no drum sends NOTHING rather than a note some other drum
+    /// answers.
     public func padPitch(index: Int) -> Int? {
-        PadGridGeometry.pitch(forPad: index, baseNote: padBaseNote, bank: padBank)
+        if let map = padNoteMap?() {
+            return map.indices.contains(index) ? map[index] : nil
+        }
+        return PadGridGeometry.pitch(forPad: index, baseNote: padBaseNote, bank: padBank)
     }
 
     /// Moves pad 1. Clamped into MIDI so the top of a bank can always exist.
@@ -118,7 +136,15 @@ public final class MusicalTypingController {
         bump()
     }
 
-    public func shiftPadBank(by delta: Int) { setPadBank(padBank + delta) }
+    /// K / L. m39-w4-8: a target with its own pad map (the drum machine) has
+    /// ONE bank, so these do nothing there — moving the session's bank under
+    /// it would change no sound and leave the grid on another bank when the
+    /// user goes back to a sampler. (`setPadBank`, the programmatic setter,
+    /// is left alone: a chop re-bases through it.)
+    public func shiftPadBank(by delta: Int) {
+        guard padNoteMap?() == nil else { return }
+        setPadBank(padBank + delta)
+    }
 
     /// Sets the velocity outright — what a pad STRUCK NEAR ITS TOP EDGE does.
     ///

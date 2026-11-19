@@ -135,9 +135,17 @@ extension ProjectStore {
         // STEM class (m13-d): no master effects, no master automation, unity
         // master. `forcedCompensationTargets: nil` — one dry track with no
         // inserts has no PDC plan to force.
+        // m39-w4-4a: the probe KEEPS the track's own modulation (only effects,
+        // sends, automation and takes are stripped above), so a tempo-synced
+        // step source rides the project's meter like every session render.
+        // STEM class for master modulation too: none.
+        // W9-PLRT R1: the song's pan rule crosses the same seam as every session
+        // render (the probe's knob is centred, so neither rule can move it).
         let audio = try await engine.renderOffline(
-            tracks: [probeTrack], tempoMap: map, masterVolume: 1.0,
+            tracks: [probeTrack], tempoMap: map, meterMap: transport.meterMap, panLaw: panLaw,
+            masterVolume: 1.0,
             masterEffects: [], masterAutomation: [],
+            masterModulationSources: [], masterModulationRoutes: [],
             fromBeat: 0, durationSeconds: totalSeconds,
             forcedCompensationTargets: nil)
 

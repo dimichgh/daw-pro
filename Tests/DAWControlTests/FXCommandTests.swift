@@ -2274,6 +2274,303 @@ struct FXCommandTests {
         #expect(message.contains("rateHz"), "the refusal must name what DOES work")
     }
 
+    /// m39-w4-4 — THE UNLOCK (W9-UNLOCK, 2026-10-11). This test was the PIN
+    /// `w44StepDivisionStillRefusesOnTheWire` ("stepDivision still refuses on
+    /// mod.addSource AND mod.setSource"); the unlock FLIPPED it on purpose,
+    /// after m39-d-cr12 made live equal the bounce and G8
+    /// (`StepDivisionG8Tests`) measured it for a synced source. The LFO's
+    /// `syncDivision` still refuses (`tempoSyncRefusesOnTheWire` above).
+    @Test("m39-w4-4 unlock: stepDivision is ACCEPTED on mod.addSource AND mod.setSource, kept by later edits, cleared by null; '1/17' and a number refuse, listing every value")
+    func w44StepDivisionIsAcceptedOnTheWire() async throws {
+        let (router, store) = makeRouter()
+        let trackID = await addTrack(router, name: "Beat", kind: "audio")
+        func setSource(_ sourceID: String, _ params: [String: JSONValue]) async -> ControlResponse {
+            await router.handle(ControlRequest(
+                id: "w44-set", command: "mod.setSource",
+                params: ["trackId": .string(trackID.uuidString), "sourceId": .string(sourceID),
+                         "params": .object(params)]))
+        }
+        func division(_ response: ControlResponse) -> String? {
+            response.result?["source"]?["params"]?["stepDivision"]?.stringValue
+        }
+        let note = try #require(TempoSync.inertRateNote(
+            for: .stepSequencer(StepSequencerSourceParams(stepDivision: "1/16"))))
+
+        // addSource with the division alone: accepted, stored, and told that rateHz is now inert.
+        let added = await addModSource(router, trackID: trackID.uuidString, kind: "stepSequencer",
+                                       params: ["stepDivision": .string("1/16")])
+        #expect(added.ok, "\(added.error ?? "")")
+        #expect(division(added) == "1/16")
+        let addWarnings = added.result?["warnings"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        #expect(addWarnings == ["\(ModulationWarning.paramIgnored): \(note)"])
+        let addedID = try #require(added.result?["sourceId"]?.stringValue)
+
+        // setSource {steps}: KEEPS the division (before the unlock this rebuilt it with stepDivision nil) and
+        // repeats no warning.
+        let kept = await setSource(addedID, ["steps": .array([.number(0), .number(1), .number(0)])])
+        #expect(kept.ok)
+        #expect(division(kept) == "1/16", "an edit that does not name stepDivision must not un-sync the source")
+        #expect((kept.result?["warnings"]?.arrayValue ?? []).isEmpty)
+
+        // setSource syncs a plain source, and null runs it free again.
+        let plain = await addModSource(router, trackID: trackID.uuidString, kind: "stepSequencer")
+        let plainID = try #require(plain.result?["sourceId"]?.stringValue)
+        let synced = await setSource(plainID, ["stepDivision": .string("1/8t")])
+        #expect(synced.ok && division(synced) == "1/8t")
+        let cleared = await setSource(plainID, ["stepDivision": .null])
+        #expect(cleared.ok && division(cleared) == nil)
+        #expect((cleared.result?["warnings"]?.arrayValue ?? []).isEmpty)
+
+        // Anything else refuses, listing the values that work, and changes nothing.
+        let before = try store.modulationState(of: .track(trackID)).sources
+        let bad = await setSource(addedID, ["stepDivision": .string("1/17")])
+        #expect(!bad.ok)
+        let message = bad.error ?? ""
+        #expect(message.contains("stepDivision") && message.contains("1/16") && message.contains("1/32t"),
+                "\(message)")
+        let badAdd = await addModSource(router, trackID: trackID.uuidString, kind: "stepSequencer",
+                                        params: ["stepDivision": .number(16)])
+        #expect(!badAdd.ok && (badAdd.error ?? "").contains("1/16"))
+        #expect(try store.modulationState(of: .track(trackID)).sources == before)
+        let model = try store.modulationState(of: .track(trackID)).sources.compactMap { source -> String? in
+            guard case .stepSequencer(let step) = source.params else { return nil }
+            return step.stepDivision ?? "free"
+        }
+        #expect(model == ["1/16", "free"])
+        print("[measured] W9-UNLOCK wire: add \(division(added) ?? "nil") warned \(addWarnings.count), "
+              + "steps edit kept \(division(kept) ?? "nil"), set \(division(synced) ?? "nil"), null "
+              + "\(division(cleared) ?? "nil"); '1/17' refused: \(message.prefix(90))")
+    }
+
+    /// m39-w4-4e (W9-UNLOCK): `mod.describe` says what a synced source does,
+    /// in the words the setter used (design §4.4).
+    @Test("m39-w4-4e: mod.describe gives a synced source a tempoSync block — stepDivision, stepsPerBar at the meter in force (16 in 4/4, 12 after a 3/4 change), the restart sentence, and the setter's rateHz sentence verbatim; a free source has none")
+    func w44ModDescribeReportsTempoSync() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Gate", kind: "audio")
+        let added = await addModSource(router, trackID: trackID.uuidString, kind: "stepSequencer",
+                                       params: ["stepDivision": .string("1/16"),
+                                                "steps": .array([.number(1), .number(0), .number(0)])])
+        let addedID = try #require(added.result?["sourceId"]?.stringValue)
+        let warning = try #require(added.result?["warnings"]?.arrayValue?.first?.stringValue)
+        let free = await addModSource(router, trackID: trackID.uuidString, kind: "stepSequencer")
+        let freeID = try #require(free.result?["sourceId"]?.stringValue)
+        let route = await router.handle(ControlRequest(
+            id: "route", command: "mod.addRoute",
+            params: ["trackId": .string(trackID.uuidString), "sourceId": .string(addedID),
+                     "target": .object(["type": .string("volume")]), "depth": .number(-0.25)]))
+        #expect(route.ok)
+        let map = await router.handle(ControlRequest(
+            id: "map", command: "tempo.setMap",
+            params: ["segments": .array([.object(["startBeat": .number(0), "bpm": .number(120)])]),
+                     "meterChanges": .array([
+                        .object(["startBeat": .number(0), "beatsPerBar": .number(4), "beatUnit": .number(4)]),
+                        .object(["startBeat": .number(16), "beatsPerBar": .number(3), "beatUnit": .number(4)]),
+                     ])]))
+        #expect(map.ok, "\(map.error ?? "")")
+        func sources(atBeat beat: Double) async throws -> [String: [String: JSONValue]] {
+            let described = await router.handle(ControlRequest(
+                id: "d", command: "mod.describe",
+                params: ["trackId": .string(trackID.uuidString), "atBeat": .number(beat)]))
+            #expect(described.ok)
+            let strips = try #require(described.result?["strips"]?.arrayValue)
+            let list = try #require(strips.first?["sources"]?.arrayValue)
+            var result: [String: [String: JSONValue]] = [:]
+            for entry in list {
+                guard let object = entry.objectValue, let id = object["id"]?.stringValue else { continue }
+                result[id] = object
+            }
+            return result
+        }
+        let at4 = try await sources(atBeat: 4)
+        let sync4 = try #require(at4[addedID]?["tempoSync"]?.objectValue)
+        #expect(sync4["stepDivision"]?.stringValue == "1/16")
+        #expect(sync4["stepsPerBar"]?.doubleValue == 16)
+        #expect(sync4["meter"]?.stringValue == "4/4")
+        let restart = sync4["restart"]?.stringValue ?? ""
+        #expect(restart.contains("starts again from step 1 at every time-signature change"), "\(restart)")
+        #expect(restart.contains("does not line up"), "3 steps of 1/16 in a 4/4 bar: \(restart)")
+        #expect(warning == "\(ModulationWarning.paramIgnored): \(sync4["rateHzNote"]?.stringValue ?? "<none>")",
+                "describe must repeat the setter's sentence verbatim")
+        #expect(at4[freeID] != nil && at4[freeID]?["tempoSync"] == nil, "a free source carries no tempoSync")
+        let at17 = try await sources(atBeat: 17)
+        let sync17 = try #require(at17[addedID]?["tempoSync"]?.objectValue)
+        #expect(sync17["stepsPerBar"]?.doubleValue == 12)
+        #expect(sync17["meter"]?.stringValue == "3/4")
+        #expect((sync17["restart"]?.stringValue ?? "").contains("plays 4 times per bar"))
+        print("[measured] W9-UNLOCK describe tempoSync @4: \(sync4["stepsPerBar"]?.doubleValue ?? -1) per bar "
+              + "(\(sync4["meter"]?.stringValue ?? "?")), @17: \(sync17["stepsPerBar"]?.doubleValue ?? -1) "
+              + "(\(sync17["meter"]?.stringValue ?? "?"))")
+    }
+
+    // MARK: - m39-w4-4c (W8-W44G) — mod.describe reads a SYNCED step source the way the render does
+    //
+    // Appended here, not in a new suite: `CommandRouter` is main-actor isolated
+    // and the @MainActor suite cap is spent. The DAWCore closed form these
+    // reach is pinned bit for bit against the render evaluator in
+    // `Tests/DAWEngineTests/ModDescribeClockAgreementTests.swift`.
+
+    /// A track with ONE step source routed to volume, its `stepDivision` written
+    /// the way these tests were first built: by hand (the wire now accepts
+    /// `stepDivision`, so this is just one more way to reach a synced project).
+    /// The project is saved with a FREE source, the key is added to
+    /// `project.json`, and the file is reopened. Returns the router,
+    /// the store, the track and the scratch folder (the caller removes it).
+    private func w44gHandEditedSyncedStep(steps: [Double], division: String)
+        async throws -> (router: CommandRouter, store: ProjectStore, trackID: UUID, folder: URL) {
+        let (router, store) = makeRouter()
+        let trackID = await addTrack(router, name: "Gate", kind: "audio")
+        let tempo = await router.handle(ControlRequest(
+            id: "tempo", command: "transport.setTempo", params: ["bpm": .number(90)]))
+        #expect(tempo.ok)
+        let source = await addModSource(router, trackID: trackID.uuidString, kind: "stepSequencer",
+                                        params: ["steps": .array(steps.map { .number($0) })])
+        #expect(source.ok)
+        let sourceID = try #require(source.result?["sourceId"]?.stringValue)
+        let route = await router.handle(ControlRequest(
+            id: "route", command: "mod.addRoute",
+            params: ["trackId": .string(trackID.uuidString), "sourceId": .string(sourceID),
+                     "target": .object(["type": .string("volume")]), "depth": .number(-0.25)]))
+        #expect(route.ok)
+
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w44g-synced-step-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let saved = try store.saveProject(to: folder.appendingPathComponent("Synced Gate").path)
+        let json = URL(fileURLWithPath: saved.path).appendingPathComponent("project.json")
+        var edits = 0
+        func addDivision(_ value: Any) -> Any {
+            if var object = value as? [String: Any] {
+                if object["kind"] as? String == "stepSequencer", object["steps"] != nil {
+                    object["stepDivision"] = division
+                    edits += 1
+                }
+                return object.mapValues(addDivision)
+            }
+            if let array = value as? [Any] { return array.map(addDivision) }
+            return value
+        }
+        let edited = addDivision(try JSONSerialization.jsonObject(with: Data(contentsOf: json)))
+        #expect(edits == 1, "exactly one step source's params in the saved file")
+        try JSONSerialization.data(withJSONObject: edited).write(to: json)
+        _ = try store.openProject(at: saved.path, discardChanges: true)
+        let state = try store.modulationState(of: .track(trackID))
+        guard case .stepSequencer(let params) = try #require(state.sources.first).params else {
+            Issue.record("the reopened source is not a step source")
+            return (router, store, trackID, folder)
+        }
+        #expect(params.stepDivision == division, "the hand edit reached the project")
+        #expect(state.routes.count == 1)
+        return (router, store, trackID, folder)
+    }
+
+    private func w44gDescribe(_ router: CommandRouter, trackID: UUID, atBeat beat: Double)
+        async throws -> [String: JSONValue] {
+        let described = await router.handle(ControlRequest(
+            id: "d", command: "mod.describe",
+            params: ["trackId": .string(trackID.uuidString), "atBeat": .number(beat)]))
+        #expect(described.ok)
+        let strips = try #require(described.result?["strips"]?.arrayValue)
+        let effective = try #require(strips.first?["effective"]?.arrayValue)
+        return try #require(effective.first?.objectValue)
+    }
+
+    @Test("m39-w4-4c: mod.describe reads a hand-edited SYNCED [1,0] 1/16 at 90 BPM on the beat — step 1 (0) at beat 0.25, where rateHz free-running said 1")
+    func modDescribeSyncedStepReadsTheMusicalClock() async throws {
+        // Control first: the SAME source before the hand edit runs free at
+        // rateHz 4, and describe says 1 at beat 0.25 (0.667 of a 1/4 s step).
+        let (freeRouter, _) = makeRouter()
+        let freeTrack = await addTrack(freeRouter, name: "Free", kind: "audio")
+        _ = await freeRouter.handle(ControlRequest(
+            id: "tempo", command: "transport.setTempo", params: ["bpm": .number(90)]))
+        let freeSource = await addModSource(freeRouter, trackID: freeTrack.uuidString, kind: "stepSequencer",
+                                            params: ["steps": .array([.number(1), .number(0)])])
+        let freeSourceID = try #require(freeSource.result?["sourceId"]?.stringValue)
+        _ = await freeRouter.handle(ControlRequest(
+            id: "route", command: "mod.addRoute",
+            params: ["trackId": .string(freeTrack.uuidString), "sourceId": .string(freeSourceID),
+                     "target": .object(["type": .string("volume")]), "depth": .number(-0.25)]))
+        _ = await freeRouter.handle(ControlRequest(id: "play", command: "transport.play"))
+        let freeEntry = try await w44gDescribe(freeRouter, trackID: freeTrack, atBeat: 0.25)
+        #expect(freeEntry["sourceValue"]?.doubleValue == 1, "what describe reported before the fix")
+
+        let (router, store, trackID, folder) = try await w44gHandEditedSyncedStep(steps: [1, 0], division: "1/16")
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        // Stopped: neutral, like the render (§7.8).
+        #expect(!store.transport.isPlaying)
+        let stopped = try await w44gDescribe(router, trackID: trackID, atBeat: 0.25)
+        #expect(stopped["sourceValue"]?.doubleValue == 0)
+
+        let play = await router.handle(ControlRequest(id: "play", command: "transport.play"))
+        #expect(play.ok && store.transport.isPlaying)
+        let onStep1 = try await w44gDescribe(router, trackID: trackID, atBeat: 0.25)
+        let onStep0 = try await w44gDescribe(router, trackID: trackID, atBeat: 0.5)
+        let value1 = try #require(onStep1["sourceValue"]?.doubleValue)
+        let value0 = try #require(onStep0["sourceValue"]?.doubleValue)
+        print("[measured] m39-w4-4c wire describe, synced [1,0] 1/16 @90: beat 0.25 → \(value1), 0.5 → \(value0); "
+              + "free-running control at 0.25 → \(freeEntry["sourceValue"]?.doubleValue ?? .nan)")
+        #expect(abs(value1) < 1e-9, "beat 0.25 is step 1 of a 1/16 pattern")
+        #expect(abs(value0 - 1) < 1e-9, "beat 0.5 wraps to step 0")
+        #expect(onStep1["sourceValueNote"] == nil, "the envelope follower's sentence must not label a step source")
+        // The modulated value follows the source: step 1 (0) leaves the knob alone.
+        #expect(onStep1["modulatedValue"]?.doubleValue == onStep1["baseValue"]?.doubleValue)
+        #expect(onStep0["modulatedValue"]?.doubleValue != onStep0["baseValue"]?.doubleValue)
+
+        // ONE HOME: at every probed beat (on the grid, between, and inside the
+        // 2 ms trailing ramp) describe reports exactly the DAWCore closed form.
+        let state = try store.modulationState(of: .track(trackID))
+        guard case .stepSequencer(let params) = try #require(state.sources.first).params else {
+            Issue.record("not a step source")
+            return
+        }
+        var beats: [Double] = [0.2485, 0.2475, 0.7485, 3.9985]
+        var k = 0
+        while k < 48 { beats.append(Double(k) * 0.0625 + 0.01); k += 1 }
+        var mismatches = 0
+        var ramps = 0
+        for beat in beats {
+            let entry = try await w44gDescribe(router, trackID: trackID, atBeat: beat)
+            let reported = try #require(entry["sourceValue"]?.doubleValue)
+            let home = try #require(ModulationMath.syncedStepValue(
+                params, atBeat: beat, tempoMap: store.transport.tempoMap,
+                meterMap: store.transport.meterMap, sampleRate: 48_000))
+            if reported.bitPattern != home.bitPattern { mismatches += 1 }
+            if reported > 1e-9 && reported < 1 - 1e-9 { ramps += 1 }
+        }
+        #expect(mismatches == 0)
+        #expect(ramps >= 2, "the probe set reaches inside the trailing edge")
+    }
+
+    @Test("m39-w4-4c: mod.describe restarts a synced pattern at a meter change — [1,0,0] at 1/4 reads step 0 at beat 16 after 4/4 → 3/4")
+    func modDescribeSyncedStepRestartsAtAMeterChange() async throws {
+        let (router, store, trackID, folder) = try await w44gHandEditedSyncedStep(steps: [1, 0, 0], division: "1/4")
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let play = await router.handle(ControlRequest(id: "play", command: "transport.play"))
+        #expect(play.ok && store.transport.isPlaying)
+        // Control: one 4/4 meter — beat 16 is 16 mod 3 = step 1.
+        let constant = try await w44gDescribe(router, trackID: trackID, atBeat: 16)
+        #expect(abs(try #require(constant["sourceValue"]?.doubleValue)) < 1e-9)
+
+        let meter = await router.handle(ControlRequest(
+            id: "meter", command: "tempo.setMap",
+            params: ["segments": .array([.object(["startBeat": .number(0), "bpm": .number(90)])]),
+                     "meterChanges": .array([
+                        .object(["startBeat": .number(0), "beatsPerBar": .number(4), "beatUnit": .number(4)]),
+                        .object(["startBeat": .number(16), "beatsPerBar": .number(3), "beatUnit": .number(4)]),
+                     ])]))
+        #expect(meter.ok, "\(meter.error ?? "")")
+        #expect(store.transport.meterMap.changes.count == 2)
+        var readings: [Double] = []
+        for beat in [15.0, 16, 17, 18, 19] {
+            let entry = try await w44gDescribe(router, trackID: trackID, atBeat: beat)
+            readings.append(try #require(entry["sourceValue"]?.doubleValue))
+        }
+        print("[measured] m39-w4-4c wire describe, [1,0,0] 1/4, 4/4 → 3/4 at 16: beats 15…19 → \(readings)")
+        let expected: [Double] = [1, 1, 0, 0, 1]
+        for (got, want) in zip(readings, expected) { #expect(abs(got - want) < 1e-9) }
+    }
+
     @Test("m39-e §7.1: mod.describeKinds carries the depth law AND the polarity convention")
     func describeKindsCarriesTheTeachingAnAgentNeeds() async throws {
         let (router, _) = makeRouter()
@@ -2358,6 +2655,114 @@ struct FXCommandTests {
         let track = try #require(store.tracks.first { $0.id == trackID })
         #expect(track.modulationRoutes.count == 2)
         #expect(track.automation.count == 63)
+    }
+
+    // MARK: - m27-f: fx.getParams (read-only)
+
+    private func undoSnapshot(_ store: ProjectStore) -> (labels: [String], redo: [String], canUndo: Bool, dirty: Bool) {
+        let history = store.undoHistory()
+        return (history.undo, history.redo, store.canUndo, store.isDirty)
+    }
+
+    @Test("m27-f: fx.getParams answers with the same chain fx.setBypass returns, and echoes effectId")
+    func fxGetParamsMatchesMutationReply() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let effectID = await addEffect(router, trackID: trackID)
+        let tid = JSONValue.string(trackID.uuidString)
+        let eid = JSONValue.string(effectID.uuidString)
+
+        let set = await router.handle(ControlRequest(
+            id: "1", command: "fx.setParam",
+            params: ["trackId": tid, "effectId": eid, "name": .string("gainLinear"), "value": .number(2)]))
+        #expect(set.ok)
+        let read = await router.handle(ControlRequest(
+            id: "2", command: "fx.getParams", params: ["trackId": tid, "effectId": eid]))
+        #expect(read.ok)
+        #expect(read.result?["effectId"]?.stringValue == effectID.uuidString)
+        #expect(read.result?["trackId"]?.stringValue == trackID.uuidString)
+        // Same encoder, so the chain is value-for-value what the write reported.
+        #expect(read.result?["effects"] == set.result?["effects"])
+        let effect = try #require(read.result?["effects"]?.arrayValue?.first)
+        #expect(effect["kind"]?.stringValue == "gain")
+        #expect(effect["params"]?["gainLinear"]?.doubleValue == 2)
+        #expect(effect["isBypassed"]?.boolValue == false)
+    }
+
+    @Test("m27-f: fx.getParams adds no undo entry, no dirty mark; the control (fx.setBypass) does")
+    func fxGetParamsIsReadOnly() async throws {
+        let (router, store) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let effectID = await addEffect(router, trackID: trackID)
+        let master = await router.handle(ControlRequest(
+            id: "m", command: "fx.add",
+            params: ["trackId": .string("master"), "kind": .string("gain")]))
+        let masterEffectID = try #require(master.result?["effectId"]?.stringValue)
+        let engine = StubLatencyEngine()
+        store.engine = engine
+
+        let before = undoSnapshot(store)
+        #expect(!before.labels.isEmpty, "the setup edits must be on the stack, or the comparison proves nothing")
+        let seqBefore = store.lastEditEvent?.seq
+        for _ in 0..<3 {
+            let a = await router.handle(ControlRequest(
+                id: "r", command: "fx.getParams",
+                params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID.uuidString)]))
+            #expect(a.ok)
+            let b = await router.handle(ControlRequest(
+                id: "r", command: "fx.getParams",
+                params: ["trackId": .string("master"), "effectId": .string(masterEffectID)]))
+            #expect(b.ok)
+        }
+        let after = undoSnapshot(store)
+        #expect(after.labels == before.labels)
+        #expect(after.redo == before.redo)
+        #expect(after.canUndo == before.canUndo)
+        #expect(after.dirty == before.dirty)
+        #expect(store.lastEditEvent?.seq == seqBefore)
+
+        // POSITIVE CONTROL: a real bypass change does grow the stack (so the
+        // equality above could have failed). MEASURED while writing this: a
+        // false->false setBypass on THIS tree journals nothing (performEdit
+        // skips a no-op), so the control uses a real change (true).
+        let bypass = await router.handle(ControlRequest(
+            id: "b", command: "fx.setBypass",
+            params: ["trackId": .string(trackID.uuidString),
+                     "effectId": .string(effectID.uuidString), "bypassed": .bool(true)]))
+        #expect(bypass.ok)
+        #expect(undoSnapshot(store).labels != before.labels)
+    }
+
+    @Test("m27-f: fx.getParams refuses unknown track / effect with fx.setBypass's own sentences")
+    func fxGetParamsRefusalsMatchSetBypass() async throws {
+        let (router, _) = makeRouter()
+        let trackID = await addTrack(router, name: "Vox", kind: "audio")
+        let effectID = await addEffect(router, trackID: trackID)
+        let ghostTrack = UUID().uuidString
+        let ghostEffect = UUID().uuidString
+
+        func both(_ track: String, _ effect: String) async -> (String?, String?) {
+            let read = await router.handle(ControlRequest(
+                id: "g", command: "fx.getParams",
+                params: ["trackId": .string(track), "effectId": .string(effect)]))
+            let write = await router.handle(ControlRequest(
+                id: "s", command: "fx.setBypass",
+                params: ["trackId": .string(track), "effectId": .string(effect), "bypassed": .bool(true)]))
+            #expect(!read.ok && !write.ok)
+            return (read.error, write.error)
+        }
+        let t = await both(ghostTrack, effectID.uuidString)
+        #expect(t.0 != nil && t.0 == t.1)
+        let e = await both(trackID.uuidString, ghostEffect)
+        #expect(e.0 != nil && e.0 == e.1)
+        let m = await both("master", ghostEffect)
+        #expect(m.0 != nil && m.0 == m.1)
+
+        let extra = await router.handle(ControlRequest(
+            id: "x", command: "fx.getParams",
+            params: ["trackId": .string(trackID.uuidString), "effectId": .string(effectID.uuidString),
+                     "bypassed": .bool(true)]))
+        #expect(!extra.ok)
     }
 
 }

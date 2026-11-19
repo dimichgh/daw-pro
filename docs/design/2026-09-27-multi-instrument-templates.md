@@ -1662,3 +1662,11 @@ Appended by the orchestrator from W7-TPL2B's report; verified by the orchestrato
 - **Why the drum machine read "too quiet" to the user while measuring louder** [M]: its hi-hats sit ~24 dB under the
   GM kit's, and the kick is 77–86% of what the loudness meter counts in our kits (48% in the GM kit). Values cannot fix
   it; a new drum-machine hi-hat gain is filed (`dm-hat-gain`), with saved projects keeping today's sound.
+
+## Errata 2026-10-11 (m39-panlaw-new, measured)
+
+- **§8.8's "≤ −2.0 dBTP" (W7-TPL4 errata above) holds only in a song saved before 2026-10-11** [M]. A NEW song uses the
+  equal-power pan rule (a panned part plays up to +3 dB louder on its near side), so the panned templates lose headroom
+  when applied to one: Jazz Combo −2.54 → −1.76 dBTP, Reggae Riddim −2.17 → −1.83, Soul Groove −2.53 → −2.13, Folk
+  −2.40 → −2.09, Rock Band −2.93 → −2.30 (loudness rises 0.4–1.2 LU). All still meet the gate's ≤ −1 dBTP; none meets
+  −2.0 in a new song. Measured 8 bars, `$S/w9/PANFIX/r2-panfix1/r2.json`; a saved song keeps the old figures bit-for-bit.

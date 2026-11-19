@@ -1,0 +1,23 @@
+{
+  "title": "DAW Pro — what's new: tune a voice, sing your words",
+  "description": "DAW Pro is a macOS digital audio workstation built so an AI agent can drive it as well as a person can. This film shows what is new for voices: writing your own words onto a melody, having the app sing them, and then tuning that voice.\n\nWe build a short original song on camera, \"Light On\" (D major, 100 BPM): drums from DAW Pro's own drum machine, a bass, a pad, and a lead melody on its own track. Then we type four lines of lyrics onto the lead notes, add a harmony a third above, and DAW Pro's built-in singer sings both parts.\n\nWHAT'S IN IT\n• The Sing sheet: words, voice and height, with a harmony a third above\n• The note editor on a sung vocal: hear the note you press, move several notes at once, and see the Split tool's cut line before you cut\n• Tune to Melody: the take is spoiled on purpose on camera, then put back, with a before and after\n• Natural vs Hard Tune, with a before and after\n• Moving a voice down an octave with Keep voice size off and on, with a before and after\n• The Voice tool: a deeper voice on the same notes, with a before and after\n\nCHAPTERS\n0:00 What we'll make\n0:22 Drums from DAW Pro's own drum machine\n0:40 Bass and a pad\n0:53 A lead melody on its own track\n1:06 Words onto the melody: the Sing sheet\n1:21 The built-in singer sings it\n1:47 The note editor: hear a note, see the cut\n2:07 Spoiling the take on purpose\n2:33 Tune to Melody, before and after\n3:15 Natural vs Hard Tune\n3:57 An octave down: Keep voice size\n4:37 The Voice tool\n5:10 The finished song\n\nAN HONEST NOTE\nNobody sang into a microphone. The singing is DAW Pro's built-in singer, running on the Mac, and the narration is a synthetic voice. The drums, bass, pad and melody were written as notes in the app; the melody and the lyrics were written for this film.\n\nEvery number spoken in the film was measured on the audio that plays under it, not read off the app's own display. Two of those measurements disagree with what the screen suggests, and the film says so: Hard Tune draws its notes almost flat, but on the sound it removes about half of the wobble; and the Voice tool's deeper voice also comes out quieter (about 4 dB for the voice alone).\n\nMade with DAW Pro.",
+  "tags": [
+    "DAW Pro",
+    "music production",
+    "singing synthesis",
+    "pitch correction",
+    "vocal tuning",
+    "Tune to Melody",
+    "Hard Tune",
+    "lyrics",
+    "audio software",
+    "macOS"
+  ],
+  "categoryId": "10",
+  "privacyStatus": "private",
+  "containsSyntheticMedia": true,
+  "madeForKids": false,
+  "_film": "scripts/video/voice/out/voice-film.mp4",
+  "_chaptersFrom": "work/segments-map.json via tools/chapters.py",
+  "_uploaded": "2026-10-11 on the user's word (handoff 00 = private; chat \"publish videos\"): https://youtu.be/6NPxozZsv5I, PRIVATE (API uploads are forced private; the user makes it public in Studio). publish.py read-back: title, privacy, duration 332 s; description byte-identical, tags same set, categoryId 10. containsSyntheticMedia is not echoed by the API for ANY upload on this channel (control: 5 earlier videos), so it is unconfirmed: check Studio's altered-content setting before going public. Log: upload-2026-10-11.log"
+}

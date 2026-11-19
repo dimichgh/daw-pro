@@ -53,12 +53,34 @@ public struct KeyFitWeights: Codable, Sendable, Equatable {
     public var medianWeight: Double
     /// Candidates within this much of the best cost are ties: smaller |t|, then smaller |o|, wins.
     public var tieWindow: Double
-    /// Recommend the best octave-only fit when its out-of-band term is at most this many semitones.
+    /// Recommend the best octave-only fit when its out-of-band term is at most this many semitones. The KEY PROPOSAL's
+    /// threshold only (`propose`): a harmony part has its own three below.
     public var octaveOnlyAcceptOutOfBand: Double
+    /// A HARMONY part fits (`HarmonyPlanner.range(melody:…)`, p2-sing-x9-f3) when, at its best height, its out-of-band
+    /// term is at most this many semitones AND no sounding note crosses either per-note cap below. The key proposal
+    /// never reads these three.
+    public var harmonyAcceptOutOfBand: Double
+    /// A harmony part's per-note cap: how many semitones one sounding note may sit above the band's upper edge
+    /// (p90 + `bandMarginSemitones`, the edge `VoiceRangeFit.score` uses).
+    public var harmonyNoteMaxAboveBand: Double
+    /// …and below the band's lower edge (p10 − `bandMarginSemitones`).
+    public var harmonyNoteMaxBelowBand: Double
 
     /// §3.5 as written on 2026-09-27: band ±1, median weight 0.25, ties within 0.15, octave-only accepted at ≤ 0.25.
-    public static let provisional = KeyFitWeights(bandMarginSemitones: 1, medianWeight: 0.25, tieWindow: 0.15,
-                                                  octaveOnlyAcceptOutOfBand: 0.25)
+    /// The harmony fields (p2-sing-x9-f3, decided 2026-10-07): measured 2026-10-07 on the built-in voice only
+    /// (W8-X9F3); PROVISIONAL for other voices.
+    public static let provisional = KeyFitWeights(
+        bandMarginSemitones: 1, medianWeight: 0.25, tieWindow: 0.15, octaveOnlyAcceptOutOfBand: 0.25,
+        // 3.0: measured 2026-10-07 on the built-in voice only (W8-X9F3); PROVISIONAL for other voices. The real
+        // engine sang a third above in tune at a duration-weighted mean of 3.86 out of band and failed at 4.73
+        // (above; below never failed down to 4.27): ≈0.9 under the last measured pass.
+        harmonyAcceptOutOfBand: 3.0,
+        // 7.0: measured 2026-10-07 on the built-in voice only (W8-X9F3); PROVISIONAL for other voices. Every note hit
+        // through MIDI 77 (+7.3 over the band's upper edge 69.7) and broke at MIDI 78 (+8.3).
+        harmonyNoteMaxAboveBand: 7.0,
+        // 8.0: measured 2026-10-07 on the built-in voice only (W8-X9F3); PROVISIONAL for other voices. Every note held
+        // down to MIDI 52 (8.7 under the band's lower edge 60.7), the lowest point measured (a bound, not a failure).
+        harmonyNoteMaxBelowBand: 8.0)
 }
 
 /// One scored (t, o) pair.
@@ -90,6 +112,12 @@ public struct KeyProposal: Codable, Sendable, Equatable {
 
     public var kind: Kind
     public var recommendation: KeyFitCandidate
+    /// Whether the recommendation fits the voice (p2-sing-x9-f5): its out-of-band term is at most
+    /// `KeyFitWeights.octaveOnlyAcceptOutOfBand` semitones, or no sounding note is outside the band at all. False means
+    /// even the recommended height leaves some notes outside where the voice usually sings; `sentence` then says so
+    /// and which side, instead of "Fits your voice." or "right where you sing". Read by `sing.proposeKey`'s
+    /// `recommendation.fits`.
+    public var fits: Bool
     /// When `kind == .songKey`: the best octave-only fit, offered as "keep the key".
     public var alternative: KeyFitCandidate?
     public var bestOctaveOnly: KeyFitCandidate
@@ -100,7 +128,8 @@ public struct KeyProposal: Codable, Sendable, Equatable {
     public var melodyMedianMidi: Double
     /// False until listening Round K validates the weights (§3.5, §7.5). The UI words the proposal as a suggestion.
     public var calibrated: Bool
-    /// §5.7's one-line proposal ("Fits your voice.", "…one octave lower…", or the key-change card).
+    /// §5.7's one-line proposal ("Fits your voice.", "…one octave lower…", or the key-change card). When the
+    /// recommendation does not fit (`fits` false), the line says that some notes sit outside the voice, and where.
     public var sentence: String
     /// §5.7's "Keep the key" line, when there is an alternative.
     public var alternativeSentence: String?
@@ -283,6 +312,9 @@ public enum VoiceRangeFit {
 
     /// §3.5 "The proposal": recommend the best octave-only fit when its out-of-band term is small enough; otherwise
     /// the best key change, with the best octave-only fit as the alternative. nil for an empty melody.
+    ///
+    /// When no key change does better, the octave route stays the recommendation even though it does not fit
+    /// (p2-sing-x9-f5): `fits` is then false and the sentence says so, never "Fits your voice.".
     public static func propose(melody: [MelodyNote], voice: VoiceRange,
                                weights: KeyFitWeights = defaultWeights) -> KeyProposal? {
         let sounding = melody.filter { $0.durationSeconds > 0 }
@@ -304,15 +336,22 @@ public enum VoiceRangeFit {
         let recommendation = kind == .octave ? bestOctaveOnly : bestOverall
         let alternative = kind == .songKey ? bestOctaveOnly : nil
         let voiceIsLower = voice.medianMidi < melodyMedian
+        let fits = candidateFits(recommendation, acceptOutOfBand: weights.octaveOnlyAcceptOutOfBand)
         return KeyProposal(
-            kind: kind, recommendation: recommendation, alternative: alternative,
+            kind: kind, recommendation: recommendation, fits: fits, alternative: alternative,
             bestOctaveOnly: bestOctaveOnly, bestOverall: bestOverall,
             bandLowMidi: voice.p10Midi - weights.bandMarginSemitones,
             bandHighMidi: voice.p90Midi + weights.bandMarginSemitones,
             melodyMedianMidi: melodyMedian, calibrated: false,
-            sentence: sentence(kind: kind, recommendation: recommendation, voiceIsLower: voiceIsLower),
+            sentence: sentence(kind: kind, recommendation: recommendation, voiceIsLower: voiceIsLower, fits: fits),
             alternativeSentence: alternative.map(keepTheKeySentence),
             candidates: candidates)
+    }
+
+    /// p2-sing-x9-f5: a candidate fits when its out-of-band term is at most `acceptOutOfBand` semitones, or when no
+    /// sounding note is outside the band at all (that second clause only matters for a negative threshold).
+    static func candidateFits(_ c: KeyFitCandidate, acceptOutOfBand: Double) -> Bool {
+        c.outOfBandSemitones <= acceptOutOfBand || c.outOfBandSemitones == 0
     }
 
     // MARK: - Copy (§5.7; exact where §5.7 covers the case — see each helper)
@@ -327,14 +366,23 @@ public enum VoiceRangeFit {
     /// §5.7 "Fits", "Octave" and "Key change". Exact for the cases §5.7 writes out (fits; one octave LOWER; a key
     /// change UP with the vocal two octaves LOWER). The mirror cases (higher, down, one octave, no octave) keep the same
     /// sentence shape; §5.7 has no wording for them, and this is flagged in the p2-sing-d3 report.
-    static func sentence(kind: KeyProposal.Kind, recommendation r: KeyFitCandidate, voiceIsLower: Bool) -> String {
+    ///
+    /// A recommendation that does NOT fit (`fits` false, p2-sing-x9-f5; the added words are PROVISIONAL, no §5.7 row):
+    /// - octave, written height: "This tune doesn't fully fit your voice: {outside}." (was "Fits your voice.");
+    /// - octave, moved: the same sentence, ending ", though {outside}." instead of ".";
+    /// - key change: the same sentence, ending ", though {outside}." instead of " — right where you sing.".
+    /// `{outside}` is `outsideWords(r)`. Every sentence for a recommendation that fits is unchanged, byte for byte.
+    static func sentence(kind: KeyProposal.Kind, recommendation r: KeyFitCandidate, voiceIsLower: Bool,
+                         fits: Bool) -> String {
         switch kind {
         case .octave:
-            if r.octaveShift == 0 { return "Fits your voice." }
+            if r.octaveShift == 0 {
+                return fits ? "Fits your voice." : "This tune doesn't fully fit your voice: \(outsideWords(r))."
+            }
             let lower = r.octaveShift < 0
             return "Your voice sits \(lower ? "lower" : "higher") than this tune. I'll sing it "
                 + "\(octaveWords(r.octaveShift)) \(lower ? "lower" : "higher") — it stays in tune with the rest of "
-                + "the song."
+                + "the song" + (fits ? "." : ", though \(outsideWords(r)).")
         case .songKey:
             let steps = abs(r.songTranspose)
             let move = "move the whole song \(r.songTranspose > 0 ? "up" : "down") \(steps) "
@@ -342,9 +390,27 @@ public enum VoiceRangeFit {
             let sing = r.octaveShift == 0
                 ? ""
                 : " and I'll sing it \(octaveWords(r.octaveShift)) \(r.octaveShift < 0 ? "lower" : "higher")"
-            return "This tune is much \(voiceIsLower ? "higher" : "lower") than your voice. Best: \(move)\(sing) — "
-                + "right where you sing."
+            return "This tune is much \(voiceIsLower ? "higher" : "lower") than your voice. Best: \(move)\(sing)"
+                + (fits ? " — right where you sing." : ", though \(outsideWords(r)).")
         }
+    }
+
+    /// Where a candidate's notes outside the band sit (p2-sing-x9-f5), from its OWN shares of note time below and
+    /// above the band, not from `voiceIsLower`: at the written height a melody that does not fit is usually too WIDE,
+    /// with notes past both edges (the 4.6-semitone wide arpeggio has 37.5% below and 37.5% above), and comparing
+    /// medians says nothing about that. Notes past both edges: both sides are named. One side: "Keep the key"'s words.
+    static func outsideWords(_ c: KeyFitCandidate) -> String {
+        if c.fractionBelowBand > 0, c.fractionAboveBand > 0 {
+            return "some notes will be above and some below where you usually sing"
+        }
+        return sideWords(below: c.fractionBelowBand > 0)
+    }
+
+    /// "Keep the key"'s edge words, shared with `outsideWords`.
+    static func sideWords(below: Bool) -> String {
+        below
+            ? "some low notes will be below where you usually sing"
+            : "some high notes will be above where you usually sing"
     }
 
     /// §5.7 "Keep the key" — exact for "two octaves lower" with low notes below the band.
@@ -352,9 +418,7 @@ public enum VoiceRangeFit {
         let sing = c.octaveShift == 0
             ? "sing it as written"
             : "sing \(octaveWords(c.octaveShift)) \(c.octaveShift < 0 ? "lower" : "higher")"
-        let edge = c.fractionBelowBand >= c.fractionAboveBand
-            ? "some low notes will be below where you usually sing"
-            : "some high notes will be above where you usually sing"
+        let edge = sideWords(below: c.fractionBelowBand >= c.fractionAboveBand)
         return "Keep the song as it is and I'll \(sing) (\(edge))."
     }
 

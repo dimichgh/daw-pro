@@ -604,4 +604,42 @@ struct LoopDeckStoreTests {
         // And the clip really carries the extra cycles' notes.
         #expect(store.tracks.first { $0.id == a.id }!.clips[0].notes!.count == 7)
     }
+
+    // MARK: p2-sing-f2: the voice recorder open
+
+    private static let recorderOpen = "The voice recorder is open. Close it before recording in the song."
+
+    @Test("p2-sing-f2: recordLayer() is refused FIRST while the voice recorder is open; the song keeps playing")
+    func recordLayerRefusedWhileTheVoiceRecorderIsOpen() throws {
+        let (store, engine, a, _) = rolling(at: 0)
+        _ = try store.setTrackArm(id: a.id, armed: true)
+        store.voiceRecorderOpenReason = Self.recorderOpen
+        do {
+            try store.recordLayer()
+            Issue.record("a layer started while the voice recorder is open")
+        } catch {
+            #expect((error as? LocalizedError)?.errorDescription == Self.recorderOpen)
+        }
+        #expect(store.lastRecordingError == Self.recorderOpen)
+        #expect(engine.layerStarts == 0)
+        #expect(!store.transport.isRecording)
+        #expect(store.transport.isPlaying)   // untouched
+        store.voiceRecorderOpenReason = nil
+        try store.recordLayer()
+        #expect(engine.layerStarts == 1)
+        #expect(store.transport.isRecording)
+    }
+
+    @Test("p2-sing-f2: a loop-deck pass that comes due while the voice recorder is open starts nothing and unwinds")
+    func aDeckPassIsRefusedWhileTheVoiceRecorderIsOpen() throws {
+        let (store, engine, a, _) = rolling(at: 0)
+        _ = try store.beginLoopDeck(bars: 1)
+        _ = try store.armLoopLayer(trackID: a.id)      // launch 4, arm 3
+        store.voiceRecorderOpenReason = Self.recorderOpen
+        tick(store, to: 3.0, engine)
+        #expect(engine.layerStarts == 0)
+        #expect(store.lastRecordingError == Self.recorderOpen)
+        #expect(!store.transport.isRecording)
+        #expect(store.loopDeckStatus?.pendingPhase == nil)   // armable again, not stuck flashing
+    }
 }

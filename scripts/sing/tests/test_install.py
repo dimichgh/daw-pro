@@ -12,10 +12,16 @@ Every runtime and the mirror itself live under paths WITH SPACES ("App Support")
      differ, and leaves nothing that looks installed; a re-run with the right pins recovers;
   d  --adopt-weights clones a matching model.pt instead of downloading, and downloads instead of adopting a wrong one;
   e  preflight refuses a disk without room before changing anything;
-  f  usage refusals (the test variables go in pairs; a pins line that could execute is refused).
+  f  usage refusals (the test variables go in pairs; a pins line that could execute is refused);
+  g  nothing lands in the caller's HOME (W8-SFIX, 2026-10-06: the real install's venv check imported g2p_en, whose
+     import-time nltk.download() wrote 3.4 MB into ~/nltk_data). Every install here runs with HOME = an empty
+     folder of the test's own, the fixture g2p_en repeats the real one's import-time download, and every python
+     step must see a HOME and an NLTK_DATA inside the install's staging folder (the venv check also a TMPDIR: torch's
+     import makes $TMPDIR/torchinductor_<user>/).
 """
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -53,6 +59,8 @@ class Installer(unittest.TestCase):
         need_machine(not missing, "the fixture mirror's inputs: %s" % ", ".join(missing))
         need_machine(ffmpeg_present(), "ffmpeg (install.sh cuts the built-in voice with it)")
         cls.tmp = os.path.realpath(temp_dir("install"))
+        cls.home = os.path.join(cls.tmp, "home of the caller")   # HOME for every install.sh run: must stay EMPTY
+        os.makedirs(cls.home)
         t0 = time.time()
         built = fixture_mirror.build(os.path.join(cls.tmp, "fixture mirror"), os.path.join(cls.tmp, "mirror work"))
         cls.mirror, cls.pins, cls.lock, cls.facts = built["mirror"], built["pins"], built["lock"], built["facts"]
@@ -68,7 +76,9 @@ class Installer(unittest.TestCase):
 
     @classmethod
     def env(cls, runtime, pins=None, **extra):
-        e = child_env(SING_RUNTIME_DIR=runtime, SING_INSTALL_SOURCE=cls.mirror, SING_PINS_FILE=pins or cls.pins)
+        e = child_env(SING_RUNTIME_DIR=runtime, SING_INSTALL_SOURCE=cls.mirror, SING_PINS_FILE=pins or cls.pins,
+                      HOME=cls.home)
+        e.pop("NLTK_DATA", None)
         e.pop("SING_FIXTURE_THROTTLE_S", None)
         for k, v in extra.items():
             if v is None:
@@ -264,6 +274,25 @@ class Installer(unittest.TestCase):
         r = subprocess.run(["/bin/bash", "-c", 'source "$1"', "-", bad], capture_output=True, timeout=60)
         self.assertTrue(os.path.exists(executed), "control: SOURCING that pins file would have run the command")
         self.assertFalse(os.path.exists(rt))
+
+    # ------------------------------------------------------------------------------------------------ g
+    def test_g_nothing_lands_in_home_and_every_python_step_sees_a_staging_home(self):
+        self.assertEqual(os.listdir(self.home), [], "an install wrote into the caller's HOME")
+        err = self.first.stderr
+        seen = [m.groups() for m in
+                re.finditer(r"^fixture ([^:]+): HOME=(.*) NLTK_DATA=(.*?)(?: TMPDIR=(.*))?$", err, re.M)]
+        kinds = sorted({k.split("(")[0] for k, _, _, _ in seen})
+        self.assertEqual(kinds, ["g2p_en import", "hf_hub_download", "nltk.download"], err[-3000:])
+        staging = os.path.join(self.rt_a, ".staging-")
+        for kind, home, nltk_data, tmpdir in seen:
+            self.assertTrue(home.startswith(staging) and home.endswith("/home"), (kind, home))
+            self.assertEqual(nltk_data, home + "/nltk_data", kind)
+            if kind == "g2p_en import":
+                self.assertEqual(tmpdir, home[:-len("home")] + "tmp/", kind)
+        self.assertIn("verify_venv: an import asked nltk to download averaged_perceptron_tagger, cmudict; nothing was "
+                      "downloaded", err)
+        evidence("HOME %r stayed empty through every install in this class; %d python-side reports, all with HOME "
+                 "under %s*/home" % (self.home, len(seen), staging))
 
 
 if __name__ == "__main__":

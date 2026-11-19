@@ -668,47 +668,12 @@ struct DJFilterTests {
 
     // MARK: - L12: the render path allocates NOTHING (§12 gate 2, absolute zero)
 
-    private typealias MallocLoggerFn =
-        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
-
-    /// Heap cells, NOT stored properties: the hook runs INSIDE malloc with its
-    /// locks held, so it must never allocate nor trip a lazy global init.
-    private nonisolated(unsafe) static let eventCount =
-        UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private nonisolated(unsafe) static let watchedThread =
-        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-
-    private static let eventHook: MallocLoggerFn = { _, _, _, _, _, _ in
-        var tid: UInt64 = 0
-        pthread_threadid_np(nil, &tid)  // no allocation, safe under malloc
-        if tid == DJFilterTests.watchedThread.pointee {
-            DJFilterTests.eventCount.pointee &+= 1
-        }
-    }
-
-    /// libmalloc's `malloc_logger` global. Nil is a FAILURE for the caller,
-    /// never a skip — a silently-absent probe is vacuity, not a pass.
-    private static func mallocLoggerSlot() -> UnsafeMutablePointer<MallocLoggerFn?>? {
-        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
-                              "malloc_logger") else { return nil }
-        return raw.assumingMemoryBound(to: MallocLoggerFn?.self)
-    }
-
-    private static func mallocEvents(
-        slot: UnsafeMutablePointer<MallocLoggerFn?>, _ body: () -> Void
-    ) -> Int {
-        pthread_threadid_np(nil, &watchedThread.pointee)
-        eventCount.pointee = 0
-        let previous = slot.pointee  // restore, don't assume it was nil
-        slot.pointee = eventHook
-        body()
-        slot.pointee = previous
-        return eventCount.pointee
-    }
+    // The hook, the counter cells and the process-wide window lock live in
+    // `Support/MallocProbe.swift` (m39-test-mallocprobe): one measurement at a time.
 
     @Test("L12 — process() allocates NOTHING across 4 000 quanta, and it actually ran")
     func processIsAllocationFree() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — the allocation probe cannot run. FAILURE, not a skip.")
             return
         }
@@ -737,7 +702,7 @@ struct DJFilterTests {
         let list = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
 
         var sum: Float = 0
-        let events = Self.mallocEvents(slot: slot) {
+        let events = MallocProbe.events(slot: slot) {
             var call = 0
             while call < calls {
                 // The automation store is on the same render thread and is part
@@ -757,7 +722,7 @@ struct DJFilterTests {
 
     @Test("L12b — POSITIVE CONTROL: the malloc probe can actually count")
     func theAllocationProbeCanSeeAnAllocation() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
             return
         }
@@ -765,7 +730,7 @@ struct DJFilterTests {
         // never allocates are the same number. This makes the probe report a
         // non-zero on work that certainly allocates.
         var sink: [[Int]] = []
-        let events = Self.mallocEvents(slot: slot) {
+        let events = MallocProbe.events(slot: slot) {
             var index = 0
             while index < 200 {
                 sink.append([Int](repeating: index, count: 64))

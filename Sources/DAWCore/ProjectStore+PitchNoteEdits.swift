@@ -459,6 +459,50 @@ extension ProjectStore {
         return tracks[t].clips[c]
     }
 
+    /// Move a GROUP of notes TOGETHER by `byCents`, exactly as dragging them
+    /// together in the pitch editor does (vf-18, W9-SLFX; design
+    /// `$S/w9/SLRV/REVIEW.md` §3.6). The agent's "move everything by M":
+    /// `clip.setNotePitches {moveByCents}` calls this (the wire leg).
+    ///
+    /// ⭐ **WHY NOT `setClipNotePitchOffsets` WITH `own + M` ON EVERY NOTE.** A
+    /// followed slide's own offset is RELATIVE to the line between its
+    /// neighbours, so `own + M` on the slide AND on its neighbours plays the
+    /// slide at about 2M (vf-18). This carries such a slide by
+    /// `(1 − follow)·M` instead (`PitchEditSet.applyingGroupPitchMove`, the
+    /// ONE transform, which the editor's group drag calls too), so every note
+    /// plays exactly M higher. The ids of the carried slides come back, so a
+    /// caller reading the offsets back sees why a slide's number moved less.
+    ///
+    /// `segmentIds` nil = every SUNG note (`origin != .unpitched`): a sound
+    /// (a breath, a consonant) moves only when it is named. Refused in words:
+    /// an unknown clip, a MIDI clip or a comp member (the per-note gates), no
+    /// stored table, no sung note to move, an unknown note id, a move that is
+    /// not a number, and a move that would take any note past ±2400 c (ALL OR
+    /// NOTHING: the sentence names the range the group CAN move, and nothing
+    /// is stored).
+    ///
+    /// ⭐ **ONE WRITER.** It stores through `setClipNotePitchOffsets`, so the
+    /// clamp, the no-op rule, D4-1's update and the slide-follow adoption are
+    /// that writer's (and its home's), the D4-1 census needs no new row, and
+    /// the whole move is ONE undo step ("Tune Notes") under `undoKey`. NO
+    /// DEFAULT for the key, the batch writer's rule: a wire call passes
+    /// `PitchCorrectionUndoKey.structuralKey`.
+    @discardableResult
+    public func moveClipNotePitches(clipId: UUID,
+                                    segmentIds: [UUID]?,
+                                    byCents: Double,
+                                    undoKey: String?) throws -> (clip: Clip, carriedSlideIDs: [UUID]) {
+        let (t, c) = try locateEditableNoteClip(clipId)
+        let table = try noteTable(trackIndex: t, clipIndex: c, seedIfAbsent: nil)
+        let ids = segmentIds ?? table.segments.filter { $0.origin != .unpitched }.map(\.id)
+        guard !ids.isEmpty || segmentIds != nil else {
+            throw ProjectError.invalidClipEdit(NotePitchMoveSentences.noSungNotes)
+        }
+        let move = try table.applyingGroupPitchMove(segmentIDs: ids, byCents: byCents, clipId: clipId)
+        let clip = try setClipNotePitchOffsets(clipId: clipId, offsets: move.offsets, undoKey: undoKey)
+        return (clip, move.carriedSlideIDs)
+    }
+
     /// Bring a vocal tuned BEFORE natural tuning onto it (m23-nt, design
     /// `docs/design/2026-09-25-natural-tuning.md` X4): the voice size kept
     /// (`formantCorrection`), consonants left untuned, and soft joins
@@ -467,7 +511,9 @@ extension ProjectStore {
     /// editor's "Tuned before this update. Tap to update." line, the wire's
     /// `clip.upgradeNaturalTuning`, and §4's D4-1 hook all call this.
     ///
-    /// It writes the three set-level fields and NOTHING ELSE: no note, no
+    /// It writes the three set-level fields, and `slideFollowRule` when the
+    /// vocal has a slide that follows its neighbours (vf-18: the hold rule,
+    /// `PitchEditSet.upgradedToNaturalTuning`), and NOTHING ELSE: no note, no
     /// `glideFollow` (the part kinds are gone once a table is stored), no
     /// retune, no stamp. ONE undo step ("Update Tuning") under
     /// `PitchCorrectionUndoKey.structuralKey`: a deliberate switch never

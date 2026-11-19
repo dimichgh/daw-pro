@@ -148,6 +148,10 @@ public enum ProjectError: Error, LocalizedError {
     case markerAmbiguous(String)     // a transport.seek name matched >1 marker
     // Loudness-normalized bounce (M5 iv-b).
     case bounceSilent
+    // Bounce in place (m39-render-pass-race): another song was opened (New,
+    // Open, a recovery) while the track rendered, so the bounce refused to
+    // land. Nothing was written or added.
+    case bounceInPlaceSongChanged
     // Stem export (M5 iv-c): a bus-routed source track has no stem of its own
     // — its signal lives in the destination bus's stem. The message is built
     // at throw time (it names both the track and its bus).
@@ -531,6 +535,11 @@ public enum ProjectError: Error, LocalizedError {
             // verbatim). Thrown ONLY when a lufsTarget was requested; a silent
             // measure-only bounce succeeds with all-nil measurement fields.
             return "program is silent below the -70 LUFS gate — cannot loudness-normalize"
+        case .bounceInPlaceSongChanged:
+            // m39-render-pass-race. The control protocol surfaces this sentence
+            // verbatim (the LocalizedError mapping); "nothing was added" is
+            // pinned by `RenderPassRaceTests`.
+            return "The song changed while the track was bouncing (a new song was started or another song was opened), so nothing was added to either song. Bounce the track again from the song it belongs to."
         case .stemNotMasterInput(let message):
             // The store/plan builds the message at throw time (which track,
             // which bus); surfaced verbatim — the invalidClipEdit precedent.

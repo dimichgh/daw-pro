@@ -8,6 +8,11 @@ It imports the SAME schema, refusal table, converter and HTTP layer as server.py
     10 ms-rounded boundaries the converter hands the model, silence on rests; about -23 LUFS on a sung line;
   * words are checked with a stand-in for g2p: a word with no letter or digit is `emptyWord`; `unknownPhone`
     never happens (there is no phone set);
+  * facadeVersion 2 (design 2026-10-06 §7.6): the SAME schema validates it, so every v2 refusal is the facade's own. A
+    Mandarin/Cantonese character gets a stand-in syllable (zh_a1 / yue_aa1), a typed syllable passes through as the
+    facade spells it, and each still sings one sine per note on the same boundaries. With no phone set there is no
+    tone fallback, so a stub reply never has "substitutions"; a v2 reply has "control" like the facade's. /health
+    adds the facade's "capabilities" (all three languages; "controls": ["score"]);
   * built-in voice `builtin-1` always exists (placeholder files under <runtime>/run/stub-voices/);
   * the output length is int(time[1]/1000*24000) samples at 24 kHz, scaled to outputSampleRate with round-half-up:
     identical to the facade's soxr length at 24/48/96 kHz, within one sample at other rates.
@@ -44,7 +49,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from singlib import http as shttp  # noqa: E402
-from singlib import schema, score, wavio  # noqa: E402
+from singlib import langs, schema, score, wavio  # noqa: E402
 from singlib.refusals import Refusal  # noqa: E402
 
 FAULTS = ("nan", "nonfinite", "silence", "click", "crash", "slow", "balloon")
@@ -58,6 +63,26 @@ _LETTER_OR_DIGIT = re.compile(r"[A-Za-z0-9]")
 def stub_phonemize(word):
     """g2p stand-in: one dummy phone per word that has a letter or digit; none otherwise (-> emptyWord)."""
     return ["AH0"] if _LETTER_OR_DIGIT.search(word) else []
+
+
+class StubLexicon(object):
+    """The per-language stand-in for the facade's Lexicon: one dummy syllable per Chinese character, spelled as the
+    phone set spells it, so the converter's runs and tokens are exercised exactly as in the facade."""
+    DUMMY = {"zh": "a1", "yue": "aa1"}
+
+    def syllables(self, lang, chars):
+        return [self.DUMMY[lang] if langs.is_cjk_char(c) else None for c in chars]
+
+    def tone_rank(self, lang, base):
+        return []
+
+
+STUB_LEXICON = StubLexicon()
+
+
+def capabilities():
+    return {"facadeVersions": list(schema.FACADE_VERSIONS), "controls": list(schema.CONTROLS),
+            "languages": list(langs.SUPPORTED)}
 
 
 def out_len(n24, out_sr):
@@ -111,7 +136,8 @@ class StubBackend(object):
                 "device": "stub", "pid": os.getpid(), "loadSeconds": self.load_s if st == "ready" else None,
                 "mpsDriverBytes": 0, "rendered": self.rendered,
                 "stub": {"fault": self.fault, "after": self.after, "count": self.count, "applied": self.applied,
-                         "renders": self.renders}}
+                         "renders": self.renders},
+                "capabilities": capabilities()}
 
     def _fault_for(self, idx):
         if not self.fault or idx < self.after:
@@ -149,7 +175,8 @@ class StubBackend(object):
     def render(self, req):
         idx = self.renders
         self.renders += 1
-        meta, info = score.build_meta(req.notes, req.words, lead=req.lead, trail=req.trail, phonemize=stub_phonemize)
+        meta, info = score.build_meta(req.notes, req.words, lead=req.lead, trail=req.trail, phonemize=stub_phonemize,
+                                      langs=req.word_langs, lexicon=STUB_LEXICON)
         if req.voice.kind == "own":
             self._check_own_voice(req.voice)
         fault = self._fault_for(idx)
@@ -180,14 +207,19 @@ class StubBackend(object):
         wavio.write_float32_wav(req.output_real, y, req.out_sr)
         self.rendered += 1
         finite = [abs(v) for v in y if v == v]
-        return {"outputPath": req.output_path, "sampleRate": req.out_sr, "channels": 1, "frames": len(y),
-                "durationS": round(len(y) / float(req.out_sr), 6),
-                "peak": max(finite) if finite else 0.0,
-                "rms": math.sqrt(sum(v * v for v in finite) / len(y)) if y else 0.0,
-                "nonFinite": False, "seed": req.seed, "nSteps": req.n_steps, "cfg": req.cfg,
-                "voice": {"id": req.voice.id, "kind": req.voice.kind}, "entries": info["entries"],
-                "samples24k": score.output_samples_24k(meta), "targetMeta": meta,
-                "stub": {"fault": fault, "renderIndex": idx}}
+        reply = {"outputPath": req.output_path, "sampleRate": req.out_sr, "channels": 1, "frames": len(y),
+                 "durationS": round(len(y) / float(req.out_sr), 6),
+                 "peak": max(finite) if finite else 0.0,
+                 "rms": math.sqrt(sum(v * v for v in finite) / len(y)) if y else 0.0,
+                 "nonFinite": False, "seed": req.seed, "nSteps": req.n_steps, "cfg": req.cfg,
+                 "voice": {"id": req.voice.id, "kind": req.voice.kind}, "entries": info["entries"],
+                 "samples24k": score.output_samples_24k(meta), "targetMeta": meta,
+                 "stub": {"fault": fault, "renderIndex": idx}}
+        if req.facade_version >= 2:          # as the facade: a v1 reply keeps exactly today's keys
+            reply["control"] = req.control
+            if info["substitutions"]:
+                reply["substitutions"] = info["substitutions"]
+        return reply
 
 
 def _env_float(name, default):

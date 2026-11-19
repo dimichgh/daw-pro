@@ -220,6 +220,9 @@ struct TimelineLanesView: View {
     /// Opens the Breath Pad for a clip (m28-p7) — the arrange clip context menu
     /// (Pro, MIDI only; sp-c). UI-only, routes to `openBreathPad`.
     var onOpenBreathPad: (_ clip: Clip) -> Void = { _ in }
+    /// Opens the Sing sheet for a clip (p2-sing-f) — the arrange clip context menu's
+    /// "Sing these notes…" (BOTH densities; MIDI clips off drum tracks only).
+    var onOpenSing: (_ clip: Clip) -> Void = { _ in }
     /// Opens the Quantize panel focused on the extract affordance (both kinds).
     var onExtractGroove: (_ clip: Clip) -> Void = { _ in }
     /// Opens **Chop to Pads…** on this clip (m39-pads) — AUDIO clips only, and
@@ -1307,6 +1310,10 @@ struct TimelineLanesView: View {
                     onOpenQuantize: { onOpenQuantize(clip) },
                     onOpenHumanize: { onOpenHumanize(clip) },
                     onOpenBreathPad: { onOpenBreathPad(clip) },
+                    // p2-sing-f: the planner's own two refusals a menu can see ahead of time
+                    // (an audio clip, a drum track) hide the entry rather than offer-then-refuse.
+                    singable: clip.isMIDI && !ProjectTranspose.isDrumTrack(track),
+                    onOpenSing: { onOpenSing(clip) },
                     onExtractGroove: { onExtractGroove(clip) },
                     onChopToPads: { onChopToPads(clip) },
                     onTuneVocal: { preset in onTuneVocal(clip, preset) },
@@ -3037,6 +3044,11 @@ private struct ClipBlock: View {
     /// Opens the Breath Pad for this clip (m28-p7; MIDI only — the pad shapes
     /// notes).
     var onOpenBreathPad: () -> Void = {}
+    /// Whether "Sing these notes…" is offered (p2-sing-f): a MIDI clip on a track that is
+    /// not a drum track — the two refusals `SingPlanner.plan` makes that a menu can see.
+    var singable: Bool = false
+    /// Opens the Sing sheet for this clip (p2-sing-f).
+    var onOpenSing: () -> Void = {}
     /// Opens the Quantize panel focused on the extract affordance (both kinds —
     /// `groove.extract` supports MIDI onsets and audio transients).
     var onExtractGroove: () -> Void = {}
@@ -4056,6 +4068,14 @@ private struct ClipBlock: View {
         // playhead-anchored route.
         Button(cutCommand.title) { onClipboardClip(.cut, cutCommand) }
         Button(copyCommand.title) { onClipboardClip(.copy, copyCommand) }
+        // ═══ SING THESE NOTES… (p2-sing-f, design §5.1) — MIDI ONLY, BOTH DENSITIES ═══
+        // Outside `if pro` on Chop's argument: singing a melody is a way a clip BECOMES
+        // a voice, not clip-edit chrome. Hidden (not offered-then-refused) on an audio
+        // clip and on a drum track, the planner's two refusals a menu can see.
+        if singable {
+            Divider()
+            Button(SingCopy.menuTitle) { onOpenSing() }
+        }
         // ═══ CHOP TO PADS (m39-pads) — AUDIO ONLY, AND IN BOTH DENSITIES ═══
         //
         // ⭐ **DELIBERATELY OUTSIDE THE `if pro` BLOCK, on Delete's argument.**

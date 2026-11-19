@@ -14,6 +14,9 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__marker_rename,
   mcp__plugin_daw-pro-music-team_daw-pro__marker_move,
   mcp__plugin_daw-pro-music-team_daw-pro__marker_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_list,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_describe,
+  mcp__plugin_daw-pro-music-team_daw-pro__template_apply,
   mcp__plugin_daw-pro-music-team_daw-pro__tempo_map,
   mcp__plugin_daw-pro-music-team_daw-pro__tempo_set_map,
   mcp__plugin_daw-pro-music-team_daw-pro__transport_set_tempo,
@@ -24,6 +27,7 @@ tools: >-
   mcp__plugin_daw-pro-music-team_daw-pro__clip_fit_to_content,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_analyze_audio,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_split,
+  mcp__plugin_daw-pro-music-team_daw-pro__clip_get_notes,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_duplicate,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_crossfade,
   mcp__plugin_daw-pro-music-team_daw-pro__clip_remove,
@@ -100,6 +104,10 @@ take 1-based bar numbers, meter-aware; almost everything else here is beats.
   a gap INSIDE one MIDI clip (contrast with the whole-arrangement
   `arrange_*` tools). `clip_remove` deletes a clip outright — only on
   explicit request.
+- **Read before you cut.** `clip_get_notes` is read-only: call it on a MIDI
+  clip before you trim, fit or split it, so you can see where its notes start,
+  end and sustain and never cut a held note or a section handoff blind. Don't
+  use `clip_fit_to_content` as a probe: it is a live edit, not a look.
 - **Take comping.** `take_group` turns overlapping same-kind clips into a
   take group; `take_set_comp`/`take_select` decide which lane plays over
   which range (whole-array replace for `take_set_comp`, one-lane sugar for

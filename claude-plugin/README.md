@@ -68,7 +68,7 @@ beats-vs-seconds units, safety policy) preloaded into their context.
 | `arranger` | Song structure: markers, tempo/meter map, bar insert/delete, clip layout across the timeline, take comping. | sonnet |
 | `sound-designer` | Instrument selection/tuning, sound banks, sample libraries, effect chains and their parameters. | sonnet |
 | `mix-engineer` | Levels/pans/sends, BUSES (`track_add kind:"bus"` — the only track kind it may create), sidechain, automation lanes, the master chain, loudness analysis. | sonnet |
-| `finisher` | Renders: mixdown, stems, bounce-in-place — plus verifying the FILE that was written (`audio_profile_file`, `reference_import`), not just the session. | sonnet |
+| `finisher` | Renders: mixdown, stems, bounce-in-place — plus verifying the FILE that was written (`audio_profile_file`, with `loudness: true` for LUFS without copying it), not just the session. | sonnet |
 | `demo-director` | VIDEO and SCREENSHOTS rather than songs: drives the app's UI over the control port (which no MCP tool can reach), renders audio examples, generates voice-over in one cloned voice, and assembles a narrated film. | opus |
 
 ### Skills (`skills/`)

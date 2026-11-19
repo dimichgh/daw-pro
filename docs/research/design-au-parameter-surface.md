@@ -131,7 +131,8 @@ func setHostedAUParameter(_ target: HostedAUTarget, address: String,
 validate the pair like `requirePluginTarget` does (track exists; effect exists **on that track**
 and `kind == .audioUnit`; instrument track with instrument kind `.audioUnit` — `.soundBank` throws
 the redirect teaching error since `SoundBankConfig` is the single source of truth (LAW L3) and
-AUSampler tree edits would be silently lost on save), then call the engine with the resolved
+AUSampler tree edits would be silently lost on save; note the sampler DOES publish 13 parameters, 4 audible
+(gain, coarse/fine tuning, pan) per the 2026-10-07 probe, so the refusal text says "not saved", never "no parameter surface"), then call the engine with the resolved
 `HostedAUTarget`, mapping nil/`.noHostedAU` to a status-naming teaching error.
 
 ## 4. Wire commands (additive; Commands.swift name list + handlers + docs/ARCHITECTURE.md table)

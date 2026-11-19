@@ -119,6 +119,9 @@ struct PianoRollView: View {
     /// the beginner exactly where the feature found them. Store-free closure so
     /// the view stays previewable.
     var onOpenBreathPad: () -> Void = {}
+    /// Opens the Sing sheet (p2-sing-f). Added by the orchestrator 2026-10-06 so the tree compiles with
+    /// W8-SF's `ContentView` wiring; the SING chip that calls it is W8-SF's to add. Store-free, like its siblings.
+    var onOpenSing: () -> Void = {}
     /// Commits the visible controller lane (m16-b4) through
     /// `ProjectStore.setControllerLane` — the SAME store call the
     /// `clip.setControllerLane` wire verb uses — and returns the updated clip so
@@ -254,10 +257,24 @@ struct PianoRollView: View {
 
     /// Whether this clip's track addresses a GM drum kit
     /// (`SMFProjectExporter.isDrumKit` — the app's ONE predicate, resolved by
-    /// the caller because this view is store-free by design). Decides the
-    /// sequencer's lane set (named percussion rows vs. a pitch window) and,
-    /// until the user picks a mode, which editor the pane opens in.
+    /// the caller because this view is store-free by design). Since m39-w4-2
+    /// it hides the Sing chip only; the step grid reads `drumLanes`.
     var isDrumKit: Bool
+
+    /// The drum rows of this clip's track (m39-w4-2, `DrumLaneMap.lanes(for:)`,
+    /// resolved by the caller like `isDrumKit`), or nil for a melodic track.
+    /// Decides the sequencer's lane set (named drum rows vs. a pitch window)
+    /// and, until the user picks a mode, which editor the pane opens in: a
+    /// track with drum rows opens in STEPS, our `pads` drum machine included.
+    var drumLanes: [DrumLane]?
+
+    /// m39-w4-10 — "START FROM A BEAT": writes the chosen ready-made beat (its
+    /// id) into THIS clip and answers what happened. Resolved by the caller,
+    /// which owns the store, like `onCommit`: the store works the notes out from
+    /// the track's own instrument (`ProjectStore.fillDrumPattern`, one undo
+    /// step) and the roll reseeds through `.onChange(of: clip)` like any
+    /// external mutation. Defaulted so previews stay one-liner-simple.
+    var onStartFromBeat: (String) -> StepBeatOutcome = { _ in .nothing }
 
     /// The NOTE-SELECTION bridge (m23-x, second pass) — reports out whether this
     /// editor currently has notes selected, which is the app's own test for
@@ -500,6 +517,7 @@ struct PianoRollView: View {
          onOpenQuantize: @escaping () -> Void,
          onOpenHumanize: @escaping () -> Void = {},
          onOpenBreathPad: @escaping () -> Void = {},
+         onOpenSing: @escaping () -> Void = {},
          onCommitControllerLane: @escaping (_ type: MIDIControllerType, _ points: [MIDIControllerPoint]) -> Clip?,
          onCopyNotes: @escaping ([MIDINote]) -> Void = { _ in },
          onCutNotes: @escaping (_ copied: [MIDINote], _ remaining: [MIDINote]) -> Bool
@@ -515,6 +533,8 @@ struct PianoRollView: View {
          onDeleteKey: @escaping () -> Bool = { false },
          stepSequencer: StepSequencerBridge = StepSequencerBridge(),
          isDrumKit: Bool = false,
+         drumLanes: [DrumLane]? = nil,
+         onStartFromBeat: @escaping (String) -> StepBeatOutcome = { _ in .nothing },
          noteSelection: PianoRollNoteSelectionBridge = PianoRollNoteSelectionBridge(),
          onBarOpsStyle: @escaping (_ role: String, _ text: String?, _ ink: Color?) -> Void
              = { _, _, _ in }) {
@@ -534,6 +554,7 @@ struct PianoRollView: View {
         self.onOpenQuantize = onOpenQuantize
         self.onOpenHumanize = onOpenHumanize
         self.onOpenBreathPad = onOpenBreathPad
+        self.onOpenSing = onOpenSing
         self.onCommitControllerLane = onCommitControllerLane
         self.onCopyNotes = onCopyNotes
         self.onCutNotes = onCutNotes
@@ -547,6 +568,8 @@ struct PianoRollView: View {
         self.onDeleteKey = onDeleteKey
         self.stepSequencer = stepSequencer
         self.isDrumKit = isDrumKit
+        self.drumLanes = drumLanes
+        self.onStartFromBeat = onStartFromBeat
         self.noteSelection = noteSelection
         self.onBarOpsStyle = onBarOpsStyle
         let rollModel = PianoRollModel(
@@ -600,9 +623,10 @@ struct PianoRollView: View {
     // MARK: - Step sequencer (m23-cq-1)
 
     /// Which editor this pane is showing — the user's pick if they made one,
-    /// else the track's kind (a drum kit opens in STEPS). ONE home:
-    /// `ClipEditorModePolicy`.
-    private var editorMode: ClipEditorMode { stepSequencer.mode(isDrumKit: isDrumKit) }
+    /// else the track's kind (a track with drum rows opens in STEPS). ONE home:
+    /// `ClipEditorModePolicy`, fed by the drum lane map (m39-w4-2), never by
+    /// `isDrumKit`, which a `pads` drum machine answers "no".
+    private var editorMode: ClipEditorMode { stepSequencer.mode(isDrumKit: drumLanes != nil) }
 
     /// The step size the grid draws at: Simple locks 1/16, Pro honours the
     /// picker — the `ClipSnap.effective` shape, so flipping to Simple and back
@@ -621,7 +645,7 @@ struct PianoRollView: View {
     /// draws and the bar numbers are the song's.
     private var stepGeometry: StepSequencerGeometry {
         StepSequencerGeometry.make(
-            isDrumKit: isDrumKit, notes: model.draft, clipLengthBeats: model.clipLengthBeats,
+            drumLanes: drumLanes, notes: model.draft, clipLengthBeats: model.clipLengthBeats,
             resolution: effectiveStepResolution, songGrid: songGridContext)
     }
 
@@ -638,6 +662,38 @@ struct PianoRollView: View {
             notes: model.draft, cell: cell, geometry: stepGeometry)
         model.replaceDraft(outcome.notes)
         commit()
+    }
+
+    /// m39-w4-3 — CLICK AN ACCENT CELL (design §3.5). The same draft and the
+    /// same `commit()` funnel as a cell toggle, so one click is one undo step.
+    /// A column with no hits has nothing to accent: `StepAccent.toggle` answers
+    /// nil and nothing is committed (an empty undo step would be a defect). Nor
+    /// does that click engage the pane: engagement rides `commit()` (m23-al R6),
+    /// and the funnels engage only on a gesture that CHANGES something, the
+    /// rule that keeps a copy from re-pointing ⌘+ (`EditorSurfaceOwnershipSiteTests`).
+    private func applyAccentToggle(_ step: Int) {
+        guard let notes = StepAccent.toggle(
+            notes: model.draft, step: step, geometry: stepGeometry)
+        else { return }
+        model.replaceDraft(notes)
+        commit()
+    }
+
+    /// m39-w4-10 — PICK A READY-MADE BEAT ("Start from a beat", design §8), on
+    /// an EMPTY drum clip. The store writes it into this clip as ONE undo step
+    /// (`onStartFromBeat` → `ProjectStore.fillDrumPattern`), deliberately NOT
+    /// through this roll's commit funnel: that funnel's `setClipNotes` folds
+    /// into the last note edit inside 800 ms, and the notes come from the
+    /// track's instrument, which this store-free view does not hold. The draft
+    /// follows through `.onChange(of: clip)` (`reseedFromExternalMutation`).
+    private func applyStartFromBeat(_ patternID: String) -> StepBeatOutcome {
+        let outcome = onStartFromBeat(patternID)
+        // ⭐ m23-al R11 — "START FROM A BEAT": a menu pick that CHANGED the clip
+        // is the user editing inside this pane, so it claims ⌘+/⌘−/⌘0 like R6's
+        // edits. Only when it changed something: a refused pick (a song not in
+        // 4/4 there) mutates nothing, and a funnel never engages on a no-op.
+        if outcome.changed { onEngage() }
+        return outcome
     }
 
     // MARK: - Wide-window band widths (m18-f — DESIGN-LANGUAGE "Wide windows")
@@ -1782,6 +1838,11 @@ struct PianoRollView: View {
                 .explainable(.quantize)
             humanizeChip
             breathPadChip
+            // p2-sing-f (design §5.1): the Sing sheet's door from the roll. Hidden on a drum
+            // kit, where the planner refuses (a drum track has no tune to sing).
+            if !isDrumKit {
+                singChip
+            }
             barOpsCluster
                 .explainable(.pianoRollBarOps)
             if editorMode == .notes {
@@ -2469,6 +2530,29 @@ struct PianoRollView: View {
         .help("Shape how hard the player blows across this part — the breath pad")
     }
 
+    /// Opens the Sing sheet (p2-sing-f, design §5.1) — "Sing these notes…" from the roll.
+    /// Neutral door chrome at rest, the BREATH chip's idiom (Rule 3); the violet is earned
+    /// by the sheet's own [Sing it], the press that asks the AI.
+    private var singChip: some View {
+        Button(action: onOpenSing) {
+            HStack(spacing: 4) {
+                Image(systemName: "music.mic")
+                    .font(.system(size: 9, weight: .semibold))
+                Text(SingCopy.entryChip)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .tracking(0.6)
+            }
+            .foregroundStyle(DAWTheme.textPrimary)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
+            .background(DAWTheme.panelRaised)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.hairline, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .help(SingCopy.entryHelp)
+    }
+
     /// Simple / Pro segmented chip — the shared `SimpleProToggle` component bound
     /// to this panel's density (docs/DESIGN-LANGUAGE.md density modes).
     private var modeToggle: some View {
@@ -2683,7 +2767,8 @@ struct PianoRollView: View {
     /// The step grid, mounted in place of the note-editor stack. Thin over
     /// `StepSequencerBand`, which is thin over the headless geometry — this
     /// property's whole job is to hand it the LIVE derived values and to route
-    /// its one gesture back into `applyStepToggle`.
+    /// its two gestures back: the cell click into `applyStepToggle`, and the
+    /// Accent row's column click (m39-w4-3) into `applyAccentToggle`.
     private var stepSequencerBand: some View {
         StepSequencerBand(
             geometry: stepGeometry,
@@ -2698,7 +2783,13 @@ struct PianoRollView: View {
                                               lengthBeats: clip.lengthBeats),
             viewportWidth: panelWidth,
             bridge: stepSequencer,
-            onToggle: applyStepToggle)
+            onToggle: applyStepToggle,
+            // m39-w4-3: the Accent row under the drum rows (drum grids only).
+            accentColumns: StepAccent.columns(notes: model.draft, geometry: stepGeometry),
+            onAccent: applyAccentToggle,
+            // m39-w4-10: "Start from a beat", offered on an EMPTY drum clip only.
+            beatChoices: StepStartFromBeat.choices(drumLanes: drumLanes, notes: model.draft),
+            onStartFromBeat: applyStartFromBeat)
     }
 
     // MARK: - Editor (keyboard + grid), vertically scrolled together
@@ -2837,7 +2928,11 @@ struct PianoRollView: View {
                                 let note = model.addNote(
                                     atBeat: model.beat(forX: value.location.x),
                                     pitch: model.pitch(forY: value.location.y),
-                                    resolution: effectiveSnap
+                                    resolution: effectiveSnap,
+                                    // m39-w4-3: the entry velocity reads the
+                                    // SAME drum rows the step grid draws from
+                                    // (`NoteEntryDefaults`), never `isDrumKit`.
+                                    drumLanes: drumLanes
                                 )
                                 model.selectOnly(note.id)
                                 // m25-a — the note the user just placed is the

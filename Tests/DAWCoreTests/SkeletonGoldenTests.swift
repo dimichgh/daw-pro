@@ -7,8 +7,11 @@ import Testing
 // Recorded BEFORE TPL-3 changed a line of `SongSkeleton.swift`: for each of the 14 genres, with the genre's own
 // roster and with one fixed `tracks` override, the project file a save would write after `applySongSkeleton` on a
 // fresh store. TPL-3 then re-pointed the skeleton through `TemplateBuilder`, and every one of these 28 files had to
-// stay BYTE-IDENTICAL. The only fixture that has changed since is `rock-default.json`, by D3 (rock's "Drums" and
-// "Bass" got the instruments every other band genre already had); its diff added exactly two `instrument` blocks.
+// stay BYTE-IDENTICAL. Since then: `rock-default.json` changed by D3 (rock's "Drums" and "Bass" got the instruments
+// every other band genre already had); its diff added exactly two `instrument` blocks. Then m27-e (2026-10-07)
+// changed ALL 28 by exactly one line each: the "Arrangement" guide track (the LAST track, so the LAST `"isMuted"`
+// line) went from `"isMuted" : false` to `true`, checked line by line and field by field before acceptance. The
+// pre-m27-e `pop-default`/`pop-override` live on, verbatim, in `Fixtures/SkeletonGuideBefore/` (the open test).
 //
 // The bytes are the real save path's (`ProjectBundle.write`: pretty-printed, sorted keys, ISO-8601 dates, via
 // `ProjectDocumentFidelityTests.bundleBytes`), with `savedAt` pinned and every UUID replaced by `UUID-<n>` in order

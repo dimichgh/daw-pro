@@ -1107,6 +1107,21 @@ A join between two notes that ABUT (same `endSeconds`/`startSeconds` bits: a joi
 - Contribution: `var constant = span.constantSemitones; if span.bridgeAmount != 0 { let u = smoothstep((t − start)/(end − start)); constant += g·(from + (to − from)·u) }` — ADDITIVE, so a drag of a followed slide moves it by its own offset (a `(1−g)·own` blend would discard the drag at g = 1: a moved blob with an unmoved line, a silent inaudible success). BRANCH ON PRESENCE, never `+ 0` (the §A lesson, :1413-1434). Smoothstep, not linear, so the tilt has zero added slope at both joins and stays C¹ with the crossfades.
 - Shaping and generated vibrato are untouched: the singer's scoop, drift and vibrato still pass through as a delta — the tilt moves WHERE the slide starts and lands, never its shape (the "keep natural scoops" ask).
 
+**§4 ERRATUM vf-18 (2026-10-12, W9-SLRV).** A uniform move of every note moved a followed slide twice (its own
+offset + its neighbours', 2M; one-sided slides up to ~1.7M; joins 30 → 200 ms). The additive bridge stays —
+a lone drag of a followed slide keeps meaning +D. Fixed at the WRITER: a group move stores
+`own + (1 − g)·Δ` on a followed slide whose anchors move with it (`groupMoveCarry`, one home in
+`NotePitchDraft.swift`), and through a versioned bridge rule: under `PitchEditSet.slideFollowRule =
+.holdAtOpenSide` a slide reads only HELD soft neighbours and a side with none copies the other side's anchor
+(step 3's "0 if the previous edge faces a hole" holds for `.sungAtOpenSide`, the absent value). Hold is the only
+affine open-side rule under which a uniform move can be exact and an unmoved table stays identity
+(`f(a+M) − f(a) = M`, `f(0) = 0` ⇒ `f(a) = a`). Sets adopt it inside a hand edit only when it changes no
+sample they already play (`afterHandEdit(from:)`), or through `upgradedToNaturalTuning`. Agents move groups
+with `clip.setNotePitches {moveByCents}`; the `notes` form keeps its absolute meaning.
+Status 2026-10-12 (W9-SLFX): the DAWCore half is in (`PitchEditSet.applyingGroupPitchMove`, the rule and its
+digest marker, `ProjectStore.moveClipNotePitches`); `moveByCents` on the wire and the editor's group drag land
+in their own legs, and until then both still store literal offsets.
+
 ### 4.b.4 Invariants (each gets a pin in 4.g)
 
 - **I1 — at most two gates open ALONG A CHAIN OF SOFT JOINS (scope matters).** The soft clamp `h ≤ min(dur_i, dur_{i+1})/2` bounds how far a NEIGHBOUR's ramp reaches into each note by half of that note, so inside a run no point sees three gates. It does NOT hold across HOLE edges, which keep legacy halves `min(r/2, dur_own/2)`: with retune 200 and a 60 ms note between two tiny holes, both neighbours' 100 ms ramps cross the whole short note — three gates, normalised, on HEAD today (the U2 0.239→0.208 trim, unpitched doc :244-247). That is PRE-EXISTING and unchanged here. The soft clamp also bounds the explicit width (a join cannot be wider than the shorter of its two notes). INFERRED.

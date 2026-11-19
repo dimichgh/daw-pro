@@ -330,8 +330,8 @@ struct BuiltInTemplateCatalogTests {
 
     static let plants: [Plant] = [
         Plant(label: "a drum machine in the pad layout", id: "hip-hop-808",
-              old: #""drumPreset": "808", "drumKit": { "noteLayout": "gm" }"#,
-              new: #""drumPreset": "808", "drumKit": { "noteLayout": "pads" }"#,
+              old: #""drumPreset": "808", "drumKit": { "noteLayout": "gm", "gain": 1 }"#,
+              new: #""drumPreset": "808", "drumKit": { "noteLayout": "pads", "gain": 1 }"#,
               path: "tracks[0].instrument.drumKit.noteLayout"),
         Plant(label: "an Audio Unit insert", id: "rock-band",
               old: #""inserts": [ { "kind": "reverb", "params": { "mix": 1, "roomSize": 0.45 } } ]"#,

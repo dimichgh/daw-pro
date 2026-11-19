@@ -206,6 +206,13 @@ final class ChainEffectUnit: @unchecked Sendable {
     /// True while a bypass crossfade is in flight.
     var fadeActive: Bool { fadeTotal > 0 }
 
+    /// m39-d CR-1: the bypass state the walk last OBSERVED (render thread
+    /// only). A continuation segment of a split call acts on this rather than
+    /// on a fresh load of `bypassFlag`: a flag flip between two segments of
+    /// one call must start its crossfade at the NEXT call's first segment, not
+    /// become a hard switch with no fade halfway through this one.
+    var observedBypass: Bool { renderBypassed }
+
     /// Reconciles the observed bypass flag with the render-side fade state:
     /// a change starts a crossfade toward the new state; a change while a
     /// fade is already running REVERSES it in place (position inversion —
@@ -395,6 +402,23 @@ final class EffectChainProcessor: @unchecked Sendable {
     /// unit self-keyed, bit-exact with the pre-sidechain walk.
     func process(bufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int,
                  key: UnsafeMutableAudioBufferListPointer?) {
+        process(bufferList: bufferList, frameCount: frameCount, key: key, continuation: false)
+    }
+
+    /// m39-d CR-1 (design §5.6): the walk over ONE SEGMENT of a render call
+    /// that `AutomationRenderer.renderChain` split at a control-cell line.
+    /// `continuation == false` is the first (or only) segment and is the walk
+    /// above, verbatim. `continuation == true` is a later segment of the SAME
+    /// call, and it keeps the two per-call events per call:
+    ///  · it does NOT consume a pending reset (`resetFlag`): a double-armed
+    ///    flush must reach the NEXT call, not the second half of this one;
+    ///  · it does NOT observe the bypass flag: it acts on the state the first
+    ///    segment observed (`ChainEffectUnit.observedBypass`), so a flip
+    ///    between segments starts its crossfade at the next call.
+    /// The crossfade's progress and the spectrum tap are per sample and
+    /// contiguous already, so they need nothing here.
+    func process(bufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int,
+                 key: UnsafeMutableAudioBufferListPointer?, continuation: Bool) {
         guard let raw = daw_atomic_ptr_load(slot) else { return }
         let snapshot = Unmanaged<EffectChainSnapshot>.fromOpaque(raw).takeUnretainedValue()
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
@@ -419,18 +443,26 @@ final class EffectChainProcessor: @unchecked Sendable {
                 // the just-cleared ring. The store-back race with a
                 // concurrent control-plane arm can only ADD resets, never
                 // lose the one in hand.
-                let pendingResets = daw_atomic_u32_exchange(unit.resetFlag, 0)
-                if pendingResets > 0 {
-                    unit.instance.reset()
-                    if pendingResets > 1 {
-                        daw_atomic_u32_store(unit.resetFlag, pendingResets - 1)
+                // m39-d CR-1: a continuation segment skips both per-call events
+                // (the reset countdown and the bypass observation) — see the
+                // `continuation:` overload's doc.
+                let bypassedNow: Bool
+                if continuation {
+                    bypassedNow = unit.observedBypass
+                } else {
+                    let pendingResets = daw_atomic_u32_exchange(unit.resetFlag, 0)
+                    if pendingResets > 0 {
+                        unit.instance.reset()
+                        if pendingResets > 1 {
+                            daw_atomic_u32_store(unit.resetFlag, pendingResets - 1)
+                        }
                     }
+                    // Bypass with equal-power crossfade (m15-f): a flag CHANGE
+                    // fades over ~10 ms; steady states walk the pre-m15f paths
+                    // verbatim (skip / keyed-or-plain process).
+                    bypassedNow = daw_atomic_u32_load(unit.bypassFlag) == 1
+                    unit.observeBypass(bypassedNow)
                 }
-                // Bypass with equal-power crossfade (m15-f): a flag CHANGE
-                // fades over ~10 ms; steady states walk the pre-m15f paths
-                // verbatim (skip / keyed-or-plain process).
-                let bypassedNow = daw_atomic_u32_load(unit.bypassFlag) == 1
-                unit.observeBypass(bypassedNow)
                 if unit.fadeActive {
                     unit.renderCrossfade(buffers: buffers, key: key, frameCount: frameCount)
                 } else if !bypassedNow {
@@ -707,6 +739,16 @@ final class EffectChainState {
     /// ≥ 2048 frames (~43 ms @ 48 kHz) before any band leaves the floor.
     func insertAnalysis(forEffect id: UUID) -> MasterAnalysisSnapshot? {
         armedTaps[id]?.drainAndSnapshot()
+    }
+
+    /// The consumer-side frame counters of one armed insert (m27-j): frames
+    /// its analyzer processed and frames its tap dropped since the arm. nil =
+    /// not armed. Main actor, like `insertAnalysis(forEffect:)`; reads no
+    /// render-thread state beyond the tap's own atomic `dropped` counter.
+    func insertAnalysisCoverage(forEffect id: UUID) -> InsertAnalysisCoverage? {
+        guard let tap = armedTaps[id] else { return nil }
+        return InsertAnalysisCoverage(framesAnalyzed: tap.framesAnalyzed,
+                                      framesDropped: tap.droppedFrames)
     }
 
     /// Effect ids with a live tap on this chain.

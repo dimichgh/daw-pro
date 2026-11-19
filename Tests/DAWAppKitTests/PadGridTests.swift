@@ -1729,3 +1729,417 @@ extension MusicalTypingControllerTests {
         #expect(model.levelsUnavailableReason == nil, "LEVELS can be pressed again")
     }
 }
+
+// MARK: - m39-w4-8: the pad grid plays the drum machine; role labels; choke link; kit sort
+
+// ⛔ STILL `MusicalTypingControllerTests`, for the reason at the top of this file:
+// no new `@MainActor` suite. The pure half (`PadGridDrumMap`) has its own
+// non-isolated suite, `PadGridDrumMapTests`.
+extension MusicalTypingControllerTests {
+
+    /// Our drum machine in `layout`, optionally edited.
+    fileprivate static func w48DrumMachine(_ layout: DrumNoteLayout,
+                                           edit: (inout DrumKitParams) -> Void = { _ in })
+        -> InstrumentDescriptor {
+        var kit = DrumKitParams(noteLayout: layout)
+        edit(&kit)
+        return InstrumentDescriptor(kind: .drumSynth, drumKit: kit)
+    }
+
+    /// A grid over a drum-machine target, with the SPY on the seam — the only
+    /// instrument that sees what actually crossed it.
+    fileprivate func w48DrumGrid(_ instrument: InstrumentDescriptor)
+        -> (PadGridModel, MusicalTypingController, PadSpySink) {
+        let (controller, sink) = makePadController()
+        let model = PadGridModel(typing: controller, zones: { [] }, targetName: { "Drums" },
+                                 instrument: { instrument })
+        return (model, controller, sink)
+    }
+
+    // MARK: P1 — pad 2 is the SNARE, by mouse AND by key, in both layouts
+
+    /// ⭐⭐ P1 (design §9 m39-w4-8), WITH A SPY ON THE SINK. Pad 2 is the snare
+    /// in either layout: note 38 on a `gm` drum machine, 37 on `pads`. Before
+    /// this item, `gm` pad 2 sent 37 — the RIM.
+    ///
+    /// ⚠️ BOTH ENTRY POINTS, because they are two code paths: the mouse
+    /// (`padDown`) and the letter key (`X`, through the controller's
+    /// `padPitch`). A label fixed on one and not the other is the shape this
+    /// grid has already shipped once (m39-pads: an inert `padDown`).
+    @Test("⭐ P1 — pad 2 pushes the SNARE across the seam: 38 on gm, 37 on pads (mouse + key)")
+    func w48PadTwoIsTheSnareInBothLayouts() {
+        for (layout, snare) in [(DrumNoteLayout.gm, 38), (.pads, 37)] {
+            let (model, controller, sink) = w48DrumGrid(Self.w48DrumMachine(layout))
+            // The mouse.
+            model.padDown(index: 1, normalizedY: 0.5)
+            #expect(sink.last == [snare], "\(layout): mouse")
+            model.padUp()
+            #expect(sink.last.isEmpty)
+            // The letter key: X is pad 2 (bottom row, second from the left).
+            padPress("X", on: controller)
+            #expect(sink.last == [snare], "\(layout): key")
+            #expect(controller.soundingPitches == [snare])
+            padRelease("X", on: controller)
+            // And the grid DRAWS what the seam received.
+            #expect(model.pads[1].pitch == snare)
+            #expect(model.pads[1].drumLabel == "Snare")
+            #expect(DrumVoice.voice(forNote: UInt8(snare), layout: layout) == .snare,
+                    "control: \(snare) really is the snare in \(layout)")
+        }
+    }
+
+    @Test("⭐ Z X C V put kick, snare, closed hat, open hat under the left hand on a gm kit")
+    func w48LeftHandIsTheCoreKit() {
+        // ⚠️ THE GRID MUST BE ALIVE. The keys reach the map through a WEAK
+        // reference to the grid (`PadGridModel.init`), so a discarded grid
+        // answers "no map" and the keys fall back to the sum — measured: the
+        // first draft of this test bound the model to `_` and heard
+        // [36, 37, 38, 39]. In the app `AppModel.padGrid` holds it.
+        let (model, controller, sink) = w48DrumGrid(Self.w48DrumMachine(.gm))
+        var heard: [Int] = []
+        withExtendedLifetime(model) {
+            for key in ["Z", "X", "C", "V"] {
+                padPress(key, on: controller)
+                heard.append(sink.last.first ?? -1)
+                padRelease(key, on: controller)
+            }
+        }
+        #expect(heard == [36, 38, 42, 46])
+        #expect(heard.map { DrumVoice.voice(forNote: UInt8($0), layout: .gm) }
+                == [.kick, .snare, .closedHat, .openHat])
+    }
+
+    @Test("a drum machine's pads 9–16 send NOTHING, by mouse or key, and say why")
+    func w48PadsPastTheEighthDrumAreSilent() {
+        let (model, controller, sink) = w48DrumGrid(Self.w48DrumMachine(.gm))
+        let before = sink.sets.count
+        model.padDown(index: 8, normalizedY: 0.5)          // pad 9
+        padPress("Q", on: controller)                       // pad 9's key
+        #expect(sink.sets.count == before, "nothing crossed the seam")
+        #expect(controller.soundingPitches.isEmpty)
+        let pads = model.pads
+        #expect(pads[8...].allSatisfy { $0.isPastLastDrum && $0.pitch == nil && !$0.isLoaded })
+        #expect(pads[..<8].allSatisfy { !$0.isPastLastDrum && $0.isLoaded })
+        #expect(PadGridModel.pastLastDrumHelp.contains("eight drums"))
+        // Control: pad 8 (the cymbal, key F) DOES sound, so the silence above is
+        // the map's edge and not a dead grid.
+        padPress("F", on: controller)
+        #expect(sink.last == [49])
+        withExtendedLifetime(model) {}     // the keys reach the map through the grid
+    }
+
+    @Test("the drum machine's pads read its eight drums; header says drums; never violet")
+    func w48DrumPadsAreLabelled() {
+        let (controller, _) = makePadController()
+        let model = PadGridModel(typing: controller, zones: { [] }, targetName: { "Drums" },
+                                 // AI clips on the track: still not violet — the
+                                 // drum machine's SOUND is synthesis.
+                                 targetIsAI: { true },
+                                 instrument: { Self.w48DrumMachine(.pads) })
+        #expect(model.isDrumMachine)
+        let expected: [String?] = ["Kick", "Snare", "Closed Hat", "Open Hat",
+                                   "Clap", "Tom", "Rim", "Cymbal"]
+            + Array(repeating: nil, count: 8)
+        #expect(model.pads.map(\.drumLabel) == expected)
+        #expect(model.pads.allSatisfy { !$0.isAITouched })
+        #expect(model.pads.allSatisfy { $0.sliceOrdinal == nil && $0.startFrame == nil })
+        #expect(model.loadedCount == 8)
+        #expect(model.loadedNoun == "drums")
+        // The two rows that could only explain a SAMPLER say what is true here.
+        #expect(model.triggerMode == nil)
+        #expect(model.triggerModeUnavailableReason?.contains("drum machine") == true)
+        #expect(model.levelsUnavailableReason?.contains("drum machine") == true)
+        // Control: a sampler target keeps the sampler sentences.
+        let sampler = PadGridModel(typing: MusicalTypingController(), zones: { [] },
+                                   targetName: { "Chop" })
+        #expect(sampler.isDrumMachine == false)
+        #expect(sampler.loadedNoun == "slices loaded")
+        #expect(sampler.triggerModeUnavailableReason?.contains("built-in Sampler") == true)
+    }
+
+    @Test("a drum machine has ONE bank: the grid shows A, and K / L leave the session's bank alone")
+    func w48DrumMachineHasOneBank() {
+        let (controller, sink) = makePadController()
+        // The session bank, left on C by a sampler track.
+        controller.setPadBank(2)
+        #expect(controller.padBank == 2)
+        let model = PadGridModel(typing: controller, zones: { [] }, targetName: { "Drums" },
+                                 instrument: { Self.w48DrumMachine(.gm) })
+        #expect(model.bank == 0)
+        #expect(model.bankCount == 1)
+        #expect(model.canBankUp == false && model.canBankDown == false)
+        #expect(model.bankHint.contains("eight drums"))
+        padPress("L", on: controller)
+        padPress("K", on: controller)
+        #expect(controller.padBank == 2, "K / L did not move the session's bank")
+        // ⚠️ AND THE BANK DOES NOT REACH THE NOTE: Z is the kick, not 36 + 32.
+        padPress("Z", on: controller)
+        #expect(sink.last == [36])
+        // Control: without the drum machine, the same bank IS the arithmetic.
+        let plain = MusicalTypingController()
+        plain.setPadBank(2)
+        #expect(plain.padPitch(index: 0) == 68)
+        withExtendedLifetime(model) {}     // the keys reach the map through the grid
+    }
+
+    @Test("an agent switching the kit to gm moves the very next pad (read fresh, never cached)")
+    func w48LayoutChangeIsReadFresh() {
+        var layout = DrumNoteLayout.pads
+        let (controller, sink) = makePadController()
+        let model = PadGridModel(typing: controller, zones: { [] }, targetName: { "Drums" },
+                                 instrument: { Self.w48DrumMachine(layout) })
+        model.padDown(index: 2, normalizedY: 0.5)
+        #expect(sink.last == [38])                         // pads: closed hat on 38
+        model.padUp()
+        layout = .gm
+        model.padDown(index: 2, normalizedY: 0.5)
+        #expect(sink.last == [42])                         // gm: closed hat on 42
+        model.padUp()
+        // The target stops being a drum machine: the grid falls back to the sum.
+        model.rebind(instrument: { nil })
+        model.padDown(index: 2, normalizedY: 0.5)
+        #expect(sink.last == [38])
+        #expect(model.isDrumMachine == false)
+    }
+
+    // MARK: P2 — the choke link, through the model
+
+    /// ⭐⭐ P2 THROUGH THE MODEL. The pure map is pinned in `PadGridDrumMapTests`;
+    /// this proves the GRID draws the group-keyed answer — the plant "key the
+    /// glyph on the voice name" lives in the model and only a model-level
+    /// fixture with the hat choke CLEARED can see it.
+    @Test("⭐ P2 — the link glyph sits on exactly the pads whose resolved choke group matches")
+    func w48ChokeGlyphFollowsTheGroup() {
+        func groups(_ instrument: InstrumentDescriptor) -> [Int?] {
+            let model = PadGridModel(typing: MusicalTypingController(), zones: { [] },
+                                     targetName: { "Drums" }, instrument: { instrument })
+            return model.pads.map { $0.chokeLink?.group }
+        }
+        let none = [Int?](repeating: nil, count: 8)
+        let hats: [Int?] = [nil, nil, 0, 0, nil, nil, nil, nil] + none
+        let hatsClapRim: [Int?] = [nil, nil, 0, 0, 3, nil, 3, nil] + none
+        let nowhere: [Int?] = none + none
+        // The factory kit: the hats, group 0.
+        #expect(groups(Self.w48DrumMachine(.gm)) == hats)
+        // The hat choke CLEARED: no glyph anywhere.
+        #expect(groups(Self.w48DrumMachine(.gm) { $0.closedHat.chokeGroup = nil }) == nowhere)
+        // Clap + rim in group 3: their glyphs appear, the hats keep theirs.
+        #expect(groups(Self.w48DrumMachine(.pads) {
+            $0.clap.chokeGroup = 3
+            $0.rim.chokeGroup = 3
+        }) == hatsClapRim)
+        // The tooltip names the partner in the pad's own words.
+        let model = PadGridModel(typing: MusicalTypingController(), zones: { [] },
+                                 targetName: { "Drums" },
+                                 instrument: { Self.w48DrumMachine(.gm) })
+        #expect(model.pads[3].chokeLink?.partners == ["Closed Hat"])
+    }
+
+    // MARK: A kit-sorted chop: role labels and the hats' link
+
+    fileprivate func w48KitZone(_ note: Int, role: DrumVoice?, choke: Int? = nil) -> SamplerZone {
+        SamplerZone(audioFileURL: URL(fileURLWithPath: "/tmp/Loop.wav"),
+                    rootPitch: note, minPitch: note, maxPitch: note,
+                    startFrame: note * 1000, endFrame: note * 1000 + 900,
+                    chokeGroup: choke, drumRole: role)
+    }
+
+    @Test("⭐ a kit-sorted chop's pads say Kick / Snare / Closed Hat / Open Hat, and the hats link")
+    func w48SortedKitPadsShowRoles() {
+        // `KitSliceLayout`'s output shape: GM notes, hats in choke group 0.
+        let zones = [w48KitZone(42, role: .closedHat, choke: 0), w48KitZone(36, role: .kick),
+                     w48KitZone(38, role: .snare), w48KitZone(46, role: .openHat, choke: 0),
+                     w48KitZone(84, role: nil)]
+        let model = PadGridModel(typing: MusicalTypingController(), zones: { zones },
+                                 targetName: { "Loop kit" })
+        let pads = model.pads                                   // base 36, bank A
+        #expect(pads[0].drumLabel == "Kick")
+        #expect(pads[2].drumLabel == "Snare")
+        #expect(pads[6].drumLabel == "Closed Hat")
+        #expect(pads[10].drumLabel == "Open Hat")
+        #expect(pads[1].drumLabel == nil && !pads[1].isLoaded, "37 holds nothing")
+        // The slice number is still there for the tooltip: ordinals by pitch.
+        #expect(pads[0].sliceOrdinal == 1)
+        // The hats link to each other, named by role.
+        #expect(pads[6].chokeLink?.partners == ["Open Hat"])
+        #expect(pads[10].chokeLink?.partners == ["Closed Hat"])
+        #expect(pads.filter { $0.chokeLink != nil }.map(\.id) == [6, 10])
+        // Bank D holds the hit it could not name.
+        model.setBank(3)
+        #expect(model.pads[0].pitch == 84)
+        #expect(model.pads[0].drumLabel == "Other")
+        // It stays a SAMPLER: the drum-machine branch is not taken.
+        #expect(model.isDrumMachine == false)
+        #expect(model.loadedNoun == "slices loaded")
+    }
+
+    @Test("a PLAIN chop draws exactly what it drew before: no drum names, no links")
+    func w48PlainChopIsUnchanged() {
+        let zones = (0..<20).map { zone(36 + $0, start: $0 * 1000) }
+        let model = PadGridModel(typing: MusicalTypingController(), zones: { zones },
+                                 targetName: { "Vocal chops" })
+        #expect(model.pads.allSatisfy { $0.drumLabel == nil && $0.chokeLink == nil })
+        #expect(model.pads.allSatisfy { !$0.isPastLastDrum })
+        #expect(model.pads.map(\.sliceOrdinal) == (1...16).map { Optional($0) })
+        // And the mouse plays the base-note sum through the controller's one
+        // home, at every pad of two banks.
+        let (controller, sink) = makePadController()
+        let grid = PadGridModel(typing: controller, zones: { zones }, targetName: { "Vocal chops" })
+        for bank in 0...1 {
+            grid.setBank(bank)
+            for index in PadGridGeometry.bankPadIndices {
+                grid.padDown(index: index, normalizedY: 0.5)
+                #expect(sink.last == [36 + bank * 16 + index], "bank \(bank) pad \(index)")
+                grid.padUp()
+            }
+        }
+    }
+
+    // MARK: The chop card's "Sort the hits into a drum kit"
+
+    /// ⛔ THE INVARIANCE PIN. With the box OFF, the card sends EXACTLY the
+    /// settings it sent before the box existed — written here as the literal
+    /// the old `settings()` built, mode by mode — so a chop made today is the
+    /// chop made yesterday (`mapping` absent = `.chromatic`, byte-identical by
+    /// m39-w4-6's C1 gate).
+    @Test("⛔ box OFF: the card sends the pre-toggle settings, byte for byte, in every mode")
+    func w48KitToggleOffIsTodaysChop() {
+        for mode in SliceBoundaryMode.allCases {
+            var chop = PadChopSettings()
+            chop.mode = mode
+            chop.baseNote = 48
+            let before = SliceToSamplerSettings(
+                mode: mode, sensitivity: 0.5,
+                divisions: mode == .divisions ? 16 : nil,
+                gridBeats: mode == .grid ? 0.25 : nil,
+                maxSlices: SliceToSamplerSettings.defaultMaxSlices,
+                includeHead: false, baseNote: 48, generateMIDI: true)
+            #expect(chop.sortIntoKit == false)
+            #expect(chop.settings() == before, "\(mode)")
+            #expect(chop.settings().mapping == .chromatic)
+            #expect(chop.baseNoteIsEffective && chop.baseNoteInertNote == nil)
+        }
+    }
+
+    @Test("⭐ box ON: the card sends mapping .kit (the wire's own shape) and dims Pad 1")
+    func w48KitToggleOnSendsKit() async {
+        var chop = PadChopSettings()
+        chop.baseNote = 48
+        chop.sortIntoKit = true
+        let sent = chop.settings()
+        #expect(sent.mapping == .kit)
+        #expect(sent.roleOverrides.isEmpty)
+        // The wire refuses `baseNote` with `kit`; the card sends the default
+        // instead of the slider, so its request equals an agent's
+        // `{mapping: "kit"}` — field for field.
+        #expect(sent.baseNote == SliceToSamplerSettings.defaultBaseNote)
+        #expect(sent == SliceToSamplerSettings(mode: .transients, divisions: nil, gridBeats: nil,
+                                               generateMIDI: true, mapping: .kit))
+        #expect(chop.baseNoteIsEffective == false)
+        let inert = chop.baseNoteInertNote ?? ""
+        #expect(!inert.isEmpty && inert.count <= 51)
+
+        // ⭐ AND IT REACHES THE CHOP ACTION — the app's is the store's
+        // `sliceClipToSampler`, the function the wire calls. The spy reports
+        // what it RECEIVED through the refusal channel (no captured state).
+        let model = PadGridModel(
+            typing: MusicalTypingController(), zones: { [] }, targetName: { "Break" },
+            selectedClip: {
+                PadChopSource(clipId: UUID(), clipName: "loop", trackId: UUID(),
+                              trackName: "Break", isMIDI: false, otherClipsOnTrack: 0)
+            },
+            chopAction: { _, settings, _ in
+                throw ProjectError.invalidClipEdit(
+                    "received mapping=\(settings.mapping.rawValue) base=\(settings.baseNote)")
+            })
+        model.chop.baseNote = 48
+        model.chop.sortIntoKit = true
+        #expect(await model.runChop() == false)
+        #expect(model.lastRefusal?.contains("received mapping=kit base=36") == true)
+        // Control: the box off sends chromatic, with the slider's note.
+        model.chop.sortIntoKit = false
+        #expect(await model.runChop() == false)
+        #expect(model.lastRefusal?.contains("received mapping=chromatic base=48") == true)
+    }
+
+    fileprivate func w48KitResult(firstPitch: Int, kitSummary: String?) -> SliceToSamplerResult {
+        let trackID = UUID()
+        return SliceToSamplerResult(
+            trackId: trackID, createdTrackId: trackID, midiClipId: nil,
+            sampleRate: 44_100, frameCount: 44_100, sliceCount: 2, headSeconds: 0,
+            slices: [SliceReport(index: 0, pitch: firstPitch, startFrame: 0, endFrame: 100,
+                                 sourceSeconds: 0, beat: 0, strength: 1,
+                                 snapOffsetFrames: 0, residualAmplitude: 0),
+                     SliceReport(index: 1, pitch: 36, startFrame: 100, endFrame: nil,
+                                 sourceSeconds: 0.01, beat: 0.5, strength: 1,
+                                 snapOffsetFrames: 0, residualAmplitude: 0)],
+            warnings: [], kitSummary: kitSummary)
+    }
+
+    fileprivate func w48ChoppingModel(_ result: SliceToSamplerResult) -> PadGridModel {
+        PadGridModel(
+            typing: MusicalTypingController(), zones: { [] }, targetName: { "Break" },
+            selectedClip: {
+                PadChopSource(clipId: UUID(), clipName: "loop", trackId: UUID(),
+                              trackName: "Break", isMIDI: false, otherClipsOnTrack: 0)
+            },
+            chopAction: { _, _, _ in result })
+    }
+
+    /// ⛔ A KIT's first slice in TIME is whatever hit came first — here a
+    /// closed hat on 42. Basing the grid there (the chromatic rule) would put a
+    /// hat on pad 1 and the kick out of reach.
+    @Test("⭐ a kit-sorted chop bases the grid on the KICK (36), not on its first slice")
+    func w48KitChopBasesOnTheKick() async {
+        let sentence = "Sorted into 1 kick and 1 closed hat."
+        let kit = w48ChoppingModel(w48KitResult(firstPitch: 42, kitSummary: sentence))
+        #expect(await kit.runChop())
+        #expect(kit.typing.padBaseNote == 36)
+        #expect(PadGridModel.kitGridBase == 36)
+        // The notice carries the store's sentence — what the chop DID.
+        #expect(kit.lastChop?.kitSummary == sentence)
+
+        // Control: the SAME result without `kitSummary` (a chromatic chop)
+        // keeps the shipped rule — the first slice's note.
+        let plain = w48ChoppingModel(w48KitResult(firstPitch: 42, kitSummary: nil))
+        #expect(await plain.runChop())
+        #expect(plain.typing.padBaseNote == 42)
+        #expect(plain.lastChop?.kitSummary == nil)
+    }
+
+    /// The kit sort's REAL refusal (built by `KitSliceLayout`, never
+    /// hand-copied) offers `mapping "chromatic"` as the way out. On this card
+    /// that way out is a box a person can see.
+    @Test("⭐ a kit refusal a PERSON reads names the box, not mapping \"chromatic\"")
+    func w48KitRefusalSpeaksTheUIVocabulary() async throws {
+        let clipID = UUID()
+        var thrown: Error?
+        do {
+            _ = try KitSliceLayout.notes(roles: Array(repeating: .other, count: 45),
+                                         loudness: Array(repeating: 1, count: 45), clipId: clipID)
+        } catch { thrown = error }
+        let refusal = try #require(thrown as? ProjectError)
+        let wireText = try #require(refusal.errorDescription)
+        // FIXTURE CONTROL: the wire really says it in its own words.
+        #expect(wireText.contains("mapping \"chromatic\""))
+        #expect(wireText.contains("maxSlices"))
+
+        let model = PadGridModel(
+            typing: MusicalTypingController(), zones: { [] }, targetName: { "Break" },
+            selectedClip: {
+                PadChopSource(clipId: clipID, clipName: "loop", trackId: UUID(),
+                              trackName: "Break", isMIDI: false, otherClipsOnTrack: 0)
+            },
+            chopAction: { _, _, _ in throw refusal })
+        model.chop.sortIntoKit = true
+        #expect(await model.runChop() == false)
+        let human = try #require(model.lastRefusalForHumans)
+        #expect(human.contains("“\(PadChopSettings.sortIntoKitLabel)” turned off"))
+        #expect(human.contains("“Most pads to make”"))
+        #expect(!human.contains("mapping"))
+        #expect(!human.contains("maxSlices"))
+        #expect(human.contains("45") && human.contains("127"), "the numbers survive")
+        // ⛔ The wire's copy is untouched.
+        #expect(model.lastRefusal == wireText)
+    }
+}

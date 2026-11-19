@@ -3,12 +3,17 @@
 It calls upstream's OWN functions, unchanged, exactly as the spike's harness did (code/harness.py):
   * cli.inference.build_model(...) and load_config(...), loaded eagerly at start;
   * soulxsinger.utils.data_processor.DataProcessor(...).process(meta, wav_path) for the prompt and the target;
-  * model.infer(..., auto_shift=False, pitch_shift=0, n_steps, cfg, control="score", use_fp16=False), with
-    torch.manual_seed + torch.mps.manual_seed IMMEDIATELY before each call (the harness's seed_all()).
+  * model.infer(..., auto_shift=False, pitch_shift=0, n_steps, cfg, control=req.control, use_fp16=False), with
+    torch.manual_seed + torch.mps.manual_seed IMMEDIATELY before each call (the harness's seed_all()). req.control
+    is "score" for every request (a v1 request cannot set it; v2 accepts only "score" until item x10), so the call
+    is today's call, keyword for keyword (test P3 pins it with a spy).
 Around them it adds only what the design asks for (§2.4): the converter (singlib.score), the output assembly of
 cli/inference.py process() (a zero buffer of int(time[1]/1000*24000) samples, the model's output copied over
 min(len)), a NaN/Inf check BEFORE writing, soxr VHQ to outputSampleRate, a float32 WAV (singlib.wavio), and
 torch.mps.empty_cache() after each unit with the driver's memory reported.
+facadeVersion 2 (design 2026-10-06 §7): Mandarin/Cantonese words go through singlib.phonemes.Lexicon, whose libraries
+are imported on the first request that needs them; a v2 reply adds "control", and "substitutions" when a tone was
+substituted. /health adds "capabilities" and keeps "facadeVersion": 1.
 
 NO pitch shifting here, ever: `auto_shift=False, pitch_shift=0` are hard-coded. Upstream's pitch_shift is added
 after the prompt and target pitches are concatenated, so it would move the PROMPT's labels too (design §2.4).
@@ -23,6 +28,7 @@ Layout it reads, under the runtime directory (design §2.3):
 """
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -31,11 +37,18 @@ import time
 import uuid
 from collections import OrderedDict
 
-from . import schema, score, wavio
+from . import langs, schema, score, wavio
 from .refusals import Refusal, first_line
 
 PROMPT_CACHE = 4
 SR = score.SAMPLE_RATE
+LANG_MODULES = (("zh", "g2pM"), ("yue", "ToJyutping"))   # found (never imported) at start, for capabilities
+
+
+def sung_languages():
+    """English, plus each Chinese language whose library this interpreter can find. find_spec locates the module
+    without importing it, so an English-only process still never loads g2pM or ToJyutping (test P8)."""
+    return ["en"] + [lang for lang, mod in LANG_MODULES if importlib.util.find_spec(mod) is not None]
 
 
 def upstream_commit(upstream_dir):
@@ -73,6 +86,8 @@ class SoulXBackend(object):
         self.ffmpeg_major = None
         self._prompts = OrderedDict()
         self._commit = upstream_commit(self.upstream)
+        self.languages = sung_languages()
+        self.lexicon = None
         try:
             self._weights_bytes = os.stat(self.model_path).st_size
         except OSError:
@@ -91,7 +106,13 @@ class SoulXBackend(object):
              "mpsDriverBytes": self.mps_driver_bytes, "rendered": self.rendered, "ffmpegMajor": self.ffmpeg_major}
         if self._error:
             h["error"] = self._error
+        h["capabilities"] = self.capabilities()
         return h
+
+    def capabilities(self):
+        """What a request may use (design 2026-10-06 §7.5). "melody" appears only with item x10."""
+        return {"facadeVersions": list(schema.FACADE_VERSIONS), "controls": list(schema.CONTROLS),
+                "languages": list(self.languages)}
 
     # ------------------------------------------------------------------ load (eager, in a background thread)
 
@@ -136,7 +157,7 @@ class SoulXBackend(object):
                                "which needs FFmpeg 4-8): %s" % first_line(e))
         import cli.inference as ci                    # upstream, unmodified
         from soulxsinger.utils.data_processor import DataProcessor
-        from .phonemes import G2PPhonemizer
+        from .phonemes import G2PPhonemizer, Lexicon
         config = ci.load_config(self.config_path)
         model = ci.build_model(model_path=self.model_path, config=config, device=self.device, use_fp16=False)
         self.torch = torch
@@ -147,6 +168,7 @@ class SoulXBackend(object):
         with open(self.phoneset_path, "r", encoding="utf-8") as f:
             self.phoneset = frozenset(json.load(f))
         self.phonemize = G2PPhonemizer(self.nltk_dir)
+        self.lexicon = Lexicon()          # builds nothing yet: g2pM / ToJyutping load on their first word
         self._sync()
         self._note_memory()
 
@@ -246,16 +268,22 @@ class SoulXBackend(object):
         import numpy as np
         torch = self.torch
         t_all = time.time()
+        missing = sorted(set(req.word_langs) - set(self.languages))
+        if missing:
+            raise Refusal("languageNotSupported", "This singing engine cannot sing %s: its %s library is not "
+                          "installed." % (", ".join(langs.NAME.get(m, m) for m in missing), ", ".join(
+                              mod for lang, mod in LANG_MODULES if lang in missing)))
         prompt_item, vfacts = self._prompt(req)
         meta, info = score.build_meta(req.notes, req.words, lead=req.lead, trail=req.trail,
-                                      phonemize=self.phonemize, phoneset=self.phoneset)
+                                      phonemize=self.phonemize, phoneset=self.phoneset,
+                                      langs=req.word_langs, lexicon=self.lexicon)
         target_item = self.dp.process(copy.deepcopy(meta), None)     # process() mutates its dict
         self._seed(req.seed)
         self._sync()
         t0 = time.perf_counter()
         with torch.no_grad():
             out = self.model.infer({"prompt": prompt_item, "target": target_item}, auto_shift=False, pitch_shift=0,
-                                   n_steps=req.n_steps, cfg=req.cfg, control="score", use_fp16=False)
+                                   n_steps=req.n_steps, cfg=req.cfg, control=req.control, use_fp16=False)
         self._sync()
         audio = out.detach().float().cpu().reshape(-1).numpy()
         infer_s = time.perf_counter() - t0
@@ -285,7 +313,7 @@ class SoulXBackend(object):
             self._note_memory()
         self.rendered += 1
         data = blob[-y.shape[0] * 4:] if y.shape[0] else b""
-        return {
+        reply = {
             "outputPath": req.output_path, "sampleRate": req.out_sr, "channels": 1, "frames": int(y.shape[0]),
             "durationS": round(y.shape[0] / float(req.out_sr), 6),
             "peak": float(np.max(np.abs(y))) if y.size else 0.0,
@@ -299,3 +327,8 @@ class SoulXBackend(object):
             "totalSeconds": round(time.time() - t_all, 4), "mpsDriverBytes": self.mps_driver_bytes,
             "targetMeta": meta,
         }
+        if req.facade_version >= 2:          # a v1 reply keeps exactly today's keys
+            reply["control"] = req.control
+            if info["substitutions"]:
+                reply["substitutions"] = info["substitutions"]
+        return reply

@@ -281,13 +281,19 @@ struct SketchpadView: View {
     }
 
     /// The instant, keyless fallback beside GENERATE — subordinate (neutral, not
-    /// violet: a song SCAFFOLD is not AI-generated audio) and quieter. Applies a
-    /// default-genre `applySongSkeleton`, which flips the project to having content
-    /// (so the onboarding `generate` step advances via `projectGainedContent`) with
-    /// no wait and no key. The Sketchpad lives in the Arrange workspace, so the new
-    /// tracks land in view beside the panel.
+    /// violet: a song SCAFFOLD is not AI-generated audio) and quieter.
+    ///
+    /// m39-tpl-8 (design §9.1): it OPENS THE TEMPLATE PICKER with Pop Band
+    /// selected, so one press of Return still starts a pop song — now with the
+    /// Pop Band's sound — through `applySongSkeleton(genre:template:)`, the call
+    /// `macro.songSkeleton {genre, template}` makes. That flips the project to
+    /// having content (the "Arrangement" guide clips), so the onboarding
+    /// `generate` step still advances via `projectGainedContent`. It used to call
+    /// `applySongSkeleton(genre: "pop")` directly under a `try?`, which hid every
+    /// refusal; the picker shows the store's own sentence instead. The Sketchpad
+    /// lives in the Arrange workspace, so the new tracks land in view beside it.
     private var templateButton: some View {
-        Button { _ = try? app.store.applySongSkeleton(genre: "pop") } label: {
+        Button { app.openTemplatePicker() } label: {
             HStack(spacing: 6) {
                 Image(systemName: "square.stack.3d.up.fill")
                     .font(.system(size: 9, weight: .bold))
@@ -303,7 +309,7 @@ struct SketchpadView: View {
             .overlay(RoundedRectangle(cornerRadius: 7).stroke(DAWTheme.hairline, lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Start instantly from a template — no waiting, no key needed")
+        .help("Start from a band template — no waiting, no key needed")
     }
 
     // MARK: - Candidates

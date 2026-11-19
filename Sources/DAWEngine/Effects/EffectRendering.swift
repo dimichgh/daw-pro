@@ -352,6 +352,52 @@ protocol EffectRendering: AnyObject {
     ///                 (`CompressorEffect.swift:252-255`)
     ///   audioUnit     default no-op below (empty spec surface in v0)
     func storeAutomatedParam(slot: Int, value: Double)
+
+    /// m39-d CR-1 (`docs/design/2026-10-07-effect-control-rate.md` §5.3): the
+    /// RENDER-THREAD HOLD. On a strip that runs on the control grid
+    /// (`AutomationRenderer.renderChain`), automated params are stored ONCE
+    /// per 512-frame cell, at the cell line; every later render call inside
+    /// the same cell calls this instead, to say "the values stored at this
+    /// cell's entry still stand". Built-ins answer
+    /// `adoptPendingParams(); return overlay.hold()`.
+    ///
+    /// Returns false when a main-actor knob publish was adopted since the last
+    /// store (the overlay's `effective` was wiped by `rebase`): the renderer
+    /// then RE-ENTERS the cell for this unit (stores again, evaluated at the
+    /// same cell line), so a knob turn on an automated effect costs one call,
+    /// as it did before the grid. Unit with no automation: never called.
+    ///
+    /// ⛔ REQUIRED, WITH NO DEFAULT IMPLEMENTATION, DELIBERATELY. A default
+    /// would let a kind that forgot it revert to its knobs on 7 of every 8
+    /// calls at a 64-frame buffer (`AutomationParamOverlay.endQuantum` reverts
+    /// any quantum with no store): a 93.75 Hz chatter that fails silently.
+    /// The compiler is the cheapest guard; G4 is the runtime one.
+    /// Same RT contract as `process`: no allocation, no lock, no ObjC.
+    func holdAutomatedParams() -> Bool
+
+    /// m39-d CR-2 (design §5.4): CONTROL-CELL GEOMETRY. On a strip that runs
+    /// on the grid the renderer calls this on EVERY unit of the chain before
+    /// EVERY segment it walks (a cell entry, a hold, a split's continuation):
+    /// `frames` is the number of frames from the start of the next `process`
+    /// call to the next cell line, capped at the offline render's end
+    /// (`AutomationSchedule.renderEndFrame`). A unit off the grid never hears
+    /// it, and a unit whose last geometry has run out is off the grid again.
+    ///
+    /// The ten kinds whose de-zipper ramp used to be as long as the render
+    /// call (flanger, djFilter, ringMod, hallReverb, tapeDelay, stereoWidth,
+    /// phaser, transientShaper, freqShifter, clipper) ramp a new value over the
+    /// rest of the CELL instead, carrying progress across calls; the three
+    /// with a 32-frame coefficient stride (phaser, djFilter, ringMod) count
+    /// that stride from the cell line too. In a 512 bounce the cell IS the
+    /// call, so the arithmetic is today's expression, run the same number of
+    /// times (G1 byte gate). Every other kind implements it as an explicit
+    /// no-op with a one-line reason.
+    ///
+    /// ⛔ REQUIRED, WITH NO DEFAULT, for the same reason as the hold. Called on
+    /// every unit, not only the automated ones, because a coefficient stride
+    /// on an UNAUTOMATED phaser is still cut by the split of a strip that
+    /// splits for another effect (W9-CR12, CR-0's Phaser finding).
+    func beginControlCell(frames: Int)
 }
 
 extension EffectRendering {
@@ -393,6 +439,12 @@ protocol KeyableEffectRendering: EffectRendering {
 ///    when the LAST lane vanished (schedule republished without this effect,
 ///    or transport stopped): the effect re-derives from `base`, restoring the
 ///    knob values with no main-actor republish needed.
+///  · `hold()` (m39-d CR-1) INSTEAD of stores on a call inside a control cell
+///    whose values were stored at its entry: it marks the quantum stored, so
+///    `endQuantum` keeps `effective`, and returns false when a `rebase` wiped
+///    `effective` since the last store, or when nothing stored is in force
+///    (`endQuantum` reverted to the knobs, or nothing was ever stored): the
+///    renderer then re-stores (m39-d-cr12-hold).
 struct AutomationParamOverlay<Params> {
     /// Last MAIN-ACTOR-published params (the knobs).
     private(set) var base: Params
@@ -400,6 +452,9 @@ struct AutomationParamOverlay<Params> {
     var effective: Params
     private var storedThisQuantum = false
     private var active = false
+    /// m39-d CR-1: a main-actor publish was adopted after the last store, so
+    /// `effective` holds the knobs, not the cell's automated values.
+    private var rebasedSinceStore = false
 
     init(base: Params) {
         self.base = base
@@ -409,12 +464,28 @@ struct AutomationParamOverlay<Params> {
     mutating func rebase(_ params: Params) {
         base = params
         effective = params
+        rebasedSinceStore = true
     }
 
     mutating func beginStore() {
         if !storedThisQuantum { effective = base }
         storedThisQuantum = true
         active = true
+        rebasedSinceStore = false
+    }
+
+    /// m39-d CR-1 (design §5.3): the values stored at this cell's entry still
+    /// stand for this quantum. False = they do not (a `rebase` since the last
+    /// store, or `!active`: `endQuantum` reverted a quantum that had neither a
+    /// store nor a hold, so `effective` holds the knobs, or nothing was ever
+    /// stored), and nothing is marked: the caller must store again. Without
+    /// the `!active` arm a hold after a revert would keep the KNOBS for the
+    /// rest of the cell (RT2 review Q2-c, m39-d-cr12-hold). A 512 bounce never
+    /// holds (every call is a cell entry), so no bounce can move.
+    mutating func hold() -> Bool {
+        if rebasedSinceStore || !active { return false }
+        storedThisQuantum = true
+        return true
     }
 
     mutating func endQuantum() -> Bool {

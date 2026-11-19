@@ -772,4 +772,70 @@ struct PitchTransitionTests {
         #expect(reach == plain.noteDragReach(ofSegmentAt: 1) && reach != plain.wholeVocalDragReach(),
                 "only the dragged note bends, so the note's own reach, not the whole vocal")
     }
+
+    // MARK: - vf-18 (W9-SLFX) T13: the drag's reach under the HOLD rule
+
+    /// vf-18 (design `$S/w9/SLRV/REVIEW.md` §3.3, §6 T13): under the hold
+    /// rule a followed slide reads only HELD neighbours and copies one across
+    /// an open side, so a drag of a held note moves a one-sided slide next to
+    /// it WHOLE and can widen the join between two adjacent followed slides.
+    /// REVIEW §3.3 argues `noteDragReach` already holds both (a followed
+    /// neighbour already reaches its whole length; the slide|slide join's
+    /// half is at most half the slide); this spy gate checks it: one-sided
+    /// slides beside moved notes, adjacent followed slides, 300 seeded soft
+    /// sets half of them on the hold rule, and legacy sets a drag SWITCHES to
+    /// hold (adoption, `afterHandEdit(from:)`). Every changed sample must lie
+    /// inside `pitchDragReach` of the set the drag starts from.
+    @Test("drag reach (vf-18 T13): on HOLD-rule sets (one-sided slides, adjacent followed slides) and on sets a drag switches to hold, every change a one-note drag makes lies inside pitchDragReach")
+    func dragReachOnHoldRuleSets() throws {
+        var rng = PitchSpanSearchTests.Rng(state: 0x0F18_2026_1012_7713)
+        var tally = DragReachTally()
+        func newSet(_ notes: [NoteSegment], rule: PitchEditSet.SlideFollowRule) -> PitchEditSet {
+            PitchEditSet(segments: notes, formantCorrection: 1, keepsConsonantsUntuned: true,
+                         transitionSlopeCentsPerSecond: 3000, slideFollowRule: rule)
+        }
+        let named: [PitchEditSet] = [
+            // A one-sided tail-off beside a moved note, and a lead-in into one.
+            newSet([Self.note(0.5, 1.0, cents: 300), Self.note(1.0, 1.2, cents: 50, follow: 1, origin: .transition),
+                    Self.note(1.4, 2.0, cents: -200)], rule: .holdAtOpenSide),
+            newSet([Self.note(0.3, 0.8, cents: -150), Self.note(1.0, 1.15, follow: 1, origin: .transition),
+                    Self.note(1.15, 1.9, cents: 400), Self.note(1.9, 2.4, cents: 100)], rule: .holdAtOpenSide),
+            // Adjacent followed slides (a split slide), full and partial follow.
+            newSet([Self.note(0.5, 1.0, cents: 300), Self.note(1.0, 1.1, cents: 100, follow: 1, origin: .transition),
+                    Self.note(1.1, 1.2, cents: -50, follow: 0.5, origin: .transition),
+                    Self.note(1.2, 2.0, cents: -200)], rule: .holdAtOpenSide),
+            // The same shapes at zero on the LEGACY rule: inert, so a drag adopts hold.
+            newSet([Self.note(0.5, 1.0), Self.note(1.0, 1.2, follow: 1, origin: .transition), Self.note(1.4, 2.0)],
+                   rule: .sungAtOpenSide),
+            newSet([Self.note(0.5, 1.0), Self.note(1.0, 1.1, follow: 1, origin: .transition),
+                    Self.note(1.1, 1.2, follow: 1, origin: .transition), Self.note(1.2, 2.0)], rule: .sungAtOpenSide),
+        ]
+        var adoptions = 0
+        var holdDrags = 0
+        for fixture in named {
+            for index in fixture.segments.indices {
+                let moved = try Self.drag(fixture, noteAt: index, &rng)
+                if moved.slideFollowRule == .holdAtOpenSide { holdDrags += 1 }
+                if fixture.slideFollowRule != moved.slideFollowRule { adoptions += 1 }
+                try Self.checkReach(from: fixture, noteAt: index, to: moved, isSecondDrag: false, &tally)
+            }
+        }
+        for _ in 0..<300 {
+            var fixture = PitchSpanSearchTests.randomSoftFixture(&rng).set
+            guard !fixture.segments.isEmpty else { continue }
+            if rng.chance(0.5) { fixture.slideFollowRule = .holdAtOpenSide }
+            let index = Int(rng.next() % UInt64(fixture.segments.count))
+            let moved = try Self.drag(fixture, noteAt: index, &rng)
+            if moved.slideFollowRule == .holdAtOpenSide { holdDrags += 1 }
+            if fixture.slideFollowRule != moved.slideFollowRule { adoptions += 1 }
+            try Self.checkReach(from: fixture, noteAt: index, to: moved, isSecondDrag: false, &tally)
+        }
+        Self.log("T13 hold reach: \(tally.changedPoints) changed samples, \(tally.escapes) outside the reach; "
+                 + "\(holdDrags) drags storing the hold rule, \(adoptions) of them switching to it")
+        #expect(tally.changedPoints > 1000 && holdDrags > 100 && adoptions > 5,
+                "positive control: the fuzz holds hold-rule drags and adoptions")
+        #expect(tally.escapes == 0, "a drag changed the curve outside its reach: \(tally.example)")
+        #expect(tally.notWholeVocal.isEmpty && tally.notNoteOwn.isEmpty,
+                "\(tally.notWholeVocal.prefix(2)) \(tally.notNoteOwn.prefix(2))")
+    }
 }

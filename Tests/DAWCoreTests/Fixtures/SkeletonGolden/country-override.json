@@ -418,7 +418,7 @@
       "id" : "UUID-031",
       "isAIGenerated" : false,
       "isArmed" : false,
-      "isMuted" : false,
+      "isMuted" : true,
       "isSoloed" : false,
       "kind" : "instrument",
       "name" : "Arrangement",

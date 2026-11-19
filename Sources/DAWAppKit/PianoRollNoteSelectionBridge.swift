@@ -472,4 +472,30 @@ public final class PianoRollNoteSelectionBridge {
 
     /// Ask the roll to SELECT ALL of its notes.
     public func requestSelectAll() { selectAllNonce += 1 }
+
+    // MARK: - The WORDS lane (p2-sing-pr-words, design 2026-10-12 §2.5)
+
+    /// REPORTED BY THE ROLL. True while its Words lane is on screen WITH WORDS TO TYPE ON — shown, and not in its
+    /// empty state (no stored words: the field cannot open there, and a Return swallowed for nothing is a key that
+    /// did nothing). The second fact the key monitor's Return route reads (`WordFieldKeyMonitorRouting.route`), beside
+    /// `hasSelection`; reported from `.onChange(of:initial:)`, never from `body`, for `hasSelection`'s reason.
+    ///
+    /// ⚠️ `clear()` DOES NOT RESET IT, ON PURPOSE. On a clip switch the outgoing roll's `.onDisappear` and the incoming
+    /// roll's `initial: true` report race in either order (this file's header, MEASURED one flag over). A reset there
+    /// that ran SECOND would latch `false` under a lane that IS shown — and the lane's visibility does not change
+    /// again, so Return would stay dead until the user toggled the lane. Latched `true` is harmless by construction:
+    /// the route also needs `hasSelection` (which `clear()` does reset and only a live roll sets) and an OPEN roll.
+    public private(set) var wordsShown = false
+
+    /// ASKED OF THE ROLL by the app's key monitor: Return was pressed with notes selected and the lane shown — open
+    /// the word field on your earliest selected melody note (`PianoRollWordsModel.openField(selection:)`, with the
+    /// roll's LIVE selection). A SIXTH NONCE, for `deleteNonce`'s reason: one number, one meaning. Carries no payload:
+    /// WHICH note is the roll's own selection's answer. Inert with no roll mounted (`.onChange` without `initial:`).
+    public private(set) var wordFieldNonce = 0
+
+    /// The roll's report. Idempotent — the view calls it with `initial: true`.
+    public func reportWordsShown(_ shown: Bool) { wordsShown = shown }
+
+    /// THE KEY MONITOR HANDED THE ROLL A RETURN (p2-sing-pr-words).
+    public func requestWordField() { wordFieldNonce &+= 1 }
 }

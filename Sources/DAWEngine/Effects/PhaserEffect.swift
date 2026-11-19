@@ -286,6 +286,16 @@ final class PhaserEffect: EffectRendering, @unchecked Sendable {
         feedbackStateR = 0
         phase = 0
         needsPrime = true
+        // m39-d CR-2: a reset drops the ramp and the coefficient block in flight
+        // (`needsPrime` re-seats both); the cell geometry is the renderer's.
+        rampFramesLeft = 0
+        rampIncrementDelta = 0
+        rampCenterDelta = 0
+        rampDepthDelta = 0
+        rampFeedbackDelta = 0
+        rampMixDelta = 0
+        rampOffsetDelta = 0
+        blockFramesLeft = 0
     }
 
     /// A bounded store over memory that was allocated in `init` — no allocation,
@@ -346,6 +356,7 @@ final class PhaserEffect: EffectRendering, @unchecked Sendable {
             stageCount = snapped
             clearSections()
         }
+        rampPending = true  // m39-d CR-2: the next `process` starts a ramp
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
@@ -367,6 +378,59 @@ final class PhaserEffect: EffectRendering, @unchecked Sendable {
         default: overlay.effective.stereoPhaseDeg = value
         }
         deriveRenderParams(overlay.effective)
+    }
+
+    // MARK: - m39-d CR-2: the control cell (docs/design/2026-10-07-effect-control-rate.md §5.4)
+    //
+    // Render-thread only. A ramp starts in the `process` call after a derive
+    // (`rampPending`). On the control grid (`cellFramesLeft` covers the whole
+    // call) it spans the REST OF THE CELL and carries across calls; off it,
+    // it spans the call, exactly as before the grid. A ramp in flight that
+    // would end INSIDE a call is re-spanned over that call, so no ramp ever
+    // ends mid-call and the per-sample loop is untouched. In a 512 bounce the
+    // cell is the call: the same delta expression, run the same number of
+    // times (G1 byte gate).
+    /// Frames from the next `process` call to the next control-cell line
+    /// (0 = off the grid). Set by `beginControlCell`, counted down here.
+    private var cellFramesLeft = 0
+    /// Frames left in the ramp in flight (0 = values sit at their targets).
+    private var rampFramesLeft = 0
+    /// A derive landed since the ramp in flight began.
+    private var rampPending = false
+    /// The ramp in flight's per-frame steps (carried across calls; 0 at rest).
+    private var rampIncrementDelta = 0.0
+    private var rampCenterDelta = 0.0
+    private var rampDepthDelta = 0.0
+    private var rampFeedbackDelta = 0.0
+    private var rampMixDelta = 0.0
+    private var rampOffsetDelta = 0.0
+    /// The 32-frame coefficient block in flight (W9-CR12, CR-0's Phaser
+    /// finding): frames left in it, and its per-sample steps and end targets.
+    /// On the grid a block never crosses a cell line and a block that a call
+    /// ends inside CARRIES into the next call, so the stride is counted from
+    /// the cell line and a split cannot move a block boundary.
+    private var blockFramesLeft = 0
+    private var blockStepL = 0.0
+    private var blockStepR = 0.0
+    private var blockTargetL = 0.0
+    private var blockTargetR = 0.0
+
+    /// m39-d CR-1 (design §5.3): the automated values stored at this control
+    /// cell's entry still stand. Adopt FIRST, so a knob publish waiting in the
+    /// slot is seen now, as a store would see it (then `overlay.hold()`
+    /// answers false and the renderer re-stores). Render thread; no allocation.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): the ramp toward a new value spans the
+    /// rest of the cell (`frames`), carried across calls, and the 32-frame
+    /// coefficient stride counts from the cell line, so a split call renders the
+    /// same samples as the unsplit bounce. (Called on an unautomated phaser too:
+    /// its LFO moves the coefficient every block whether or not a lane does.)
+    func beginControlCell(frames: Int) {
+        cellFramesLeft = max(0, frames)
     }
 
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
@@ -412,16 +476,38 @@ final class PhaserEffect: EffectRendering, @unchecked Sendable {
         guard channelCount > 0, minFrames > 0, let left = channelData[0] else { return }
         let right = channelCount > 1 ? channelData[1] : nil
 
-        let span = Double(minFrames)
-        let incrementDelta = (targetIncrement - previousIncrement) / span
-        let centerDelta = (targetCenterHz - previousCenterHz) / span
-        let depthDelta = (targetDepthOctaves - previousDepthOctaves) / span
-        let feedbackDelta = (targetFeedback - previousFeedback) / span
-        let mixDelta = (targetMix - previousMix) / span
-        let offsetDelta = (targetOffset - previousOffset) / span
+        // m39-d CR-2: start (or re-span) the ramp — see the MARK above. The
+        // delta expressions are the pre-grid ones, verbatim.
+        if rampPending || (rampFramesLeft > 0 && rampFramesLeft < minFrames) {
+            rampPending = false
+            let rampFrames = cellFramesLeft >= minFrames ? cellFramesLeft : minFrames
+            let span = Double(rampFrames)
+            rampIncrementDelta = (targetIncrement - previousIncrement) / span
+            rampCenterDelta = (targetCenterHz - previousCenterHz) / span
+            rampDepthDelta = (targetDepthOctaves - previousDepthOctaves) / span
+            rampFeedbackDelta = (targetFeedback - previousFeedback) / span
+            rampMixDelta = (targetMix - previousMix) / span
+            rampOffsetDelta = (targetOffset - previousOffset) / span
+            rampFramesLeft = rampFrames
+        }
+        let incrementDelta = rampIncrementDelta
+        let centerDelta = rampCenterDelta
+        let depthDelta = rampDepthDelta
+        let feedbackDelta = rampFeedbackDelta
+        let mixDelta = rampMixDelta
+        let offsetDelta = rampOffsetDelta
         let denormalFloor = Self.denormalFloor
         let sections = stageCount
         let rightBase = Self.maxStages
+        // m39-d CR-2: on the grid a block is capped at the CELL's end (and may
+        // carry into the next call); off it, at the CALL's end, as before. In a
+        // 512 bounce the two are the same frame.
+        let onGrid = cellFramesLeft >= minFrames
+        var blockLeft = blockFramesLeft
+        var aStepL = blockStepL
+        var aStepR = blockStepR
+        var targetA = blockTargetL
+        var targetAR = blockTargetR
 
         var increment = previousIncrement
         var centerHz = previousCenterHz
@@ -441,28 +527,32 @@ final class PhaserEffect: EffectRendering, @unchecked Sendable {
         // allocation gates can assert an absolute zero.
         var frame = 0
         while frame < minFrames {
-            var blockEnd = frame + Self.coefficientStride
+            if blockLeft == 0 {
+                let regionLeft = onGrid ? cellFramesLeft - frame : minFrames - frame
+                let blockLength = regionLeft < Self.coefficientStride
+                    ? regionLeft : Self.coefficientStride
+
+                // ONE `tan` per channel per 32-frame block (§6.0.6's frozen
+                // stride), evaluated at the LFO phase the block will END on, then
+                // interpolated per sample from where the last block left off — so
+                // the cadence is cheap AND there is no step at the boundary.
+                let blockEndPhase = lfo + increment * Double(blockLength)
+                targetA = PhaserParams.allpassCoefficient(
+                    cornerHz: PhaserParams.sweptCornerHz(
+                        phaseRadians: blockEndPhase, centerHz: centerHz,
+                        depthOctaves: depthOctaves),
+                    sampleRate: sampleRate)
+                aStepL = (targetA - aL) / Double(blockLength)
+                targetAR = PhaserParams.allpassCoefficient(
+                    cornerHz: PhaserParams.sweptCornerHz(
+                        phaseRadians: blockEndPhase + offset, centerHz: centerHz,
+                        depthOctaves: depthOctaves),
+                    sampleRate: sampleRate)
+                aStepR = (targetAR - aR) / Double(blockLength)
+                blockLeft = blockLength
+            }
+            var blockEnd = frame + blockLeft
             if blockEnd > minFrames { blockEnd = minFrames }
-            let blockLength = blockEnd - frame
-
-            // ONE `tan` per channel per 32-frame block (§6.0.6's frozen
-            // stride), evaluated at the LFO phase the block will END on, then
-            // interpolated per sample from where the last block left off — so
-            // the cadence is cheap AND there is no step at the boundary.
-            let blockEndPhase = lfo + increment * Double(blockLength)
-            let targetA = PhaserParams.allpassCoefficient(
-                cornerHz: PhaserParams.sweptCornerHz(
-                    phaseRadians: blockEndPhase, centerHz: centerHz,
-                    depthOctaves: depthOctaves),
-                sampleRate: sampleRate)
-            let aStepL = (targetA - aL) / Double(blockLength)
-            let targetAR = PhaserParams.allpassCoefficient(
-                cornerHz: PhaserParams.sweptCornerHz(
-                    phaseRadians: blockEndPhase + offset, centerHz: centerHz,
-                    depthOctaves: depthOctaves),
-                sampleRate: sampleRate)
-            let aStepR = (targetAR - aR) / Double(blockLength)
-
             var index = frame
             while index < blockEnd {
                 let dryL = left[index]
@@ -537,12 +627,15 @@ final class PhaserEffect: EffectRendering, @unchecked Sendable {
                 aR += aStepR
                 index += 1
             }
-            // SNAPPED to this block's targets rather than left at whatever the
-            // accumulation landed on (the `StereoWidthEffect` rule): a
-            // coefficient that settled at 0.96148002 instead of 0.96148 would
-            // drift the notch positions by a hair, every block, forever.
-            aL = targetA
-            aR = targetAR
+            blockLeft -= blockEnd - frame
+            if blockLeft == 0 {
+                // SNAPPED to this block's targets rather than left at whatever the
+                // accumulation landed on (the `StereoWidthEffect` rule): a
+                // coefficient that settled at 0.96148002 instead of 0.96148 would
+                // drift the notch positions by a hair, every block, forever.
+                aL = targetA
+                aR = targetAR
+            }
             frame = blockEnd
         }
 
@@ -551,6 +644,32 @@ final class PhaserEffect: EffectRendering, @unchecked Sendable {
         feedbackStateR = fbR
         coefficientL = aL
         coefficientR = aR
+        blockFramesLeft = blockLeft
+        blockStepL = aStepL
+        blockStepR = aStepR
+        blockTargetL = targetA
+        blockTargetR = targetAR
+
+        // m39-d CR-2: a ramp still in flight carries what it reached; at the
+        // ramp's end the values are SNAPPED to their targets, exactly as every
+        // call end did before the grid (and still does off it).
+        rampFramesLeft = rampFramesLeft > minFrames ? rampFramesLeft - minFrames : 0
+        cellFramesLeft = cellFramesLeft > minFrames ? cellFramesLeft - minFrames : 0
+        if rampFramesLeft > 0 {
+            previousIncrement = increment
+            previousCenterHz = centerHz
+            previousDepthOctaves = depthOctaves
+            previousFeedback = feedback
+            previousMix = mix
+            previousOffset = offset
+            return
+        }
+        rampIncrementDelta = 0
+        rampCenterDelta = 0
+        rampDepthDelta = 0
+        rampFeedbackDelta = 0
+        rampMixDelta = 0
+        rampOffsetDelta = 0
 
         previousIncrement = targetIncrement
         previousCenterHz = targetCenterHz

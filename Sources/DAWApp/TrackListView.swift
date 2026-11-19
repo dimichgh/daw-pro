@@ -11,6 +11,8 @@ import DAWAppKit
 /// in sync. Carries the shared `.arrangeAddTrack` Explain entry.
 struct AddTrackMenu<ChipLabel: View>: View {
     @Environment(ProjectStore.self) private var store
+    /// m39-tpl-8: the template picker lives on the app model.
+    @Environment(AppModel.self) private var app
     @ViewBuilder var label: () -> ChipLabel
 
     var body: some View {
@@ -24,6 +26,14 @@ struct AddTrackMenu<ChipLabel: View>: View {
             Button {
                 store.addTrack(kind: .bus)
             } label: { Label("Bus Track", systemImage: "arrow.triangle.merge") }
+            // m39-tpl-8 (design §9.1): a whole band at once, through the picker.
+            // NO key equivalent, on purpose: an unbundled staging binary cannot
+            // receive one (m23-g1), so it could only be verified by hand, and a
+            // menu item's key is checked before text insertion (the m17-d trap).
+            Divider()
+            Button {
+                app.openTemplatePicker()
+            } label: { Label(TemplatePickerCopy.addBandMenuItem, systemImage: "square.stack.3d.up") }
         } label: {
             label()
         }
@@ -764,15 +774,43 @@ struct TrackRow: View {
             model.toggleAutomation(track.id)
         case .bounceInPlace:
             // Both densities (a plain action, no advanced-control split). Lands
-            // a new audio track + clip in one undo step; refused states fail as
-            // safe no-ops, hence `try?`.
-            Task { try? await store.bounceTrackInPlace(trackId: track.id) }
+            // a new audio track + clip in one undo step. A REFUSAL IS SHOWN, in
+            // the store's own words (m39-render-pass-race-ui): this used to be
+            // `try?`, so a bounce that added nothing said nothing. The case that
+            // made it matter is New or Open pressed while the track renders —
+            // the store then refuses to land the bounce in either song
+            // (`bounceInPlaceSongChanged`) — but a song with no clips
+            // (`nothingToRender`) was swallowed the same way. The decision is
+            // the headless, tested `TrackHeaderMenuBounce.press`; this case
+            // only shows its answer, in Export MIDI's alert shape.
+            Task { @MainActor in
+                if let refusal = await TrackHeaderMenuBounce.press(store, trackID: track.id) {
+                    presentRefusal(refusal)
+                }
+            }
         case .exportMIDI:
             exportMIDI()
+        case .saveAsTemplate:
+            // m39-tpl-8: the Save as Template card with this track ticked; the
+            // store's `saveTemplate` (the `template.save` call) runs from there.
+            model.openSaveTrackAsTemplate(trackID: track.id)
         case .removeTrack:
             // m13-c: refused mid-recording (transportBusy) — safe no-op here.
             _ = try? store.removeTrack(id: track.id)
         }
+    }
+
+    /// Shows a refusal the STORE worded, verbatim, in the alert every menu
+    /// action in this app uses for one (`exportMIDI()` below,
+    /// `FileCommands.present(_:)`, `EditCommands.present(_:)`): the same title,
+    /// the store's sentence as the body. Bounce in Place's (m39-render-pass-race-ui).
+    @MainActor
+    private func presentRefusal(_ sentence: String) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Couldn't complete that"
+        alert.informativeText = sentence
+        alert.runModal()
     }
 
     /// "Export MIDI…" (m23-m3b): write THIS track out as a Standard MIDI File,

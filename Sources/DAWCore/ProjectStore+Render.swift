@@ -1,5 +1,31 @@
 import Foundation
 
+/// Every SONG-LEVEL input of an offline session render, read from the store in
+/// ONE main-actor turn (m39-render-pass-race). A multi-pass operation
+/// (`renderStems`, `bounceTrackInPlace`) captures this ONCE, beside its
+/// `tracksWithLiveAudioUnitState()` snapshot and before its first await, and
+/// every pass reads it. The main actor is free while the operation waits
+/// (compensation probe, each render, each loudness measure), so a New, an Open
+/// or a recovery can replace the song between two passes; a pass that re-read
+/// the store would render the rest of the export with the OTHER song's tempo,
+/// meter, master volume and master chain.
+///
+/// `projectGeneration` is the store's session counter at capture
+/// (`ProjectStore.projectGeneration`, bumped on every session replacement): a
+/// different value after an await means the song that was open is gone.
+struct SessionRenderInputs: Sendable {
+    let tempoMap: TempoMap
+    let meterMap: MeterMap
+    /// W9-PLRT R1: the pan rule rides as an input like the rest.
+    let panLaw: PanLaw
+    let masterVolume: Double
+    let masterEffects: [EffectDescriptor]
+    let masterAutomation: [AutomationLane]
+    let masterModulationSources: [ModulationSource]
+    let masterModulationRoutes: [ModulationRoute]
+    let projectGeneration: UInt64
+}
+
 /// Measured / loudness-normalized render store operations (M5 iv-b, spec
 /// §4.1–4.3). Everything here is OFFLINE policy over the engine's buffer
 /// seam (`renderOffline` / `writeAudioFile`) — DAWCore stays engine-free and
@@ -8,6 +34,22 @@ import Foundation
 /// live in extension files (ProjectStore.swift is 2.3k lines).
 @MainActor
 extension ProjectStore {
+
+    /// The song-level render inputs, read NOW in one main-actor turn
+    /// (m39-render-pass-race). Call it before the operation's first await and
+    /// read only the returned value afterwards.
+    func sessionRenderInputs() -> SessionRenderInputs {
+        SessionRenderInputs(
+            tempoMap: transport.tempoMap,
+            meterMap: transport.meterMap,
+            panLaw: panLaw,
+            masterVolume: masterVolume,
+            masterEffects: masterEffects,
+            masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            projectGeneration: projectGeneration)
+    }
 
     /// Renders the session offline and measures it (BS.1770-4 integrated +
     /// maxima + 4× true peak) — NOTHING is written to disk. All-nil
@@ -29,11 +71,15 @@ extension ProjectStore {
         // whole point — the Copilot adds EQ+limiter to master, then measures.
         // The master volume lane rides the class (m15-c): a programmed fade
         // IS part of the measured program.
+        // W9-PLRT R1: the song's pan rule is an INPUT of the render, read here
+        // with the rest of the song, never by the engine after an await.
+        let law = panLaw
         let audio = try await engine.renderOffline(
             // m23-bx-1: measuring a patch the user is not hearing would make
             // every loudness number a measurement of the wrong program.
             tracks: tracksWithLiveAudioUnitState(),
-            tempoMap: transport.tempoMap, masterVolume: masterVolume,
+            tempoMap: transport.tempoMap, meterMap: transport.meterMap, panLaw: law,
+            masterVolume: masterVolume,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
             // m39-e-2: master modulation rides the class too — a master
@@ -116,9 +162,12 @@ extension ProjectStore {
         // MASTERED class (m13-d, design §2): the deliverable bounce carries
         // the master chain AND the master volume lane (m15-c — "fade out the
         // song" lands in the deliverable); the loudness report measures the
-        // mastered file.
+        // mastered file. W9-PLRT R1: the song's pan rule rides as an input.
+        let law = panLaw
         let rendered = try await engine.renderOffline(
-            tracks: exclusion.tracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
+            tracks: exclusion.tracks, tempoMap: transport.tempoMap, meterMap: transport.meterMap,
+            panLaw: law,
+            masterVolume: masterVolume,
             masterEffects: masterEffects,
             masterAutomation: masterAutomation,
             // m39-e-2: and the master strip's modulation — the deliverable is
@@ -259,6 +308,13 @@ extension ProjectStore {
     ///   `masteredLufsTarget` on a gated-silent program throws `bounceSilent`
     ///   AFTER the stem files have already landed on disk (throwing matches
     ///   `renderBounce`; the partial output is real).
+    /// - The export finishes as the song that was open when it started
+    ///   (m39-render-pass-race): the tracks and every song-level input
+    ///   (`SessionRenderInputs`: tempo map, meter map, pan rule, master volume,
+    ///   and for the mastered sibling the master chain, lane and modulation)
+    ///   are captured ONCE before the first await. A New or Open that lands
+    ///   between passes changes the open song, never the rest of this set, and
+    ///   the reply's `masterChain` field still describes the exported song.
     public func renderStems(toDirectory directory: String? = nil, trackIds: [UUID]? = nil,
                             fromBeat: Double = 0, durationSeconds: Double? = nil,
                             includeMixdown: Bool = false,
@@ -285,6 +341,13 @@ extension ProjectStore {
         // partition (Σ stems nulls against "00 Mixdown.wav") would stop
         // holding for a reason no one could see in the files.
         let liveTracks = tracksWithLiveAudioUnitState()
+        // m39-render-pass-race: EVERY song-level input, captured ONCE beside
+        // the tracks and before the first await, for the same reason. The
+        // passes below read ONLY this value (never `transport`, `panLaw` or a
+        // `master*` property), so a New, Open or recovery that lands while the
+        // export waits between passes cannot move the later files onto
+        // another song's tempo, meter, pan rule (W9-PLRT R1) or master.
+        let inputs = sessionRenderInputs()
         // The full-session plan, probed ONCE — every pass below is forced
         // under it (WYSIWYG stretch awaits ride inside each renderOffline).
         let targets = await engine.offlineCompensationTargets(tracks: liveTracks)
@@ -303,7 +366,8 @@ extension ProjectStore {
             // stays included, exactly as ever).
             let audio = try await engine.renderOffline(
                 tracks: StemPlan.passTracks(for: descriptor, session: liveTracks),
-                tempoMap: transport.tempoMap, masterVolume: masterVolume,
+                tempoMap: inputs.tempoMap, meterMap: inputs.meterMap, panLaw: inputs.panLaw,
+                masterVolume: inputs.masterVolume,
                 masterEffects: [],
                 masterAutomation: [],
                 // m39-e-2: master modulation is master performance too —
@@ -333,7 +397,9 @@ extension ProjectStore {
             // null-check anchor Σ-stems compares against. A MASTERED file
             // comes from `render.bounce`.
             let audio = try await engine.renderOffline(
-                tracks: liveTracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
+                tracks: liveTracks, tempoMap: inputs.tempoMap, meterMap: inputs.meterMap,
+                panLaw: inputs.panLaw,
+                masterVolume: inputs.masterVolume,
                 masterEffects: [],
                 masterAutomation: [],
                 masterModulationSources: [],  // m39-e-2: STEM class, like the lane
@@ -365,12 +431,17 @@ extension ProjectStore {
             // array is the full session, so forcing the auto-plan's own values
             // is a parity no-op, and it removes timing as a confound when
             // someone diffs this file against the stems' sum.
+            // m39-render-pass-race: the master chain, lane and modulation come
+            // from the captured inputs too: this pass runs LAST, after every
+            // await of the passes above.
             let rendered = try await engine.renderOffline(
-                tracks: liveTracks, tempoMap: transport.tempoMap, masterVolume: masterVolume,
-                masterEffects: masterEffects,
-                masterAutomation: masterAutomation,
-                masterModulationSources: masterModulationSources,  // m39-e-2
-                masterModulationRoutes: masterModulationRoutes,
+                tracks: liveTracks, tempoMap: inputs.tempoMap, meterMap: inputs.meterMap,
+                panLaw: inputs.panLaw,
+                masterVolume: inputs.masterVolume,
+                masterEffects: inputs.masterEffects,
+                masterAutomation: inputs.masterAutomation,
+                masterModulationSources: inputs.masterModulationSources,  // m39-e-2
+                masterModulationRoutes: inputs.masterModulationRoutes,
                 fromBeat: startBeat, durationSeconds: duration,
                 forcedCompensationTargets: targets
             )
@@ -397,8 +468,11 @@ extension ProjectStore {
                                 // deliverables. It describes the STEMS, which
                                 // stay chain-excluded whether or not the
                                 // mastered sibling was written — m23-m1 does
-                                // not touch this live string.
-                                masterChain: masterEffects.isEmpty ? nil : "excluded",
+                                // not touch this live string. It reads the
+                                // CAPTURED chain (m39-render-pass-race): after
+                                // the awaits above, the store's chain may be
+                                // another song's.
+                                masterChain: inputs.masterEffects.isEmpty ? nil : "excluded",
                                 masteredMixdown: masteredMixdown,
                                 bitDepth: format.reportedBitDepth,
                                 container: format.reportedContainer,

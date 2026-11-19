@@ -747,7 +747,7 @@ public struct SongSkeletonPlan: Sendable, Equatable {
     /// key). The roster of a genre or a `tracks` override never does.
     public let hasRouting: Bool
 
-    /// The guide track (always the last of `tracks`).
+    /// The guide track (always the last of `tracks`; created muted, m27-e).
     public var arrangementTrack: Track? { tracks.last }
 }
 
@@ -785,7 +785,8 @@ extension ProjectStore {
     /// ("Song Skeleton '<GenreDisplayName>'"): sets the tempo, appends the
     /// roster's named tracks (the genre's, or the caller's `tracks` override —
     /// with their mixer presets pre-applied as fresh
-    /// chains), appends an INSTRUMENT "Arrangement" guide track carrying one
+    /// chains), appends a MUTED INSTRUMENT "Arrangement" guide track (m27-e: a
+    /// visual reference, kept out of what you hear) carrying one
     /// contiguous empty MIDI clip per section (named per section, `startBeat` =
     /// running sum, `lengthBeats` = bars × 4), drops a real SESSION MARKER at
     /// every section start, and enables the loop over the whole arrangement.
@@ -847,7 +848,11 @@ extension ProjectStore {
     ///    → field-named `invalidSongSkeleton`;
     ///  - a template the builder refuses, or whose files are missing →
     ///    `TemplateRefusal`; a connected template while recording →
-    ///    `transportBusy`.
+    ///    `transportBusy`;
+    ///  - then (m39-tpl-f8) `setTempo`'s own two refusals, through its own
+    ///    guard: recording → `transportBusy` ("cannot change tempo while
+    ///    recording — stop first"); a multi-segment tempo map →
+    ///    `tempoMapMultiSegment`.
     /// The whole scaffold publishes through a SINGLE `performEdit` snapshot — the
     /// tempo and loop mutations fold in via `applyTempoChange` / `applyLoopRegion`
     /// (which do NOT open their own edits) rather than the public `setTempo` /
@@ -855,10 +860,10 @@ extension ProjectStore {
     /// means the genre default; `sections` nil means the genre's default layout;
     /// `tracks` nil means the genre's default roster.
     ///
-    /// ⚠️ F-8 (design §5.5, NOT changed here on purpose): the tempo change skips
-    /// both guards `setTempo` has (recording, a multi-segment tempo map). It is
-    /// item TPL-F8, a flagged behaviour change; the golden gate forbids making
-    /// it silently.
+    /// F-8 (design §5.5), CLOSED by m39-tpl-f8, a flagged behaviour change: the
+    /// tempo change used to skip both guards `setTempo` has. `planSongSkeleton`
+    /// now runs them (`requireSingleTempoChangeAllowed`), after every other
+    /// check, so the golden fixtures (idle, single-segment) are unchanged.
     @discardableResult
     public func applySongSkeleton(genre genreID: String,
                                   tempoBPM: Double? = nil,
@@ -1024,6 +1029,15 @@ extension ProjectStore {
             }
         }
 
+        // m39-tpl-f8 (design §5.5, F-8): the skeleton changes the tempo, so it
+        // refuses exactly when `setTempo` would (while recording; on a
+        // multi-segment tempo map) through `setTempo`'s OWN guard: same error,
+        // same sentence. AFTER every argument and template check on purpose:
+        // a call those already refused keeps its refusal word for word, and
+        // only a call that used to succeed is newly refused. Here in the plan,
+        // so the apply, the `template:` path and the dry run refuse alike.
+        try requireSingleTempoChangeAllowed()
+
         // Build the Arrangement guide track: one contiguous empty MIDI clip per
         // section (notes: [] makes it a MIDI clip with no notes). startBeat is the
         // running sum; lengthBeats is bars × 4. The SAME loop mints the section
@@ -1043,7 +1057,15 @@ extension ProjectStore {
             cursorBeats += lengthBeats
         }
         let totalBeats = cursorBeats  // >= 4 (min 1 section × 1 bar) — a valid loop region.
-        let arrangementTrack = Track(name: "Arrangement", kind: .instrument, clips: guideClips)
+        // m27-e: the guide track is a visual reference, not a part, so it is
+        // created MUTED: it never sounds and never reaches a bounce, even if
+        // something writes notes onto it. This is the ONE place it is built, so
+        // the genre roster, a `tracks` override, a `template:` and the dry run
+        // agree. Only this track, only at creation: its kind, its place (LAST)
+        // and its clips are unchanged, anyone can unmute it like any track, and
+        // a saved project keeps whatever mute it was saved with.
+        let arrangementTrack = Track(name: "Arrangement", kind: .instrument, isMuted: true,
+                                     clips: guideClips)
 
         let label = template.map { "Song Skeleton '\(genre.displayName)' with '\($0.name)'" }
             ?? "Song Skeleton '\(genre.displayName)'"

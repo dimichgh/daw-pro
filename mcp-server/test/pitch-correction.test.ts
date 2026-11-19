@@ -1254,7 +1254,7 @@ test("clip_set_note_pitches's cents is UNCHECKED at the schema layer, per note â
   assert.equal(parseJSON(r).notes[0].pitchOffsetCents, 2400, "the RESPONSE carries the app's clamped value");
 });
 
-test("clip_set_note_pitches requires clipId and notes (array of {segmentId, cents}) at the schema layer, zero bridge calls", async () => {
+test("clip_set_note_pitches requires clipId, and notes (when given) must be an array of {segmentId, cents}, zero bridge calls", async () => {
   const clipId = randomUUID();
   const segmentId = randomUUID();
 
@@ -1263,9 +1263,6 @@ test("clip_set_note_pitches requires clipId and notes (array of {segmentId, cent
     arguments: { notes: [{ segmentId, cents: 50 }] },
   })) as any;
   assert.ok(r.isError, "missing clipId must be rejected");
-
-  r = (await client.callTool({ name: "clip_set_note_pitches", arguments: { clipId } })) as any;
-  assert.ok(r.isError, "missing notes must be rejected");
 
   r = (await client.callTool({
     name: "clip_set_note_pitches",
@@ -1298,6 +1295,69 @@ test("clip_set_note_pitches requires clipId and notes (array of {segmentId, cent
   assert.ok(r.isError, "a string cents inside a notes element must be rejected");
 
   assert.equal(calls.length, 0, "every schema rejection above must never reach the bridge");
+});
+
+// --- vf-18 leg 2 (W9-SLWR): moveByCents + segmentIds, additive; notes is now optional ---
+
+test("clip_set_note_pitches forwards {clipId, moveByCents} and omits notes/segmentIds when absent", async () => {
+  const clipId = randomUUID();
+  queuedResult = makeStubbedResponse({ movedByCents: 1200, carriedSlides: [] });
+  const result = (await client.callTool({
+    name: "clip_set_note_pitches",
+    arguments: { clipId, moveByCents: 1200 },
+  })) as any;
+  assert.ok(!result.isError);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.command, "clip.setNotePitches");
+  assert.deepEqual(calls[0]!.params, { clipId, moveByCents: 1200 }, "only the keys sent are forwarded");
+  assert.equal(parseJSON(result).movedByCents, 1200);
+});
+
+test("clip_set_note_pitches forwards segmentIds with moveByCents; both keys are validated at the schema layer", async () => {
+  const clipId = randomUUID();
+  const sid = randomUUID();
+  queuedResult = makeStubbedResponse({ movedByCents: -300, carriedSlides: [sid] });
+  const ok = (await client.callTool({
+    name: "clip_set_note_pitches",
+    arguments: { clipId, moveByCents: -300, segmentIds: [sid] },
+  })) as any;
+  assert.ok(!ok.isError);
+  assert.deepEqual(calls[0]!.params, { clipId, moveByCents: -300, segmentIds: [sid] });
+  const before = calls.length;
+  let r = (await client.callTool({
+    name: "clip_set_note_pitches",
+    arguments: { clipId, moveByCents: "up", segmentIds: [sid] },
+  })) as any;
+  assert.ok(r.isError, "a string moveByCents must be rejected");
+  r = (await client.callTool({
+    name: "clip_set_note_pitches",
+    arguments: { clipId, moveByCents: 100, segmentIds: ["not-a-uuid"] },
+  })) as any;
+  assert.ok(r.isError, "a non-UUID in segmentIds must be rejected");
+  assert.equal(calls.length, before, "schema rejections never reach the bridge");
+});
+
+test("clip_set_note_pitches: neither notes nor moveByCents reaches the bridge (the app owns the 'exactly one' refusal)", async () => {
+  const clipId = randomUUID();
+  queuedError = new Error("Send exactly one of 'notes' or 'moveByCents'.");
+  const r = (await client.callTool({ name: "clip_set_note_pitches", arguments: { clipId } })) as any;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0]!.params, { clipId });
+  assert.ok(r.isError);
+});
+
+test("clip_set_note_pitches description: states the doubling sentence and points to moveByCents for 'move this vocal up'", async () => {
+  const listed = await client.listTools();
+  const tool = listed.tools.find((t) => t.name === "clip_set_note_pitches");
+  assert.ok(tool);
+  const description = tool!.description ?? "";
+  assert.match(description, /moveByCents/);
+  assert.match(description, /move this vocal\/phrase up/);
+  assert.match(description, /ABSOLUTE own offset/);
+  assert.match(description, /play about twice as far/, "the doubling sentence");
+  assert.match(description, /exactly ONE of `notes` or `moveByCents`/);
+  assert.match(description, /carriedSlides/);
+  assert.match(description, /warnings/);
 });
 
 test("clip_set_note_pitches: an unrecognized key INSIDE one notes[] element is rejected (m30-c nested-strict)", async () => {

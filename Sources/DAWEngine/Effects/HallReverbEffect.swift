@@ -411,6 +411,10 @@ final class HallReverbEffect: EffectRendering, @unchecked Sendable {
         }
         freezeBlend = freezeTarget
         needsPrime = true
+        // m39-d CR-2: a reset drops the ramp in flight (`needsPrime` re-seats
+        // the values); the cell geometry is the renderer's and stays.
+        rampFramesLeft = 0
+        zeroRampDeltas()
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -507,6 +511,7 @@ final class HallReverbEffect: EffectRendering, @unchecked Sendable {
         }
 
         freezeTarget = HallReverbParams.isFrozen(p.freeze) ? 1 : 0
+        rampPending = true  // m39-d CR-2: the next `process` starts a ramp
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
@@ -538,6 +543,78 @@ final class HallReverbEffect: EffectRendering, @unchecked Sendable {
         default: overlay.effective.freeze = value
         }
         deriveRenderParams(overlay.effective)
+    }
+
+    // MARK: - m39-d CR-2: the control cell (docs/design/2026-10-07-effect-control-rate.md §5.4)
+    //
+    // Render-thread only. A ramp starts in the `process` call after a derive
+    // (`rampPending`). On the control grid (`cellFramesLeft` covers the whole
+    // call) it spans the REST OF THE CELL and carries across calls; off it,
+    // it spans the call, exactly as before the grid. A ramp in flight that
+    // would end INSIDE a call is re-spanned over that call, so no ramp ever
+    // ends mid-call and the per-sample loop is untouched. In a 512 bounce the
+    // cell is the call: the same delta expression, run the same number of
+    // times (G1 byte gate).
+    /// Frames from the next `process` call to the next control-cell line
+    /// (0 = off the grid). Set by `beginControlCell`, counted down here.
+    private var cellFramesLeft = 0
+    /// Frames left in the ramp in flight (0 = values sit at their targets).
+    private var rampFramesLeft = 0
+    /// A derive landed since the ramp in flight began.
+    private var rampPending = false
+    /// The ramp in flight's per-frame steps (carried across calls; 0 at rest).
+    /// The 24 per-line steps live in `deltaMidGain` / `deltaLowRatio` /
+    /// `deltaHighRatio`, which were already stored properties.
+    private var rampSizeDelta = 0.0
+    private var rampPreDelayDelta = 0.0
+    private var rampDepthDelta = 0.0
+    private var rampIncrementDelta = 0.0
+    private var rampMixDelta = 0.0
+    private var rampWidthDelta = 0.0
+    private var rampDiffusionDelta = 0.0
+    private var rampEarlyDelta = 0.0
+    private var rampLateDelta = 0.0
+    private var rampLowCoeffDelta = 0.0
+    private var rampHighCoeffDelta = 0.0
+
+    /// m39-d CR-1 (design §5.3): the automated values stored at this control
+    /// cell's entry still stand. Adopt FIRST, so a knob publish waiting in the
+    /// slot is seen now, as a store would see it (then `overlay.hold()`
+    /// answers false and the renderer re-stores). Render thread; no allocation.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): the ramp toward a new value (24 line
+    /// gains included) spans the rest of the cell (`frames`), carried across
+    /// calls, instead of one call.
+    func beginControlCell(frames: Int) {
+        cellFramesLeft = max(0, frames)
+    }
+
+    /// m39-d CR-2: every ramp step to 0 — at a ramp's end and on reset. While
+    /// no ramp is in flight the values sit at their targets, so a 0 step is
+    /// exactly the pre-grid per-call `(target − previous) / span`.
+    private func zeroRampDeltas() {
+        rampSizeDelta = 0
+        rampPreDelayDelta = 0
+        rampDepthDelta = 0
+        rampIncrementDelta = 0
+        rampMixDelta = 0
+        rampWidthDelta = 0
+        rampDiffusionDelta = 0
+        rampEarlyDelta = 0
+        rampLateDelta = 0
+        rampLowCoeffDelta = 0
+        rampHighCoeffDelta = 0
+        var line = 0
+        while line < Self.lineCount {
+            deltaMidGain[line] = 0
+            deltaLowRatio[line] = 0
+            deltaHighRatio[line] = 0
+            line += 1
+        }
     }
 
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
@@ -588,26 +665,49 @@ final class HallReverbEffect: EffectRendering, @unchecked Sendable {
         guard channelCount > 0, minFrames > 0, let left = channelData[0] else { return }
         let right = channelCount > 1 ? channelData[1] : nil
 
-        let span = Double(minFrames)
-        let sizeDelta = (targetSizeSamples - previousSizeSamples) / span
-        let preDelayDelta = (targetPreDelaySamples - previousPreDelaySamples) / span
-        let depthDelta = (targetDepthMs - previousDepthMs) / span
-        let incrementDelta = (targetIncrement - previousIncrement) / span
-        let mixDelta = (targetMix - previousMix) / span
-        let widthDelta = (targetWidth - previousWidth) / span
-        let diffusionDelta = (targetDiffusion - previousDiffusion) / span
-        let earlyDelta = (targetEarlyGain - previousEarlyGain) / span
-        let lateDelta = (targetLateGain - previousLateGain) / span
-        let lowCoeffDelta = (targetLowCoeff - previousLowCoeff) / span
-        let highCoeffDelta = (targetHighCoeff - previousHighCoeff) / span
+        // m39-d CR-2: start (or re-span) the ramp — see the MARK above. The
+        // delta expressions are the pre-grid ones, verbatim; `running*` reloads
+        // from `previous*` every call as before (mid-ramp, `previous*` holds
+        // where the last call left off).
+        let startsRamp = rampPending || (rampFramesLeft > 0 && rampFramesLeft < minFrames)
+        let rampFrames = cellFramesLeft >= minFrames ? cellFramesLeft : minFrames
+        let span = Double(rampFrames)
+        if startsRamp {
+            rampPending = false
+            rampSizeDelta = (targetSizeSamples - previousSizeSamples) / span
+            rampPreDelayDelta = (targetPreDelaySamples - previousPreDelaySamples) / span
+            rampDepthDelta = (targetDepthMs - previousDepthMs) / span
+            rampIncrementDelta = (targetIncrement - previousIncrement) / span
+            rampMixDelta = (targetMix - previousMix) / span
+            rampWidthDelta = (targetWidth - previousWidth) / span
+            rampDiffusionDelta = (targetDiffusion - previousDiffusion) / span
+            rampEarlyDelta = (targetEarlyGain - previousEarlyGain) / span
+            rampLateDelta = (targetLateGain - previousLateGain) / span
+            rampLowCoeffDelta = (targetLowCoeff - previousLowCoeff) / span
+            rampHighCoeffDelta = (targetHighCoeff - previousHighCoeff) / span
+            rampFramesLeft = rampFrames
+        }
+        let sizeDelta = rampSizeDelta
+        let preDelayDelta = rampPreDelayDelta
+        let depthDelta = rampDepthDelta
+        let incrementDelta = rampIncrementDelta
+        let mixDelta = rampMixDelta
+        let widthDelta = rampWidthDelta
+        let diffusionDelta = rampDiffusionDelta
+        let earlyDelta = rampEarlyDelta
+        let lateDelta = rampLateDelta
+        let lowCoeffDelta = rampLowCoeffDelta
+        let highCoeffDelta = rampHighCoeffDelta
         var setup = 0
         while setup < Self.lineCount {
             runningMidGain[setup] = previousMidGain[setup]
             runningLowRatio[setup] = previousLowRatio[setup]
             runningHighRatio[setup] = previousHighRatio[setup]
-            deltaMidGain[setup] = (targetMidGain[setup] - previousMidGain[setup]) / span
-            deltaLowRatio[setup] = (targetLowRatio[setup] - previousLowRatio[setup]) / span
-            deltaHighRatio[setup] = (targetHighRatio[setup] - previousHighRatio[setup]) / span
+            if startsRamp {
+                deltaMidGain[setup] = (targetMidGain[setup] - previousMidGain[setup]) / span
+                deltaLowRatio[setup] = (targetLowRatio[setup] - previousLowRatio[setup]) / span
+                deltaHighRatio[setup] = (targetHighRatio[setup] - previousHighRatio[setup]) / span
+            }
             setup += 1
         }
 
@@ -807,6 +907,34 @@ final class HallReverbEffect: EffectRendering, @unchecked Sendable {
             highCoeff += highCoeffDelta
             frame += 1
         }
+
+        // m39-d CR-2: a ramp still in flight carries what it reached; at the
+        // ramp's end the values are SNAPPED to their targets, exactly as every
+        // call end did before the grid (and still does off it).
+        rampFramesLeft = rampFramesLeft > minFrames ? rampFramesLeft - minFrames : 0
+        cellFramesLeft = cellFramesLeft > minFrames ? cellFramesLeft - minFrames : 0
+        if rampFramesLeft > 0 {
+            previousSizeSamples = sizeSamples
+            previousPreDelaySamples = preDelaySamples
+            previousDepthMs = depthMs
+            previousIncrement = increment
+            previousMix = mix
+            previousWidth = width
+            previousDiffusion = diffusion
+            previousEarlyGain = earlyGain
+            previousLateGain = lateGain
+            previousLowCoeff = lowCoeff
+            previousHighCoeff = highCoeff
+            var carry = 0
+            while carry < Self.lineCount {
+                previousMidGain[carry] = runningMidGain[carry]
+                previousLowRatio[carry] = runningLowRatio[carry]
+                previousHighRatio[carry] = runningHighRatio[carry]
+                carry += 1
+            }
+            return
+        }
+        zeroRampDeltas()
 
         previousSizeSamples = targetSizeSamples
         previousPreDelaySamples = targetPreDelaySamples

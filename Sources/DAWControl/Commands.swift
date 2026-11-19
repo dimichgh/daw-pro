@@ -135,6 +135,12 @@ public final class CommandRouter {
     /// clock and inject it here.
     private let insertSpectrumLeases: InsertSpectrumLeases
 
+    /// m27-j (W8-M27J) TEST SEAM: the pause between `fx.spectrum`'s
+    /// `audition` reads. nil (production) = real time via `Task.sleep`. Tests
+    /// install a closure that RENDERS the audio the pause would have played,
+    /// so the same hold loop is measured deterministically.
+    var spectrumHoldWait: (@MainActor (Duration) async -> Void)?
+
     /// The four `instrument.*SoundBank*` download verbs' engine (m34-c) —
     /// held ONE PER ROUTER (the `installCoordinator` precedent).
     ///
@@ -243,6 +249,28 @@ public final class CommandRouter {
     /// true empty answer, "show me the app" does not.
     public weak var viewUI: (any ViewUIControlling)?
 
+    /// The singing verbs (p2-sing-e part 2, design §6), in `SingWire.swift`.
+    /// ONE per router; it holds the app's ONE `SingJobCoordinator` (through
+    /// `SingWireServices`), never a second.
+    private let singWire: SingWireHandlers
+
+    /// The voice recorder window (item p2-sing-f). Weak, the `viewUI`
+    /// precedent: nil until the app registers one, and `sing.openVoiceRecorder`
+    /// then refuses with singNoWindow.
+    public var singVoiceRecorder: (any SingVoiceRecorderPresenting)? {
+        get { singWire.voiceRecorder }
+        set { singWire.voiceRecorder = newValue }
+    }
+
+    /// Told about every job `sing.render` submits, with the progress card's
+    /// label. The app registers it with the card as
+    /// `GenerationJobOrigin.forSingJob(fromAgent:)` (never with an ACE job id:
+    /// the card would poll it as one).
+    public var singJobSubmitted: (@MainActor (_ status: SingJobStatus, _ label: String) -> Void)? {
+        get { singWire.onJobSubmitted }
+        set { singWire.onJobSubmitted = newValue }
+    }
+
     public static let allCommands: [String] = [
         "transport.play",
         "transport.stop",
@@ -276,6 +304,7 @@ public final class CommandRouter {
         "fx.reorder",
         "fx.setBypass",
         "fx.setParam",
+        "fx.getParams",
         "fx.setSidechain",
         "fx.describe",
         "fx.listAudioUnits",
@@ -380,12 +409,63 @@ public final class CommandRouter {
         "template.remove",
         "template.import",
         "template.export",
+        // p2-sing-e part 2: the SINGING verbs, design §6 rows 1–17 in table
+        // order, as ONE contiguous block. Placed HERE, right after the
+        // template block and NOT at the tail (the playbox / template
+        // precedent): TemplateWireCommandTests pins the seven template verbs
+        // at playbox + 1…7 and PlayboxCommandTests pins playbox after the
+        // song skeleton, so the block goes AFTER the last of them; nothing
+        // pins the automation verb that follows. An insertion 186 entries
+        // from the END (counted in this array, not copied from a neighbour's
+        // figure) leaves every end-relative assertion in the
+        // tree (the dropLast and suffix windows) true by construction, so
+        // only the explicit count pins move. NOTE: no quoted string in this
+        // comment, deliberately (the m25-d rule).
+        "sing.sidecarStatus",
+        "sing.sidecarStart",
+        "sing.sidecarStop",
+        "sing.installEngine",
+        "sing.cancelInstall",
+        "sing.uninstallEngine",
+        "sing.listVoices",
+        "sing.addVoice",
+        "sing.removeVoice",
+        "sing.openVoiceRecorder",
+        "sing.proposeKey",
+        "clip.setLyrics",
+        "clip.getLyrics",
+        "sing.render",
+        "sing.jobStatus",
+        "sing.cancelJob",
+        "project.transpose",
+        // p2-sing-x7 part A: the singing expansion's five verbs (design
+        // 2026-10-06 sections 3.4, 5.6, 4.7 and 6.9), appended to the end of
+        // the contiguous singing block above and NOT at the tail: every entry
+        // after them keeps its distance from the end of this array, so the
+        // end-relative assertions in the tree stay true by construction and
+        // only the explicit count pins move. NOTE: no quoted string in this
+        // comment, deliberately (the m25-d rule).
+        "clip.setNoteWord",
+        "clip.setSingStyle",
+        "clip.getSingStyle",
+        "sing.proposeHarmony",
+        "sing.capabilities",
         "automation.addLane",
         "automation.removeLane",
         "automation.setPoints",
         "automation.setLaneEnabled",
         "clip.addAudio",
         "clip.addMIDI",
+        // m39-w4-10 — the ready-made drum beats: the writer, then the list it
+        // reads from. Placed HERE, right after their sibling (the writer goes
+        // through its funnel), and NOT at the tail: an insertion about 180
+        // entries from the end leaves every end-relative assertion in the tree
+        // (the dropLast and suffix windows) true by construction, so only the
+        // explicit count pins move. Verified before inserting: no adjacency
+        // pin spans this point. NOTE: no quoted string in this comment,
+        // deliberately (the m25-d rule).
+        "clip.addDrumPattern",
+        "pattern.list",
         "clip.setNotes",
         "clip.getNotes",
         "clip.repeatNotes",
@@ -990,7 +1070,12 @@ public final class CommandRouter {
         chordProgressionGenerator: (@MainActor () throws -> any ChordProgressionGenerating)? = nil,
         importGenerator: SongGenerating? = nil,
         modelLifecycle: ModelLifecycleCoordinator = .shared,
-        voiceModelImportDirectory: URL = VoiceModelImport.voicesDirectory
+        voiceModelImportDirectory: URL = VoiceModelImport.voicesDirectory,
+        singServices: SingWireServices? = nil,
+        singLyrics: (any SingLyricsWriting)? = nil,
+        singTranspose: (any SongTransposing)? = nil,
+        singLyricsEditing: (any SingLyricsEditing)? = nil,
+        singStyle: (any SingStyleWriting)? = nil
     ) {
         self.store = store
         self.sidecarManager = sidecarManager
@@ -1006,6 +1091,16 @@ public final class CommandRouter {
         self.connectionInfo = connectionInfo
         self.modelLifecycle = modelLifecycle
         self.voiceModelImportDirectory = voiceModelImportDirectory
+        // p2-sing-e part 2: the singing verbs' handlers. `singLyrics` /
+        // `singTranspose` exist ONLY so a spy test can stand in front of the
+        // store's own `setClipLyrics` / `transposeProject`; nil (every real
+        // caller) is the store itself.
+        // p2-sing-x7: `singLyricsEditing` / `singStyle` likewise exist only for
+        // spy tests in front of `setClipLyrics(…language:…)`, `setNoteWord`
+        // and `setSingStyle`; nil is the store itself.
+        self.singWire = SingWireHandlers(
+            store: store, lyrics: singLyrics ?? store, transposer: singTranspose ?? store,
+            services: singServices, lyricEdits: singLyricsEditing, styles: singStyle)
         // Default: resolve a writer from the shared key chain on each call.
         // `ai.writeLyrics` uses the APP's keys + live project context — the MCP
         // server's own legacy `generate_lyrics` calls a provider directly with its
@@ -1780,8 +1875,12 @@ public final class CommandRouter {
             // precedent).
             let drumKitOverlay: DrumKitParams?
             if let raw = params["drumKit"] {
-                let current = store.tracks.first { $0.id == instTrackID }?
-                    .instrument?.drumKit ?? DrumKitParams()
+                // W9-DRUMDEF: the kit the track PLAYS (`resolvedDrumKit`): its
+                // own; the factory kit on a saved never-edited drum machine; a
+                // NEW drum machine's kit on any other instrument, so a partial
+                // kit sent with `kind: "drumSynth"` overlays the user's picks.
+                let current = (store.tracks.first { $0.id == instTrackID }?
+                    .instrument ?? .default).resolvedDrumKit
                 drumKitOverlay = try Self.parseDrumKit(raw, base: current)
             } else {
                 drumKitOverlay = nil
@@ -2023,7 +2122,10 @@ public final class CommandRouter {
             // instrument track, or a bus). A bus-ROUTED source track rejects
             // stemNotMasterInput verbatim (its signal is part of the
             // destination bus's stem); an unknown id → trackNotFound; a session
-            // with no clips in the window → nothingToRender — all via the
+            // with no clips in the window → nothingToRender; a song that
+            // changed while the track was bouncing (a new song was started or
+            // another opened) → bounceInPlaceSongChanged, so nothing is added
+            // to either song (m39-render-pass-race) — all via the
             // LocalizedError mapping. The bounced audio is NEVER normalized and
             // is byte-identical to render.stems {trackIds:[trackId]} for the
             // same window (same forced full-session PDC plan, same post-fader
@@ -2610,9 +2712,9 @@ public final class CommandRouter {
 
         case "instrument.setDrumParam":
             // m39-dm — THE PER-PARAMETER PATH, and there is exactly one of it
-            // for all 75 names.
+            // for all 77 names.
             //
-            // ⛔ The alternative was 75 more optional arguments on
+            // ⛔ The alternative was 77 more optional arguments on
             // `track.setInstrument`. That signature already carries 22, and
             // `ProjectStore.swift` records that every one must be
             // hand-mirrored in its rebuild or it DESTROYS ITSELF on every
@@ -2679,7 +2781,7 @@ public final class CommandRouter {
             //    kind's payload across kind switches, so a track can hold a
             //    fully-dialled kit while playing a sound bank. This answers for
             //    the kit either way and says which.
-            // ③ `routesUsed`/`routeBudget`. There are 75 names and
+            // ③ `routesUsed`/`routeBudget`. There are 77 names and
             //    `ModulationLimits.maxRoutes` is 64, so they cannot all be
             //    routed at once. The ceiling is reported BEFORE it bites rather
             //    than discovered by a route going missing.
@@ -2712,9 +2814,12 @@ public final class CommandRouter {
             ]))
 
         case "instrument.loadDrumPreset":
-            // ⚠️ WHOLESALE. Loading a preset REPLACES all 75 values — it is not
+            // ⚠️ WHOLESALE. Loading a preset REPLACES all 77 values — it is not
             // an overlay — and the response says so rather than leaving a
-            // caller to discover it by diffing.
+            // caller to discover it by diffing. W9-DRUMDEF: that includes the
+            // hi-hat and cymbal levels, and every factory preset carries the
+            // NEW drum machine's (`DrumKitParams.presetBase`), so a preset on a
+            // drum machine from an older song (both at 0) raises them.
             try params.rejectUnknownKeys(["trackId", "name"],
                                          verb: "instrument.loadDrumPreset")
             let loadPresetTrackID = try params.requireTrackID()
@@ -2727,9 +2832,11 @@ public final class CommandRouter {
             }
             // TPL-0 — a preset changes how the drums SOUND, never which note
             // plays which drum: `applyingPreset` keeps the kit's `noteLayout`
-            // (the one DAWCore home; `DemoRender` calls it too).
-            let loadPresetCurrentKit = store.tracks.first { $0.id == loadPresetTrackID }?
-                .instrument?.resolvedDrumKit ?? DrumKitParams()
+            // (the one DAWCore home; `DemoRender` calls it too). W9-DRUMDEF: the
+            // kit the track PLAYS, so a track that is not a drum machine yet
+            // takes the preset in a NEW drum machine's layout (`gm`).
+            let loadPresetCurrentKit = (store.tracks.first { $0.id == loadPresetTrackID }?
+                .instrument ?? .default).resolvedDrumKit
             guard let loadPresetDescriptor = try store.setInstrument(
                 id: loadPresetTrackID, drumKit: loadPresetCurrentKit.applyingPreset(preset)
             ) else { throw ControlError.noTrack(loadPresetTrackID) }
@@ -2773,9 +2880,11 @@ public final class CommandRouter {
             // NOT an edit: the ladder is rendered from a synthetic one-track
             // copy built and thrown away inside the store. Nothing is inserted,
             // no undo entry is pushed, `store.tracks` is untouched. There is
-            // deliberately no `fromBeat`: a windowed render DROPS every MIDI
-            // note whose note-on precedes the window and would report silence
-            // for material that is fine from the top.
+            // deliberately no `fromBeat`: the ladder is the probe's OWN
+            // notes, rendered from beat 0, so no window applies. (A windowed
+            // render also now RE-ATTACKS a note held across the window start —
+            // m23-bv, `RescheduleCause.swift` — a synthesised attack the song
+            // does not have, which is a second reason not to window it.)
             //
             // Response: `TimbreLiveness.Result` threaded through its own
             // Codable (can-never-drift) — {trackId, instrumentKind,
@@ -3190,6 +3299,34 @@ public final class CommandRouter {
                 return .success(request.id, masterFxResult())
             }
 
+        case "fx.getParams":
+            // m27-f: the READ-ONLY twin of fx.setBypass/fx.setParam. An agent used
+            // to call fx.setBypass false->false just to get the resolved chain
+            // back, and every such call added an undo entry. This verb answers
+            // with the SAME reply those two build (`fxResult`/`masterFxResult`,
+            // the one shared encoder: `{trackId, effectId, effects:[...]}`, each
+            // effect with kind, bypass state and every param's current value),
+            // and it touches nothing: no store setter, no journal entry, no dirty
+            // mark, no engine call. The refusals are the ones fx.setBypass throws
+            // (ProjectError.trackNotFound / .effectNotFound), word for word.
+            try params.rejectUnknownKeys(["trackId", "effectId"], verb: "fx.getParams")
+            let fxGetEffectID = try params.requireEffectID()
+            switch try params.parseFXTarget() {
+            case .track(let fxGetTrackID):
+                guard let fxGetTrack = store.tracks.first(where: { $0.id == fxGetTrackID }) else {
+                    throw ProjectError.trackNotFound(fxGetTrackID)
+                }
+                guard fxGetTrack.effects.contains(where: { $0.id == fxGetEffectID }) else {
+                    throw ProjectError.effectNotFound(fxGetEffectID)
+                }
+                return .success(request.id, fxResult(trackID: fxGetTrackID, effectID: fxGetEffectID))
+            case .master:
+                guard store.masterEffects.contains(where: { $0.id == fxGetEffectID }) else {
+                    throw ProjectError.effectNotFound(fxGetEffectID)
+                }
+                return .success(request.id, masterFxResult(effectID: fxGetEffectID))
+            }
+
         case "fx.setParam":
             // params: trackId (required — a track UUID or "master", m13-d),
             // effectId (required UUID), name (required string), value (required
@@ -3370,15 +3507,14 @@ public final class CommandRouter {
         // no phase register to reset and a verb implying hidden state would
         // invite exactly the state this design exists to avoid.
         //
-        // ⚠️ TEMPO SYNC IS NOT IN v1. `syncDivision` / `stepDivision` refuse
-        // with `modulationTempoSyncUnavailable`; free-running `rateHz` ships
-        // alone. m39-c generalises the one tempo-sync resolver, and
-        // hand-rolling a second one here is the duplication it exists to
-        // remove. The FIELDS persist, so m39-c adds sync additively — it only
-        // has to resolve a division to samples-per-cycle at the ONE seam,
-        // `ModulationSnapshotBuilder.resolve(_:sampleRate:steps:macros:)`,
-        // and delete the two `refuseSync` calls in
-        // `ModulationSourceParams.apply`.
+        // TEMPO SYNC (m39-w4-4): a step sequencer's `stepDivision` locks its
+        // steps to the song's beat. `TempoSync.modulationSourceRegistrations`
+        // says which source kinds may sync, and the render reads the musical
+        // clock (`ModulationSnapshotClock.swift`). While it is set `rateHz` is
+        // inert and the setter's reply says so. The LFO's `syncDivision` still
+        // refuses (`modulationTempoSyncUnavailable`): a synced LFO is not
+        // built. Every rule lives in `ModulationSourceParams.apply`;
+        // `mod.describe` reports each synced source's `tempoSync` block.
         //
         // TODO(m39-e, MCP): the MCP mirror is dispatched separately. Nine
         // tools, one per verb: mod_describe_kinds, mod_add_source,
@@ -3595,12 +3731,29 @@ public final class CommandRouter {
             // surfaces via the LocalizedError mapping. Returns the resulting
             // chain in the shared fx-mutation result shape ({trackId, effects})
             // so the agent sees the effects the preset laid down, in order.
+            // m39-tpl-f9 wire (W8-X7A), ADDITIVE: `removedSidechainKeys` —
+            // ALWAYS present, [] when the replaced chain carried no key —
+            // lists every sidechain key the preset removed along with the
+            // effect that held it: [{effectId, kind, sourceTrackId,
+            // sourceTrackName (null when no track has that id), message}].
+            // Refused mid-take (transportBusy) only when the chain it replaces
+            // holds a sidechain-keyed effect (`removeEffect`'s rule).
             try params.rejectUnknownKeys(
                 ["trackId", "preset"], verb: "mixer.applyPreset")
             let presetTrackID = try params.requireTrackID()
             let presetName = try params.require("preset", \.stringValue)
-            _ = try store.applyMixerPreset(trackID: presetTrackID, presetName: presetName)
-            return .success(request.id, fxResult(trackID: presetTrackID))
+            let presetApplied = try store.applyMixerPreset(trackID: presetTrackID, presetName: presetName)
+            var presetPayload = fxResult(trackID: presetTrackID).objectValue ?? [:]
+            presetPayload["removedSidechainKeys"] = .array(presetApplied.removedSidechainKeys.map { key in
+                .object([
+                    "effectId": .string(key.effectID.uuidString),
+                    "kind": .string(key.effectKind.rawValue),
+                    "sourceTrackId": .string(key.sourceTrackID.uuidString),
+                    "sourceTrackName": key.sourceTrackName.map(JSONValue.string) ?? .null,
+                    "message": .string(key.message),
+                ])
+            })
+            return .success(request.id, .object(presetPayload))
 
         case "mixer.masterAnalysis":
             // No params. Latest master-mix analysis snapshot (M8 vm-a, the
@@ -3841,20 +3994,31 @@ public final class CommandRouter {
             // audio file on disk; not a track, not a clip, not the project
             // reference), windowSeconds > 0 (required), fromSeconds >= 0
             // (default 0), durationSeconds > 0 (default: rest of the file
-            // from fromSeconds). m25-z: the missing "what is the peak level
-            // between 53s and 54s of this WAV" surface — a windowing
+            // from fromSeconds), loudness (optional bool, default false; a
+            // non-bool is refused). m25-z: the missing "what is the peak
+            // level between 53s and 54s of this WAV" surface — a windowing
             // question, deliberately NOT a second copy of the BS.1770
-            // loudness path (render.measureLoudness/reference.analyze
-            // already answer program-loudness questions; m23-ch keeps the
-            // ebur128 cross-check external on purpose, since a single
-            // meter cannot detect its own miscount).
+            // loudness path (m23-ch keeps the ebur128 cross-check external
+            // on purpose, since a single meter cannot detect its own
+            // miscount). m27-k: loudness=true ADDS `loudness` — the BS.1770
+            // reading of the profiled range in the LoudnessMeasurement shape
+            // render.measureLoudness reports — so a bounce's loudness can be
+            // checked WITHOUT reference.import, which copies the file into
+            // the References library every time (three checks left 243 MB).
+            // Still not a second copy: FileProfiler hands the same chunks to
+            // Loudness.Stream, the meter reference.import/reference.analyze
+            // use (ReferenceAnalyzer.analyze), so the numbers EQUAL theirs.
+            // Without the flag the reply is byte-identical to m25-z's.
             // Read-only: never writes, never copies, and the project's
             // reference slot / References library are UNTOUCHED (unlike
             // reference.import, this never occupies the one reference slot
             // and never copies the file anywhere).
             // Response: {durationSeconds, sampleRateHz, channelCount,
             // bitDepth?, isFloat?, windows: [{startSeconds, durationSeconds,
-            // peakDb?, rmsDb?}]}. durationSeconds in the header is the
+            // peakDb?, rmsDb?}], loudness? (ONLY with loudness=true:
+            // {integratedLufs?, truePeakDbtp?, maxMomentaryLufs?,
+            // maxShortTermLufs?, loudnessRangeLu?}, a field omitted when the
+            // range holds no evidence for it)}. durationSeconds in the header is the
             // WHOLE file (the ffprobe readback); each window's own
             // durationSeconds is usually windowSeconds, except the LAST
             // window of the profiled range, which truncates at EOF (or at
@@ -3870,9 +4034,10 @@ public final class CommandRouter {
             // JSON has no -inf; never a fabricated 0). Refusals verbatim:
             // no file at path -> audioFileNotFound (names the path);
             // headless / no engine -> engineUnavailable (a profile is
-            // never fabricated).
+            // never fabricated); loudness=true on an engine without that
+            // capability -> engineUnavailable (nor is a reading).
             try params.rejectUnknownKeys(
-                ["path", "windowSeconds", "fromSeconds", "durationSeconds"],
+                ["path", "windowSeconds", "fromSeconds", "durationSeconds", "loudness"],
                 verb: "audio.profileFile")
             let profilePath = try params.requireAbsolutePath("path")
             let profileWindowSeconds = try params.require("windowSeconds", \.doubleValue)
@@ -3887,9 +4052,11 @@ public final class CommandRouter {
             if let profileDurationSeconds, profileDurationSeconds <= 0 {
                 throw ControlError("'durationSeconds' must be > 0")
             }
+            let profileLoudness = try Self.optionalBool(params["loudness"], "'loudness'") ?? false
             let profileResult = try await store.profileFile(
                 path: profilePath, windowSeconds: profileWindowSeconds,
-                fromSeconds: profileFromSeconds, durationSeconds: profileDurationSeconds)
+                fromSeconds: profileFromSeconds, durationSeconds: profileDurationSeconds,
+                loudness: profileLoudness)
             return .success(request.id, try JSONValue(encoding: profileResult))
 
         case "engine.performanceStats":
@@ -4088,7 +4255,9 @@ public final class CommandRouter {
                 let plan = try store.planSongSkeleton(
                     genre: genre, tempoBPM: skeletonTempo, sections: skeletonSections,
                     tracks: skeletonTracks, template: skeletonTemplateParam?.template)
-                return .success(request.id, songSkeletonPlanResult(plan))
+                return .success(
+                    request.id,
+                    songSkeletonPlanResult(plan, extraWarnings: skeletonTemplateParam?.warnings ?? []))
             }
             let skeleton = try store.applySongSkeleton(
                 genre: genre, tempoBPM: skeletonTempo, sections: skeletonSections,
@@ -4274,6 +4443,150 @@ public final class CommandRouter {
                 lengthBeats: midiLength, notes: midiNotes
             )
             return .success(request.id, try JSONValue(encoding: midiClip))
+
+        case "clip.addDrumPattern":
+            // m39-w4-10 — write a ready-made drum beat (`pattern.list`) onto a
+            // drum track as ONE new MIDI clip: ONE undo step, through the
+            // `addMIDIClip` funnel (`ProjectStore+DrumPattern.swift`).
+            // MCP: `clip_add_drum_pattern` (this verb) and `pattern_list`
+            // (pattern.list) in mcp-server/src/server.ts.
+            // params: trackId (required: a drum track, meaning the Drum
+            // Machine, the General MIDI drum kit, or a Sampler sorted into a
+            // kit), pattern (required: an id or a name from pattern.list),
+            // bars? (whole number 1...64; omitted = the pattern's own 1 or 2
+            // bars; more repeats it, fewer stops at a bar line), atBeat?
+            // (>= 0; omitted = after the track's last clip, on the next bar
+            // line).
+            //
+            // Roles become notes through the TRACK'S OWN map (the kit's note
+            // layout, General MIDI for the drum kit, the sorted pads for a
+            // Sampler). A drum the kit lacks is LEFT OUT and named in
+            // `warnings`/`rolesLeftOut`, never swapped for another drum.
+            //
+            // OVERLAP POLICY: REFUSE (the clip.addAudio m33-j rule), unlike
+            // clip.addMIDI, whose funnel trims the clip it lands on. Every
+            // refusal (unknown beat, not a drum track, a meter that is not 4
+            // beats to the bar, a kit with none of the beat's drums, a landing
+            // on another clip) is a DrumPatternError sentence surfaced verbatim
+            // by the LocalizedError arm, and nothing changes.
+            //
+            // Response: the created clip's fields at the top level (the
+            // clip.addMIDI shape) PLUS pattern, patternName, bars, notesWritten,
+            // rolesWritten [{role, name, note, hits}], rolesLeftOut [{role,
+            // name, hits}] and warnings [sentence]. The three arrays are ALWAYS
+            // present, empty on the ordinary path.
+            //
+            // W9-PATF — FILL AN EXISTING CLIP: `clipId?` (a MIDI clip on
+            // `trackId`) routes to `ProjectStore.fillDrumPattern` instead:
+            // the beat goes INTO that clip, which must be EMPTY, and fills its
+            // own length (the clip decides where and for how long, so `atBeat`
+            // and `bars` sent WITH `clipId` are refused). One undo step; no new
+            // clip; a clip with notes, a clip on another track, a 3/4 spot and
+            // a kit with none of the beat's drums are refused in the store's
+            // own sentences (DrumPatternFillError / DrumPatternError). The reply
+            // is the same shape as the new-clip form (the filled clip's fields
+            // at the top level plus the seven fields above). Count-neutral:
+            // still the one verb. MCP: `clip_add_drum_pattern` gains `clipId`.
+            try params.rejectUnknownKeys(
+                ["trackId", "pattern", "bars", "atBeat", "clipId"], verb: "clip.addDrumPattern")
+            let patternTrackID = try params.requireTrackID()
+            guard let patternName = params["pattern"]?.stringValue, !patternName.isEmpty else {
+                throw ControlError("missing or invalid required param 'pattern' — a beat's id from "
+                    + "pattern.list, such as '\(DrumPatternLibrary.firstPattern.id)'")
+            }
+            // ONE reply builder for both forms, so they cannot drift apart.
+            func patternReply(clip: Clip, pattern: DrumPattern, bars: Int, written: [DrumPatternRoleUse],
+                              leftOut: [DrumPatternRoleUse], warnings: [String]) throws -> JSONValue {
+                var patternObject = try JSONValue(encoding: clip).objectValue ?? [:]
+                patternObject["pattern"] = .string(pattern.id)
+                patternObject["patternName"] = .string(pattern.name)
+                patternObject["bars"] = .number(Double(bars))
+                patternObject["notesWritten"] = .number(Double(clip.notes?.count ?? 0))
+                patternObject["rolesWritten"] = .array(written.map { use in
+                    .object([
+                        "role": .string(use.role.rawValue),
+                        "name": .string(use.role.displayName),
+                        "note": use.note.map { .number(Double($0)) } ?? .null,
+                        "hits": .number(Double(use.hits)),
+                    ])
+                })
+                patternObject["rolesLeftOut"] = .array(leftOut.map { use in
+                    .object([
+                        "role": .string(use.role.rawValue),
+                        "name": .string(use.role.displayName),
+                        "hits": .number(Double(use.hits)),
+                    ])
+                })
+                patternObject["warnings"] = .array(warnings.map { .string($0) })
+                return .object(patternObject)
+            }
+            if params["clipId"] != nil {
+                let fillClipID = try params.requireClipID()
+                for key in ["atBeat", "bars"] where params[key] != nil {
+                    throw ControlError("'\(key)' can't be used with 'clipId': the clip you name decides "
+                        + "where the beat starts and how long it runs, because it fills that clip from its "
+                        + "first beat to its end. Leave '\(key)' out, or leave 'clipId' out to add the "
+                        + "beat as a new clip.")
+                }
+                guard let owner = store.tracks.first(where: { $0.clips.contains { $0.id == fillClipID } }) else {
+                    throw ProjectError.clipNotFound(fillClipID)
+                }
+                guard owner.id == patternTrackID else {
+                    let clipName = owner.clips.first { $0.id == fillClipID }?.name ?? "that clip"
+                    throw ControlError("The clip '\(clipName)' is on the track '\(owner.name)' (\(owner.id.uuidString)), "
+                        + "not on the track you named in 'trackId'. Nothing was changed. Send that track's "
+                        + "id as 'trackId'.")
+                }
+                let filled = try store.fillDrumPattern(named: patternName, intoClip: fillClipID)
+                return .success(request.id, try patternReply(
+                    clip: filled.clip, pattern: filled.pattern, bars: filled.bars,
+                    written: filled.written, leftOut: filled.leftOut, warnings: filled.warnings))
+            }
+            var patternBars: Int?
+            if let rawBars = params["bars"] {
+                let range = DrumPatternLibrary.barsRange
+                guard let value = rawBars.doubleValue, value == value.rounded(),
+                      value >= Double(range.lowerBound), value <= Double(range.upperBound) else {
+                    throw ControlError("'bars' must be a whole number from \(range.lowerBound) to "
+                        + "\(range.upperBound)")
+                }
+                patternBars = Int(value)
+            }
+            var patternAtBeat: Double?
+            if let rawAtBeat = params["atBeat"] {
+                guard let value = rawAtBeat.doubleValue, value >= 0 else {
+                    throw ControlError("'atBeat' must be a number of beats, 0 or more")
+                }
+                patternAtBeat = value
+            }
+            let patternWrite = try store.addDrumPattern(
+                named: patternName, toTrack: patternTrackID, bars: patternBars, atBeat: patternAtBeat)
+            return .success(request.id, try patternReply(
+                clip: patternWrite.clip, pattern: patternWrite.pattern, bars: patternWrite.bars,
+                written: patternWrite.written, leftOut: patternWrite.leftOut,
+                warnings: patternWrite.warnings))
+
+        case "pattern.list":
+            // m39-w4-10 — the ready-made drum beats clip.addDrumPattern writes,
+            // in menu order. The FIRST is the user's L2 pick (the basic
+            // backbeat with a closed hi-hat on every eighth note). Read-only
+            // and headless: a compile-time list, no store, no device.
+            // Response: {patterns: [{id, name, description, bars, roles}],
+            // count}; `roles` are drum names in the drum machine's spelling
+            // (kick, snare, closedHat, openHat, clap, tom, rim, cymbal).
+            try params.rejectUnknownKeys([], verb: "pattern.list")
+            return .success(request.id, .object([
+                "patterns": .array(DrumPatternLibrary.patterns.map { pattern in
+                    .object([
+                        "id": .string(pattern.id),
+                        "name": .string(pattern.name),
+                        "description": .string(pattern.summary),
+                        "bars": .number(Double(pattern.bars)),
+                        "roles": .array(pattern.roles.map { .string($0.rawValue) }),
+                    ])
+                }),
+                "count": .number(Double(DrumPatternLibrary.patterns.count)),
+            ]))
 
         case "clip.setNotes":
             // params: clipId (required UUID), notes (required array, may be []).
@@ -4757,11 +5070,8 @@ public final class CommandRouter {
                 trackId: envTrackID, clipId: envClipID, points: envPoints)
             return .success(request.id, try JSONValue(encoding: envelopedClip))
 
-        // TODO(m16-b2 phase 3, mcp-integration-engineer): expose these two verbs
-        // as MCP tools `clip_set_controller_lane` + `clip_remove_controller_lane`
-        // (flat zod schema, no unions — the m15-c prose-sentinel law; teach
-        // stepwise semantics, bend center 8192, built-ins honour bend+sustain
-        // only, chase behaviour, poly-aftertouch deferred). See design-m16b §10.
+        // clip.setControllerLane / clip.removeControllerLane: MCP tools `clip_set_controller_lane` +
+        // `clip_remove_controller_lane` exist; which CCs each instrument honors is MIDIControllerRouting's table.
         case "clip.setControllerLane":
             // params: clipId (required), type ("cc"|"pitchBend"|"channelPressure",
             // required), controller (required integer 0-127 IFF type=="cc"),
@@ -4887,7 +5197,11 @@ public final class CommandRouter {
             // crossing in from before keeps its head (its overlap spliced out).
             // The clip's lengthBeats shrinks by the excised amount (floored at one
             // beat / the last remaining note's extent). ONE undo step. MIDI clips
-            // only. clipNotFound/notAMIDIClip/invalidClipEdit (non-positive length
+            // only. The clip's lyrics follow arrange.deleteBars' rule
+            // (p2-sing-pr-words-f1): a word whose notes were ALL removed leaves the
+            // text in the same undo step; a word that keeps a note stays; lyrics the
+            // singer cannot place are kept unchanged.
+            // clipNotFound/notAMIDIClip/invalidClipEdit (non-positive length
             // or startBeat outside [0, lengthBeats)) surface via the LocalizedError
             // mapping. Response: the updated clip.
             try params.rejectUnknownKeys(
@@ -5217,16 +5531,32 @@ public final class CommandRouter {
             // is null when nothing was muted for ANY reason; reading your own
             // request back would miss both skip cases.
             //
+            // mapping? (m39-w4-6) "chromatic" (default: one pad per note from
+            // baseNote up, exactly the chop above) | "kit": the engine measures
+            // each slice and the hits are SORTED INTO A GENERAL MIDI DRUM KIT —
+            // kicks on 36 then 35, snares on 38 then 40, closed hats on 42 then
+            // 44, the open hat on 46 (the loudest hit of a role first), every
+            // other or overflow hit on the extra pads from 84 up in time order
+            // (refused, never truncated, past 127). Zones carry drumRole; the
+            // hats get chokeGroup 0, so a closed hat cuts a ringing open hat.
+            // Same timing, length and velocity as "chromatic"; only the notes
+            // move. baseNote is refused with "kit". roles? ("kit" only): an
+            // object, slice index → "kick" | "snare" | "closedHat" | "openHat"
+            // | "other", forced before the classifier (confidence 1).
+            // "other" is never folded into a drum.
+            //
             // ONE undo step ("Chop to Sampler", no coalescing). Response:
             // {trackId, createdTrackId?, midiClipId?, sampleRate, frameCount,
             // sliceCount, headSeconds, slices: [{index, pitch, startFrame,
             // endFrame?, sourceSeconds, beat, strength?, snapOffsetFrames?,
-            // residualAmplitude?}], warnings, mutedTrackId?}.
+            // residualAmplitude?, role?, confidence?}], warnings,
+            // mutedTrackId?, kitSummary?} — role/confidence/kitSummary only
+            // with mapping "kit".
             try params.rejectUnknownKeys(
                 ["clipId", "targetTrackId", "mode", "sensitivity", "divisions",
                  "gridBeats", "minSliceSeconds", "maxSlices", "includeHead",
                  "baseNote", "snapWindowMs", "generateMIDI", "atBeat",
-                 "velocityFromStrength", "muteSourceTrack"],
+                 "velocityFromStrength", "muteSourceTrack", "mapping", "roles"],
                 verb: "clip.sliceToSampler")
             let chopClipID = try params.requireClipID()
             var chopTargetTrackID: UUID?
@@ -5953,6 +6283,8 @@ public final class CommandRouter {
                         "gainDb": sngStoredGain]))
 
         case "clip.setNotePitches":
+            // vf-18 leg 2 UPDATE (W9-SLWR): `notes` is no longer required — exactly one of
+            // `notes` / `moveByCents` (+ optional `segmentIds`); see the body below.
             // m23-ap I4 wire leg (mcp-integration-engineer, part 1 of 2): the
             // BATCH twin of `clip.setNotePitch` — `ProjectStore.setClipNotePitchOffsets`
             // (`Sources/DAWCore/ProjectStore+PitchNoteEdits.swift`), I4's
@@ -6019,8 +6351,84 @@ public final class CommandRouter {
             // request's — `cents` is what you ask for, `pitchOffsetCents` is
             // what every OTHER response on this door already calls what is
             // stored).
-            try params.rejectUnknownKeys(["clipId", "notes"], verb: "clip.setNotePitches")
+            try params.rejectUnknownKeys(["clipId", "notes", "moveByCents", "segmentIds"],
+                                         verb: "clip.setNotePitches")
             let snpsClipID = try params.requireClipID()
+            // ⭐ vf-18 leg 2 (W9-SLWR), ADDITIVE: a SECOND way to call this verb —
+            // `moveByCents` (+ optional `segmentIds`) — "move these notes together
+            // by this many cents, exactly as dragging them together in the pitch
+            // editor does". EXACTLY ONE of `notes` / `moveByCents`: both or
+            // neither is refused in words, nothing written. `moveByCents` is a
+            // DELTA (the one place this verb takes one): the store
+            // (`ProjectStore.moveClipNotePitches`, which calls
+            // `PitchEditSet.applyingGroupPitchMove`) owns the carry — a followed
+            // slide whose anchors move too stores `own + (1 − g)·Δ`, because its
+            // bridge already adds the move — so this layer never re-implements it.
+            // `segmentIds` absent = every SUNG note (a sound moves only when
+            // named); one undo step (`structuralKey`); a move that would take any
+            // note past ±2400 refuses ALL-OR-NOTHING with the store's sentence.
+            // The reply adds `movedByCents`, `carriedSlides` (the followed slides
+            // whose stored offset moved by less than Δ because a neighbour
+            // carries them) and the usual `notes` echo for every moved note.
+            let snpsHasNotes = params["notes"] != nil
+            let snpsHasMove = params["moveByCents"] != nil
+            if snpsHasNotes && snpsHasMove {
+                throw ControlError(
+                    "Send either 'notes' (each note's own absolute cents) or 'moveByCents' "
+                    + "(move notes together by the same amount), not both. Nothing was changed.")
+            }
+            if !snpsHasNotes && !snpsHasMove {
+                throw ControlError(
+                    "Send exactly one of 'notes' (each note's own absolute cents: [{segmentId, cents}]) "
+                    + "or 'moveByCents' (move notes together by the same number of cents; 100 cents is "
+                    + "one semitone). Nothing was changed.")
+            }
+            if snpsHasMove {
+                guard let snpsMoveBy = params["moveByCents"]?.doubleValue, snpsMoveBy.isFinite else {
+                    throw ControlError(
+                        "'moveByCents' must be a number of cents (100 cents is one semitone; "
+                        + "positive moves up). Nothing was changed.")
+                }
+                var snpsMoveIDs: [UUID]?
+                if let rawIDs = params["segmentIds"] {
+                    guard let list = rawIDs.arrayValue, !list.isEmpty else {
+                        throw ControlError(
+                            "'segmentIds' must be a non-empty array of note ids (from "
+                            + "clip.getPitchEdits' `segments`). Leave it out to move every sung note. "
+                            + "Nothing was changed.")
+                    }
+                    var seen = Set<UUID>()
+                    var ordered: [UUID] = []
+                    for (index, entry) in list.enumerated() {
+                        guard let raw = entry.stringValue, let id = UUID(uuidString: raw) else {
+                            throw ControlError("segmentIds[\(index)] is not a valid UUID")
+                        }
+                        if seen.insert(id).inserted { ordered.append(id) }
+                    }
+                    snpsMoveIDs = ordered
+                }
+                let snpsMove = try store.moveClipNotePitches(
+                    clipId: snpsClipID, segmentIds: snpsMoveIDs, byCents: snpsMoveBy,
+                    undoKey: PitchCorrectionUndoKey.structuralKey)
+                // ⭐ A setter's return is not proof it took — read the STORED offsets back.
+                let snpsMovedOrder: [UUID] = snpsMoveIDs
+                    ?? (snpsMove.clip.pitchEdits?.segments ?? []).filter { $0.origin != .unpitched }.map(\.id)
+                let snpsMovedEcho: [JSONValue] = snpsMovedOrder.map { id in
+                    let stored = snpsMove.clip.pitchEdits?.segments.first(where: { $0.id == id })?.pitchOffsetCents
+                    return .object(["segmentId": .string(id.uuidString),
+                                     "pitchOffsetCents": stored.map { JSONValue.number($0) } ?? .null])
+                }
+                return .success(request.id, Self.pitchEditsResponse(
+                    clip: snpsMove.clip, appliedOptions: nil,
+                    extra: ["notes": .array(snpsMovedEcho),
+                            "movedByCents": .number(snpsMoveBy),
+                            "carriedSlides": .array(snpsMove.carriedSlideIDs.map { .string($0.uuidString) })]))
+            }
+            if params["segmentIds"] != nil {
+                throw ControlError(
+                    "'segmentIds' goes with 'moveByCents' (it names which notes move together); the "
+                    + "'notes' form already names each note. Nothing was changed.")
+            }
             guard let snpsRawNotes = params["notes"]?.arrayValue else {
                 throw ControlError(
                     "'notes' must be an array of {segmentId, cents} — segmentId is the `id` "
@@ -6042,6 +6450,10 @@ public final class CommandRouter {
                 snpsOffsets.append(NotePitchOffset(segmentId: segmentID, offsetCents: cents))
                 snpsRequestOrder.append(segmentID)
             }
+            // The table as it stood BEFORE this call: the doubling warning below
+            // compares each named note's new offset against it. `try?` — the
+            // store's own refusals (MIDI clip, no table…) are the ones that speak.
+            let snpsBefore = (try? store.pitchEditClip(forClipId: snpsClipID))?.pitchEdits
             let snpsClip = try store.setClipNotePitchOffsets(
                 clipId: snpsClipID, offsets: snpsOffsets,
                 undoKey: PitchCorrectionUndoKey.structuralKey)
@@ -6056,9 +6468,42 @@ public final class CommandRouter {
                 return .object(["segmentId": .string(id.uuidString),
                                  "pitchOffsetCents": stored.map { JSONValue.number($0) } ?? .null])
             }
+            var snpsExtra: [String: JSONValue] = ["notes": .array(snpsNotesEcho)]
+            // ⭐ vf-18: the literal form keeps its ABSOLUTE meaning, so naming a
+            // followed slide AND one of its anchors with the SAME non-zero change
+            // plays the slide about twice as far (its bridge already follows the
+            // anchor). Said once, in words, exactly for that shape — a lone slide
+            // or differing changes stay quiet. The shape test is DAWCore's own
+            // `groupMoveCarries` (a carry below 1 = the slide AND an anchor are in
+            // the group), asked once per distinct change.
+            if let before = snpsBefore {
+                var changeByID: [UUID: Double] = [:]
+                for id in snpsNamedOrder {
+                    guard let was = before.segments.first(where: { $0.id == id })?.pitchOffsetCents,
+                          let now = snpsClip.pitchEdits?.segments.first(where: { $0.id == id })?.pitchOffsetCents
+                    else { continue }
+                    let change = now - was
+                    if abs(change) > 1e-9 { changeByID[id] = change }
+                }
+                var doubled = Set<UUID>()
+                let distinct = Set(changeByID.values.map { ($0 * 1e6).rounded() })
+                for key in distinct {
+                    let group = Set(changeByID.filter { ($0.value * 1e6).rounded() == key }.keys)
+                    for (id, carry) in before.groupMoveCarries(movingIDs: group) where carry < 1 {
+                        doubled.insert(id)
+                    }
+                }
+                if !doubled.isEmpty {
+                    let one = doubled.count == 1
+                    snpsExtra["warnings"] = .array([.string(
+                        "\(doubled.count) sung slide\(one ? " follows" : "s follow") the notes beside "
+                        + "\(one ? "it" : "them"), and this call moved \(one ? "it" : "them") together with "
+                        + "those notes by the same amount, so \(one ? "it now plays" : "they now play") about "
+                        + "twice as far. To move notes together, send moveByCents instead.")])
+                }
+            }
             return .success(request.id, Self.pitchEditsResponse(
-                clip: snpsClip, appliedOptions: nil,
-                extra: ["notes": .array(snpsNotesEcho)]))
+                clip: snpsClip, appliedOptions: nil, extra: snpsExtra))
 
         case "clip.auditionNote":
             // m23-ap I1 wire leg (mcp-integration-engineer, part 2 of 2):
@@ -8207,9 +8652,21 @@ public final class CommandRouter {
             // this fails with an actionable message naming the Settings panel
             // (⌘,) and ai.providerStatus — never a key value (keys never cross
             // this plane; see ai.providerStatus).
+            //
+            // p2-sing-x7b (design 2026-10-06 §8.3): fitClipId? (a MIDI melody
+            // clip) writes ONE plain line per breath phrase of that melody, no
+            // section tags, and CHECKS the reply: the base assigner must take it
+            // line for line and every line's syllables must be at most its
+            // phrase's notes; one retry names the lines that failed. Response
+            // then also has fit {lines [{phrase, notes, syllables, fits}],
+            // allFit, attempts, sentence}. language? ("en"/"zh"/"yue") asks for
+            // that language (with fitClipId, default the clip's words'). Neither
+            // stores anything; clip.setLyrics stores. Refusals: clipNotFound,
+            // lyricsNeedMIDIClip, singClipHasNoNotes,
+            // lyricsLanguageUnsupported, structure with fitClipId.
             try params.rejectUnknownKeys(
                 ["prompt", "style", "structure", "context", "existingLyrics",
-                    "instruction"], verb: "ai.writeLyrics")
+                    "instruction", "fitClipId", "language"], verb: "ai.writeLyrics")
             let lyricsTheme = try params.require("prompt", \.stringValue)
             var writeRequest = LyricsWriteRequest(prompt: lyricsTheme)
             if let style = params["style"]?.stringValue { writeRequest.style = style }
@@ -8223,7 +8680,19 @@ public final class CommandRouter {
             if let instruction = params["instruction"]?.stringValue {
                 writeRequest.instruction = instruction
             }
+            let fitTarget = try singWire.lyricsFitTarget(params)
+            writeRequest.language = fitTarget.language
             let writer = try lyricsWriterProvider()
+            if let fitClip = fitTarget.clip {
+                let outcome = try await LyricsFit.write(
+                    writeRequest, clip: fitClip, language: fitTarget.language,
+                    tempoMap: store.transport.tempoMap, writer: writer)
+                return .success(request.id, .object([
+                    "lyrics": .string(outcome.result.lyrics),
+                    "provider": .string(outcome.result.provider),
+                    "fit": SingWireHandlers.lyricsFitJSON(outcome),
+                ]))
+            }
             let writeResult = try await writer.writeLyrics(writeRequest)
             return .success(request.id, .object([
                 "lyrics": .string(writeResult.lyrics),
@@ -9054,20 +9523,9 @@ public final class CommandRouter {
                 ["trackId", "pitches", "velocity", "durationMs"], verb: "note.audition",
                 hint: "'pitches' is an array of MIDI note numbers (1…8 of them, each 0…127)")
             let auditionTrackID = try params.requireTrackID()
-            guard case .some(.array(let rawPitches)) = params["pitches"] else {
-                throw ControlError("'pitches' must be an array of MIDI note numbers (0…127)")
-            }
-            var auditionPitches: [Int] = []
-            for entry in rawPitches {
-                guard let number = entry.doubleValue, Self.isInteger(number) else {
-                    throw ControlError("every entry in 'pitches' must be an integer 0…127")
-                }
-                auditionPitches.append(Int(number))
-            }
-            let auditionVelocity = try Self.optionalInteger(params["velocity"], "'velocity'")
-                ?? AuditionController.defaultVelocity
-            let auditionDuration = try Self.optionalInteger(params["durationMs"], "'durationMs'")
-                ?? AuditionController.defaultDurationMs
+            // m27-j: parsed by the ONE helper `fx.spectrum`'s `audition` shares.
+            let (auditionPitches, auditionVelocity, auditionDuration) =
+                try Self.auditionNoteValues(params)
             let auditionResult = try store.auditionNote(
                 trackID: auditionTrackID, pitches: auditionPitches,
                 velocity: auditionVelocity, durationMs: auditionDuration)
@@ -11231,6 +11689,292 @@ public final class CommandRouter {
             }
             return .success(request.id, .object(loadResult))
 
+        // p2-sing-e part 2 — THE SINGING VERBS (design
+        // docs/design/2026-09-27-p2-sing-integration.md §6, rows 1–17). Every
+        // case keeps its own `rejectUnknownKeys` here (the wire census reads
+        // this file) and delegates to `SingWireHandlers` (SingWire.swift),
+        // which reaches the SAME store/coordinator methods the Sing sheet
+        // will: `ProjectStore.setClipLyrics`, `ProjectStore.transposeProject`,
+        // `SingJobCoordinator.submit/status/statuses/cancel`. Refusals read
+        // "<code>: <sentence>". A router built without `singServices` (tests,
+        // headless sessions) still answers clip.setLyrics, clip.getLyrics,
+        // project.transpose, sing.proposeKey and sing.render with dryRun; the
+        // engine and voice verbs then refuse with singNotConnected.
+        case "sing.sidecarStatus":
+            // params: verify? (bool — also hashes the engine's multi-GB model
+            // file against its pin; slow, so the MCP bridge gives it the long
+            // tier).
+            // Response: state (design §2.8's nine: notInstalled,
+            // awaitingUserConsent, installing, needsUpdate, installedNotRunning,
+            // starting, ready, stopping, error), message, engineState, pid,
+            // install progress, runtime facts, health, resident, consent
+            // requests waiting, lastError, verify?.
+            try params.rejectUnknownKeys(["verify"], verb: "sing.sidecarStatus")
+            return .success(request.id, try await singWire.sidecarStatus(params))
+
+        case "sing.sidecarStart":
+            // No params. Starts the singing engine (port 8004, loopback only)
+            // and waits for it to be ready (up to the manager's 120 s startup
+            // window; LONG_RUNNING bridge tier). Refusals: singEngineNotInstalled,
+            // singEngineNeedsUpdate, singPortBusy, singStartFailed.
+            try params.rejectUnknownKeys([], verb: "sing.sidecarStart")
+            return .success(request.id, try await singWire.sidecarStart())
+
+        case "sing.sidecarStop":
+            // params: cancelJobs? (bool). Refused with singJobsRunning while a
+            // take is being sung unless cancelJobs is true. Response: the stop's
+            // status and its evidence (the three limbs: port free, probe
+            // unreachable, no captured pid alive), cancelledJobs.
+            try params.rejectUnknownKeys(["cancelJobs"], verb: "sing.sidecarStop")
+            return .success(request.id, try await singWire.sidecarStop(params))
+
+        case "sing.installEngine":
+            // No params. ⚠️ CONSENT IS A HUMAN ACT (design §2.5, user ruling
+            // sing-consent = "Ask me first"): from the wire this posts a request
+            // to the app's window and returns awaitingUserConsent; NOTHING
+            // downloads until the user clicks Install. The staging launch flag
+            // DAWPRO_SING_TEST_AUTO_CONSENT=1 (read once at launch, never over
+            // the wire) performs it at once. Also: alreadyInstalled, or
+            // installing. Refusals: singInstallInProgress, singDiskFull (with
+            // the measured free space), singUnsupportedMac.
+            try params.rejectUnknownKeys([], verb: "sing.installEngine")
+            return .success(request.id, try await singWire.installEngine())
+
+        case "sing.cancelInstall":
+            // No params. Cancels a running install (the status turns cancelled
+            // only once install.sh has removed its staging folder), or withdraws
+            // a request still waiting for the user's click. Refusal:
+            // singNoInstallRunning.
+            try params.rejectUnknownKeys([], verb: "sing.cancelInstall")
+            return .success(request.id, try await singWire.cancelInstall())
+
+        case "sing.uninstallEngine":
+            // params: dryRun? (bool — reports the bytes it would free and
+            // deletes nothing, no consent needed). Otherwise the SAME consent as
+            // sing.installEngine: awaitingUserConsent from the wire. Deletes only
+            // the SingingEngine folder; voices, the phrase cache and songs stay.
+            // Refusals: singInstallInProgress, singJobsRunning.
+            try params.rejectUnknownKeys(["dryRun"], verb: "sing.uninstallEngine")
+            return .success(request.id, try await singWire.uninstallEngine(params))
+
+        case "sing.listVoices":
+            // No params. The built-in singer and every saved voice, with its
+            // range, alignment verdict and word check. Works with the engine
+            // down (it reads voice.json files only).
+            try params.rejectUnknownKeys([], verb: "sing.listVoices")
+            return .success(request.id, try await singWire.listVoices())
+
+        case "sing.addVoice":
+            // params: EXACTLY ONE of path (absolute; any audio file macOS can
+            // read) or clipId (an unstretched audio clip; its own window), and
+            // name? (default "My voice"). The clip check, range and Route N
+            // labels run in Swift (no engine needed); the word check follows in
+            // the background. Refusals: the nine clip-check reasons
+            // (singVoiceTooShort … singVoiceGuideLeak, §5.7's sentences),
+            // singVoiceFileUnreadable, singVoiceNeedsAudioClip,
+            // singVoiceClipStretched, clipNotFound.
+            try params.rejectUnknownKeys(["path", "clipId", "name"], verb: "sing.addVoice")
+            return .success(request.id, try await singWire.addVoice(params))
+
+        case "sing.removeVoice":
+            // params: voiceId (required). Moves the voice's folder to the Trash
+            // (never deletes). Refusals: singVoiceNotFound, singVoiceBuiltIn.
+            try params.rejectUnknownKeys(["voiceId"], verb: "sing.removeVoice")
+            return .success(request.id, try await singWire.removeVoice(params))
+
+        case "sing.openVoiceRecorder":
+            // No params. Opens the voice recorder (item p2-sing-f); only the
+            // user presses Record. Refusal: singNoWindow until a recorder
+            // registers (`singVoiceRecorder`, set by the app).
+            try params.rejectUnknownKeys([], verb: "sing.openVoiceRecorder")
+            return .success(request.id, try singWire.openVoiceRecorder())
+
+        case "sing.proposeKey":
+            // params: clipId (required, a melody clip), voiceId? (default
+            // builtin-1). Read-only. Response: the voice's range, the melody's,
+            // the recommendation {kind, octaveShift, songTranspose, vocalOffset,
+            // calibrated}, alternatives and §5.7's sentence. Refusals:
+            // clipNotFound, singNeedsMIDIClip, singVoiceNotFound.
+            try params.rejectUnknownKeys(["clipId", "voiceId"], verb: "sing.proposeKey")
+            return .success(request.id, try await singWire.proposeKey(params))
+
+        case "clip.setLyrics":
+            // params: clipId (required), text (required; "" clears), dryRun?.
+            // Stores through `ProjectStore.setClipLyrics` — THE lyrics write,
+            // the one the words box uses — as ONE undo step ("Set Lyrics"),
+            // after the same checks a dry run makes. Response: text, stored,
+            // changed, assignment {words: [{text, noteIds, startBeat, endBeat,
+            // held}], lines}, warnings. Refusals: clipNotFound,
+            // lyricsNeedMIDIClip, lyricsTooManyWords, lyricsNotEnglish,
+            // lyricsTooLong (over 4,000 characters).
+            // p2-sing-x7 (design 2026-10-06 sections 6.9 and 8.1), ADDITIVE:
+            // language? ("en", "zh", "yue"; stored through the language
+            // overload of setClipLyrics, and echoed in the reply ONLY when
+            // sent; omitted, the clip keeps its language and the reply is the
+            // base reply exactly). wordless? ("ooh", "aah", "mm") with
+            // wordlessPerNote? writes the text from the clip's own breath
+            // phrases (`WordlessLyrics`) instead of `text`; sending both is
+            // refused. New refusals: lyricsLanguageUnsupported,
+            // lyricsScriptMismatch, lyricsWordlessWithText,
+            // lyricsWordlessInvalid, lyricsWordlessPerNoteAlone,
+            // singClipHasNoNotes (wordless on a clip with no notes).
+            try params.rejectUnknownKeys(["clipId", "text", "dryRun", "language", "wordless", "wordlessPerNote"],
+                                         verb: "clip.setLyrics")
+            return .success(request.id, try singWire.setLyrics(params))
+
+        case "clip.getLyrics":
+            // params: clipId (required). The text and the assignment derived
+            // NOW from the current notes; words that no longer fit come back as
+            // `problem`, never thrown. Refusal: clipNotFound. p2-sing-x7: the
+            // reply carries `language` ONLY when the clip has one.
+            try params.rejectUnknownKeys(["clipId"], verb: "clip.getLyrics")
+            return .success(request.id, try singWire.getLyrics(params))
+
+        case "sing.render":
+            // params: clipId (required), lyrics? (stored first through
+            // setClipLyrics, its own undo step), voiceId? (default builtin-1),
+            // octaveShift? ("auto", the default, or a whole number −2…2), seed?,
+            // trackName?, dryRun?. START-THEN-POLL: returns {jobId, plan} at once
+            // and the job runs in the app's ONE SingJobCoordinator (it starts the
+            // engine if needed); poll sing.jobStatus. The landed take is its own
+            // undo step. Refusals: the planner's (singNeedsMIDIClip,
+            // singClipHasNoNotes, singDrumTrack, singNeedsLyrics,
+            // lyricsTooManyWords, lyricsNotEnglish, singOctaveShiftInvalid,
+            // singNoteTooLong), clipNotFound, singVoiceNotFound,
+            // singEngineNotInstalled, singEngineNeedsUpdate, singQueueFull.
+            // p2-sing-x7b (design 2026-10-06 §4.7): parts? (at most 3, each
+            // {kind: harmony|chordTones|clip|double, interval?, direction?,
+            // chordSource?, sourceClipId?, voiceId?, seed?, trackName?, pan?,
+            // volumeDb?}) and key?/mode? (the key a harmony part is counted in;
+            // refused without parts). They reach the coordinator as X6's
+            // SingJobRequest.parts/.key; plan.parts ({role, name, units,
+            // octaveShift, range {sentence, fits}, warnings, voiceId, seed,
+            // trackName}) comes back ONLY when parts was sent. Every landed line
+            // is ONE undo step. More refusals: singTooManyParts,
+            // singHarmonyNeedsKey, singHarmonyIntervalInvalid,
+            // singPartClipNotFound, singPartInvalid (names the field), a part's
+            // planner refusal ("The part '…': …"). A dry run with
+            // parts previews them (over new lyrics too, nothing saved). Without parts: the base verb, byte
+            // for byte (§9.2 S6).
+            try params.rejectUnknownKeys(
+                ["clipId", "lyrics", "voiceId", "octaveShift", "seed", "trackName", "dryRun", "parts", "key",
+                 "mode"],
+                verb: "sing.render")
+            return .success(request.id, try await singWire.render(params))
+
+        case "sing.jobStatus":
+            // params: jobId? (omit for the last 20, newest first). Response:
+            // state (queued/running/landed/done/failed/cancelled), phase, unit
+            // {index, count}, progress, etaSeconds, waitingFor, warnings,
+            // notices, result {trackId, clipId, loudness, noteAccuracy,
+            // wordCheck {state, wer, heard, verdict}}, error. Refusal:
+            // singJobNotFound. p2-sing-x7b: a job that had parts also has
+            // parts [{role, name, state, trackId, clipId, error}], the lead
+            // first; its result (and word check) is the LEAD's take when the
+            // lead landed, else the FIRST landed part's — read parts[].role.
+            try params.rejectUnknownKeys(["jobId"], verb: "sing.jobStatus")
+            return .success(request.id, try await singWire.jobStatus(params))
+
+        case "sing.cancelJob":
+            // params: jobId (required). Only REQUESTS the stop: a started job
+            // stops at its next line and reads cancelled after; nothing lands.
+            // Refusals: singJobNotFound, singJobFinished. Once a take has
+            // started landing, cancel cannot stop it (W8-RV6: a cancel in that
+            // window is accepted and then ignored today; a follow-up makes it
+            // refuse with singJobFinished): edit.undo removes a landed take.
+            try params.rejectUnknownKeys(["jobId"], verb: "sing.cancelJob")
+            return .success(request.id, try await singWire.cancelJob(params))
+
+        case "project.transpose":
+            // params: semitones (required, a whole number −12…12),
+            // excludeTrackIds? (track ids to leave alone), dryRun?. THE ONLY
+            // way the song's key changes (design §3.6): every pitched track's
+            // notes and every audio clip's pitch shift move together as ONE
+            // undo step; drum tracks are skipped. Response: the
+            // TransposeReport verbatim (what moved and what was skipped, per
+            // field, plus warnings). Refusals: transposeOutOfRange,
+            // transposeNoteOutOfRange, transposeAudioShiftOutOfRange (names the
+            // clip), transposeLooperOpen, trackNotFound.
+            try params.rejectUnknownKeys(["semitones", "excludeTrackIds", "dryRun"], verb: "project.transpose")
+            return .success(request.id, try singWire.transpose(params))
+
+        // p2-sing-x7 part A — THE SINGING EXPANSION'S VERBS (design
+        // docs/design/2026-10-06-p2-sing-expansion.md). Same shape as the
+        // block above: the case keeps its `rejectUnknownKeys`, the handler
+        // lives in SingWire.swift and reaches the SAME store method the Sing
+        // sheet will (`setNoteWord`, `setSingStyle`).
+        case "clip.setNoteWord":
+            // params: clipId, noteId, word (required: one word; "+" holds the
+            // word before onto this note; "" clears the note's word), dryRun?.
+            // Rewrites the clip's TEXT through `ProjectStore.setNoteWord` (the
+            // note field's method) as ONE undo step ("Type Word"). Response:
+            // the clip.setLyrics shape {clipId, text, stored, changed,
+            // assignment, warnings}. Refusals (design 3.4): clipNotFound,
+            // lyricsNeedMIDIClip, lyricsNoText, noteNotFound, noteNotSung,
+            // lyricWordHasSpace, the assigner's (lyricsTooManyWords,
+            // lyricsNotEnglish, lyricsScriptMismatch, ...), lyricEditUnstable,
+            // lyricsTooLong, clipInTakeGroup; PROVISIONAL: lyricWordHasMarks,
+            // lyricWordHasNoLetters, lyricNothingToHold, lyricNoteInsideWord.
+            try params.rejectUnknownKeys(["clipId", "noteId", "word", "dryRun"], verb: "clip.setNoteWord",
+                                         hint: "to write a whole line at once, use clip.setLyrics")
+            return .success(request.id, try singWire.setNoteWord(params))
+
+        case "clip.setSingStyle":
+            // params: clipId (required); any of vibrato (asSung, straight,
+            // gentle, normal, wide), air (0-1), followVelocity (bool), notes
+            // ([{noteId, vibrato?, air?}]: each REPLACES that note's own
+            // choice; {noteId} alone makes the note follow the clip again);
+            // or clear: true alone. ONE undo step ("Set Singing Style"),
+            // through `ProjectStore.setSingStyle`, all or nothing. Response:
+            // {clipId, style (null when none), changed, orphanedNoteIds (the
+            // per-note choices whose notes were gone; this write removed
+            // them)}. Refusals (design 5.6): clipNotFound,
+            // singStyleNeedsMIDIClip, singStyleVibratoInvalid,
+            // singStyleAirOutOfRange, noteNotFound, singStyleClearAlone,
+            // nothingToChange, clipInTakeGroup; PROVISIONAL:
+            // singStyleLoopNotes (per-note choices on an open live loop's
+            // layer clip).
+            try params.rejectUnknownKeys(["clipId", "vibrato", "air", "followVelocity", "notes", "clear"],
+                                         verb: "clip.setSingStyle",
+                                         hint: "per-note choices go in 'notes' as [{noteId, vibrato?, air?}]")
+            return .success(request.id, try singWire.setSingStyle(params))
+
+        case "clip.getSingStyle":
+            // params: clipId (required). Read-only. Response: {clipId, style
+            // (null when none), orphanedNoteIds (per-note choices whose notes
+            // are gone: inert; the next clip.setSingStyle removes them)}.
+            // Refusal: clipNotFound.
+            try params.rejectUnknownKeys(["clipId"], verb: "clip.getSingStyle")
+            return .success(request.id, try singWire.getSingStyle(params))
+
+        case "sing.proposeHarmony":
+            // params: clipId, interval (third, sixth, fifth, octave),
+            // direction (above, below) (all required), chordSource? (auto,
+            // none, thisClip, otherTracks; default auto), key? (0 = C … 11 =
+            // B) with mode? (major, minor; default major), voiceId? (default
+            // builtin-1). READ-ONLY, works with the engine down: plans the
+            // part with `HarmonyPlanner` and judges its height for the voice.
+            // Response: {clipId, harmony, key {tonic, mode, name, source,
+            // confidence}, notes [{leadNoteId, leadPitch, pitch, rule}], range
+            // {voiceId, octaveShift, leadOctaveShift, outOfBandSemitones, fits,
+            // sentence}, warnings}. Refusals (design 4.7): clipNotFound,
+            // singNeedsMIDIClip, singClipHasNoNotes, singHarmonyNeedsKey,
+            // singHarmonyIntervalInvalid, singVoiceNotFound; PROVISIONAL:
+            // singDrumTrack.
+            try params.rejectUnknownKeys(["clipId", "interval", "direction", "chordSource", "key", "mode", "voiceId"],
+                                         verb: "sing.proposeHarmony")
+            return .success(request.id, try singWire.proposeHarmony(params))
+
+        case "sing.capabilities":
+            // No params. What singing can do on this Mac, with the engine
+            // down too: {languages [{code, name, status, needsEngineUpdate}]
+            // (from `LyricLanguage`, the one list), expression [...],
+            // maxParts, engine {installed, scriptsVersion,
+            // shippedScriptsVersion, needsUpdate} or null in a session with no
+            // engine wired in}. Starts, installs and downloads nothing.
+            try params.rejectUnknownKeys([], verb: "sing.capabilities")
+            return .success(request.id, await singWire.capabilities())
+
         case "vc.sidecarStatus":
             // No params. Health-probes the local RVC voice-conversion sidecar
             // (GET /health on 127.0.0.1:8002, loopback only — see
@@ -11716,11 +12460,15 @@ public final class CommandRouter {
 
         case "clip.transcribe":
             // BLOCKING (m23-n2b) — the render.mixdown-class precedent stated
-            // verbatim at vc.convertVocals above: there is NO in-app job
-            // registry (ai.generateSong's job lives in the ACE-Step
-            // SIDECAR), so inventing one here would be new infrastructure
-            // for a call that, like vc.convertVocals, can simply await its
-            // answer. On-device WhisperKit (m23-n2a); nothing leaves the
+            // verbatim at vc.convertVocals above. Since p2-sing-e (design
+            // §4.1) the app HAS one in-app registry of model-render jobs,
+            // the singing one (`SingJobCoordinator`: sing.render starts,
+            // sing.jobStatus polls, sing.cancelJob cancels), because a whole
+            // sung song outlasts every bridge tier; ai.generateSong's job
+            // still lives in the ACE-Step SIDECAR. Transcription stays
+            // blocking on purpose: like vc.convertVocals it can simply await
+            // its answer, and a job for it would be new infrastructure for a
+            // call that takes about a second once warm. On-device WhisperKit (m23-n2a); nothing leaves the
             // machine. `transcriber` is held ONE PER ROUTER (see its own
             // property doc): the FIRST call on a machine pays a one-time
             // ~90 s CoreML ANE compile (measured 93.7 s cold vs 1.15 s
@@ -11928,7 +12676,7 @@ public final class CommandRouter {
                 store.setInsertAnalysisArmed(trackID: target.trackID, effectID: target.effectID,
                                              armed: false, owner: .control)
             }
-            try params.rejectUnknownKeys(["trackId", "effectId", "arm"], verb: "fx.spectrum")
+            try params.rejectUnknownKeys(["trackId", "effectId", "arm", "audition"], verb: "fx.spectrum")
             let fxSpecTrackID: UUID?
             switch try params.parseFXTarget() {
             case .track(let id): fxSpecTrackID = id
@@ -11951,18 +12699,13 @@ public final class CommandRouter {
                 return .object(obj)
             }
 
-            if fxSpecArm {
+            // Arms (or renews) the control lease, or throws the arm's refusal.
+            // Shared by the plain arm:true read and the m27-j `audition` hold.
+            func fxSpecArmOrThrow() throws {
                 switch store.setInsertAnalysisArmed(trackID: fxSpecTrackID, effectID: fxSpecEffectID,
                                                     armed: true, owner: .control) {
                 case .armed:
                     insertSpectrumLeases.renew(fxSpecTarget)
-                    // A nil reading here is a can't-happen: the arm just
-                    // succeeded. Throw rather than fabricate a floor.
-                    guard let snapshot = store.insertAnalysis(trackID: fxSpecTrackID,
-                                                              effectID: fxSpecEffectID) else {
-                        throw ProjectError.engineUnavailable
-                    }
-                    return .success(request.id, try fxSpecResponse(armed: true, snapshot: snapshot))
                 case .trackNotFound(let id):
                     throw ProjectError.trackNotFound(id)
                 case .effectNotFound(let id):
@@ -11974,6 +12717,99 @@ public final class CommandRouter {
                 case .released:
                     throw ControlError("internal error: fx.spectrum arm returned .released")
                 }
+            }
+
+            // m27-j (W8-M27J, 2026-10-07): `audition` = play a note and measure
+            // it in ONE call. Without it nothing in this block runs and the
+            // reply is byte-identical (pinned in FXSpectrumCommandTests). Why
+            // it exists: one read analyzes only the newest ~85 ms, so a
+            // separate note.audition → fx.spectrum pair read the floor
+            // (measured: DAWEngineTests InsertSpectrumCoverageTests "m27-j").
+            // Order: validate EVERYTHING first (a refused call arms nothing and
+            // sounds nothing), arm, start the note through the SAME store
+            // function note.audition calls, read every
+            // `AuditionSpectrumProbe.pollIntervalMs` while it sounds (renewing
+            // the lease each time), and answer the per-band PEAK HOLD.
+            if let fxSpecAuditionValue = params["audition"] {
+                guard fxSpecArm else {
+                    throw ControlError("fx.spectrum: 'audition' measures while the note plays, so it cannot be "
+                                       + "combined with arm:false. Leave 'arm' out, and release the meter "
+                                       + "later with a separate arm:false call")
+                }
+                guard case .object(let fxSpecAudition) = fxSpecAuditionValue else {
+                    throw ControlError("'audition' must be an object such as {\"pitches\": [69]}: the notes to "
+                                       + "play while the spectrum is measured")
+                }
+                // A NAMED set, deliberately not an array literal: the source
+                // scrapes in CopilotCatalogTests / ZeroParamVerbRejectionTests
+                // read a literal here as fx.spectrum's TOP-LEVEL keys.
+                try fxSpecAudition.rejectUnknownKeys(
+                    Self.auditionObjectKeys, verb: "fx.spectrum",
+                    hint: "Those are the keys allowed inside 'audition'; 'pitches' is an array of MIDI "
+                        + "note numbers (1…8 of them, each 0…127)")
+                let fxSpecAuditionTrackID: UUID
+                if fxSpecAudition["trackId"] != nil {
+                    fxSpecAuditionTrackID = try fxSpecAudition.requireTrackID()
+                } else if let fxSpecTrackID {
+                    fxSpecAuditionTrackID = fxSpecTrackID
+                } else {
+                    throw ControlError("'audition' on the master chain needs its own 'trackId': the instrument "
+                                       + "track that should play the note")
+                }
+                let fxSpecNote = try Self.auditionNoteValues(fxSpecAudition)
+                try store.validateAuditionNote(trackID: fxSpecAuditionTrackID, pitches: fxSpecNote.pitches,
+                                               velocity: fxSpecNote.velocity,
+                                               durationMs: fxSpecNote.durationMs)
+                try fxSpecArmOrThrow()
+                let fxSpecCoverageBefore = store.insertAnalysisCoverage(trackID: fxSpecTrackID,
+                                                                        effectID: fxSpecEffectID)
+                var fxSpecPlayed: AuditionResult?
+                let fxSpecHold = try await AuditionSpectrumProbe.hold(
+                    durationMs: fxSpecNote.durationMs,
+                    start: {
+                        fxSpecPlayed = try store.auditionNote(
+                            trackID: fxSpecAuditionTrackID, pitches: fxSpecNote.pitches,
+                            velocity: fxSpecNote.velocity, durationMs: fxSpecNote.durationMs)
+                    },
+                    read: { store.insertAnalysis(trackID: fxSpecTrackID, effectID: fxSpecEffectID) },
+                    wait: { duration in await spectrumHoldPause(duration) },
+                    keepAlive: { insertSpectrumLeases.renew(fxSpecTarget) })
+                guard let fxSpecHeld = fxSpecHold.snapshot, let fxSpecResult = fxSpecPlayed,
+                      case .object(var fxSpecObject) = try fxSpecResponse(armed: true, snapshot: fxSpecHeld)
+                else {
+                    throw ProjectError.engineUnavailable
+                }
+                fxSpecObject["hold"] = .string(AuditionSpectrumProbe.holdKind)
+                fxSpecObject["reads"] = .number(Double(fxSpecHold.reads))
+                if let before = fxSpecCoverageBefore,
+                   let after = store.insertAnalysisCoverage(trackID: fxSpecTrackID, effectID: fxSpecEffectID),
+                   after.framesAnalyzed >= before.framesAnalyzed, after.framesDropped >= before.framesDropped {
+                    fxSpecObject["framesCovered"] = .number(Double(after.framesAnalyzed - before.framesAnalyzed))
+                    fxSpecObject["framesMissed"] = .number(Double(after.framesDropped - before.framesDropped))
+                }
+                var fxSpecAuditionPayload: [String: JSONValue] = [
+                    "trackId": .string(fxSpecResult.trackID.uuidString),
+                    "pitches": .array(fxSpecResult.pitches.map { .number(Double($0)) }),
+                    "velocity": .number(Double(fxSpecResult.velocity)),
+                    "durationMs": .number(Double(fxSpecResult.durationMs)),
+                    "audible": .bool(fxSpecResult.isAudible),
+                ]
+                if let reason = Self.auditionReason(fxSpecResult.outcome) {
+                    fxSpecAuditionPayload["reason"] = .string(reason)
+                }
+                fxSpecObject["audition"] = .object(fxSpecAuditionPayload)
+                return .success(request.id, .object(fxSpecObject))
+            }
+
+            if fxSpecArm {
+                try fxSpecArmOrThrow()
+                // A nil reading here is a can't-happen: the arm just
+                // succeeded. Throw rather than fabricate a floor.
+                guard let snapshot = store.insertAnalysis(trackID: fxSpecTrackID,
+                                                          effectID: fxSpecEffectID) else {
+                    throw ProjectError.engineUnavailable
+                }
+                return .success(request.id, try fxSpecResponse(armed: true, snapshot: snapshot))
             } else {
                 // Read WHILE still armed (if it is), THEN validate+release:
                 // reading after release could observe the engine's own tap
@@ -14153,7 +14989,9 @@ public final class CommandRouter {
         // The evaluation position. `sampleRate` CANCELS for every closed-form
         // source (an LFO's phase is seconds × rateHz, and seconds is p ÷ rate),
         // so any consistent rate gives the same answer — this is a read, not a
-        // render, and it does not have to match the graph.
+        // render, and it does not have to match the graph. (m39-w4-4c: a synced
+        // step source's edge ramp cancels it in the maths, not bit for bit; on a
+        // step it is exact, inside a 2 ms ramp it can differ by rounding.)
         let sampleRate = 48_000.0
         let seconds = store.transport.tempoMap.seconds(from: 0, to: beat)
         let position = Int64((seconds * sampleRate).rounded())
@@ -14177,6 +15015,15 @@ public final class CommandRouter {
                 sourceValue = nil
             } else if source.kind.isPositionDependent, !rolling {
                 sourceValue = 0
+            } else if case .stepSequencer(let step) = source.params,
+                      let synced = ModulationMath.syncedStepValue(
+                        step, atBeat: beat, tempoMap: store.transport.tempoMap,
+                        meterMap: store.transport.meterMap, sampleRate: sampleRate) {
+                // m39-w4-4c: a TEMPO-SYNCED step source reads the musical clock
+                // as the render does: this beat and the meter map, never
+                // `rateHz`, which it ignores. `value(of:)` below returns nil for
+                // it by design, so this branch must come first.
+                sourceValue = synced
             } else {
                 sourceValue = ModulationMath.value(of: source.params, atSample: position,
                                                    sampleRate: sampleRate)
@@ -14185,9 +15032,13 @@ public final class CommandRouter {
                 entry["sourceValue"] = .number(sourceValue)
             } else {
                 entry["sourceValue"] = .null
-                entry["sourceValueNote"] = .string(
-                    "an envelope follower's value exists only while audio is rendering; "
-                    + "it is not a function of transport position")
+                // The follower's sentence labels the follower only: any other
+                // null would be a caller bug, and must not borrow its reason.
+                if source.kind == .envelopeFollower {
+                    entry["sourceValueNote"] = .string(
+                        "an envelope follower's value exists only while audio is rendering; "
+                        + "it is not a function of transport position")
+                }
             }
             if let base = try modulationBaseValue(of: route.target, on: strip) {
                 entry["baseValue"] = .number(base)
@@ -14209,7 +15060,7 @@ public final class CommandRouter {
             effective.append(.object(entry))
         }
         var object: [String: JSONValue] = [
-            "sources": .array(try state.sources.map { try JSONValue(encoding: $0) }),
+            "sources": .array(try state.sources.map { try modulationSourceDescription($0, atBeat: beat) }),
             "routes": .array(try state.routes.map { try JSONValue(encoding: $0) }),
             "effective": .array(effective),
             "atBeat": .number(beat),
@@ -14219,6 +15070,29 @@ public final class CommandRouter {
         case .master: object["trackId"] = .string("master")
         case .track(let id): object["trackId"] = .string(id.uuidString)
         }
+        return .object(object)
+    }
+
+    /// m39-w4-4e — one source's `mod.describe` entry: the source as stored,
+    /// plus, for a TEMPO-SYNCED step source, a `tempoSync` block — its
+    /// division, `stepsPerBar` at the meter in force at `beat`, where the
+    /// pattern starts again (and the loop-wrap caveat), and `rateHzNote`, the
+    /// very sentence the setter's `modulationParamIgnored` warning carries
+    /// (`TempoSync.inertRateNote(for:)`, design §4.4). A free source's entry
+    /// is exactly what it was.
+    private func modulationSourceDescription(_ source: ModulationSource,
+                                             atBeat beat: Double) throws -> JSONValue {
+        let encoded = try JSONValue(encoding: source)
+        guard case .stepSequencer(let step) = source.params,
+              let sync = step.syncSummary(meterMap: store.transport.meterMap, atBeat: beat),
+              case .object(var object) = encoded else { return encoded }
+        object["tempoSync"] = .object([
+            "stepDivision": .string(sync.division.rawValue),
+            "stepsPerBar": .number(sync.stepsPerBar),
+            "meter": .string(sync.meter),
+            "restart": .string(sync.restart),
+            "rateHzNote": .string(sync.rateNote),
+        ])
         return .object(object)
     }
 
@@ -14299,10 +15173,22 @@ public final class CommandRouter {
             }
             return .object(object)
         }
-        let syncNote = "NOT AVAILABLE IN v1 — any non-null value is refused with "
-            + "modulationTempoSyncUnavailable. Tempo-synced rates need m39-c's generalised "
-            + "resolver; until it lands, use the free-running rateHz. The field exists so "
-            + "the shape never changes when sync arrives."
+        let syncNote = "NOT AVAILABLE for the LFO — any non-null value is refused with "
+            + "modulationTempoSyncUnavailable: a synced LFO is not built yet. Use the "
+            + "free-running rateHz. (A step sequencer's stepDivision does follow the song's "
+            + "beat.) The field exists so the shape never changes when a synced LFO arrives."
+        // m39-w4-4: the step sequencer's tempo sync, from `TempoSync`'s sibling table.
+        let stepDivisionNote = "Locks every step to a note length of the song, so the steps "
+            + "follow the beat: \"1/16\" makes each step a sixteenth note, and step 1 lands on "
+            + "the bar line. One of the listed values (d = dotted, t = triplet), or null to run "
+            + "free on rateHz again. The pattern starts from step 1 at the song's first beat and "
+            + "again at every time-signature change; mod.describe reports stepsPerBar. While it "
+            + "is set, rateHz is ignored and the reply says so. Any other value is refused."
+        func withValues(_ entry: JSONValue, _ values: [String]) -> JSONValue {
+            guard case .object(var object) = entry else { return entry }
+            object["values"] = .array(values.map { .string($0) })
+            return .object(object)
+        }
         let polarity = "POLARITY — a source value is an OFFSET from the parameter's current "
             + "value, not a level. 0 means 'leave it alone'. On volume the fader has only "
             + "+6.02 dB of headroom against 48 dB of cut, so gates and tremolos take a "
@@ -14379,11 +15265,13 @@ public final class CommandRouter {
                               "1 to \(ModulationLimits.maxSteps) OFFSETS, not levels — read "
                                   + "the polarity note. A gate that opens on the downbeat "
                                   + "is [0,1,0,1]."),
-                        param("stepDivision", "string|null", nil, .null, "", "", syncNote),
+                        withValues(param(TempoSync.stepSequencerRegistration.divisionParam,
+                                         "string|null", nil, .null, "", "", stepDivisionNote),
+                                   TempoSync.divisionValues),
                         param("rateHz", "number", StepSequencerSourceParams.rateRange,
                               .number(4.0), "steps/s", "logarithmic",
                               "free-running step rate in STEPS PER SECOND (4 is a 1/16 at "
-                                  + "60 BPM). The tempo-relative spelling arrives with m39-c."),
+                                  + "60 BPM). Ignored while stepDivision is set."),
                         param("edgeMs", "number", StepSequencerSourceParams.edgeRange,
                               .number(2.0), "ms", "logarithmic",
                               "raised-cosine edge between steps"),
@@ -14967,7 +15855,11 @@ public final class CommandRouter {
     /// are simply absent), so it cannot be mistaken for a real result. Built from
     /// the SAME `SongSkeletonPlan` `applySongSkeleton` turns into the real tracks,
     /// so a dry run cannot drift from what it predicts.
-    private func songSkeletonPlanResult(_ plan: SongSkeletonPlan) -> JSONValue {
+    /// `extraWarnings` (W8-T67R): whatever resolving the wire's `template` param itself
+    /// worked around, prepended exactly as `songSkeletonResult` does for the real call, so
+    /// a dry run never hides a warning the real call would show.
+    private func songSkeletonPlanResult(_ plan: SongSkeletonPlan,
+                                        extraWarnings: [TemplateWarning] = []) -> JSONValue {
         .object([
             "applied": .bool(false),
             "genre": .string(plan.genre),
@@ -15008,7 +15900,7 @@ public final class CommandRouter {
             "loopEnd": .number(plan.loopEnd),
             "templateName": plan.templateName.map(JSONValue.string) ?? .null,
             "hasRouting": .bool(plan.hasRouting),
-            "warnings": .array(plan.warnings.map(Self.templateWarningJSON)),
+            "warnings": .array((extraWarnings + plan.warnings).map(Self.templateWarningJSON)),
         ])
     }
 
@@ -15705,6 +16597,56 @@ public final class CommandRouter {
                 + "a per-slice strength to map")
         }
 
+        // m39-w4-6 — `mapping` ("chromatic", the default and the pre-w4-6 chop,
+        // or "kit") and, in "kit" only, `roles` (slice index → role, forced
+        // before the classifier). Scoped like everything above: `baseNote` in
+        // "kit" and `roles` outside it are named errors, never ignored.
+        var mapping = SliceMapping.chromatic
+        if let raw = params["mapping"]?.stringValue {
+            if let parsed = SliceMapping(rawValue: raw) {
+                mapping = parsed
+            } else {
+                problems.append(
+                    "'mapping' must be 'chromatic' (one pad per note from baseNote up, the default) or "
+                    + "'kit' (sort the hits into a drum kit: kicks on 36, snares on 38, hi-hats on 42 "
+                    + "and 46, anything else from 84 up) — got '\(raw)'")
+            }
+        } else if params["mapping"] != nil {
+            problems.append("'mapping' must be a string")
+        }
+        if mapping == .kit && params["baseNote"] != nil {
+            problems.append(
+                "'baseNote' only applies to mapping 'chromatic' — mapping 'kit' puts each hit on its "
+                + "General MIDI drum note")
+        }
+        var roleOverrides: [Int: KitSliceRole] = [:]
+        if let rolesValue = params["roles"] {
+            let allowed = KitSliceRole.allCases.map { "'\($0.rawValue)'" }.joined(separator: ", ")
+            if mapping != .kit {
+                problems.append(
+                    "'roles' only applies to mapping 'kit' — pass mapping: \"kit\" to sort the hits "
+                    + "into a drum kit")
+            } else if case .object(let object) = rolesValue {
+                for key in object.keys.sorted() {
+                    guard let index = Int(key), index >= 0, String(index) == key else {
+                        problems.append(
+                            "'roles' keys are slice indexes (\"0\", \"1\", …) — got '\(key)'")
+                        continue
+                    }
+                    guard let raw = object[key]?.stringValue,
+                          let role = KitSliceRole(rawValue: raw) else {
+                        problems.append("'roles.\(key)' must be one of \(allowed)")
+                        continue
+                    }
+                    roleOverrides[index] = role
+                }
+            } else {
+                problems.append(
+                    "'roles' must be an object mapping a slice index (\"0\", \"1\", …) to one of "
+                    + allowed)
+            }
+        }
+
         guard problems.isEmpty else {
             throw combinedFieldProblems(problems, verb: "clip.sliceToSampler")
         }
@@ -15715,7 +16657,8 @@ public final class CommandRouter {
             baseNote: baseNote, snapWindowSeconds: snapWindowMs / 1000.0,
             generateMIDI: params["generateMIDI"]?.boolValue ?? true,
             atBeat: params["atBeat"]?.doubleValue,
-            velocityFromStrength: velocityFromStrength)
+            velocityFromStrength: velocityFromStrength,
+            mapping: mapping, roleOverrides: roleOverrides)
     }
 
     /// Parses an optional `sampler` object into a `SamplerParams` — a WHOLESALE
@@ -15787,6 +16730,36 @@ public final class CommandRouter {
         var crossfade: SamplerCrossfade?
         var reverse: Bool?
         var chokeGroup: Int?
+        /// m39-w4-6: `.other` is the caller saying "not a drum", which is how a
+        /// patch clears a role (an omitted key keeps it).
+        var drumRole: ParsedDrumRole?
+    }
+
+    /// A zone's `drumRole` as the caller sent it (m39-w4-6): one of the drum
+    /// machine's eight voices, or `"other"` — explicitly no drum.
+    private enum ParsedDrumRole {
+        case role(DrumVoice)
+        case other
+
+        var voice: DrumVoice? {
+            if case .role(let voice) = self { return voice }
+            return nil
+        }
+    }
+
+    /// Parses `drumRole`: absent → nil; a `DrumVoice` raw value or `"other"` →
+    /// the role; anything else (a number, null, an unknown word) is a teaching
+    /// error naming the field path, never a silent drop.
+    private static func parseDrumRole(_ value: JSONValue?, _ path: String) throws -> ParsedDrumRole? {
+        guard let value else { return nil }
+        if let raw = value.stringValue {
+            if raw == "other" { return .other }
+            if let voice = DrumVoice(rawValue: raw) { return .role(voice) }
+        }
+        throw ControlError(
+            "\(path) must be one of "
+                + DrumVoice.allCases.map { "\"\($0.rawValue)\"" }.joined(separator: ", ")
+                + ", or \"other\" (not a drum)")
     }
 
     /// Parses one zone object's fields. `label` is the wire path prefix
@@ -15873,6 +16846,7 @@ public final class CommandRouter {
         f.crossfade = try parseCrossfade(zone["crossfade"], "\(label).crossfade")
         f.reverse = try optionalBool(zone["reverse"], "\(label).reverse")
         f.chokeGroup = try optionalInteger(zone["chokeGroup"], "\(label).chokeGroup")
+        f.drumRole = try parseDrumRole(zone["drumRole"], "\(label).drumRole")
         return f
     }
 
@@ -16013,7 +16987,10 @@ public final class CommandRouter {
             // `zonePatches`. There is no compiler help for the omission — the
             // model init would just use its nil default.
             reverse: f.reverse ?? base.reverse,
-            chokeGroup: f.chokeGroup ?? base.chokeGroup)
+            chokeGroup: f.chokeGroup ?? base.chokeGroup,
+            // m39-w4-6: "other" CLEARS the role (the one way a patch can say
+            // "not a drum"); an omitted key keeps it.
+            drumRole: f.drumRole.map(\.voice) ?? base.drumRole)
     }
 
     /// A brand-new zone: every unmentioned field resolves to the MODEL DEFAULT.
@@ -16049,7 +17026,8 @@ public final class CommandRouter {
             loopEnd: f.loopEnd,
             crossfade: f.crossfade,
             reverse: f.reverse,
-            chokeGroup: f.chokeGroup)
+            chokeGroup: f.chokeGroup,
+            drumRole: f.drumRole?.voice)
     }
 
     /// Parses a zone's optional `crossfade` object (m27 leg B). Absent → nil.
@@ -16414,6 +17392,11 @@ public final class CommandRouter {
             // silent read-back default). Written by
             // `clip.setPitchTransitionSmoothness`.
             "transitionSlopeCentsPerSecond": .number(edits?.transitionSlopeCentsPerSecond ?? 0),
+            // vf-18 (leg 2): which bridge rule this set's followed slides use —
+            // "sungAtOpenSide" (legacy; also an absent table) or "holdAtOpenSide"
+            // (a held side keeps the slide's own pitch; a followed neighbour is not
+            // an anchor). `PitchEditSet.slideFollowRule.rawValue`, the Codable form.
+            "slideFollowRule": .string((edits?.slideFollowRule ?? .sungAtOpenSide).rawValue),
             // NT-W (natural tuning R16): a tuned vocal made before natural
             // tuning existed — `PitchEditSet.predatesNaturalTuning`, the ONE
             // predicate (never restated here): `formantCorrection == nil`
@@ -17046,6 +18029,44 @@ public final class CommandRouter {
         }
     }
 
+    /// The keys allowed INSIDE `fx.spectrum`'s `audition` object (m27-j):
+    /// note.audition's own four.
+    private static let auditionObjectKeys: Set<String> = ["trackId", "pitches", "velocity", "durationMs"]
+
+    /// The `pitches` / `velocity` / `durationMs` of a note audition, parsed
+    /// ONCE for both `note.audition` and `fx.spectrum`'s `audition` object
+    /// (m27-j, W8-M27J) — one home for these refusal sentences (moved verbatim
+    /// from the `note.audition` case). Ranges and the track are checked by
+    /// `ProjectStore.validateAuditionNote`, shared the same way.
+    private static func auditionNoteValues(_ params: [String: JSONValue]) throws
+        -> (pitches: [Int], velocity: Int, durationMs: Int) {
+        guard case .some(.array(let rawPitches)) = params["pitches"] else {
+            throw ControlError("'pitches' must be an array of MIDI note numbers (0…127)")
+        }
+        var pitches: [Int] = []
+        for entry in rawPitches {
+            guard let number = entry.doubleValue, isInteger(number) else {
+                throw ControlError("every entry in 'pitches' must be an integer 0…127")
+            }
+            pitches.append(Int(number))
+        }
+        let velocity = try optionalInteger(params["velocity"], "'velocity'")
+            ?? AuditionController.defaultVelocity
+        let durationMs = try optionalInteger(params["durationMs"], "'durationMs'")
+            ?? AuditionController.defaultDurationMs
+        return (pitches, velocity, durationMs)
+    }
+
+    /// m27-j: the pause between `fx.spectrum`'s `audition` reads — real time,
+    /// unless a test installed `spectrumHoldWait`.
+    private func spectrumHoldPause(_ duration: Duration) async {
+        if let spectrumHoldWait {
+            await spectrumHoldWait(duration)
+        } else {
+            try? await Task.sleep(for: duration)
+        }
+    }
+
     /// An optional integer pitch field: absent → nil; present-but-not-a-whole-
     /// number → a field-path error. Range is left to the model's clamping init.
     private static func optionalPitch(_ value: JSONValue?, _ field: String) throws -> Int? {
@@ -17583,7 +18604,8 @@ public final class CommandRouter {
         // above: a project that never touched the drum machine keeps its
         // pre-m39-dm wire shape byte-for-byte, and "never configured" stays
         // distinguishable from "configured to the factory values" on a round
-        // trip. `nil` reads as the factory kit (`resolvedDrumKit`), which
+        // trip. `nil` reads as the factory kit on a drum machine and as a new
+        // drum machine's kit on anything else (`resolvedDrumKit`), which
         // `instrument.describeDrumKit` reports explicitly.
         if let drumKit = d.drumKit {
             payload["drumKit"] = Self.drumKitJSON(drumKit)
@@ -17939,6 +18961,11 @@ public final class CommandRouter {
         // m32-f: likewise only-when-SET.
         if let chokeGroup = zone.chokeGroup {
             object["chokeGroup"] = .number(Double(chokeGroup))
+        }
+        // m39-w4-6: likewise only-when-SET, so a zone with no drum role keeps
+        // its pre-w4-6 wire shape byte-for-byte.
+        if let drumRole = zone.drumRole {
+            object["drumRole"] = .string(drumRole.rawValue)
         }
         // m39-levels-2: SIXTEEN LEVELS' direction, read live off the zone's
         // OWN geometry (`SixteenLevels.direction(of:)`) — never a stored

@@ -47,6 +47,10 @@ struct TransportBar: View {
     /// never an overflowing one.
     @State private var barWidth: CGFloat = 0
     @State private var leadingClusterWidth: CGFloat = 0
+    /// The Record press's own refusal, in the store's words (p2-sing-f2: the
+    /// press was `try?`, which threw it away). On the button's tooltip through
+    /// `recordButton`; cleared by a press that records and by any take starting.
+    @State private var recordPressRefusal: String?
 
     /// TB-F1 — which of the right region's controls take their compact form
     /// (`TransportBarFit`, pure and pinned by `TransportBarFitTests`). TB's
@@ -388,15 +392,18 @@ struct TransportBar: View {
                 isActive: store.transport.isRecording,
                 activeColor: DAWTheme.record
             ) {
-                if store.transport.isRecording {
-                    store.stop()
-                } else {
-                    try? store.record()
-                }
+                // p2-sing-f2: through the headless seam, never `try?`. A refusal
+                // comes back in the store's words and goes on the tooltip.
+                recordPressRefusal = TransportRecordButtonModel.press(store)
             }
-            .disabled(!store.transport.isRecording
-                      && !store.hasArmedAudioTracks && !store.hasArmedInstrumentTracks)
+            // The `LoopDeckControlModel` pattern: a refusal the store will give
+            // (nothing armed, the voice recorder open) disables the button with
+            // the store's own sentence on its tooltip.
+            .disabled(!recordButton.isEnabled)
             .help(recordHelp)
+            .onChange(of: store.transport.isRecording) { _, recording in
+                if recording { recordPressRefusal = nil }
+            }
             .explainable(.transportRecord)
 
             // PANIC (m23-af). Momentary, so `isActive` is always false — there is
@@ -442,13 +449,15 @@ struct TransportBar: View {
         }
     }
 
-    /// Why record is (un)available, surfaced right on the button.
-    private var recordHelp: String {
-        if store.transport.isRecording { return "Stop recording" }
-        if let error = store.lastRecordingError { return error }
-        return store.hasArmedAudioTracks || store.hasArmedInstrumentTracks
-            ? "Record onto armed tracks"
-            : "Record — arm a track (R) first"
+    /// Why record is (un)available, surfaced right on the button: headless in
+    /// `TransportRecordButtonModel` (p2-sing-f2), so the rule is tested.
+    /// (`TransportBarLabelSiteTests` reads the leading cluster up to THIS
+    /// declaration: keep its name.)
+    private var recordHelp: String { recordButton.help }
+
+    /// The Record button's state: enabled, and the tooltip `recordHelp` shows.
+    private var recordButton: TransportRecordButtonModel {
+        TransportRecordButtonModel.resolve(store: store, pressRefusal: recordPressRefusal)
     }
 
     /// Toggles looping. Range editing arrives with the arrange view; for now the

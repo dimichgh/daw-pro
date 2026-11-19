@@ -1,6 +1,6 @@
 import Foundation
 
-// m39-dm — THE DRUM MACHINE'S MODEL, AND THE ONE HOME FOR ITS 75 NAMES.
+// m39-dm — THE DRUM MACHINE'S MODEL, AND THE ONE HOME FOR ITS 77 NAMES (75 + W8-HAT's 2 trims).
 //
 // ⚠️⚠️ NAME-ADDRESSED, NEVER POSITIONAL. `InstrumentParams.swift:18-24` forbids
 // positional addressing for instrument parameters in those words, and a drum
@@ -40,6 +40,42 @@ import Foundation
 // inside the kit so it rides every path the kit already travels, including the
 // render instance's own copy. ONE HOME for the map: `DrumVoice.voice(forNote:
 // layout:)`. `docs/design/2026-09-27-multi-instrument-templates.md` §3.
+//
+// W8-HAT (m39 wave 4, `dm-hat-gain`) — TWO APPENDED KIT-SCOPE LEVEL TRIMS,
+// `kit.hatsLevelDb` (the two hi-hat voices) and `kit.cymbalsLevelDb` (the
+// cymbal voice), in dB on top of each voice's own `level`. Measured 2026-10-06
+// in the Hip-Hop 808 groove (A-weighted, relative to each kit's own snare): the
+// Mac's GM kit puts its hats 23.4 dB and its crash 5.7 dB above ours — 17.6 dB
+// apart, so ONE shared trim could not match both. ⛔ THE SHIPPED-TONE LAW:
+// a trim ABSENT from a saved kit decodes to `savedKitLevelTrimDb` (0 dB,
+// exactly ×1.0), NEVER to the new-kit default; see `init(from:)` and the
+// constants below.
+//
+// W9-DRUMDEF (m39-hat-default + m39-dm-gm-default) — THE USER'S PICKS. A NEW
+// drum machine plays its hi-hats and cymbals as loud as the Mac's own drum kit
+// (`newKitHatsLevelDb` 23.4, `newKitCymbalsLevelDb` 5.7) and answers the
+// General MIDI drum keys (`newKitNoteLayout`, `gm`): `newDrumMachineKit`.
+// ⛔ `DrumKitParams()` IS NOT A NEW DRUM MACHINE. It stays the kit every saved
+// song plays — trims 0 dB, layout `pads` — because a drum machine that was
+// never edited is saved with NO kit and `resolvedDrumKit` turns that nil into
+// `DrumKitParams()`. A new drum machine is BORN with `newDrumMachineKit`
+// written into it (`InstrumentDescriptor.drumKitCarried(into:)`, the template
+// reader), so its file says what it plays.
+//
+// W9-HEAD (m39-dm-headroom) — A NEW drum machine also starts with HEADROOM: its
+// kit gain is `newKitGain` (0.7, -3.1 dB), not 1.0. Measured 2026-10-11 through
+// the export path (the app's 4x true-peak meter, a new song with no master
+// chain, fader 1.0): at kit gain 1.0 a plain General MIDI beat on the picks
+// peaked +1.0 dBTP, and +2.0 dBTP with every hit accented, which an MP3 export
+// turns into crunch. The kit gain scales every voice alike, so the hats-vs-snare
+// balance the user picked does not move. `DrumKitParams()` keeps gain 1.0, so a
+// nil kit and every saved kit play exactly as before. Every factory preset
+// carries the same headroom (the orchestrator's ruling, 2026-10-11; `lofi` keeps
+// its step below the others, 0.9 x 0.7, and `acoustic` takes the same step on
+// the headroom alone), so loading one keeps a new drum machine clear of
+// clipping too. The built-in templates that name a preset pin the kit
+// gain they always played at (`"gain"` in their `drumKit` blocks: 1, lofi 0.9),
+// so they do not move, and `presetsBeforeHeadroom` keeps those kits' names.
 
 /// WHICH MIDI NOTE PLAYS WHICH DRUM (m39-tpl-0).
 ///
@@ -51,7 +87,7 @@ import Foundation
 /// our closed hat, GM 42 (closed hat) our rim, and GM 46/49/51 play nothing.
 ///
 /// ⛔ STRUCTURAL, NOT A SOUND PARAMETER — the `chokeGroup` precedent. It is not
-/// one of the 75 names, so `instrument.setDrumParam` and modulation both refuse
+/// one of the 77 names, so `instrument.setDrumParam` and modulation both refuse
 /// it, and a PRESET NEVER CHANGES IT (`DrumKitParams.applyingPreset(_:)`).
 public enum DrumNoteLayout: String, Sendable, Equatable, Codable, CaseIterable {
     /// Notes 36–43 in voice order. What every kit saved before this setting
@@ -108,6 +144,32 @@ public enum DrumVoice: String, Sendable, Equatable, Codable, CaseIterable {
         case .tom: return 5
         case .rim: return 6
         case .cymbal: return 7
+        }
+    }
+
+    /// The voice whose render-side `slot` is `slot`, or nil for any other
+    /// value. The exact inverse of `slot` above (a test pins the round trip).
+    ///
+    /// ⛔ RENDER THREAD. `DrumSynthInstrument.refreshOutputStages` calls this
+    /// for every SOUNDING slot whenever a new kit is adopted, so it is a plain
+    /// `switch` on the integer — F-4's rule, the `voice(forNote:layout:)`
+    /// shape: no `static let` table, no `allCases` scan. W8-RTFIX (RT review
+    /// F1): the `DrumVoice.allCases.first(where:)` scan this replaced raised
+    /// 192 000 malloc events per 1 000 kit adoptions with eight voices
+    /// sounding in the debug test build (`DrumNoteLayoutRenderTests`); a
+    /// `switch` raises none, and has no dependence on the optimiser.
+    @inline(__always)
+    public static func voice(forSlot slot: Int32) -> DrumVoice? {
+        switch slot {
+        case 0: return .kick
+        case 1: return .snare
+        case 2: return .closedHat
+        case 3: return .openHat
+        case 4: return .clap
+        case 5: return .tom
+        case 6: return .rim
+        case 7: return .cymbal
+        default: return nil
         }
     }
 
@@ -189,6 +251,33 @@ public enum DrumVoice: String, Sendable, Equatable, Codable, CaseIterable {
     public func notes(in layout: DrumNoteLayout) -> [UInt8] {
         (UInt8(0)...UInt8(127)).filter { Self.voice(forNote: $0, layout: layout) == self }
     }
+
+    /// The ONE note a drum row writes for this voice in `layout` (m39-w4-2,
+    /// `DrumLaneMap`): in `pads` the voice's own note (36–43); in `gm` the
+    /// General MIDI note a beginner expects, where the voice answers several.
+    /// A `switch`, the shape `voice(forNote:layout:)` keeps (F-4), though this
+    /// one is not called on the render thread.
+    ///
+    /// Not a second note map: `DrumLaneMapTests` pins
+    /// `voice(forNote: primaryNote(in: l), layout: l) == self` for every voice
+    /// in both layouts, so a primary note that played another drum fails there.
+    public func primaryNote(in layout: DrumNoteLayout) -> UInt8 {
+        switch layout {
+        case .pads:
+            return note
+        case .gm:
+            switch self {
+            case .kick: return 36       // Bass Drum 1
+            case .rim: return 37        // Side Stick
+            case .snare: return 38      // Acoustic Snare
+            case .clap: return 39       // Hand Clap
+            case .closedHat: return 42  // Closed Hi-Hat
+            case .tom: return 45        // Low Tom
+            case .openHat: return 46    // Open Hi-Hat
+            case .cymbal: return 49     // Crash Cymbal 1
+            }
+        }
+    }
 }
 
 /// The leaf half of a dotted parameter name. Its `slot` is packed into the
@@ -200,6 +289,19 @@ public enum DrumLeafParam: String, Sendable, Equatable, Codable, CaseIterable {
     case pitchAmount, pitchDecay, partial2Ratio, noiseTone, spread, band
     // Kit-scope.
     case gain, velocityToTone, accentThreshold, accentDepth
+    // Kit-scope LEVEL TRIMS (W8-HAT), APPENDED: each reaches only its own
+    // voices (`DrumKitParams.levelTrimLeaf(for:)`), never the whole kit.
+    case hatsLevelDb, cymbalsLevelDb
+
+    /// Whether this leaf is one of the two level trims — the leaves `encode`
+    /// omits at the saved-kit neutral and `init(from:)` does not default from
+    /// `DrumKitParams()`.
+    public var isLevelTrim: Bool {
+        switch self {
+        case .hatsLevelDb, .cymbalsLevelDb: return true
+        default: return false
+        }
+    }
 
     public var slot: Int32 {
         switch self {
@@ -221,6 +323,8 @@ public enum DrumLeafParam: String, Sendable, Equatable, Codable, CaseIterable {
         case .velocityToTone: return 15
         case .accentThreshold: return 16
         case .accentDepth: return 17
+        case .hatsLevelDb: return 18
+        case .cymbalsLevelDb: return 19
         }
     }
 }
@@ -255,7 +359,7 @@ public struct DrumVoiceParams: Sendable, Equatable {
     public var band: Double
 
     /// Mutual-cut group, 0…63, or nil for "chokes nothing and is choked by
-    /// nothing". STRUCTURAL, not continuous — deliberately NOT one of the 75
+    /// nothing". STRUCTURAL, not continuous — deliberately NOT one of the 77
     /// modulation names, because exposing it would give this instrument its
     /// only discrete parameter. Clamped through `SamplerZone.chokeGroupRange`
     /// so the sampler and the drum machine can never disagree about what 63
@@ -365,6 +469,14 @@ public struct DrumKitParams: Sendable, Equatable {
     /// Extra level (and half-share of tone shift) an accented hit receives.
     public var accentDepth: Double
 
+    /// W8-HAT — extra level, in dB, on the two HI-HAT voices (`closedHat` and
+    /// `openHat`: General MIDI notes 42, 44 and 46 in the `gm` layout), on top
+    /// of each hat's own `level`. Latched at note-on, like `gain`.
+    public var hatsLevelDb: Double
+    /// W8-HAT — extra level, in dB, on the CYMBAL voice (every crash, ride,
+    /// China, splash and bell note in the `gm` layout).
+    public var cymbalsLevelDb: Double
+
     /// m39-tpl-0 — the note layout. ⛔ STORED AS AN OPTIONAL, nil meaning
     /// `.pads`, and NEVER stored as `.pads`: the setter of `noteLayout` writes
     /// nil for it. Both halves are load-bearing:
@@ -436,6 +548,101 @@ public struct DrumKitParams: Sendable, Equatable {
     public static let accentThresholdRange: ClosedRange<Double> = 1...127
     public static let accentDepthRange: ClosedRange<Double> = 0...1
 
+    /// W8-HAT — the trims' ranges. Wide on purpose: matching the GM kit's hats
+    /// takes about +23 dB (measured), and the hats need room above that.
+    /// COMPUTED, not `static let`, because the render thread reads them
+    /// (`levelTrimGain`): a computed literal is never a lazily initialised
+    /// global (`generalMIDIPercussionNotes`' rule).
+    public static var hatsLevelDbRange: ClosedRange<Double> { -24...36 }
+    public static var cymbalsLevelDbRange: ClosedRange<Double> { -24...24 }
+
+    // MARK: - The level trims' neutral and the NEW-kit defaults (W8-HAT)
+
+    /// ⛔⛔ NEVER CHANGE THIS. The hats and cymbal trim every kit saved BEFORE
+    /// the trims existed plays at: 0 dB, which multiplies by exactly 1.0, so
+    /// those kits render bit for bit as they did. It is what an ABSENT key
+    /// DECODES to (`init(from:)`) and the value at which `encode` OMITS the
+    /// key, so a kit saved today re-saves byte-identically.
+    public static let savedKitLevelTrimDb: Double = 0
+
+    /// ⭐ THE PICK'S CONSTANTS: the trims a NEW drum machine starts at
+    /// (`newDrumMachineKit`), and so every factory preset (`presetBase`) and
+    /// every template that names one. Measured 2026-10-06 (W8-HAT, the Hip-Hop
+    /// 808 groove, A-weighted, relative to each kit's own snare): the Mac's GM
+    /// kit puts its hats 23.4 dB and its crash 5.7 dB above ours. The user
+    /// picked "as loud as the Mac kit" (`hats-level` = 2, 2026-10-07): exactly
+    /// these two numbers (W8-HAT listening spec, variant `2-at-mac-kit-level`).
+    /// They are also the trims' spec `defaultValue`, which `describeDrumKit`
+    /// and the MCP schema report as each trim's "default".
+    ///
+    /// ⛔ THEY DO NOT REACH `DrumKitParams()`. A drum machine that was never
+    /// edited is saved with NO kit (`InstrumentDescriptor.drumKit == nil`) and
+    /// `resolvedDrumKit` turns that nil into `DrumKitParams()`, so
+    /// `DrumKitParams()` keeps the saved-kit neutral (`init`'s defaults) and
+    /// every such saved song keeps its sound.
+    /// `DrumLevelTrimTests.aNeverEditedDrumMachineKeepsTodaysTrims` pins it.
+    public static let newKitHatsLevelDb: Double = 23.4
+    public static let newKitCymbalsLevelDb: Double = 5.7
+
+    /// ⭐ THE PICK'S LAYOUT: a NEW drum machine answers the General MIDI drum
+    /// keys (`dm-notes` = `gm-pads`, 2026-10-07), so a beat written from GM
+    /// drum numbers, an imported .mid file or a step-sequenced drum clip plays
+    /// the right drums. The pads still play the eight drums in order in either
+    /// layout (`PadGridDrumMap`). Computed, so never a lazily initialised global.
+    public static var newKitNoteLayout: DrumNoteLayout { .gm }
+
+    /// ⭐ W9-HEAD (m39-dm-headroom) — THE KIT GAIN A NEW DRUM MACHINE STARTS
+    /// AT: 0.7 (-3.1 dB) rather than 1.0, so a plain beat on a new song stays
+    /// under the -1 dBTP line an MP3 export needs. Measured 2026-10-11 through
+    /// the export path (`Loudness.measure`, 4x true peak; the 808 template's
+    /// audition beat on General MIDI notes, fader 1.0, no master chain): at 1.0
+    /// the picked kit peaked +1.00 dBTP at the beat's own velocities and +1.99
+    /// with every hit at 127; at 0.7 it peaks -2.10 and -1.11. Before the picks
+    /// (both trims 0, `gm`) the same beat already peaked -0.37: the drum machine
+    /// ran hot before the hats were raised, and the raise took it over 0.
+    /// ⛔ NOT `DrumKitParams()`'s gain, which stays 1.0 (a nil kit and every
+    /// saved kit keep their level). Every factory preset carries it too
+    /// (`presetBase`); the built-in templates pin their own. It is also the
+    /// `kit.gain` spec default, the trims' rule: "default" is what a new drum
+    /// machine starts at.
+    public static let newKitGain: Double = 0.7
+
+    /// ⭐ THE KIT A NEW DRUM MACHINE IS BORN WITH: the factory 808 sound, the
+    /// hi-hats and cymbals at the Mac kit's level, the General MIDI layout, and
+    /// the kit gain at `newKitGain` (W9-HEAD). It is the `808` preset in the
+    /// `gm` layout (`DrumNewKitDefaultTests` pins that: loading 808 onto it
+    /// changes nothing), and it differs from `DrumKitParams()` in exactly those
+    /// four settings. Every place a drum machine comes into
+    /// being writes THIS into the track rather than leaving the kit nil — a nil
+    /// kit means "saved before", and plays `DrumKitParams()`.
+    public static var newDrumMachineKit: DrumKitParams {
+        DrumKitParams(gain: newKitGain,
+                      noteLayout: newKitNoteLayout,
+                      hatsLevelDb: newKitHatsLevelDb,
+                      cymbalsLevelDb: newKitCymbalsLevelDb)
+    }
+
+    /// What every factory preset starts from: the factory sound with the NEW-kit
+    /// trims (layout `pads`; a preset never sets the layout, see
+    /// `applyingPreset`). So a preset loaded onto a new drum machine keeps the
+    /// hi-hats where the user picked them, and `instrument.loadDrumPreset` still
+    /// replaces all 77 values. Loading a preset onto a kit saved before the
+    /// pick raises its hats and cymbals to the new level: loading a preset is
+    /// an edit, never something that happens to a saved song by itself.
+    /// W9-HEAD (the orchestrator's ruling, 2026-10-11): its kit gain is
+    /// `newKitGain`, the headroom a new drum machine starts with, so a preset
+    /// loaded onto a new drum machine stays clear of clipping. Loading one onto
+    /// a kit saved before lowers that kit's gain to the same level: again an
+    /// edit. The built-in templates pin the gain they always played at.
+    static var presetBase: DrumKitParams { presetFoundation(gain: newKitGain) }
+
+    /// `presetBase` at a given kit gain: `newKitGain` for the factory presets,
+    /// 1.0 for the same kits as they were before the headroom
+    /// (`presetsBeforeHeadroom`).
+    static func presetFoundation(gain: Double) -> DrumKitParams {
+        DrumKitParams(gain: gain, hatsLevelDb: newKitHatsLevelDb, cymbalsLevelDb: newKitCymbalsLevelDb)
+    }
+
     /// The tom's pitch-envelope decay is DERIVED, not addressable: `0.18 ×
     /// decay`, which holds the tom at nine names.
     ///
@@ -443,7 +650,7 @@ public struct DrumKitParams: Sendable, Equatable {
     /// `docs/design/2026-09-20-drum-machine.md` §2.6 lists `pitchDecay` 0.08 s
     /// among the tom's defaults and then, four lines later, says it "is fixed at
     /// `0.18 × decay` for the tom to hold the voice at 9 names". Both cannot be
-    /// true. The derived form is the one the parameter COUNT depends on (75, and
+    /// true. The derived form is the one the parameter COUNT depends on (77, and
     /// `describeDrumKit` publishes that number), so the derived form wins; at the
     /// default `decay` 0.38 it yields 0.0684 s, which is what the 0.08 s figure
     /// was approximating anyway. Exposing it later is purely additive.
@@ -505,7 +712,12 @@ public struct DrumKitParams: Sendable, Equatable {
                 cymbal: DrumVoiceParams = DrumKitParams.cymbalDefault,
                 gain: Double = 1.0, velocityToTone: Double = 0.4,
                 accentThreshold: Double = 100, accentDepth: Double = 0.25,
-                noteLayout: DrumNoteLayout = .pads) {
+                noteLayout: DrumNoteLayout = .pads,
+                // W9-DRUMDEF: the SAVED-kit neutral, never the new-kit numbers.
+                // `DrumKitParams()` is what a nil kit plays (see
+                // `newDrumMachineKit` for a new drum machine).
+                hatsLevelDb: Double = DrumKitParams.savedKitLevelTrimDb,
+                cymbalsLevelDb: Double = DrumKitParams.savedKitLevelTrimDb) {
         self.kick = kick
         self.snare = snare
         self.closedHat = closedHat
@@ -519,6 +731,8 @@ public struct DrumKitParams: Sendable, Equatable {
         self.accentThreshold = accentThreshold
         self.accentDepth = accentDepth
         self.noteLayoutStorage = noteLayout == .pads ? nil : noteLayout
+        self.hatsLevelDb = hatsLevelDb
+        self.cymbalsLevelDb = cymbalsLevelDb
     }
 
     // MARK: - Voice access by name (never by index)
@@ -542,6 +756,30 @@ public struct DrumKitParams: Sendable, Equatable {
         set { self[keyPath: Self.voiceKeyPath(for: voice)] = newValue }
     }
 
+    /// One voice's parameters, READ by a plain `switch` over the stored fields.
+    /// Returns exactly what `self[voice]` returns (a test pins it per voice).
+    ///
+    /// ⛔ RENDER THREAD: `DrumSynthInstrument` reads the kit through THIS at
+    /// every note-on and for every sounding slot when a kit is adopted.
+    /// W8-RTFIX (RT review F4): the subscript above goes through a KeyPath, and
+    /// the shipped release build calls `swift_getAtKeyPath` and `swift_release`
+    /// for it — runtime machinery and atomic reference counting the render
+    /// thread does not need. Main-actor code keeps the subscript (it also
+    /// WRITES, which this does not).
+    @inline(__always)
+    public func voiceParams(_ voice: DrumVoice) -> DrumVoiceParams {
+        switch voice {
+        case .kick: return kick
+        case .snare: return snare
+        case .closedHat: return closedHat
+        case .openHat: return openHat
+        case .clap: return clap
+        case .tom: return tom
+        case .rim: return rim
+        case .cymbal: return cymbal
+        }
+    }
+
     public static func leafKeyPath(for leaf: DrumLeafParam)
         -> WritableKeyPath<DrumVoiceParams, Double>? {
         switch leaf {
@@ -559,12 +797,54 @@ public struct DrumKitParams: Sendable, Equatable {
         case .noiseTone: return \.noiseTone
         case .spread: return \.spread
         case .band: return \.band
-        case .gain, .velocityToTone, .accentThreshold, .accentDepth: return nil
+        case .gain, .velocityToTone, .accentThreshold, .accentDepth,
+             .hatsLevelDb, .cymbalsLevelDb: return nil
         }
+    }
+
+    // MARK: - The level trims (W8-HAT)
+
+    /// The level trim that reaches `voice`, or nil for the five voices no trim
+    /// reaches. ⭐ ONE HOME for "which drums a trim moves": the render (at
+    /// note-on) and the tests both read THIS. ⛔ RENDER THREAD: a plain
+    /// `switch` — no table, no `allCases` scan, no allocation (F-4's rule).
+    @inline(__always)
+    public static func levelTrimLeaf(for voice: DrumVoice) -> DrumLeafParam? {
+        switch voice {
+        case .closedHat, .openHat: return .hatsLevelDb
+        case .cymbal: return .cymbalsLevelDb
+        case .kick, .snare, .clap, .tom, .rim: return nil
+        }
+    }
+
+    /// The stored trim, in dB, that reaches `voice`; 0 (no trim) for a voice
+    /// none reaches. Render-thread safe: a `switch` over stored fields.
+    @inline(__always)
+    public func levelTrimDb(for voice: DrumVoice) -> Double {
+        switch Self.levelTrimLeaf(for: voice) {
+        case .hatsLevelDb?: return hatsLevelDb
+        case .cymbalsLevelDb?: return cymbalsLevelDb
+        default: return 0
+        }
+    }
+
+    /// A trim in dB as the linear gain the render multiplies by.
+    ///
+    /// ⭐ EXACTLY 1.0 AT 0 dB, WITHOUT CALLING `pow`, and `x * 1.0 == x` in IEEE
+    /// arithmetic — which is what makes every kit at the neutral render BIT FOR
+    /// BIT as it did before the trims existed (the shipped-tone law's render
+    /// half). A non-finite trim is unity, never NaN on the render thread; the
+    /// clamp is the union of the two trims' ranges (their own ranges are
+    /// enforced where the values are set and modulated).
+    @inline(__always)
+    public static func levelTrimGain(dB: Double) -> Double {
+        guard dB.isFinite, dB != 0 else { return 1.0 }
+        let bounded = min(max(dB, hatsLevelDbRange.lowerBound), hatsLevelDbRange.upperBound)
+        return pow(10.0, bounded / 20.0)
     }
 }
 
-// MARK: - The spec table: 75 names
+// MARK: - The spec table: 77 names
 
 public extension DrumKitParams {
     /// The dotted name for a scope/leaf pair. ONE spelling rule, one place.
@@ -627,11 +907,11 @@ public extension DrumKitParams {
         ]
     }
 
-    /// ⭐ THE 75 NAMES. Reorderable by construction — see the file header.
+    /// ⭐ THE 77 NAMES (75, then W8-HAT's two trims appended). Reorderable by construction — see the file header.
     static var paramSpecs: [DrumParamSpec] { Self.cachedParamSpecs }
 
     // Built once. The table is pure and immutable; rebuilding it per call would
-    // put 75 allocations on every `describeDrumKit` and every route validation.
+    // put 77 allocations on every `describeDrumKit` and every route validation.
     private static let cachedParamSpecs: [DrumParamSpec] = {
         var specs: [DrumParamSpec] = []
 
@@ -789,8 +1069,15 @@ public extension DrumKitParams {
 
         // ── kit (4) ──
         specs += [
-            kitRow(.gain, \.gain, gainRange, 1.0, "level", .linear,
-                   "Output gain for the whole kit, after every voice sums."),
+            // W9-HEAD — the default is what a NEW drum machine starts at
+            // (`newKitGain`), the trims' rule; `DrumKitParams()` keeps 1.0.
+            kitRow(.gain, \.gain, gainRange, newKitGain, "level", .linear,
+                   "Output gain for the whole kit, after every voice sums. A new drum "
+                       + "machine starts at \(newKitGain), and so does every factory kit "
+                       + "(lofi and acoustic a step lower), which keeps the loudest hits "
+                       + "from clipping. "
+                       + "1.0 is how the drum machine played before that, and how a song "
+                       + "saved back then still plays."),
             kitRow(.velocityToTone, \.velocityToTone, velocityToToneRange, 0.4, "", .linear,
                    "How much of each voice's velocity response is BRIGHTNESS "
                        + "rather than level. A real drum struck harder is brighter, "
@@ -805,12 +1092,33 @@ public extension DrumKitParams {
             kitRow(.accentDepth, \.accentDepth, accentDepthRange, 0.25, "", .linear,
                    "Extra level (and half a share of extra brightness) an "
                        + "accented hit receives, on every voice."),
+            // W8-HAT — APPENDED. Two trims, not one: the hats and the cymbal
+            // sit 17.6 dB apart against the GM kit (measured), so one shared
+            // number could not put both where they belong.
+            kitRow(.hatsLevelDb, \.hatsLevelDb, hatsLevelDbRange, newKitHatsLevelDb,
+                   "dB", .linear,
+                   "How loud the HI-HATS are (closed, open and pedal), in decibels, "
+                       + "on top of each hat's own level. A new drum machine starts at "
+                       + "+\(newKitHatsLevelDb), about as loud as the Mac's own drum kit "
+                       + "plays its hi-hats. 0 is how the drum machine sounded before "
+                       + "that, and how a song saved back then still plays. Higher is "
+                       + "louder, lower is quieter, and about +10 sounds twice as loud. "
+                       + "Only the hi-hats change. Takes effect at the next note-on."),
+            kitRow(.cymbalsLevelDb, \.cymbalsLevelDb, cymbalsLevelDbRange, newKitCymbalsLevelDb,
+                   "dB", .linear,
+                   "How loud the CYMBALS are (every crash and ride), in decibels, on "
+                       + "top of the cymbal's own level. A new drum machine starts at "
+                       + "+\(newKitCymbalsLevelDb), about as loud as the Mac's own drum kit "
+                       + "plays its cymbals. 0 is how the drum machine sounded before that, "
+                       + "and how a song saved back then still plays. Higher is louder, "
+                       + "lower is quieter. Only the cymbals change. Takes effect at the "
+                       + "next note-on."),
         ]
         return specs
     }()
 
     /// Name → table index. Built once; `setValue` and `value(forParamName:)`
-    /// are O(1) rather than a 75-row linear scan on every wire call.
+    /// are O(1) rather than a 77-row linear scan on every wire call.
     private static let specIndexByName: [String: Int] = {
         var map: [String: Int] = [:]
         for (index, spec) in cachedParamSpecs.enumerated() { map[spec.name] = index }
@@ -866,11 +1174,38 @@ public extension DrumKitParams {
     }
 }
 
+// MARK: - Births and kind changes (W9-DRUMDEF)
+
+public extension InstrumentDescriptor {
+    /// The kit to STORE when this instrument's kind changes to `newKind`.
+    ///
+    /// ⭐ ONE RULE FOR EVERY KIND CHANGE (`ProjectStore.setInstrument`, Chop to
+    /// Sampler): a kit that is already stored rides along untouched; a NIL kit
+    /// is written out as what it plays, but ONLY when the drum machine is
+    /// entered or left, so a switch between two other instruments never grows
+    /// a drum kit in the saved file.
+    ///   · ENTERING (a new drum machine): nil resolves, on a non-drum
+    ///     instrument, to `DrumKitParams.newDrumMachineKit` — the user's picks.
+    ///   · LEAVING a drum machine that was never edited: nil resolves to
+    ///     `DrumKitParams()`, the kit it played, so coming back to the drum
+    ///     machine later plays the song exactly as before. Without this, a
+    ///     saved song's drum machine left and re-picked (the picker stays open
+    ///     to compare) would come back in the `gm` layout and its pad-order
+    ///     beat would play the wrong drums.
+    ///   · Re-picking the drum machine on a drum machine changes nothing: a
+    ///     saved song's nil kit stays nil, byte for byte.
+    func drumKitCarried(into newKind: Kind) -> DrumKitParams? {
+        if let drumKit { return drumKit }
+        guard (kind == .drumSynth) != (newKind == .drumSynth) else { return nil }
+        return resolvedDrumKit
+    }
+}
+
 // MARK: - Codable, driven off the table
 
 extension DrumKitParams: Codable {
     /// Dynamic key so the encoder and decoder can walk the spec table rather
-    /// than duplicating 75 names in a `CodingKeys` enum that would rot.
+    /// than duplicating 77 names in a `CodingKeys` enum that would rot.
     private struct NameKey: CodingKey {
         var stringValue: String
         var intValue: Int? { nil }
@@ -906,6 +1241,17 @@ extension DrumKitParams: Codable {
             self[keyPath: Self.voiceKeyPath(for: voice)].chokeGroup =
                 try voiceBox.decodeIfPresent(Int.self, forKey: NameKey(Self.chokeGroupKey))
         }
+        // W8-HAT — ⛔ THE LEVEL TRIMS DO NOT FALL BACK TO THE NEW-KIT DEFAULT.
+        // `self.init()` above put `newKitHatsLevelDb`/`newKitCymbalsLevelDb`
+        // here: the numbers the user's PICK will raise. A kit saved before the
+        // trims existed carries no key and must play exactly as it did, so both
+        // restart from the SAVED-kit neutral before the present keys are read.
+        // The `chokeGroup` precedent: the one other place this decoder
+        // deliberately does not take `DrumKitParams()`'s value. Pinned by
+        // `DrumLevelTrimTests` with a JSON fixture that OMITS both keys — a
+        // byte gate over renders cannot see this line (measured in this tree).
+        hatsLevelDb = Self.savedKitLevelTrimDb
+        cymbalsLevelDb = Self.savedKitLevelTrimDb
         for spec in Self.cachedParamSpecs where spec.voice == nil {
             if let value = try container.decodeIfPresent(
                 Double.self, forKey: NameKey(spec.leaf.rawValue)) {
@@ -940,8 +1286,12 @@ extension DrumKitParams: Codable {
                                          forKey: NameKey(Self.chokeGroupKey))
         }
         for spec in Self.cachedParamSpecs where spec.voice == nil {
-            try container.encode(self[keyPath: spec.keyPath],
-                                 forKey: NameKey(spec.leaf.rawValue))
+            let value = self[keyPath: spec.keyPath]
+            // W8-HAT — a trim AT the saved-kit neutral is not written: absent
+            // decodes to exactly that value, so nothing is lost, and every kit
+            // saved before the trims existed re-saves byte for byte.
+            if spec.leaf.isLevelTrim, value == Self.savedKitLevelTrimDb { continue }
+            try container.encode(value, forKey: NameKey(spec.leaf.rawValue))
         }
         // Only when set, which means only `gm` (the storage is never `.pads`):
         // a `pads` kit writes exactly the bytes it wrote before TPL-0.
@@ -962,34 +1312,53 @@ public struct DrumKitPreset: Sendable, Equatable {
 }
 
 public extension DrumKitParams {
-    /// The factory kits, in menu order.
-    static let presets: [DrumKitPreset] = [
-        DrumKitPreset(
-            name: "808",
-            summary: "The long boom. Deep sub kick with a slow fall, loose hats, "
-                + "a snare that sits back. The defaults.",
-            params: DrumKitParams()),
-        DrumKitPreset(
-            name: "909",
-            summary: "The hard click. Faster and deeper pitch sweep on the kick, "
-                + "a much shorter body, a brighter snappier snare.",
-            params: nineOhNine),
-        DrumKitPreset(
-            name: "acoustic",
-            summary: "Longer, less saturated and less synthetic: no drive, "
-                + "inharmonic snare modes, a wider kit image.",
-            params: acoustic),
-        DrumKitPreset(
-            name: "lofi",
-            summary: "Dull and driven. Everything darker, the kick saturated, "
-                + "the hats short and closed down.",
-            params: lofi),
-        DrumKitPreset(
-            name: "trap",
-            summary: "A very long sub kick, a tight clap-forward snare and fast "
-                + "bright hats built for rolls.",
-            params: trap),
-    ]
+    /// The factory kits, in menu order, at the new-kit gain (W9-HEAD).
+    ///
+    /// W9-HEAD (the orchestrator's second ruling, 2026-10-11): `acoustic` sits a
+    /// step below the others ON THE HEADROOM ONLY, lofi's step (0.9 x 0.7 =
+    /// 0.63, exact in binary). At 0.7 it still peaked -0.42 dBTP on the 808
+    /// audition beat (measured); at 0.63 it peaks under -1. The step is passed
+    /// here, not written inside `acoustic(gain:)`, so the kit as it was before
+    /// the headroom (`presetsBeforeHeadroom`) keeps its 1.0.
+    static let presets: [DrumKitPreset] = factoryPresets(gain: newKitGain, acousticStep: 0.9)
+
+    /// W9-HEAD — THE SAME FIVE KITS AS THEY WERE BEFORE THE HEADROOM: kit gain
+    /// 1.0 (`lofi` 0.9), every other value identical, in the same order. A song
+    /// that loaded a kit before then plays it, and the built-in templates pin
+    /// it; `matchingPreset` keeps their names. Never offered as a preset.
+    static let presetsBeforeHeadroom: [DrumKitPreset] = factoryPresets(gain: 1.0, acousticStep: 1.0)
+
+    /// The five factory kits at one kit gain: lofi a step below it always, and
+    /// acoustic at `gain` x `acousticStep`.
+    private static func factoryPresets(gain: Double, acousticStep: Double) -> [DrumKitPreset] {
+        [
+            DrumKitPreset(
+                name: "808",
+                summary: "The long boom. Deep sub kick with a slow fall, loose hats, "
+                    + "a snare that sits back. The defaults.",
+                params: presetFoundation(gain: gain)),
+            DrumKitPreset(
+                name: "909",
+                summary: "The hard click. Faster and deeper pitch sweep on the kick, "
+                    + "a much shorter body, a brighter snappier snare.",
+                params: nineOhNine(gain: gain)),
+            DrumKitPreset(
+                name: "acoustic",
+                summary: "Longer, less saturated and less synthetic: no drive, "
+                    + "inharmonic snare modes, a wider kit image.",
+                params: acoustic(gain: gain * acousticStep)),
+            DrumKitPreset(
+                name: "lofi",
+                summary: "Dull and driven. Everything darker, the kick saturated, "
+                    + "the hats short and closed down.",
+                params: lofi(gain: gain)),
+            DrumKitPreset(
+                name: "trap",
+                summary: "A very long sub kick, a tight clap-forward snare and fast "
+                    + "bright hats built for rolls.",
+                params: trap(gain: gain)),
+        ]
+    }
 
     static func preset(named name: String) -> DrumKitPreset? {
         presets.first { $0.name.caseInsensitiveCompare(name) == .orderedSame }
@@ -1001,8 +1370,11 @@ public extension DrumKitParams {
     /// DRUM. Every factory preset carries the default layout, so replacing a
     /// `gm` kit with `preset.params` wholesale would silently move every drum
     /// back to the pad keys, and every General MIDI beat on the track would
-    /// play the wrong drums. ONE HOME: `instrument.loadDrumPreset` and
-    /// `DemoRender` both call this, and `matchingPreset` is defined through it.
+    /// play the wrong drums. ONE HOME: `instrument.loadDrumPreset`, the
+    /// template reader and `DemoRender` call this, and `matchingPreset` is
+    /// defined through it. The hat and cymbal levels are SOUND and come from
+    /// the preset, which carries the new-kit levels and the new-kit gain
+    /// (`presetBase`).
     func applyingPreset(_ preset: DrumKitPreset) -> DrumKitParams {
         var result = preset.params
         result.noteLayout = noteLayout
@@ -1013,13 +1385,34 @@ public extension DrumKitParams {
     /// or nil for a custom kit. Defined as "loading this preset would change
     /// nothing", so it ignores the layout by construction rather than by a
     /// second, hand-written equality that could drift from `applyingPreset`.
+    ///
+    /// W9-DRUMDEF: a song saved before the presets carried the hat and cymbal
+    /// levels holds the preset with both levels at the saved-kit neutral (0) —
+    /// its untouched 808 is `DrumKitParams()`. That is still the preset as it
+    /// sounded then, so it keeps its name rather than reading as a custom kit.
+    ///
+    /// W9-HEAD: a kit loaded before the presets carried the headroom holds the
+    /// preset at its old gain (1.0, `lofi` 0.9), and a built-in template pins
+    /// exactly that gain, so each preset is also recognised as it was then
+    /// (`presetsBeforeHeadroom`), with or without the picked levels. Any other
+    /// gain is a custom kit.
     var matchingPreset: DrumKitPreset? {
-        Self.presets.first { applyingPreset($0) == self }
+        for (index, preset) in Self.presets.enumerated() {
+            for source in [preset, Self.presetsBeforeHeadroom[index]] {
+                let loaded = applyingPreset(source)
+                if loaded == self { return preset }
+                var savedBefore = loaded
+                savedBefore.hatsLevelDb = Self.savedKitLevelTrimDb
+                savedBefore.cymbalsLevelDb = Self.savedKitLevelTrimDb
+                if savedBefore == self { return preset }
+            }
+        }
+        return nil
     }
 
     /// 909: the same three blocks per voice, different numbers (design §2.1).
-    private static var nineOhNine: DrumKitParams {
-        var p = DrumKitParams()
+    private static func nineOhNine(gain: Double) -> DrumKitParams {
+        var p = presetFoundation(gain: gain)
         p.kick.tune = 58
         p.kick.decay = 0.26
         p.kick.pitchAmount = 7.5
@@ -1043,8 +1436,8 @@ public extension DrumKitParams {
         return p
     }
 
-    private static var acoustic: DrumKitParams {
-        var p = DrumKitParams()
+    private static func acoustic(gain: Double) -> DrumKitParams {
+        var p = presetFoundation(gain: gain)
         p.kick.tune = 62
         p.kick.decay = 0.42
         p.kick.pitchAmount = 1.6
@@ -1071,8 +1464,8 @@ public extension DrumKitParams {
         return p
     }
 
-    private static var lofi: DrumKitParams {
-        var p = DrumKitParams()
+    private static func lofi(gain: Double) -> DrumKitParams {
+        var p = presetFoundation(gain: gain)
         p.kick.tune = 48
         p.kick.decay = 0.5
         p.kick.tone = 0.18
@@ -1092,13 +1485,15 @@ public extension DrumKitParams {
         p.clap.tone = 0.25
         p.clap.tune = 780
         p.velocityToTone = 0.2
-        p.gain = 0.9
+        // W9-HEAD: lofi's step below the other kits, kept at any kit gain:
+        // 0.9 x 0.7 = 0.63 for the preset (exact in binary), 0.9 before.
+        p.gain = 0.9 * gain
         p.clampAll()
         return p
     }
 
-    private static var trap: DrumKitParams {
-        var p = DrumKitParams()
+    private static func trap(gain: Double) -> DrumKitParams {
+        var p = presetFoundation(gain: gain)
         p.kick.tune = 42
         p.kick.decay = 1.45
         p.kick.pitchAmount = 5.0

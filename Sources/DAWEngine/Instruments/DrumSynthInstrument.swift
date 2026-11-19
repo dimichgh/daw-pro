@@ -209,13 +209,22 @@ final class DrumSynthInstrument: InstrumentRendering, @unchecked Sendable {
     /// modulated kit, which keeps the stride branch off the hot path entirely.
     private var modulationTouchesOutput = false
 
-    /// Resolved target index per spec-table row, or −1. Preallocated at 75.
+    /// Resolved target index per spec-table row, or −1. Preallocated at
+    /// `DrumKitParams.paramSpecs.count` (77 since W8-HAT's two trims) in `init`.
     private let modTarget: UnsafeMutablePointer<Int32>
     private let modTargetCount: Int
     /// `scopeIndex * leafStride + leafSlot` → spec-table row, or −1. Built once
     /// in `init`; the render thread never searches a table or touches a String.
     private let specRow: UnsafeMutablePointer<Int32>
-    private static let leafStride = 18
+    /// One more than the highest `DrumLeafParam.slot`, DERIVED in `init`.
+    ///
+    /// ⛔ W8-HAT: this was the literal 18, which held exactly the 18 leaves
+    /// m39-dm shipped. The two appended trims carry slots 18 and 19, so with
+    /// the literal `kit.hatsLevelDb` would have indexed `specRow[8 * 18 + 18]`
+    /// — one past the allocation — on the render thread. An instance constant
+    /// computed from the enum cannot fall behind a 21st leaf; a stored `let` is
+    /// a plain load in the sample-rate code, never a lazy global.
+    private let leafStride: Int
     private static let scopeCount = 9
 
     private var sampleRate = 48_000.0
@@ -241,12 +250,14 @@ final class DrumSynthInstrument: InstrumentRendering, @unchecked Sendable {
         modTarget = .allocate(capacity: specs.count)
         modTarget.initialize(repeating: -1, count: specs.count)
 
-        let rowCount = Self.scopeCount * Self.leafStride
+        let stride = Int(DrumLeafParam.allCases.map(\.slot).max() ?? 0) + 1
+        leafStride = stride
+        let rowCount = Self.scopeCount * stride
         specRow = .allocate(capacity: rowCount)
         specRow.initialize(repeating: -1, count: rowCount)
         for (row, spec) in specs.enumerated() {
             let scope = Int(spec.voice?.slot ?? 8)
-            specRow[scope * Self.leafStride + Int(spec.leaf.slot)] = Int32(row)
+            specRow[scope * stride + Int(spec.leaf.slot)] = Int32(row)
         }
 
         paramsSlot = .allocate(capacity: 1)
@@ -278,7 +289,7 @@ final class DrumSynthInstrument: InstrumentRendering, @unchecked Sendable {
         bankInc.deallocate()
         modTarget.deinitialize(count: modTargetCount)
         modTarget.deallocate()
-        specRow.deinitialize(count: Self.scopeCount * Self.leafStride)
+        specRow.deinitialize(count: Self.scopeCount * leafStride)
         specRow.deallocate()
     }
 
@@ -433,7 +444,7 @@ final class DrumSynthInstrument: InstrumentRendering, @unchecked Sendable {
     private func modulated(scope: Int32, leaf: DrumLeafParam, base: Double,
                            snapshot: ModulationSnapshot?, atSample: Int64) -> Double {
         guard let snapshot else { return base }
-        let row = specRow[Int(scope) * Self.leafStride + Int(leaf.slot)]
+        let row = specRow[Int(scope) * leafStride + Int(leaf.slot)]
         guard row >= 0 else { return base }
         let target = modTarget[Int(row)]
         guard target >= 0 else { return base }
@@ -454,13 +465,28 @@ final class DrumSynthInstrument: InstrumentRendering, @unchecked Sendable {
     /// NOT latched — they are the voice's output stage — so the whole point of
     /// this function is to pick up their new values.
     /// `velocityScale` and `kitGain` stay latched: those belong to the HIT.
+    ///
+    /// ⛔ RENDER THREAD (W8-RTFIX, RT review F1/F4). The slot → voice lookup is
+    /// `DrumVoice.voice(forSlot:)`, a `switch`, and the kit read is
+    /// `kit.voiceParams(_:)`, a `switch` over stored fields. The
+    /// `DrumVoice.allCases.first(where:)` scan this replaced built an array per
+    /// sounding slot in the debug build — 192 000 malloc events per 1 000
+    /// adoptions with eight voices sounding (`DrumNoteLayoutRenderTests`) — and
+    /// the KeyPath subscript costs a `swift_getAtKeyPath` and a release per read
+    /// in the release build. The loop is a `while`, not `for … in 0..<n`: at
+    /// -Onone a `Range` loop raises malloc events of its own (the m23-r1 law,
+    /// `ModulationEvaluator`). The increment is UNCONDITIONAL, so the nil
+    /// branch (a topology no voice has; unreachable today) cannot spin.
     private func refreshOutputStages() {
-        for slot in 0..<Self.slotCount where voices[slot].active {
-            guard let voice = DrumVoice.allCases.first(where: { $0.slot == voices[slot].topology })
-            else { continue }
-            voices[slot].baseLevel = kit[voice].level
-            voices[slot].basePan = kit[voice].pan
-            setOutput(slot: slot, level: voices[slot].baseLevel, pan: voices[slot].basePan)
+        var slot = 0
+        while slot < Self.slotCount {
+            if voices[slot].active, let voice = DrumVoice.voice(forSlot: voices[slot].topology) {
+                let params = kit.voiceParams(voice)
+                voices[slot].baseLevel = params.level
+                voices[slot].basePan = params.pan
+                setOutput(slot: slot, level: voices[slot].baseLevel, pan: voices[slot].basePan)
+            }
+            slot += 1
         }
     }
 
@@ -512,7 +538,8 @@ final class DrumSynthInstrument: InstrumentRendering, @unchecked Sendable {
     private func trigger(voice: DrumVoice, velocity: UInt8, atSample sample: Int64,
                          modulation: ModulationSnapshot?, modulationSample: Int64) {
         let scope = voice.slot
-        let params = kit[voice]
+        // W8-RTFIX (F4): a `switch` read, never the KeyPath subscript.
+        let params = kit.voiceParams(voice)
         let group = params.resolvedChokeGroup
         let fadeCoef = DrumDSP.decayCoefficient(seconds: Self.fadeSeconds,
                                                 sampleRate: sampleRate)
@@ -597,6 +624,17 @@ final class DrumSynthInstrument: InstrumentRendering, @unchecked Sendable {
         voices[slot].rng = DrumDSP.seed(noteOnSample: sample, voiceSlot: scope)
         voices[slot].velocityScale = min(max(velocityScale, 0), 4)
         voices[slot].kitGain = min(max(kp(.gain, kit.gain), 0), 2)
+        // W8-HAT — the hats/cymbals LEVEL TRIM, latched with the hit exactly as
+        // `kit.gain` is (it rides `kitGain`, which `refreshOutputStages` keeps).
+        // Only the voices `levelTrimLeaf` names hear it. ⭐ BIT-EXACT AT 0 dB:
+        // `levelTrimGain` returns exactly 1.0 there without calling `pow`, and
+        // x · 1.0 == x, so every kit at the neutral renders as it did before.
+        // RT: a `switch`, one optional enum, and `pow` only off the neutral —
+        // at a NOTE-ON, never per sample; no allocation, lock or message.
+        if let trimLeaf = DrumKitParams.levelTrimLeaf(for: voice) {
+            let trimDb = kp(trimLeaf, kit.levelTrimDb(for: voice))
+            voices[slot].kitGain *= DrumKitParams.levelTrimGain(dB: trimDb)
+        }
         voices[slot].baseLevel = p(.level, params.level)
         voices[slot].basePan = p(.pan, params.pan)
         setOutput(slot: slot, level: voices[slot].baseLevel, pan: voices[slot].basePan)

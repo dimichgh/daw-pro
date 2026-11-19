@@ -9,7 +9,7 @@
   "genres": ["lo-fi"],
   "tracks": [
     { "key": "drums", "name": "Drums", "kind": "instrument", "volume": 0.64,
-      "instrument": { "kind": "drumSynth", "drumPreset": "lofi", "drumKit": { "noteLayout": "gm" } },
+      "instrument": { "kind": "drumSynth", "drumPreset": "lofi", "drumKit": { "noteLayout": "gm", "gain": 0.9 } },
       "inserts": [ { "kind": "saturator", "params": { "driveDb": 4 } } ],
       "sends": [ { "bus": "room", "level": 0.2 } ] },
     { "key": "bass", "name": "Bass", "kind": "instrument", "volume": 1.43, "mixerPreset": "bass-round",

@@ -76,6 +76,14 @@ final class ModulationSnapshot {
         var floorDb: Double = -60
         var detectorGainLinear: Double = 1
         var detectorIsPeak: Bool = false
+        // m39-w4-4 — a TEMPO-SYNCED step sequencer (`stepDivision`). 0 means
+        // free-running, and a free-running source never reads the fields below
+        // nor the clock: its render path is byte-for-byte the pre-clock one.
+        /// The division's length in beats (1/16 = 0.25).
+        var divisionBeats: Double = 0
+        /// `edgeMs` in samples. The edge stays this long across a tempo
+        /// change; its fraction of a step is derived per evaluation.
+        var edgeSamples: Double = 0
     }
 
     /// One route: a source index and a depth. Grouped by target, so the
@@ -133,6 +141,14 @@ final class ModulationSnapshot {
     /// Whether any source needs the per-sample detector to run at all.
     let hasFollower: Bool
 
+    /// m39-w4-4 — the musical clock (`ModulationSnapshotClock.swift`): the
+    /// head segments, then the loop's cycle template. Empty when no source on
+    /// this strip is tempo-synced or the transport is not rolling.
+    let clock: UnsafeBufferPointer<ClockSegment>
+    let clockHeadCount: Int
+    let clockLoopHeadSeconds: Double
+    let clockLoopCycleSeconds: Double
+
     /// 16 preallocated macro slots, Float bit patterns (§7.2). `mod.setMacro`
     /// is ONE atomic store into this array and touches nothing else — no
     /// republish, no reallocation, no retire-bin churn.
@@ -156,7 +172,7 @@ final class ModulationSnapshot {
     init(generation: UInt64, timelineID: UInt64, sampleRate: Double,
          originSample: Int64, positionValid: Bool,
          sources: [Source], routes: [Route], targets: [Target], steps: [Float],
-         macroValues macros: [Float]) {
+         macroValues macros: [Float], clock compiled: Clock = .empty) {
         self.generation = generation
         self.timelineID = timelineID
         self.sampleRate = sampleRate
@@ -166,6 +182,10 @@ final class ModulationSnapshot {
         self.routes = Self.own(routes)
         self.targets = Self.own(targets)
         self.steps = Self.own(steps)
+        self.clock = Self.own(compiled.segments)
+        self.clockHeadCount = compiled.segments.isEmpty ? 0 : compiled.headCount
+        self.clockLoopHeadSeconds = compiled.loopHeadSeconds
+        self.clockLoopCycleSeconds = compiled.loopCycleSeconds
         var volumeIndex: Int32 = -1
         var panIndex: Int32 = -1
         var instrument = false
@@ -197,6 +217,7 @@ final class ModulationSnapshot {
         if routes.baseAddress != nil { UnsafeMutableBufferPointer(mutating: routes).deallocate() }
         if targets.baseAddress != nil { UnsafeMutableBufferPointer(mutating: targets).deallocate() }
         if steps.baseAddress != nil { UnsafeMutableBufferPointer(mutating: steps).deallocate() }
+        if clock.baseAddress != nil { UnsafeMutableBufferPointer(mutating: clock).deallocate() }
         macroValues.deallocate()
         followerLevels.deinitialize(count: ModulationLimits.maxSources)
         followerLevels.deallocate()

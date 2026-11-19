@@ -275,14 +275,52 @@ public struct SingingEngineInstaller: Sendable {
 
     private let configuration: Configuration
 
+    /// TEST ONLY, reached through `@testable import` (W8-IDR): `nil` in production, and nothing in
+    /// `Sources/` ever sets it. The child's exit and its pipes' last bytes reach this process on
+    /// two unordered paths, and these hooks make that race happen on demand instead of only under
+    /// load.
+    struct TestHooks: Sendable {
+        /// Where in a readability-handler call `handlerPause` runs.
+        enum HandlerPoint: Sendable { case beforeRead, afterRead }
+        /// Runs at the top of every readability-handler call (`.beforeRead`: the bytes are still
+        /// in the pipe) and again once that call has read some bytes (`.afterRead`: read, not yet
+        /// parsed). A test sleeps here to hold the child's last bytes back while the child exits.
+        var handlerPause: (@Sendable (HandlerPoint) -> Void)?
+        /// Replaces `eofWaitBound`, so a test can stall the handlers PAST the bound without paying
+        /// the production bound on every run.
+        var eofWaitBound: Duration?
+        /// Told how the post-exit wait ended: `true` when both pipes reached end-of-file, `false`
+        /// when the bound passed first (something still held a pipe open).
+        var endOfFileWaitEnded: (@Sendable (_ bothPipesReachedEndOfFile: Bool) -> Void)?
+
+        init(
+            handlerPause: (@Sendable (HandlerPoint) -> Void)? = nil, eofWaitBound: Duration? = nil,
+            endOfFileWaitEnded: (@Sendable (_ bothPipesReachedEndOfFile: Bool) -> Void)? = nil
+        ) {
+            self.handlerPause = handlerPause
+            self.eofWaitBound = eofWaitBound
+            self.endOfFileWaitEnded = endOfFileWaitEnded
+        }
+    }
+
+    /// See `TestHooks`. `nil` in production.
+    var testHooks: TestHooks?
+
+    /// How long `install` waits, AFTER the child exited, for both of its pipes to reach
+    /// end-of-file (W8-IDR). The child's own bytes are already in the pipe by the time it exits,
+    /// so this wait normally ends as soon as the readability handlers catch up; the bound only
+    /// matters when a grandchild that inherited a pipe (`uv`, `curl`, `pip`) is still alive, and
+    /// it keeps such a grandchild from ever hanging the call.
+    static let eofWaitBound: Duration = .seconds(2)
+
     public init(configuration: Configuration = .resolved()) {
         self.configuration = configuration
     }
 
     /// Runs install.sh to completion (or until cancelled) and returns what happened. `progress` is
-    /// called synchronously, from an arbitrary background thread (`Pipe`'s own readability-handler
-    /// thread — never this call's own `Task`), once per parsed `@@` line, in the order the lines
-    /// arrived — the `WhisperModelInstallCoordinator`/`SoundBankDownloadCoordinator` "why progress
+    /// called synchronously, from an arbitrary thread (`Pipe`'s own readability-handler thread, or,
+    /// for a line still unread in the pipe when install.sh exits, this call's own final drain),
+    /// once per parsed `@@` line, in the order the lines arrived, never two at once — the `WhisperModelInstallCoordinator`/`SoundBankDownloadCoordinator` "why progress
     /// does not go through the actor's mailbox" reasoning, restated: routing each tick through an
     /// actor hop would risk two ticks landing out of order with no ordering guarantee between the
     /// unstructured tasks that would carry them.
@@ -329,9 +367,12 @@ public struct SingingEngineInstaller: Sendable {
         let stdoutRemainderBox = OSAllocatedUnfairLock<Data>(initialState: Data())
         let stderrRemainderBox = OSAllocatedUnfairLock<Data>(initialState: Data())
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }   // EOF sentinel — nothing left to flush (lines are '\n'-terminated)
+        // W8-IDR: each stream has ONE consumer, `consumeStdout`/`consumeStderr`, and every byte
+        // reaches it exactly once — from the readability handler while the child runs, or from
+        // `PipeStreamReader.finish`'s drain after it exits, whichever read that byte (see
+        // `PipeStreamReader`). Lines are '\n'-terminated, so a partial last line with no newline is
+        // never an `@@` line install.sh emitted, and is not flushed at end-of-file.
+        let consumeStdout: @Sendable (Data) -> Void = { data in
             let parsedLines: [SingingEngineInstallLine] = stdoutRemainderBox.withLock { remainder in
                 remainder.append(data)
                 var found: [SingingEngineInstallLine] = []
@@ -369,9 +410,7 @@ public struct SingingEngineInstaller: Sendable {
                 progress(updated)
             }
         }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
+        let consumeStderr: @Sendable (Data) -> Void = { data in
             // Keep only the tail — install.sh's `say()` output over a 15-minute run could be long,
             // and only the last message (or a handful) is ever what a `badUsage`/`crashed` outcome
             // needs to explain itself.
@@ -385,6 +424,16 @@ public struct SingingEngineInstaller: Sendable {
             }
             stderrTailBox.withLock { $0 = text }
         }
+
+        let endOfFile = PipesEndOfFileGate(streams: 2)
+        let stdoutReader = PipeStreamReader(
+            consume: consumeStdout, pause: testHooks?.handlerPause,
+            onEndOfFile: { endOfFile.streamReachedEndOfFile() })
+        let stderrReader = PipeStreamReader(
+            consume: consumeStderr, pause: testHooks?.handlerPause,
+            onEndOfFile: { endOfFile.streamReachedEndOfFile() })
+        stdoutReader.start(stdoutPipe.fileHandleForReading)
+        stderrReader.start(stderrPipe.fileHandleForReading)
 
         // FIX NOW #5 (architect review Q6): a cancel requested before `process.run()` actually
         // executes was previously LOST — `withTaskCancellationHandler`'s documented semantics run
@@ -433,8 +482,23 @@ public struct SingingEngineInstaller: Sendable {
             }
         }
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        // W8-IDR: the child's exit is NOT the end of its output. `terminationHandler` and each
+        // pipe's readability handler fire on separate, unordered dispatch sources, so at this
+        // moment the child's LAST bytes — the `@@error`/`@@done`/`@@cancelled` line on stdout, the
+        // bad-usage reason on stderr — may still be unread in the pipe, or read and not yet parsed.
+        // Ending the run here used to lose them (measured: 12 of 1,000 fast-exit runs, e.g.
+        // `badUsage("… no stderr captured")` for a reason the child did write). So: wait for both
+        // pipes to reach end-of-file, bounded (a grandchild that inherited a pipe — `uv`, `curl`,
+        // `pip` — can hold it open long after the child exits), then drain whatever is left without
+        // blocking. The wait is for `.exited` only: when nothing was spawned, this process still
+        // holds its own copies of both write ends, so end-of-file can never arrive and waiting
+        // would only add the full bound to a launch failure or a pre-launch cancel.
+        if case .exited = rawExit {
+            let reachedEndOfFile = await endOfFile.wait(bound: testHooks?.eofWaitBound ?? Self.eofWaitBound)
+            testHooks?.endOfFileWaitEnded?(reachedEndOfFile)
+        }
+        stdoutReader.finish(stdoutPipe.fileHandleForReading)
+        stderrReader.finish(stderrPipe.fileHandleForReading)
         try? stdoutPipe.fileHandleForReading.close()
         try? stderrPipe.fileHandleForReading.close()
 
@@ -460,6 +524,147 @@ public struct SingingEngineInstaller: Sendable {
         case cancelledBeforeLaunch
         case cannotLaunch
         case exited(status: Int32, reason: Process.TerminationReason, cancelRequested: Bool)
+    }
+
+    /// One child pipe's reader (W8-IDR). Every byte the child wrote is read from the pipe exactly
+    /// ONCE and handed to `consume` exactly once, whichever path reads it: the readability handler
+    /// while the child runs, or `finish`'s drain after it exits. Both paths read AND consume while
+    /// holding `state`'s lock, so they can never interleave, reorder, or parse the same bytes
+    /// twice; once `finish` has run, a late handler call touches nothing — not even the handle,
+    /// which `install` closes next.
+    private final class PipeStreamReader: Sendable {
+        private struct State: Sendable {
+            var reachedEndOfFile = false
+            var finished = false
+        }
+
+        private let state = OSAllocatedUnfairLock(initialState: State())
+        private let consume: @Sendable (Data) -> Void
+        private let pause: (@Sendable (TestHooks.HandlerPoint) -> Void)?
+        private let onEndOfFile: @Sendable () -> Void
+
+        /// The drain's own ceiling, so a grandchild that keeps writing can never keep `finish`
+        /// reading forever. install.sh's whole stdout is a few hundred `@@` lines.
+        private static let maxDrainBytes = 1 << 20
+
+        init(
+            consume: @escaping @Sendable (Data) -> Void,
+            pause: (@Sendable (TestHooks.HandlerPoint) -> Void)?,
+            onEndOfFile: @escaping @Sendable () -> Void
+        ) {
+            self.consume = consume
+            self.pause = pause
+            self.onEndOfFile = onEndOfFile
+        }
+
+        func start(_ handle: FileHandle) {
+            handle.readabilityHandler = { [self] handle in handlerFired(handle) }
+        }
+
+        private func handlerFired(_ handle: FileHandle) {
+            pause?(.beforeRead)
+            let reachedEndOfFileNow: Bool = state.withLockUnchecked { state in
+                guard !state.finished, !state.reachedEndOfFile else { return false }
+                let data = handle.availableData
+                guard !data.isEmpty else {
+                    state.reachedEndOfFile = true
+                    return true
+                }
+                pause?(.afterRead)
+                consume(data)
+                return false
+            }
+            if reachedEndOfFileNow {
+                // At end-of-file the handler fires again and again until it is removed.
+                handle.readabilityHandler = nil
+                onEndOfFile()
+            }
+        }
+
+        /// After the child exited and the bounded wait ended: stop the handler, then — unless it
+        /// already saw end-of-file — read what the pipe still holds WITHOUT blocking (a grandchild
+        /// may hold the write end open, so a blocking read could wait forever) and hand it to the
+        /// same `consume`.
+        func finish(_ handle: FileHandle) {
+            handle.readabilityHandler = nil
+            state.withLockUnchecked { state in
+                defer { state.finished = true }
+                guard !state.finished, !state.reachedEndOfFile else { return }
+                let descriptor = handle.fileDescriptor
+                var chunk = [UInt8](repeating: 0, count: 65_536)
+                var drained = 0
+                while drained < Self.maxDrainBytes {
+                    var poller = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+                    let ready = poll(&poller, 1, 0)
+                    if ready < 0, errno == EINTR { continue }
+                    // 0: nothing readable right now (a grandchild still holds the write end).
+                    // < 0: poll itself failed. Either way, stop: the run must end, and what was
+                    // read so far is what gets classified.
+                    guard ready > 0 else { return }
+                    let count = chunk.withUnsafeMutableBytes { read(descriptor, $0.baseAddress, $0.count) }
+                    if count > 0 {
+                        drained += count
+                        consume(Data(chunk[0..<count]))
+                    } else if count == 0 {
+                        state.reachedEndOfFile = true
+                        return
+                    } else if errno != EINTR {
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resumes `wait` once every pipe reported end-of-file, or once the bound passes, whichever
+    /// comes first, exactly once (W8-IDR).
+    private final class PipesEndOfFileGate: Sendable {
+        private struct State: Sendable {
+            var streamsLeft: Int
+            var waiter: CheckedContinuation<Bool, Never>?
+        }
+
+        private let state: OSAllocatedUnfairLock<State>
+
+        init(streams: Int) {
+            state = OSAllocatedUnfairLock(initialState: State(streamsLeft: streams, waiter: nil))
+        }
+
+        func streamReachedEndOfFile() {
+            let waiter = state.withLock { state -> CheckedContinuation<Bool, Never>? in
+                state.streamsLeft = max(0, state.streamsLeft - 1)
+                guard state.streamsLeft == 0 else { return nil }
+                defer { state.waiter = nil }
+                return state.waiter
+            }
+            waiter?.resume(returning: true)
+        }
+
+        /// `true`: every pipe reached end-of-file. `false`: the bound passed first. The timer is a
+        /// dispatch timer, never `Task.sleep`: on the cancel path this call's `Task` is already
+        /// cancelled, a cancelled `Task.sleep` returns at once, and the bound would become zero.
+        func wait(bound: Duration) async -> Bool {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+                let alreadyDone = state.withLock { state -> Bool in
+                    if state.streamsLeft == 0 { return true }
+                    state.waiter = continuation
+                    return false
+                }
+                if alreadyDone {
+                    continuation.resume(returning: true)
+                    return
+                }
+                let (seconds, attoseconds) = bound.components
+                let nanoseconds = Int(seconds) * 1_000_000_000 + Int(attoseconds / 1_000_000_000)
+                DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(nanoseconds)) {
+                    let waiter = self.state.withLock { state -> CheckedContinuation<Bool, Never>? in
+                        defer { state.waiter = nil }
+                        return state.waiter
+                    }
+                    waiter?.resume(returning: false)
+                }
+            }
+        }
     }
 
     /// PURE. The exit-code-plus-`@@`-vocabulary classification the type doc promises.
@@ -539,6 +744,9 @@ public struct SingingEngineInstaller: Sendable {
         if let pinsFile = configuration.pinsFile {
             environment["SING_PINS_FILE"] = pinsFile.path
         }
+        // install.sh runs tools/*.py and `from singlib import ...` out of the scripts dir, which is
+        // a sealed bundle directory in a shipped app: never write bytecode there.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
         for (key, value) in configuration.testExtraEnvironment { environment[key] = value }
         return environment
     }

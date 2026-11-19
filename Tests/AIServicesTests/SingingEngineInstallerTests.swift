@@ -7,7 +7,9 @@ import Testing
 /// tables need no process at all; the real-install/re-run/cancel/badUsage suites run
 /// `scripts/sing/install.sh` for real against the LOCAL FIXTURE MIRROR
 /// (`scripts/sing/tests/fixture_mirror.py`) — never the network, never the real engine, per the
-/// design's own gate text.
+/// design's own gate text. The mirror is BUILT from a few files of the installed engine (uv,
+/// CPython, two upstream audio files), which it only reads; every install.sh child gets an
+/// empty HOME of the test's own (W8-SFIX).
 
 private func testScriptsDir() throws -> URL {
     try #require(
@@ -33,21 +35,36 @@ enum SingingInstallerFixture {
         var builtinWavSha256: String
     }
 
-    /// Mirrors `fixture_mirror.missing_inputs()`'s exact 6 paths, filesystem-only (no subprocess),
-    /// so `.enabled(if:)` gating costs nothing on a machine that lacks the spike.
-    static var machineHasFixtureInputs: Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let spike = home.appendingPathComponent("DAWPro-spikes/sing-soulx", isDirectory: true)
-        let need = [
-            home.appendingPathComponent(".local/bin/uv").path,
-            spike.appendingPathComponent(
-                "python/cpython-3.10.20-macos-aarch64-none/bin/python3.10"
-            ).path,
-            spike.appendingPathComponent("src/SoulX-Singer/example/audio/zh_prompt.mp3").path,
-            spike.appendingPathComponent("src/SoulX-Singer/example/audio/zh_prompt.json").path,
+    /// The INSTALLED singing runtime the fixture's real inputs are read from (only ever read):
+    /// `~/Library/Application Support/DAWPro/SingingEngine`, or `SING_TEST_RUNTIME` — the same knob
+    /// and the same default as `fixture_mirror.RUNTIME`. A durable home: the spike folder these
+    /// inputs used to come from is being deleted (W8-SFIX, 2026-10-06). Deliberately not
+    /// `AppDirectories`, which a test process may resolve elsewhere: the fixture needs the user's
+    /// real installed engine, and reads nothing else from it.
+    static var runtimeDir: URL {
+        if let override = ProcessInfo.processInfo.environment["SING_TEST_RUNTIME"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/DAWPro/SingingEngine", isDirectory: true)
+    }
+
+    /// `fixture_mirror.required_inputs()`'s exact 6 paths, filesystem-only (no subprocess), so
+    /// `.enabled(if:)` gating costs nothing on a machine without the engine installed.
+    /// `gatePathsAreFixtureMirrorsOwn` compares this list with Python's, so the two cannot drift.
+    static var requiredInputs: [String] {
+        let runtime = runtimeDir
+        return [
+            runtime.appendingPathComponent("bin/uv").path,
+            runtime.appendingPathComponent("python/cpython-3.10.20-macos-aarch64-none/bin/python3.10").path,
+            runtime.appendingPathComponent("upstream/example/audio/zh_prompt.mp3").path,
+            runtime.appendingPathComponent("upstream/example/audio/zh_prompt.json").path,
             "/usr/bin/git", "/usr/bin/tar",
         ]
-        return need.allSatisfy { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    static var machineHasFixtureInputs: Bool {
+        requiredInputs.allSatisfy { FileManager.default.fileExists(atPath: $0) }
     }
 
     static let built: Result<Paths, InstallerFixtureError> = {
@@ -82,6 +99,7 @@ enum SingingInstallerFixture {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         process.arguments = ["-c", script]
+        process.environment = pythonEnvironment()
         let outPipe = Pipe()
         let errPipe = Pipe()
         process.standardOutput = outPipe
@@ -129,6 +147,25 @@ enum SingingInstallerFixture {
 
 private func pythonLiteral(_ s: String) -> String {
     "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
+
+/// The environment for a `python3` that imports `scripts/sing/tests/` modules: this process's
+/// own, plus `PYTHONDONTWRITEBYTECODE=1` (never a `__pycache__` in the repo; `run_all.sh`'s gate
+/// fails on one).
+private func pythonEnvironment() -> [String: String] {
+    var environment = ProcessInfo.processInfo.environment
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    return environment
+}
+
+/// HOME for an install.sh child: an EMPTY folder of the test's own, under `root`, that must stay
+/// empty (W8-SFIX, 2026-10-06: the real install's venv check wrote 3.4 MB into the user's
+/// `~/nltk_data`). The fixture `g2p_en` repeats the real one's import-time `nltk.download()`, so
+/// if that ever comes back it lands HERE, never in the real home.
+private func emptyHome(under root: URL) throws -> URL {
+    let home = root.appendingPathComponent("home of the caller", isDirectory: true)
+    try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+    return home
 }
 
 // MARK: - `sing-installer-*` temp-dir hygiene (FIX NOW #5, registered while #5 is edited)
@@ -465,9 +502,11 @@ struct SingingEngineInstallerRealInstallTests {
         let fixture = try SingingInstallerFixture.requirePaths()
         let (runtimeDir, runtimeRoot) = try testRuntimeDir(tag: "A")
         defer { try? FileManager.default.removeItem(at: runtimeRoot) }
+        let home = try emptyHome(under: runtimeRoot)
         let installer = SingingEngineInstaller(configuration: .init(
             scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
-            installSource: fixture.mirror, pinsFile: fixture.pins))
+            installSource: fixture.mirror, pinsFile: fixture.pins,
+            testExtraEnvironment: ["HOME": home.path]))
         let collector = ProgressCollector()
 
         let outcome = await installer.install(progress: { collector.record($0) })
@@ -490,6 +529,38 @@ struct SingingEngineInstallerRealInstallTests {
         // figure: it is still unambiguously "the multi-megabyte weights download", without this
         // test being fragile to config.yaml's own byte count ever changing by a few bytes.
         #expect(ticks.contains { ($0.bytesTotal ?? 0) >= 3_000_000 }, "got bytesTotal values: \(ticks.map(\.bytesTotal))")
+        // W8-SFIX: the whole install, through the app's own installer, wrote nothing into HOME.
+        let homeEntries = try? FileManager.default.contentsOfDirectory(atPath: home.path)
+        #expect(homeEntries == [], "install.sh wrote into the caller's HOME: \(String(describing: homeEntries))")
+    }
+
+    @Test("the Swift gate's 6 paths are exactly fixture_mirror.required_inputs() (W8-SFIX: no silent drift)")
+    func gatePathsAreFixtureMirrorsOwn() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = [
+            "-c",
+            "import sys, json; sys.path.insert(0, sys.argv[1]); import fixture_mirror; "
+                + "print(json.dumps(fixture_mirror.required_inputs()))",
+            try testScriptsDir().appendingPathComponent("tests").path,
+        ]
+        var environment = pythonEnvironment()
+        // Python honours these one-input overrides; the Swift gate honours only SING_TEST_RUNTIME.
+        for key in ["SING_TEST_UV", "SING_TEST_CPYTHON", "SING_TEST_UPSTREAM"] { environment[key] = nil }
+        process.environment = environment
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        try process.run()
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        try #require(process.terminationStatus == 0,
+                     "python3 exited \(process.terminationStatus): \(String(decoding: errData, as: UTF8.self))")
+        let python = try JSONDecoder().decode([String].self, from: outData)
+        #expect(python == SingingInstallerFixture.requiredInputs)
+        #expect(python.count == 6)
     }
 
     @Test(
@@ -504,7 +575,8 @@ struct SingingEngineInstallerRealInstallTests {
         defer { try? FileManager.default.removeItem(at: runtimeRoot) }
         let installer = SingingEngineInstaller(configuration: .init(
             scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
-            installSource: fixture.mirror, pinsFile: fixture.pins))
+            installSource: fixture.mirror, pinsFile: fixture.pins,
+            testExtraEnvironment: ["HOME": try emptyHome(under: runtimeRoot).path]))
 
         let first = await installer.install(progress: { _ in })
         guard case .succeeded = first else {
@@ -540,7 +612,9 @@ struct SingingEngineInstallerRealInstallTests {
             // `test_install.py`'s own exact value — slow enough that a `@@bytes` tick reliably
             // lands (and this test can wait for it) before the whole 3 MiB fixture download would
             // otherwise finish in milliseconds.
-            testExtraEnvironment: ["SING_FIXTURE_THROTTLE_S": "1.5"]))
+            testExtraEnvironment: [
+                "SING_FIXTURE_THROTTLE_S": "1.5", "HOME": try emptyHome(under: runtimeRoot).path,
+            ]))
         let collector = ProgressCollector()
 
         let installTask = Task { await installer.install(progress: { collector.record($0) }) }
@@ -578,7 +652,8 @@ struct SingingEngineInstallerRealInstallTests {
         defer { try? FileManager.default.removeItem(at: runtimeRoot) }
         let installer = SingingEngineInstaller(configuration: .init(
             scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
-            installSource: fixture.mirror, pinsFile: fixture.pins))
+            installSource: fixture.mirror, pinsFile: fixture.pins,
+            testExtraEnvironment: ["HOME": try emptyHome(under: runtimeRoot).path]))
         let collector = ProgressCollector()
 
         let task = Task {
@@ -663,7 +738,8 @@ struct SingingEngineInstallerFailureShapeTests {
 
         let installer = SingingEngineInstaller(configuration: .init(
             scriptsDir: try testScriptsDir(), runtimeDir: runtimeDir,
-            installSource: fixture.mirror, pinsFile: badPins))
+            installSource: fixture.mirror, pinsFile: badPins,
+            testExtraEnvironment: ["HOME": try emptyHome(under: runtimeRoot).path]))
         let outcome = await installer.install(progress: { _ in })
         guard case .badUsage(let message) = outcome else {
             Issue.record("expected .badUsage, got \(outcome)")

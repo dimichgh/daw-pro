@@ -207,6 +207,63 @@ if [[ "$hook_files" != "1" ]]; then
 fi
 echo "==> bundled voice-conversion patches + hook (one-file invariant holds)"
 
+# The singing engine's scripts (p2-sing-h, design 2026-09-27-p2-sing-integration §2.3).
+#
+# install.sh / run.sh / server.py / stub_server.py / singlib/ / tools/ are OURS and small
+# (~200 KB). The ~GB runtime (venv + weights) installs separately into Application Support,
+# but the SCRIPTS must travel with the app: an app copied out of the repo (the .dmg,
+# /Applications) cannot walk up to Package.swift, so Configuration.resolveScriptsDir falls
+# through to Contents/Resources/sing. Without this block that fallback finds nothing.
+#
+# Shipped: everything EXCEPT tests/ (29 files: fixtures + test_*.py; nothing in install.sh,
+# run.sh, server.py, stub_server.py, singlib/ or tools/ imports or reads it) and any
+# __pycache__ / *.pyc (they would break the seal; the launcher sets PYTHONDONTWRITEBYTECODE).
+# Like the blocks above, this MUST run before `codesign`.
+sing_src="scripts/sing"
+for need in install.sh run.sh; do
+    if [[ ! -f "$sing_src/$need" ]]; then
+        echo "error: $sing_src/$need not found — the singing engine could not be installed or started from the bundle" >&2
+        exit 1
+    fi
+done
+sing_dest="$APP/Contents/Resources/sing"
+rm -rf "$sing_dest"
+mkdir -p "$sing_dest"
+sing_expected=0
+while IFS= read -r f; do
+    rel="${f#$sing_src/}"
+    mkdir -p "$sing_dest/$(dirname "$rel")"
+    cp -p "$f" "$sing_dest/$rel"
+    sing_expected=$((sing_expected + 1))
+done < <(find "$sing_src" -type f -not -path "$sing_src/tests/*" -not -path '*__pycache__*' -not -name '*.pyc' | LC_ALL=C sort)
+chmod +x "$sing_dest/install.sh" "$sing_dest/run.sh"
+# Assert on what LANDED, not on what the loop meant to do.
+for need in install.sh run.sh server.py stub_server.py; do
+    if [[ ! -f "$sing_dest/$need" ]]; then
+        echo "error: $sing_dest/$need did not land in the bundle" >&2
+        exit 1
+    fi
+done
+if [[ ! -d "$sing_dest/singlib" ]]; then
+    echo "error: $sing_dest/singlib did not land in the bundle" >&2
+    exit 1
+fi
+if [[ ! -x "$sing_dest/install.sh" || ! -x "$sing_dest/run.sh" ]]; then
+    echo "error: install.sh / run.sh lost their exec bit in the bundle" >&2
+    exit 1
+fi
+sing_landed=$(find "$sing_dest" -type f | wc -l | tr -d ' ')
+if [[ "$sing_landed" != "$sing_expected" || "$sing_expected" -lt 1 ]]; then
+    echo "error: singing scripts landed $sing_landed files, expected $sing_expected (source minus tests/ and bytecode)" >&2
+    exit 1
+fi
+sing_junk=$(find "$sing_dest" \( -name '__pycache__' -o -name '*.pyc' \) | wc -l | tr -d ' ')
+if [[ "$sing_junk" != "0" ]]; then
+    echo "error: $sing_junk bytecode entries landed in $sing_dest — they would break the seal" >&2
+    exit 1
+fi
+echo "==> bundled singing-engine scripts ($sing_landed files, tests/ and bytecode excluded)"
+
 # Speech-model weights (m23-n1, 2026-07-27) — OPT-IN, off by default.
 #
 # The default ships a SMALL app and the weights are installed separately into

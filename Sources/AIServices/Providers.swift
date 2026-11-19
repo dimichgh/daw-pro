@@ -84,6 +84,12 @@ public struct LyricsWriteRequest: Sendable, Equatable {
     public var existingLyrics: String?
     /// REFINE mode: how to revise, e.g. "make the chorus more hopeful".
     public var instruction: String?
+    /// p2-sing-x7b (design 2026-10-06 §8.3): write to fit a melody, one line per breath phrase, with no section tags
+    /// (`LyricsFit` fills it and checks the reply). nil = today's bracketed-structure request, byte for byte.
+    public var fit: LyricsFitBrief?
+    /// p2-sing-x7b: the language to write in, as a `ClipLyrics` code ("zh", "yue"); nil = no language line in the
+    /// prompt (today's request). English is nil (`LyricLanguage.stored`).
+    public var language: String?
 
     /// The default structure when a caller doesn't specify one — a familiar
     /// pop shape (verse/chorus × 2 into a bridge and a final chorus).
@@ -95,7 +101,9 @@ public struct LyricsWriteRequest: Sendable, Equatable {
         structure: [String] = LyricsWriteRequest.defaultStructure,
         context: LyricsWriteContext = LyricsWriteContext(),
         existingLyrics: String? = nil,
-        instruction: String? = nil
+        instruction: String? = nil,
+        fit: LyricsFitBrief? = nil,
+        language: String? = nil
     ) {
         self.prompt = prompt
         self.style = style
@@ -103,6 +111,8 @@ public struct LyricsWriteRequest: Sendable, Equatable {
         self.context = context
         self.existingLyrics = existingLyrics
         self.instruction = instruction
+        self.fit = fit
+        self.language = language
     }
 
     /// True when there are existing lyrics to revise (REFINE mode).
@@ -130,6 +140,7 @@ public enum LyricsPromptBuilder {
     /// Teaches the bracketed ACE-Step format, singability, and the project
     /// context. In REFINE mode it also instructs the model to preserve structure.
     public static func systemPrompt(_ request: LyricsWriteRequest) -> String {
+        if let fit = request.fit { return fitSystemPrompt(request, fit) }
         var parts: [String] = []
         parts.append("""
         You are a professional lyricist working inside a digital audio workstation. \
@@ -151,6 +162,9 @@ public enum LyricsPromptBuilder {
         if let clause = contextClause(request.context) {
             parts.append(clause)
         }
+        if let clause = languageClause(request.language) {
+            parts.append(clause)
+        }
         if request.isRefine {
             parts.append("""
             You are REVISING the lyrics the user provides according to their \
@@ -165,6 +179,7 @@ public enum LyricsPromptBuilder {
     /// The per-request user turn: theme/style/structure for WRITE, or the
     /// existing lyrics + instruction for REFINE.
     public static func userPrompt(_ request: LyricsWriteRequest) -> String {
+        if let fit = request.fit { return fitUserPrompt(request, fit) }
         var lines: [String] = []
         if request.isRefine {
             lines.append("Here are the current lyrics to revise:")
@@ -202,6 +217,85 @@ public enum LyricsPromptBuilder {
         if let genre = context.genre.nonEmpty { facts.append("genre \(genre)") }
         return "PROJECT CONTEXT: the track is in " + facts.joined(separator: ", ")
             + ". Shape phrasing, line length, and mood to fit."
+    }
+
+    /// "LANGUAGE: write the lyrics in Chinese (Mandarin)." — nil for no language (or English, stored as nil).
+    static func languageClause(_ code: String?) -> String? {
+        guard let code = code.nonEmpty, code != "en" else { return nil }
+        return "LANGUAGE: write the lyrics in \(SingCapabilities.displayName(code))."
+    }
+
+    // MARK: Fit to a melody (p2-sing-x7b, design 2026-10-06 §8.3)
+
+    /// The system prompt when the words must fit a melody: one plain line per breath phrase, at most that phrase's
+    /// notes in syllables, no section tags.
+    static func fitSystemPrompt(_ request: LyricsWriteRequest, _ fit: LyricsFitBrief) -> String {
+        let count = fit.phrases.count
+        let lines = count == 1 ? "1 line" : "\(count) lines"
+        var parts: [String] = []
+        parts.append("""
+        You are a professional lyricist working inside a digital audio workstation. \
+        Write lyrics that a singing voice will sing on a melody that is already \
+        written, one syllable on each note.
+        """)
+        parts.append("""
+        FORMAT: write exactly \(lines), one for each phrase of the melody, in order. \
+        Plain lyric lines only: no section tags such as [verse] or [chorus], no \
+        blank lines, no numbers, no title.
+        """)
+        parts.append("""
+        SYLLABLES: line N must have AT MOST as many syllables as phrase N has \
+        notes, and ideally exactly that many. Count every syllable. Favor natural \
+        word stress and open vowels on the long notes.
+        """)
+        if let clause = contextClause(request.context) {
+            parts.append(clause)
+        }
+        if let clause = languageClause(request.language) {
+            parts.append(clause)
+        }
+        if request.isRefine {
+            parts.append("""
+            You are REVISING the lyrics the user provides according to their \
+            instruction, keeping one line for each phrase of the melody.
+            """)
+        }
+        parts.append("Return ONLY the \(lines) — no commentary or explanation.")
+        return parts.joined(separator: "\n\n")
+    }
+
+    /// The user turn when the words must fit a melody: the theme (or the lyrics to revise), then every phrase's
+    /// note count and length, then, on the retry, what did not fit last time.
+    static func fitUserPrompt(_ request: LyricsWriteRequest, _ fit: LyricsFitBrief) -> String {
+        var lines: [String] = []
+        if request.isRefine {
+            lines.append("Here are the current lyrics to revise:")
+            lines.append(request.existingLyrics ?? "")
+            if let instruction = request.instruction.nonEmpty {
+                lines.append("Revision instruction: \(instruction)")
+            }
+            if !request.prompt.isEmpty {
+                lines.append("Keep them about: \(request.prompt)")
+            }
+        } else {
+            lines.append("Theme: \(request.prompt)")
+        }
+        if let style = request.style.nonEmpty {
+            lines.append("Style: \(style)")
+        }
+        lines.append("The melody's phrases, in order (write one line for each):")
+        for (i, phrase) in fit.phrases.enumerated() {
+            let notes = phrase.notes == 1 ? "1 note" : "\(phrase.notes) notes"
+            lines.append("Phrase \(i + 1): \(notes), \(String(format: "%.1f", phrase.seconds)) seconds")
+        }
+        if !fit.problems.isEmpty {
+            lines.append("Your last lines didn't fit the tune:")
+            lines.append(contentsOf: fit.problems.map { "- \($0)" })
+            lines.append("Write all \(fit.phrases.count) lines again, fixing those.")
+        } else {
+            lines.append("Write the \(fit.phrases.count == 1 ? "line" : "\(fit.phrases.count) lines") now.")
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Normalizes a section tag to `[name]`, tolerating an already-bracketed input.

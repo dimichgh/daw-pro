@@ -5,15 +5,19 @@ In the fixture venv this package answers that call by copying from the local mir
 local_dir/.cache/huggingface/download/ as the real one does, so install.sh's code path is the SAME in both modes.
 
 SING_FIXTURE_THROTTLE_S (seconds per MiB, default 0) slows the copy so a test can cancel mid-download.
+Each call reports on stderr the HOME and NLTK_DATA it ran under (test_install checks they are inside staging).
 """
 import os
 import shutil
+import sys
 import time
 
 __version__ = "0.36.2+fixture"
 
 
 def hf_hub_download(repo_id, filename, revision=None, local_dir=None, **_kw):
+    sys.stderr.write("fixture hf_hub_download(%s): HOME=%s NLTK_DATA=%s\n" % (
+        filename, os.environ.get("HOME", ""), os.environ.get("NLTK_DATA", "")))
     src = os.path.join(os.environ["SING_INSTALL_SOURCE"], "hf", repo_id, revision or "main", filename)
     if not os.path.isfile(src):
         raise FileNotFoundError("fixture mirror has no %s" % src)

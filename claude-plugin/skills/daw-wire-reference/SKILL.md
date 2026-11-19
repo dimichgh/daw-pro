@@ -210,8 +210,11 @@ for all nine, the direct-vs-wrapper strictness split, the nested-strict-gap
 closure on `target` (the discriminated union) and `params` (the m30-c
 precedent), and every one of those verbatim carries.
 ⚠️ The authoritative pins are `mcp-server/test/integration.test.ts`'s
-`assert.equal(result.tools.length, 261)` and `mcp-server/test/mcp-log.test.ts`'s
-`assert.equal(instrumented.length, 261)` (bumped from 260 at the W7-WIRE2 close,
+`assert.equal(result.tools.length, 293)` and `mcp-server/test/mcp-log.test.ts`'s
+`assert.equal(instrumented.length, 293)` (293 since m39-w4-10's `pattern_list` and
+`clip_add_drum_pattern`, read off both pins 2026-10-12; this line had gone stale at
+261 while the pins moved on, so trust the pins over the history that follows. 261
+was bumped from 260 at the W7-WIRE2 close,
 2026-09-27, which itself was bumped from 259 at the X4 close, 2026-09-27, which
 itself was bumped from 258 at the C5b-3b close, 2026-09-26, which itself was
 bumped from 257 at the NT-W over
@@ -219,7 +222,7 @@ NT-C C2 close, 2026-09-25) — **NOT** a `grep -c 'registerTool('`,
 which is a known liar on this file and previously anchored this paragraph at a
 stale 194) and
 `Sources/DAWControl/Commands.swift`
-(**263 commands** — re-measured 2026-09-27 at W7-WIRE2 (mcp-integration-engineer):
+(**288 commands** — 288 since m39-w4-10 (`pattern.list`, the ready-made drum beats, and `clip.addDrumPattern`, which writes one onto a drum track and REFUSES to land on another clip), measured 2026-10-12 by `doc-count-drift.mjs`; 286 since m27-f (`fx.getParams`, a read-only view of one insert's current values), measured 2026-10-07 by `doc-count-drift.mjs`; 285 since p2-sing-x7 part A, measured 2026-10-07 by `doc-count-drift.mjs` (`clip.setNoteWord`, `clip.setSingStyle`, `clip.getSingStyle`, `sing.proposeHarmony`, `sing.capabilities`); 280 since p2-sing-e part 2, measured 2026-10-06 by `doc-count-drift.mjs` (the 17 singing verbs: 15 `sing.*`, `clip.setLyrics`/`clip.getLyrics`, `project.transpose`); before that 263, re-measured 2026-09-27 at W7-WIRE2 (mcp-integration-engineer):
 headline moved 255 -> 256, ONE verb (`clip.setNoteShapes`, the BATCH twin of
 `clip.setNoteShape` over the SAME `ProjectStore.setClipNoteShapes` the single
 verb already calls), placed
@@ -595,22 +598,22 @@ It is never silently accepted — a path that fell through to the filesystem
 would report success and play silence, which is the failure mode this whole
 feature exists to remove.
 
-### A windowed render is not an excerpt of the full render
+### A windowed render re-strikes held notes
 
-`render_measure_loudness` (and any `fromBeat`-windowed render) DROPS every
-MIDI note whose note-ON falls before the window start — both the note-on
-and the note-off, so the note contributes nothing at all. A straddling
-AUDIO clip behaves the opposite way: it is entered mid-file and sounds.
-Measuring "just the outro" of a pad-heavy arrangement can therefore report
-gated silence for a passage that is perfectly fine from the top. This
-produced a convincing false alarm in a real session.
+`render_measure_loudness` (and any `fromBeat`-windowed render) plays every
+MIDI note whose note-ON falls before the window start AGAIN at the window
+start, at full velocity: an offline render chases held notes the way the play
+button does (the user's ruling of 2026-08-17, m23-bv; a mid-note window was
+measured equal to the full render for a sustained tone on 2026-10-07, m27-m).
+A straddling AUDIO clip is entered mid-file and sounds.
 
-**So: an unexpectedly silent window over sustained MIDI is far more likely
-to be this scheduling rule than a hole in the arrangement.** Re-measure
-from beat 0, or from the start of the clip in question, before you report
-silence to anyone. (The behaviour is deliberate-for-now and pinned by
-tests; whether the bounce should chase held notes is an open product
-question for the project owner, not something to work around silently.)
+**So a window over sustained MIDI is not silent, but it is not a perfect
+excerpt either:** a note that was already fading at the window start restarts
+its attack there, so the start of the window can read a little louder than
+that passage sounds in the full song. Measure from beat 0, or from the start
+of the clip in question, when the level at the window's start must match the
+whole render. (Before 2026-08-17 such notes were dropped and a window could
+read as false silence; older notes and logs may still describe that.)
 
 Related unit trap in the same call: `fromBeat` is BEATS, `durationSeconds`
 is SECONDS. There is no beat-range form.
@@ -1381,7 +1384,7 @@ guessing. What is actually measurable:
 | What does ONE track/effect chain look like spectrally? | `fx_spectrum` |
 | What key/tempo/spectral balance is this audio clip? | `clip_analyze_audio` |
 | What pitch is this audio, over time? | `clip_detect_pitch` |
-| What did the file I just wrote actually contain? | `audio_profile_file` (peak/RMS/DC/silence — explicitly NOT a loudness meter) |
+| What did the file I just wrote actually contain? | `audio_profile_file` (windowed sample peak/RMS/silence; add `loudness: true` for the file's BS.1770 LUFS and true peak, copying nothing) |
 | How does my mix compare to a reference track? | `reference_import` + `reference_compare` |
 | Does velocity change this patch's TONE, or only its volume? | `instrument_probe_liveness` |
 
@@ -1710,3 +1713,113 @@ Three things about its output nobody should be surprised by:
 - **Marker names mirror the section names verbatim**, so a layout with two
   verses gives you two markers named "Verse". Disambiguate by beat, not by
   name — the result payload carries both.
+- **`macro_song_skeleton` now has a `template` parameter** — pass a template
+  `id` (from `template_list`) or a whole template object (the shape
+  `template_describe` returns under `template`) to build the song's form
+  (tempo, sections, markers) PLUS a full band's instruments and effects in
+  one call. The template's roster replaces the genre's default one; omit
+  both `template` and `tracks` to use the genre's roster outright.
+- **`macro_song_skeleton` also has a `dryRun` parameter** — pass `true` to
+  preview what the call would create (each track's name, kind and one-sentence
+  sound, its insert chain, plus the sections and markers) without changing
+  the song, with `applied: false` and no ids. Use it instead of memorising
+  a genre's roster.
+
+## Band templates: save and share track + instrument + effect setups
+
+`template_list` / `template_describe` / `template_apply` / `template_save` /
+`template_remove` / `template_import` / `template_export` — a complete set of
+seven verbs that let you save a band (tracks with their instruments, effects,
+mixer settings and routing) and reuse it across projects or share it with
+others. Ten built-in templates ship with the app (Pop Band, Piano Ballad, Rock
+Band, House Club, Hip-Hop 808, Lo-Fi Chill, Jazz Combo, Acoustic Folk, Soul &
+Blues Band, Reggae Riddim); you can create and save your own.
+
+- **`template_list`** — read-only, takes no parameters. Lists every available
+  band template — the ten built-in ones plus any you have saved.
+  Returns `{templates: [{id, name, summary, source, genres, songForm, ...}],
+  unreadable: [{file, message}]}`. Use an `id` from here as the `template`
+  argument to `template_describe` / `template_apply` / `macro_song_skeleton`.
+  `instruments` lists each instrument track's instrument kind; `hasRouting`
+  means the template also builds buses/sends; `hasAudioUnits` means it needs
+  third-party plug-ins installed.
+
+- **`template_describe`** — read one template WITHOUT changing the song. Call
+  this before `template_apply` to see what you're about to add. Takes
+  `template` (a template `id` from `template_list`, or a whole template
+  object). Returns `{template: <the full canonical JSON>, tracks: [{key, name,
+  kind, sound}], slotsUsed, hasRouting, warnings}`. The `template` field is
+  the exact JSON you could edit and pass back to `template_apply` or
+  `template_save`. The `tracks` array gives each track's `key` (its address
+  inside the template), name, kind and a one-sentence `sound` description.
+  `slotsUsed` counts engine resources the template would use. Errors readably
+  for an unknown id or a template the app cannot read — the error names the
+  exact place and what to fix (e.g. `tracks[2].inserts[0]`).
+
+- **`template_apply`** — add a band template's tracks to the song as ONE
+  undoable step. A single `edit_undo` removes them all. Takes `template` (an
+  `id` or a whole template object) and optional `dryRun` (default false).
+  Returns `{applied, name, tracks: [{key, id, name, kind}], warnings,
+  duplicateTrackNames, undoLabel, hasRouting, slotsUsed}`. When `dryRun:
+  true`, returns what would be added with `applied: false` and no ids,
+  changing nothing. IT ONLY ADDS: it never removes or replaces existing
+  tracks; applying twice adds the band twice. Refused if a sound-bank or
+  sample file is missing, an id is unknown, or the template would add
+  routing while recording is running (stop recording first).
+
+- **`template_save`** — save tracks from the current song as a reusable band
+  template. Takes `name` (1-40 characters, required), `trackIds` (array of
+  track ids to save, at least one, required), plus optional `summary` (one
+  sentence), `songForm` (e.g. "verse-chorus"), `genres` (array of genre names
+  it suits), and `replaceId` (a saved template's id to update in place, not a
+  built-in). Saves instruments, effects, mixer settings and routing, but NOT
+  clips, recordings, automation, or the master chain. Returns `{id, name,
+  template, warnings}`. Refused for more than 24 tracks, a name over 40
+  characters, unknown ids, or an empty `trackIds` array. This writes a file
+  only — no undo entry, no changes to the song.
+
+- **`template_remove`** — delete one of your saved templates. Takes `id` (from
+  `template_list` where `source` is "saved"). Returns `{removed: id}`. Errors
+  readably for an unknown id or a built-in template (built-ins cannot be
+  removed). This deletes a file, so it cannot be undone. Never touches the
+  tracks already in the song.
+
+- **`template_import`** — import a band template from a `.dawtemplate` file
+  (one exported with `template_export`, or shared by someone else) and add it
+  to your library. Takes `path` (absolute or `~`-prefixed, required) and
+  optional `overwrite` (default false). Returns `{id, name, warnings}`. The
+  file keeps its `id` unless that id is missing, belongs to a built-in, or is
+  already taken — then it gets a fresh `id` and a warning says so. Use the
+  returned `id` with `template_describe` or `template_apply`. Errors readably
+  for a path that is not absolute, a file that is missing or over 2 MB, or a
+  file that is not a valid template.
+
+- **`template_export`** — export a band template to a `.dawtemplate` file so
+  it can be backed up, shared, or brought back with `template_import`. Takes
+  `id` (from `template_list`, required), `path` (absolute or `~`-prefixed,
+  required), and optional `overwrite` (default false). Returns `{path,
+  bytes}`. An existing file at `path` is never overwritten unless you pass
+  `overwrite: true`. This writes a file only — no undo entry, no changes to
+  the song.
+
+⭐ **A key-based architecture: everything inside a template refers to other
+pieces by template-local keys, never by name and never by project UUID.** A
+dangling key (a track outputting to a bus that does not exist in the template)
+is a refusal naming it, before any edit. This avoids the silent-mismatch class
+of defects entirely: "I routed the vocals into a reverb bus" does not
+accidentally route into a reverb bus you already had in the project with the
+same name.
+
+⚠️ **A misspelled key inside `macro_song_skeleton`'s `tracks[i]` is now an
+ERROR** — it used to be silently ignored. If you pass `{tracks: [{name:
+"Vocals", kind: "audio", progam: "Diva"}]}`, the `progam` typo is refused
+with a teaching error naming the valid keys ("A track list can't pick sounds.
+To choose instruments, pass a template."). Caught on BOTH surfaces — the wire
+rejects it, and so does `template_describe` when you pass an inline template
+object with the same typo.
+
+**Command-side entry**: `macro.songSkeleton` moved from 256 → 263 commands
+(the seven template verbs: `template.list` / `template.describe` /
+`template.apply` / `template.save` / `template.remove` / `template.import` /
+`template.export`, all NEW). No plugin version bump (regeneration is
+separate). MCP tools 261 → 268 by the same seven.

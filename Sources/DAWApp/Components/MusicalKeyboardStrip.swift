@@ -382,7 +382,10 @@ struct MusicalKeyboardStrip: View {
     /// question a performer asks ("am I on the kick bank or the perc bank?"),
     /// not the 0-based bank index the code carries.
     private var padRangeValue: String {
-        let first = controller.padBank * PadGridGeometry.padsPerBank + 1
+        // m39-w4-8: the GRID's bank, which is always A on a drum machine (one
+        // bank) even when the session's bank was left elsewhere by a sampler.
+        let bank = padGrid?.bank ?? controller.padBank
+        let first = bank * PadGridGeometry.padsPerBank + 1
         return "\(first)–\(first + PadGridGeometry.padsPerBank - 1)"
     }
 
@@ -419,7 +422,8 @@ struct MusicalKeyboardStrip: View {
                     onToggleLevels: { padGrid.toggleLevels() },
                     spreadDirection: padGrid.spreadDirection,
                     spreadDirectionUnavailableReason: padGrid.spreadDirectionUnavailableReason,
-                    onSetSpreadDirection: { padGrid.setSpreadDirection($0) })
+                    onSetSpreadDirection: { padGrid.setSpreadDirection($0) },
+                    bankHint: padGrid.bankHint)
                 if let notice = padGrid.lastChop {
                     chopNotice(notice, model: padGrid)
                 }
@@ -442,7 +446,8 @@ struct MusicalKeyboardStrip: View {
                 .font(.system(size: 13, weight: .bold, design: .monospaced))
                 .foregroundStyle(padGrid.loadedCount > 0
                                  ? DAWTheme.playback : DAWTheme.textFaint)
-            Text(padGrid.loadedCount == 1 ? "slice loaded" : "slices loaded")
+            // m39-w4-8: "drums" on a drum machine — the model's one word for it.
+            Text(padGrid.loadedNoun)
                 .font(.system(size: 11))
                 .foregroundStyle(DAWTheme.textSecondary)
             if let name = padGrid.targetName {
@@ -525,6 +530,11 @@ struct MusicalKeyboardStrip: View {
     private func chopNoticeText(_ notice: PadChopSummary) -> String {
         var text = "\(notice.sliceCount) pad\(notice.sliceCount == 1 ? "" : "s") on "
             + "“\(notice.trackName)”\(notice.createdTrack ? " (a new track)" : "")."
+        // m39-w4-8: a kit-sorted chop says how it sorted — the STORE's sentence
+        // ("Sorted into 4 kicks, 3 snares, …"), absent from a plain chop.
+        if let kit = notice.kitSummary {
+            text += " " + kit
+        }
         // ⚠️⚠️ **TWO INDEPENDENT FACTS, TWO SENTENCES — and collapsing them into
         // one `if/else` is the bug this shape exists to prevent.** "Did THIS
         // chop mute something?" (undo messaging) and "will the original be

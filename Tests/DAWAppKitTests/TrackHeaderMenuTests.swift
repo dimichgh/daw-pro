@@ -30,10 +30,12 @@ struct TrackHeaderMenuTests {
 
     private func actions(_ track: Track,
                          sidebarWidth: CGFloat = TrackHeaderMenuTests.wide,
-                         expanded: Bool = false) -> [TrackHeaderMenuAction] {
+                         expanded: Bool = false,
+                         isPro: Bool = false) -> [TrackHeaderMenuAction] {
         TrackHeaderMenu.items(track: track,
                               sidebarWidth: sidebarWidth,
-                              isAutomationExpanded: expanded).map(\.action)
+                              isAutomationExpanded: expanded,
+                              isPro: isPro).map(\.action)
     }
 
     private func takeGroupTrack(kind: TrackKind) -> Track {
@@ -184,10 +186,32 @@ struct TrackHeaderMenuTests {
         var seen: Set<TrackHeaderMenuAction> = []
         for kind in TrackKind.allCases {
             for width in [Self.narrow, Self.wide] {
-                seen.formUnion(actions(Track(name: "T", kind: kind), sidebarWidth: width))
-                seen.formUnion(actions(takeGroupTrack(kind: kind), sidebarWidth: width))
+                // m39-tpl-8: Pro is an input too (it adds "Save Track as Template…").
+                for isPro in [false, true] {
+                    seen.formUnion(actions(Track(name: "T", kind: kind), sidebarWidth: width, isPro: isPro))
+                    seen.formUnion(actions(takeGroupTrack(kind: kind), sidebarWidth: width, isPro: isPro))
+                }
             }
         }
         #expect(seen == Set(TrackHeaderMenuAction.allCases))
+    }
+
+    /// m39-tpl-8 (design §9.1): a Pro arrange offers "Save Track as Template…"
+    /// on every kind, just before Remove; a Simple one never does, so every list
+    /// pinned above (all Simple) is unchanged.
+    @Test("m39-tpl-8: Pro adds \"Save Track as Template…\" on every kind, before Remove; Simple never shows it")
+    func saveAsTemplateIsProOnly() throws {
+        for kind in TrackKind.allCases {
+            let track = Track(name: "T", kind: kind)
+            let simple = actions(track)
+            let pro = actions(track, isPro: true)
+            #expect(!simple.contains(.saveAsTemplate), "kind \(kind.rawValue)")
+            #expect(pro == simple.dropLast() + [.saveAsTemplate, .removeTrack], "kind \(kind.rawValue): \(pro)")
+        }
+        let item = try #require(TrackHeaderMenu.items(track: Track(name: "T", kind: .instrument),
+                                                     sidebarWidth: Self.wide, isAutomationExpanded: false,
+                                                     isPro: true).first { $0.action == .saveAsTemplate })
+        #expect(item.title == "Save Track as Template…")
+        #expect(!item.isDestructive)
     }
 }

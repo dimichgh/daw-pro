@@ -14,8 +14,10 @@ import Foundation
 /// the References library. It is also deliberately NOT a second copy of the
 /// BS.1770 loudness path (m23-ch: a single meter cannot detect its own
 /// miscount, which is why the external `ebur128` cross-check stays
-/// external) — this surface answers a WINDOWING question, not a loudness
-/// one.
+/// external) — the windows answer a WINDOWING question, not a loudness one.
+/// The one exception is OPT-IN (m27-k): `loudness`, below, is the SAME meter
+/// those commands use, read through this door so a bounce's loudness can be
+/// checked without `reference.import` copying the file.
 public struct FileProfile: Codable, Sendable, Equatable {
     /// The WHOLE file's duration — the `ffprobe` readback — independent of
     /// any `fromSeconds`/`durationSeconds` sub-range that was requested.
@@ -29,10 +31,23 @@ public struct FileProfile: Codable, Sendable, Equatable {
     /// format doesn't expose it (compressed codecs).
     public var isFloat: Bool?
     public var windows: [FileProfileWindow]
+    /// m27-k, OPT-IN: the BS.1770 program reading for the PROFILED RANGE
+    /// (`[fromSeconds, fromSeconds + durationSeconds)`, measured as if it were
+    /// its own file: the filters start cold at `fromSeconds` and the true-peak
+    /// edge is zero-padded at the range end). Present ONLY when the request
+    /// asked for it (`audio.profileFile {loudness: true}`); nil otherwise,
+    /// which synthesized Codable OMITS, so the no-flag reply is byte-identical
+    /// to m25-z's. The `LoudnessMeasurement` shape `render.measureLoudness`
+    /// reports, from `Loudness.Stream`, the meter `reference.analyze` uses (a
+    /// second door, not a second meter). Each field is nil when the range
+    /// holds no evidence for it: under 0.4 s has no integrated or momentary
+    /// reading, under 3 s no short-term or range, digital silence none.
+    public var loudness: LoudnessMeasurement?
 
     public init(
         durationSeconds: Double, sampleRateHz: Double, channelCount: Int,
-        bitDepth: Int? = nil, isFloat: Bool? = nil, windows: [FileProfileWindow]
+        bitDepth: Int? = nil, isFloat: Bool? = nil, windows: [FileProfileWindow],
+        loudness: LoudnessMeasurement? = nil
     ) {
         self.durationSeconds = durationSeconds
         self.sampleRateHz = sampleRateHz
@@ -40,6 +55,7 @@ public struct FileProfile: Codable, Sendable, Equatable {
         self.bitDepth = bitDepth
         self.isFloat = isFloat
         self.windows = windows
+        self.loudness = loudness
     }
 }
 

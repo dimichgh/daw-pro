@@ -130,6 +130,77 @@ class CleanRender(StubCase):
             stop_pid_exact(p.pid, p)
 
 
+class V2Surface(StubCase):
+    """facadeVersion 2 through the stub (design 2026-10-06 §7.6): the facade's schema and refusals, a stand-in
+    syllable per Chinese character, one sine per note on the converter's boundaries, and the facade's reply keys."""
+
+    def chinese(self, chars, lang="zh", name="zh.wav", **over):
+        notes = [(60 + 2 * i, i, 1) for i in range(len(chars))]
+        words = [(c, [i]) for i, c in enumerate(chars)]
+        body = phrase_request(notes, words, self.out(name), facadeVersion=2, **over)
+        for w in body["phrase"]["words"]:
+            if w["text"] != "hold":
+                w["lang"] = lang
+        return http("POST", self.port, "/v1/sing/phrase", body, timeout=120), notes
+
+    def test_health_capabilities(self):
+        with self.stub():
+            h = health_status(self.port)
+            self.assertEqual(h["capabilities"], {"facadeVersions": [1, 2], "controls": ["score"],
+                                                 "languages": ["en", "zh", "yue"]})
+            self.assertEqual(h["facadeVersion"], 1)
+
+    def test_a_chinese_line_sings_one_sine_per_character(self):
+        with self.stub():
+            for lang, chars, tok in (("zh", ["一", "闪", "hold", "ni3", "lv4"], ["zh_a1", "zh_a1", "en_AH0", "zh_ni3",
+                                                                                   "zh_lu:4"]),
+                                     ("yue", ["一", "閃", "nei5"], ["yue_aa1", "yue_aa1", "yue_nei5"])):
+                (st, body), notes = self.chinese(chars, lang, name=lang + ".wav")
+                self.assertEqual(st, 200, body)
+                meta = body["targetMeta"]
+                self.assertEqual([t for t in meta["phoneme"].split() if t != score.SP], tok)
+                self.assertEqual(meta["language"], {"zh": "Mandarin", "yue": "Cantonese"}[lang])
+                self.assertEqual(body["control"], "score")
+                self.assertNotIn("substitutions", body)                     # no phone set, so never a fallback
+                y, sr = wavio.read_float32_mono(self.out(lang + ".wav"))
+                bounds = score.bounds_of(meta)
+                pitches = [int(p) for p in meta["note_pitch"].split()]
+                sung = [(i, p) for i, p in enumerate(pitches) if p > 0]
+                self.assertEqual([p for _, p in sung], [n[0] for n in notes])
+                for i, p in sung:
+                    a, b = int(round(bounds[i] * sr)), int(round(bounds[i + 1] * sr))
+                    hz = zero_crossing_hz(y, a, b, sr)
+                    self.assertLess(abs(hz / midi_hz(p) - 1.0), 0.01, (lang, i, hz, p))
+
+    def test_v1_reply_keys_unchanged_and_v2_adds_control(self):
+        with self.stub():
+            st1, b1 = self.render(name="v1.wav")
+            st2, b2 = self.render(name="v2.wav", facadeVersion=2)
+            self.assertEqual((st1, st2), (200, 200))
+            self.assertNotIn("control", b1)
+            self.assertEqual(sorted(set(b2) - set(b1)), ["control"])
+            with open(self.out("v1.wav"), "rb") as f1, open(self.out("v2.wav"), "rb") as f2:
+                self.assertEqual(f1.read(), f2.read())                       # v2 with only defaults = v1, by bytes
+
+    def test_v2_refusals_are_the_facades(self):
+        with self.stub():
+            (st, body), _ = self.chinese(["你", "好"], lang="es")
+            self.assertEqual((st, body["error"]), (400, "languageNotSupported"))
+            (st, body), _ = self.chinese(["你好"])
+            self.assertEqual((st, body["error"]), (400, "badRequest"))
+            (st, body), _ = self.chinese(["你"], control="melody")
+            self.assertEqual((st, body["error"]), (400, "badRequest"))
+            self.assertIn("control", body["message"])
+            st, body = self.render(control="score")                          # a v2 key under v1
+            self.assertEqual((st, body["error"]), (400, "badRequest"))
+            self.assertIn("needs facadeVersion 2", body["message"])
+            body = phrase_request(T2_NOTES, T2_WORDS, self.out("vib.wav"), facadeVersion=2)
+            body["phrase"]["notes"][0]["vibrato"] = {"rateHz": 5.5, "depthCents": 45, "onsetS": 0.25}
+            st, body = http("POST", self.port, "/v1/sing/phrase", body, timeout=60)
+            self.assertEqual((st, body["error"]), (400, "vibratoNeedsMelody"))
+            self.assertFalse(os.path.exists(self.out("vib.wav")))
+
+
 class Faults(StubCase):
     def samples(self, name):
         return wavio.read_float32_mono(self.out(name))[0]

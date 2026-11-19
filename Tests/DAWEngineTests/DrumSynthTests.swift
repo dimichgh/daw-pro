@@ -984,3 +984,130 @@ struct DrumSynthTests {
         #expect((0..<512).allSatisfy { channels[0][$0] == 0 })
     }
 }
+
+// MARK: - m39-w4-3 P2: an entry velocity below the accent threshold is un-accented
+
+/// `docs/design/2026-10-07-loop-drum-depth.md` §9.2 `m39-w4-3` P2, against the
+/// level formula of `docs/design/2026-09-20-drum-machine.md` §5:
+/// `vScale = 1 - voice.velocity * (1 - v/127)`, times `(1 + accentDepth)` when
+/// the velocity reaches `accentThreshold`.
+///
+/// With the fixture entry velocity of 80 (below the default threshold 100) a
+/// hand-entered hit must carry NO accent term, and an Accent-row hit (127) must
+/// carry it. Appended to this `@MainActor` suite (the kit `apply` path forces
+/// the isolation, see the suite's header); no new suite.
+///
+/// The formula is a LEVEL formula, and velocity also moves the tone
+/// (`velocityToTone`), which changes the waveform and so its peak. The GATE
+/// (`P2a`) therefore holds the tone equal on both sides of every ratio, so the
+/// peak ratio IS the level ratio. `P2b` reads the default kit as shipped and
+/// pins what it measures; the hi-hat there is a FACT, not a pass of the formula
+/// (`(m39-dm-hatvel)`: a harder hat gets brighter but barely louder).
+extension DrumSynthTests {
+
+    static let w43EntryVelocity = 80           // the design's fixture drum constant
+    static let w43ReferenceVelocity = 99       // the loudest un-accented hit at threshold 100
+
+    private func w43Peak(_ samples: [Float]) -> Double {
+        Double(samples.reduce(Float(0)) { max($0, abs($1)) })
+    }
+
+    private func w43Db(_ ratio: Double) -> Double { 20 * log10(ratio) }
+
+    private static func w43VScale(_ velocity: Int, voiceVelocity: Double) -> Double {
+        1 - voiceVelocity * (1 - Double(velocity) / 127)
+    }
+
+    @Test("m39-w4-3 P2a — with the tone held equal, a kick or snare hit at the entry velocity 80 is exactly the formula's level with NO accent term, and an Accent-row hit at 127 carries exactly the (1 + accentDepth) term, each within 0.1 dB")
+    func w43EntryVelocityIsUnaccentedAndAccentAddsItsTerm() throws {
+        var kit = DrumKitParams()
+        kit.velocityToTone = 0          // velocity no longer moves the tone ...
+        // ... and the reference for the accent term adds, by hand, the tone the
+        // accent adds (`toneShift += accentDepth * 0.5`), with no accent level.
+        var reference = kit
+        reference.accentDepth = 0
+        for voice in [DrumVoice.kick, .snare] {
+            reference[voice].tone += kit.accentDepth * 0.5
+        }
+        #expect(kit.accentThreshold == 100)
+        #expect(Self.w43EntryVelocity < Int(kit.accentThreshold))
+        #expect(Self.w43ReferenceVelocity < Int(kit.accentThreshold))
+
+        for voice in [DrumVoice.kick, .snare] {
+            let vv = kit[voice].velocity
+            // Positive control: the harness is deterministic, so a ratio of two
+            // renders is a property of the instrument, not of the run.
+            let entry = try renderHit(voice, kit: kit, seconds: 0.5, velocity: UInt8(Self.w43EntryVelocity))
+            let again = try renderHit(voice, kit: kit, seconds: 0.5, velocity: UInt8(Self.w43EntryVelocity))
+            #expect(entry == again, "\(voice) render is not deterministic")
+
+            // Un-accented: 80 against 99, both under the threshold.
+            let ref99 = try renderHit(voice, kit: kit, seconds: 0.5, velocity: UInt8(Self.w43ReferenceVelocity))
+            let measuredPlain = w43Db(w43Peak(entry) / w43Peak(ref99))
+            let formulaPlain = w43Db(Self.w43VScale(Self.w43EntryVelocity, voiceVelocity: vv)
+                                     / Self.w43VScale(Self.w43ReferenceVelocity, voiceVelocity: vv))
+            #expect(abs(measuredPlain - formulaPlain) < 0.1,
+                    "\(voice) 80 vs 99: measured \(measuredPlain) dB, formula \(formulaPlain) dB")
+
+            // Accented: 127 with the accent against 127 with depth 0 and the
+            // accent's tone added by hand: the ratio is (1 + depth) alone.
+            let accented = try renderHit(voice, kit: kit, seconds: 0.5, velocity: 127)
+            let flat = try renderHit(voice, kit: reference, seconds: 0.5, velocity: 127)
+            let measuredAccent = w43Db(w43Peak(accented) / w43Peak(flat))
+            let formulaAccent = w43Db(1 + kit.accentDepth)
+            #expect(abs(measuredAccent - formulaAccent) < 0.1,
+                    "\(voice) accent term: measured \(measuredAccent) dB, formula \(formulaAccent) dB")
+            print("W43-P2a \(voice.rawValue) plain80vs99 measured=\(measuredPlain) formula=\(formulaPlain) "
+                  + "accent measured=\(measuredAccent) formula=\(formulaAccent)")
+        }
+    }
+
+    @Test("m39-w4-3 P2b — on the default kit as shipped, an Accent-row hit (127) against an entry hit (80) for kick, snare and closed hat: measured peak contrast against the formula, pinned (the hat as a fact, m39-dm-hatvel)")
+    func w43DefaultKitAccentContrast() throws {
+        let kit = DrumKitParams()
+        for voice in [DrumVoice.kick, .snare, .closedHat] {
+            let vv = kit[voice].velocity
+            let entry = try renderHit(voice, kit: kit, seconds: 0.5, velocity: UInt8(Self.w43EntryVelocity))
+            let accented = try renderHit(voice, kit: kit, seconds: 0.5, velocity: 127)
+            let ref99 = try renderHit(voice, kit: kit, seconds: 0.5, velocity: UInt8(Self.w43ReferenceVelocity))
+            let measuredAccent = w43Db(w43Peak(accented) / w43Peak(entry))
+            let formulaAccent = w43Db(Self.w43VScale(127, voiceVelocity: vv) * (1 + kit.accentDepth)
+                                      / Self.w43VScale(Self.w43EntryVelocity, voiceVelocity: vv))
+            let measuredPlain = w43Db(w43Peak(entry) / w43Peak(ref99))
+            let formulaPlain = w43Db(Self.w43VScale(Self.w43EntryVelocity, voiceVelocity: vv)
+                                     / Self.w43VScale(Self.w43ReferenceVelocity, voiceVelocity: vv))
+            print("W43-P2b \(voice.rawValue) acc127vs80 measured=\(measuredAccent) formula=\(formulaAccent) "
+                  + "dev=\(measuredAccent - formulaAccent) plain80vs99 measured=\(measuredPlain) "
+                  + "formula=\(formulaPlain) dev=\(measuredPlain - formulaPlain)")
+            // The direction holds for every voice: the Accent row is louder.
+            #expect(measuredAccent > 0, "\(voice) accented hit is not louder than the entry hit")
+            // MEASURED 2026-10-07 by W8-W43 (this harness: 48 kHz, 512-frame
+            // quanta, peak of the mono sum over 0.5 s, default kit):
+            //   kick   127-accented vs 80  +3.924 dB (formula +3.915, dev +0.009);
+            //          80 vs 99 dev -0.003. THE FORMULA HOLDS AS SHIPPED.
+            //   snare  127-accented vs 80  +5.542 dB (formula +5.219, dev +0.323);
+            //          80 vs 99 dev -0.144. The tone term (`velocityToTone` 0.4,
+            //          snare velocity 0.85) moves the peak past 0.1 dB; with the
+            //          tone held equal (P2a) the level term is exact.
+            //   c.hat  127-accented vs 80  +0.116 dB (formula +4.762, dev -4.646);
+            //          80 vs 99 dev -0.092. ⛔ FACT, NOT A PASS (m39-dm-hatvel):
+            //          a harder hat gets brighter, and its filter band moves up
+            //          with the tone, so an Accent-row hit on the hat is only
+            //          ~0.1 dB louder by peak than an 80 hit. Pinned so a fix of
+            //          that item shows up here, and must re-measure this line.
+            switch voice {
+            case .kick:
+                #expect(abs(measuredAccent - formulaAccent) < 0.1, "kick accent dev")
+                #expect(abs(measuredPlain - formulaPlain) < 0.1, "kick plain dev")
+            case .snare:
+                #expect(abs((measuredAccent - formulaAccent) - 0.323) < 0.05, "snare accent dev moved")
+                #expect(abs((measuredPlain - formulaPlain) - (-0.144)) < 0.05, "snare plain dev moved")
+            case .closedHat:
+                #expect(abs(measuredAccent - 0.116) < 0.05, "(m39-dm-hatvel) hat accent contrast moved")
+                #expect(abs((measuredPlain - formulaPlain) - (-0.092)) < 0.05, "hat plain dev moved")
+            default:
+                Issue.record("unexpected voice \(voice)")
+            }
+        }
+    }
+}

@@ -1,8 +1,9 @@
 """The converter (singlib/score.py) against the spike's own fixtures, byte for byte, plus its rules.
 
 THE GATE (design §9, p2-sing-b): the converter reproduces the spike's T1, T2 and T1T2 JSON byte for byte.
-The spike's files are vendored in tests/fixtures/spike/ (byte copies of ~/DAWPro-spikes/sing-soulx/fixtures/*.json;
-test_vendored_copies_are_the_spikes proves the copies exact whenever the spike is on this Mac). Phonemes come from a
+The spike's files are vendored in tests/fixtures/spike/ (byte copies of ~/DAWPro-spikes/sing-soulx/fixtures/*.json and
+its fixtures-manifest.json; test_vendored_copies_are_the_spikes checks them against sha256s measured from the spike
+itself on 2026-10-06, before that folder was deleted). Phonemes come from a
 table (the tokens the spike's own files carry), so this runs under the system python; test_venv_g2p.py repeats the
 gate with the real g2p_en and upstream's phone_set.json.
 """
@@ -10,7 +11,7 @@ import json
 import os
 import unittest
 
-from _util import (FIXTURES, SPIKE, T2_NOTES, T2_WORDS, all_spike_cases, evidence, fixture_bytes, need_machine,
+from _util import (FIXTURES, T2_NOTES, T2_WORDS, all_spike_cases, evidence, fixture_bytes,
                    phrase_request, sha256_bytes, spike_cases, table_phonemize)
 
 from singlib import schema, score
@@ -18,7 +19,20 @@ from singlib.refusals import Refusal
 
 GATE = ("T1", "T2", "T1T2")
 ALL = ("T1", "T2", "T1T2", "T2-sep", "T1-f0-110", "T1-plus2", "T3-30", "T3-60")
-SPIKE_FIXTURES = os.path.join(SPIKE, "fixtures")
+MANIFEST = os.path.join(FIXTURES, "spike", "fixtures-manifest.json")
+# sha256 of the spike's own fixtures/<name>.json and fixtures-manifest.json, measured by W8-SFIX on 2026-10-06 from
+# ~/DAWPro-spikes/sing-soulx/fixtures/ AND from the vendored copies (identical), before the spike folder was deleted.
+SPIKE_SHA256 = {
+    "T1": "83e5baf016dd2d5556e8bf28a28d6dac19fbed67ae862ca5887541b7a5c08796",
+    "T2": "d70dc04e8527ad111845dd2da248fd3a8de81c1e07a856c5137db49af5ee5eae",
+    "T1T2": "e44eaa9a0cc31d86525b34217b8392221c7eb91ea6d5e915f2239920c5fc0626",
+    "T2-sep": "ff22a7680fd96eb50fb233e4d2afc815067a454fb6787819a5f905dd61d177b0",
+    "T1-f0-110": "3ed34981d96d04a9d6417f6fcac00b5c36252886f7d8bee4e9f8fe7d009ed516",
+    "T1-plus2": "39290d4f3769cc1297ca213a3003c6f96a7872023e7fe9e1bb3a67f967839d31",
+    "T3-30": "40a77641643d0eab560241ede8b9d285649fdbc04bd0ab9a08eca72299cc7a12",
+    "T3-60": "8db9c70725979d6bd21072cad52a2ac2d82311c7bf540c7657659a23dd194f24",
+    "fixtures-manifest": "cd7ccf71252bbc4db0e36999520f7dcf9b087bfd9a8d604043770b9cf15ff420",
+}
 
 
 def build(name):
@@ -67,15 +81,13 @@ class SpikeBytes(unittest.TestCase):
         self.assertNotEqual(score.dump_meta_list([meta]), fixture_bytes("T1"))
 
     def test_vendored_copies_are_the_spikes(self):
-        need_machine(os.path.isdir(SPIKE_FIXTURES), "the spike's fixtures folder %s" % SPIKE_FIXTURES)
         for name in ALL:
-            with open(os.path.join(SPIKE_FIXTURES, name + ".json"), "rb") as f:
-                self.assertEqual(f.read(), fixture_bytes(name), name)
+            self.assertEqual(sha256_bytes(fixture_bytes(name)), SPIKE_SHA256[name], name)
+        with open(MANIFEST, "rb") as f:
+            self.assertEqual(sha256_bytes(f.read()), SPIKE_SHA256["fixtures-manifest"])
 
     def test_info_matches_the_spikes_manifest(self):
-        man = os.path.join(SPIKE_FIXTURES, "fixtures-manifest.json")
-        need_machine(os.path.isfile(man), "the spike's %s" % man)
-        with open(man) as f:
+        with open(MANIFEST) as f:
             manifest = json.load(f)
         for name in ALL:
             _, info = build(name)
@@ -168,6 +180,142 @@ class Rules(unittest.TestCase):
         b = score.bounds_of(meta)
         self.assertEqual(len(b), len(meta["duration"].split()) + 1)
         self.assertAlmostEqual(b[-1], meta["time"][1] / 1000.0, places=9)
+
+
+class TableLexicon(object):
+    """An injected lexicon (no venv): readings from a table, ranks from a table, and a log of every call."""
+
+    def __init__(self, readings, ranks=None):
+        self.readings, self.ranks, self.calls = readings, ranks or {}, []
+
+    def syllables(self, lang, chars):
+        self.calls.append((lang, chars))
+        return [self.readings.get((lang, c)) for c in chars]
+
+    def tone_rank(self, lang, base):
+        return self.ranks.get((lang, base), [])
+
+
+ZH = {("zh", c): r for c, r in zip("一闪亮晶我爱你行长银", ["yi1", "shan3", "liang4", "jing1", "wo3", "ai4", "ni3",
+                                                        "xing2", "zhang3", "yin2"])}
+ZH.update({("zh", "对"): "dui3", ("zh", "喆"): "喆", ("zh", "兛"): "shi2 ke4", ("zh", "嗯"): "m2", ("zh", "绿"): "lu:4"})
+YUE = {("yue", c): r for c, r in zip("一閃亮晶我的心情", ["jat1", "sim2", "loeng6", "zing1", "ngo5", "dik1", "sam1", "cing4"])}
+YUE.update({("yue", "兀"): "ngat6"})
+READINGS = dict(ZH)
+READINGS.update(YUE)
+# a phone set with every token above EXCEPT zh_dui3 (as in the real set: dui1/dui4 only), zh_m2 (no zh_m* at all)
+# and yue_ngat6 (ngat1 only)
+PHONESET = frozenset({"zh_" + r for (lang, _), r in ZH.items() if lang == "zh" and r and " " not in r}
+                     | {"yue_" + r for (lang, _), r in YUE.items() if r} | {"zh_dui1", "zh_dui4", "yue_ngat1",
+                                                                              "zh_ni3", "zh_hao3", "zh_lu:4", "en_HH",
+                                                                              "en_OW1", "en_L", "en_D"}) \
+    - {"zh_dui3", "zh_m2", "yue_ngat6"}
+
+
+def zh_meta(chars, langs=None, lexicon=None, phoneset=None, english=()):
+    """One word per note, 0.5 s each; `english` = indices that are English words (sung through the table)."""
+    words = [(c, [i]) for i, c in enumerate(chars)]
+    notes = [(60 + i, 0.5 * i, 0.5 * (i + 1)) for i in range(len(chars))]
+    langs = langs or ["en" if i in english else "zh" for i in range(len(chars))]
+    return score.build_meta(notes, words, phonemize=table_phonemize, phoneset=phoneset, langs=langs,
+                            lexicon=lexicon if lexicon is not None else TableLexicon(READINGS))
+
+
+class Languages(unittest.TestCase):
+    """facadeVersion 2's per-language tokens (design 2026-10-06 §6.4), with an injected lexicon (no venv)."""
+
+    def phonemes(self, meta):
+        return [r["phoneme"] for r in entries(meta) if r["phoneme"] != score.SP]
+
+    def test_all_english_langs_build_todays_bytes_for_every_spike_case(self):
+        for name in ALL:
+            notes, words, kw = all_spike_cases()[name]
+            want, _ = build(name)
+            meta, info = score.build_from_beats(notes, words, phonemize=table_phonemize, langs=["en"] * len(words),
+                                                lexicon=None, **kw)
+            self.assertEqual(score.dump_meta_list([meta]), score.dump_meta_list([want]), name)
+            self.assertEqual(score.dump_meta_list([meta]), fixture_bytes(name), name)
+            self.assertEqual(info["substitutions"], [])
+
+    def test_a_mandarin_run_is_one_call_and_one_token_per_character(self):
+        lex = TableLexicon(ZH)
+        meta, info = zh_meta("一闪一闪亮晶晶", lexicon=lex, phoneset=PHONESET)
+        self.assertEqual(lex.calls, [("zh", "一闪一闪亮晶晶")])
+        self.assertEqual(self.phonemes(meta), ["zh_yi1", "zh_shan3", "zh_yi1", "zh_shan3", "zh_liang4", "zh_jing1",
+                                               "zh_jing1"])
+        self.assertEqual(meta["language"], "Mandarin")
+        self.assertEqual(meta["text"].split()[1:-1], list("一闪一闪亮晶晶"))
+        self.assertEqual(info["substitutions"], [])
+
+    def test_an_english_word_or_a_typed_syllable_splits_the_run(self):
+        lex = TableLexicon(ZH)
+        meta, _ = zh_meta(["我", "爱", "hold", "你"], lexicon=lex, phoneset=PHONESET, english=(2,))
+        self.assertEqual(lex.calls, [("zh", "我爱"), ("zh", "你")])
+        self.assertEqual(self.phonemes(meta), ["zh_wo3", "zh_ai4", "en_HH-OW1-L-D", "zh_ni3"])
+        lex = TableLexicon(ZH)
+        meta, _ = zh_meta(["我", "NI3", "你", "lv4"], lexicon=lex, phoneset=PHONESET)
+        self.assertEqual(lex.calls, [("zh", "我"), ("zh", "你")])
+        self.assertEqual(self.phonemes(meta), ["zh_wo3", "zh_ni3", "zh_ni3", "zh_lu:4"])
+
+    def test_a_chinese_word_on_k_notes_is_k_entries_of_one_token(self):
+        meta, _ = score.build_meta([(60, 0.0, 0.5), (62, 0.5, 1.0), (64, 1.0, 1.5)], [("我", [0, 1]), ("你", [2])],
+                                   phonemize=table_phonemize, phoneset=PHONESET, langs=["zh", "zh"],
+                                   lexicon=TableLexicon(ZH))
+        rows = [r for r in entries(meta) if r["phoneme"] != score.SP]
+        self.assertEqual([(r["phoneme"], r["note_type"]) for r in rows],
+                         [("zh_wo3", "2"), ("zh_wo3", "3"), ("zh_ni3", "2")])
+
+    def test_cantonese(self):
+        meta, info = zh_meta("一閃亮晶我的心情", langs=["yue"] * 8, phoneset=PHONESET)
+        self.assertEqual(self.phonemes(meta), ["yue_jat1", "yue_sim2", "yue_loeng6", "yue_zing1", "yue_ngo5",
+                                               "yue_dik1", "yue_sam1", "yue_cing4"])
+        self.assertEqual((meta["language"], info["substitutions"]), ("Cantonese", []))
+
+    def test_tone_fallback_uses_the_rank_and_reports_each_substitution_once(self):
+        lex = TableLexicon(ZH, ranks={("zh", "dui"): ["3", "4", "1"]})          # 3 is ranked first but missing
+        meta, info = zh_meta("对我对", lexicon=lex, phoneset=PHONESET)
+        self.assertEqual(self.phonemes(meta), ["zh_dui4", "zh_wo3", "zh_dui4"])
+        self.assertEqual(info["substitutions"], [{"word": "对", "asked": "dui3", "used": "dui4"}])
+        lex = TableLexicon(ZH, ranks={("zh", "dui"): ["1", "4"]})
+        self.assertEqual(self.phonemes(zh_meta("对", lexicon=lex, phoneset=PHONESET)[0]), ["zh_dui1"])
+        lex = TableLexicon(ZH)                                            # unranked: the lowest tone in the set
+        self.assertEqual(self.phonemes(zh_meta("对", lexicon=lex, phoneset=PHONESET)[0]), ["zh_dui1"])
+        meta, info = zh_meta("兀", langs=["yue"], phoneset=PHONESET)
+        self.assertEqual((self.phonemes(meta), info["substitutions"]),
+                         (["yue_ngat1"], [{"word": "兀", "asked": "ngat6", "used": "ngat1"}]))
+        meta, info = zh_meta(["dui3"], lexicon=TableLexicon(ZH), phoneset=PHONESET)    # a typed syllable too
+        self.assertEqual(info["substitutions"], [{"word": "dui3", "asked": "dui3", "used": "dui1"}])
+        meta, info = zh_meta("对", lexicon=TableLexicon(ZH), phoneset=None)          # no phone set: no fallback
+        self.assertEqual((self.phonemes(meta), info["substitutions"]), (["zh_dui3"], []))
+
+    def test_no_sung_syllable_or_no_tone_in_the_set_is_unknown_phone_naming_the_character(self):
+        for char, why in (("喆", "'喆'"), ("兛", "shi2 ke4"), ("嗯", "knows no tone of 'm'")):
+            with self.assertRaises(Refusal) as cm:
+                zh_meta(char, phoneset=PHONESET)
+            self.assertEqual(cm.exception.code, "unknownPhone", char)
+            self.assertIn(repr(char), cm.exception.message)
+            self.assertIn(why, cm.exception.message)
+        with self.assertRaises(Refusal) as cm:                       # Latin but not a syllable: never looked up
+            zh_meta(["x"], langs=["yue"], phoneset=PHONESET)
+        self.assertEqual(cm.exception.code, "badRequest")
+        with self.assertRaises(Refusal) as cm:                       # a character the lexicon has no reading for
+            zh_meta("心", langs=["zh"], phoneset=PHONESET)          # (心 has a Cantonese reading only, in the table)
+        self.assertEqual(cm.exception.code, "unknownPhone")
+        self.assertIn("None", cm.exception.message)
+
+    def test_a_lexicon_that_miscounts_is_an_internal_error_not_a_shifted_line(self):
+        class Short(TableLexicon):
+            def syllables(self, lang, chars):
+                return super(Short, self).syllables(lang, chars)[:-1]
+        with self.assertRaises(Refusal) as cm:
+            zh_meta("我爱你", lexicon=Short(ZH), phoneset=PHONESET)
+        self.assertEqual(cm.exception.code, "badRequest")
+        self.assertIn("Internal", cm.exception.message)
+
+    def test_no_lexicon_is_language_not_supported(self):
+        with self.assertRaises(Refusal) as cm:
+            score.build_meta([(60, 0.0, 0.5)], [("我", [0])], phonemize=table_phonemize, langs=["zh"], lexicon=None)
+        self.assertEqual(cm.exception.code, "languageNotSupported")
 
 
 class PromptMeta(unittest.TestCase):

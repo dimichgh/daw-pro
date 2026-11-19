@@ -275,11 +275,32 @@ public struct PadState: Equatable, Sendable, Identifiable {
     /// by shape — not only the one the grid remembers making — so a reopened
     /// or wire-made spread labels itself too.
     public let levelsSemitones: Int?
+    /// m39-w4-8 — the DRUM this pad plays, in a beginner's words: one of the
+    /// drum machine's eight voices ("Kick", "Open Hat"), or a kit-sorted
+    /// chop's role ("Kick 2", "Other"). nil on a plain slice, an empty pad and
+    /// a spread pad. The view shows it in place of the slice number.
+    ///
+    /// ⭐ It is the step grid's row label for the same note (`DrumLaneMap`),
+    /// so the pad and the row that say "Snare" play the same thing.
+    public let drumLabel: String?
+    /// m39-w4-8 — the pads this one cuts off, and that cut it off (a choke
+    /// group), or nil. Drawn as a small link glyph; its `sentence` is the
+    /// tooltip. Keyed on the GROUP, never on the drum's name — see
+    /// `PadChokeLink`.
+    public let chokeLink: PadChokeLink?
+    /// m39-w4-8 — true on pads 9–16 of a DRUM MACHINE: it has eight drums, so
+    /// these pads send nothing (`pitch` is nil). Distinct from a pad whose
+    /// bank runs past MIDI 127, which is the other reason `pitch` can be nil,
+    /// and the view words the two differently.
+    public let isPastLastDrum: Bool
 
     public init(id: Int, pitch: Int?, noteName: String, keyLabel: String?,
                 isLoaded: Bool, isPlaying: Bool, sliceOrdinal: Int?,
                 startFrame: Int?, isAITouched: Bool,
-                levelsSemitones: Int? = nil) {
+                levelsSemitones: Int? = nil,
+                drumLabel: String? = nil,
+                chokeLink: PadChokeLink? = nil,
+                isPastLastDrum: Bool = false) {
         self.id = id
         self.pitch = pitch
         self.noteName = noteName
@@ -290,6 +311,9 @@ public struct PadState: Equatable, Sendable, Identifiable {
         self.startFrame = startFrame
         self.isAITouched = isAITouched
         self.levelsSemitones = levelsSemitones
+        self.drumLabel = drumLabel
+        self.chokeLink = chokeLink
+        self.isPastLastDrum = isPastLastDrum
     }
 
     /// Where this pad is drawn on screen.

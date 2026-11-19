@@ -166,7 +166,14 @@ struct DrumNoteLayoutRenderTests {
     @Test("A pads kit renders bit-identically before and after TPL-0")
     func padsKitRendersBitIdentically() async throws {
         #expect(Self.sweepFrames == Self.sweepFramesBefore)
-        let lofi = try #require(DrumKitParams.preset(named: "lofi")).params
+        // W9-DRUMDEF: every factory kit now carries a new drum machine's
+        // hats/cymbals trims (23.4 / 5.7). This pin is about the LAYOUT, and was
+        // taken on trims at 0 — so hold them at the saved-kit neutral here.
+        // W9-HEAD: the factory kits now carry the headroom (lofi 0.63); this pin was taken at lofi's old
+        // 0.9, so read the kit as it was before (`presetsBeforeHeadroom`), every other value identical.
+        var lofi = try #require(DrumKitParams.presetsBeforeHeadroom.first { $0.name == "lofi" }).params
+        lofi.hatsLevelDb = DrumKitParams.savedKitLevelTrimDb
+        lofi.cymbalsLevelDb = DrumKitParams.savedKitLevelTrimDb
         let cases: [(String, String, DrumKitParams)] = [
             ("default", "default", DrumKitParams()),
             ("lofi", "lofi", lofi),
@@ -427,61 +434,21 @@ struct DrumNoteLayoutRenderTests {
 
     // MARK: - Leg 4: F-4, the note lookup allocates nothing
 
-    private typealias MallocLoggerFn =
-        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
-
-    /// Heap cells, NOT stored properties: the hook runs INSIDE malloc with its
-    /// locks held, so it must never allocate nor trip a lazy global init.
-    private nonisolated(unsafe) static let eventCount =
-        UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private nonisolated(unsafe) static let watchedThread =
-        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-
-    private static let eventHook: MallocLoggerFn = { _, _, _, _, _, _ in
-        var tid: UInt64 = 0
-        pthread_threadid_np(nil, &tid)
-        if tid == DrumNoteLayoutRenderTests.watchedThread.pointee {
-            DrumNoteLayoutRenderTests.eventCount.pointee &+= 1
-        }
-    }
-
-    /// libmalloc's `malloc_logger` global. Nil is a FAILURE for the caller,
-    /// never a skip — a silently-absent probe is vacuity, not a pass.
-    private static func mallocLoggerSlot() -> UnsafeMutablePointer<MallocLoggerFn?>? {
-        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
-                              "malloc_logger") else { return nil }
-        return raw.assumingMemoryBound(to: MallocLoggerFn?.self)
-    }
-
-    /// ⛔ SIBLING-IDENTICAL TO `ClipperTests` ON PURPOSE. The `warmup` runs
-    /// with the hook live and the counter is zeroed afterwards, because
-    /// Swift's `static let` arrays allocate on FIRST TOUCH anywhere in the
-    /// process.
-    private static func mallocEvents(
-        slot: UnsafeMutablePointer<MallocLoggerFn?>,
-        warmup: () -> Void = {}, _ body: () -> Void
-    ) -> Int {
-        pthread_threadid_np(nil, &watchedThread.pointee)
-        eventCount.pointee = 0
-        let previous = slot.pointee  // restore, don't assume it was nil
-        slot.pointee = eventHook
-        warmup()
-        eventCount.pointee = 0   // one-time lazy-global costs are not the measurement
-        body()
-        slot.pointee = previous
-        return eventCount.pointee
-    }
+    // The hook, the counter cells and the process-wide window lock live in
+    // `Support/MallocProbe.swift` (m39-test-mallocprobe): one measurement at a time. This leg's F-4 idle count
+    // used to read half its value in a 2 306-test parallel run, when another file's restore removed this hook.
+    // `warmup:` runs with the hook live and the counter is zeroed after it.
 
     @Test("F-4 control: the malloc probe can actually count")
     func theAllocationProbeCanSeeAnAllocation() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
             return
         }
         // ⭐ A zero from a probe that never fires and a zero from a lookup that
         // never allocates are the same number.
         var sink: [[Int]] = []
-        let events = Self.mallocEvents(slot: slot) {
+        let events = MallocProbe.events(slot: slot) {
             var index = 0
             while index < 200 {
                 sink.append([Int](repeating: index, count: 64))
@@ -500,14 +467,14 @@ struct DrumNoteLayoutRenderTests {
     /// table: no calls at all). The `switch` must count zero in both layouts.
     @Test("F-4: the note lookup allocates nothing, in either layout")
     func theLookupAllocatesNothing() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
             return
         }
         var sink: Int32 = 0
         let calls = 1_000
         for layout in DrumNoteLayout.allCases {
-            let events = Self.mallocEvents(slot: slot, warmup: {
+            let events = MallocProbe.events(slot: slot, warmup: {
                 var note = 30
                 while note <= 60 {
                     sink &+= DrumVoice.voice(forNote: UInt8(note), layout: layout)?.slot ?? -1
@@ -525,7 +492,7 @@ struct DrumNoteLayoutRenderTests {
             #expect(events == 0, "the \(layout) lookup allocated (\(events) malloc events)")
         }
         // The legacy entry point, which is now the pads column of the switch.
-        let legacy = Self.mallocEvents(slot: slot) {
+        let legacy = MallocProbe.events(slot: slot) {
             var call = 0
             while call < calls {
                 sink &+= DrumVoice.voice(forNote: UInt8(36 + call % 8))?.slot ?? -1
@@ -542,7 +509,7 @@ struct DrumNoteLayoutRenderTests {
     /// RT review; see the assertion's comment for what is and is not claimed.
     @Test("F-4: a render quantum with a note-on, against one without")
     func noteOnQuantumEvents() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
             return
         }
@@ -575,7 +542,7 @@ struct DrumNoteLayoutRenderTests {
             var kit = DrumKitParams()
             kit.noteLayout = layout
             let hitting = Self.makeDrums(kit)
-            let withNotes = Self.mallocEvents(slot: slot, warmup: {
+            let withNotes = MallocProbe.events(slot: slot, warmup: {
                 var q = 0
                 while q < warm {
                     hitting.render(events: UnsafeBufferPointer(start: store + q, count: 1),
@@ -593,7 +560,7 @@ struct DrumNoteLayoutRenderTests {
                 }
             }
             let idle = Self.makeDrums(kit)
-            let withoutNotes = Self.mallocEvents(slot: slot, warmup: {
+            let withoutNotes = MallocProbe.events(slot: slot, warmup: {
                 var q = 0
                 while q < warm {
                     idle.render(events: empty, renderStart: Int64(q * Self.quantum),
@@ -641,7 +608,7 @@ struct DrumNoteLayoutRenderTests {
     /// review.
     @Test("F-4, recorded: what a note-on's kit read raises")
     func noteOnKitReadEvents() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
             return
         }
@@ -657,7 +624,7 @@ struct DrumNoteLayoutRenderTests {
         let kit = DrumKitParams()
         let calls = 1_000
         var sink = 0.0
-        let reads = Self.mallocEvents(slot: slot, warmup: {
+        let reads = MallocProbe.events(slot: slot, warmup: {
             var v = 0
             while v < 8 {
                 sink += kit[voices[v]].level
@@ -670,7 +637,7 @@ struct DrumNoteLayoutRenderTests {
                 call += 1
             }
         }
-        let paths = Self.mallocEvents(slot: slot, warmup: {
+        let paths = MallocProbe.events(slot: slot, warmup: {
             var v = 0
             while v < 8 {
                 _ = DrumKitParams.voiceKeyPath(for: voices[v])
@@ -686,5 +653,387 @@ struct DrumNoteLayoutRenderTests {
         Self.record("f4.kitRead.events.per1000", "\(reads)")
         Self.record("f4.voiceKeyPath.events.per1000", "\(paths)")
         #expect(sink > 0)
+    }
+}
+
+// MARK: - W8-RTFIX (F1/F4/F7): the render thread's kit adoption and kit read
+
+/// W8-RTFIX — `refreshOutputStages`, the render-thread pass that re-reads
+/// `level`/`pan` for every SOUNDING voice when a new kit is adopted (and when
+/// modulation stops), and the note-on kit read in `trigger`.
+///
+/// ⛔ THE DIGESTS BELOW ARE THE BYTE GATE, and they were taken on the source
+/// BEFORE W8-RTFIX touched it (run B0). The live publish lands while all eight
+/// voices ring, with a DIFFERENT level factor and pan offset per voice, so a
+/// slot → voice mix-up in the refresh moves the bytes.
+///
+/// ⭐ PHYSICS, NOT DISTINCTNESS: `level` is the voice's FINAL multiply
+/// (`renderSlot`: `out *= gate * level`), so a published kit that halves every
+/// voice's level must make every later sample EXACTLY half (scaling by 0.5 is
+/// exact in binary floating point), and every earlier sample identical.
+extension DrumNoteLayoutRenderTests {
+    static let rtfixFrames = Int(2.0 * sampleRate)
+    /// `render(applyAt:)` publishes at the first quantum boundary at or after
+    /// this frame: 12_288 = 24 × 512, the frame the render adopts the kit.
+    static let rtfixPublishAt = 12_000
+    static let rtfixAdoptionFrame = 12_288
+
+    /// Eight hits, one per voice, 37 frames apart inside the first quantum,
+    /// then the same eight at 0.6 s and 1.2 s at other velocities (127 is an
+    /// accent). Notes are `layout`'s own, so the gm kit plays gm notes.
+    static func rtfixEvents(_ layout: DrumNoteLayout) -> [ScheduledMIDIEvent] {
+        var events: [ScheduledMIDIEvent] = []
+        var id: UInt64 = 1
+        let rounds: [(seconds: Double, velocity: UInt8)] = [(0, 110), (0.6, 70), (1.2, 127)]
+        for round in rounds {
+            for voice in DrumVoice.allCases {
+                let at = Int64(round.seconds * sampleRate) + Int64(voice.slot) * 37
+                events.append(noteOn(voice.notes(in: layout)[0], at: at,
+                                     velocity: round.velocity, id: id))
+                id += 1
+            }
+        }
+        return events
+    }
+
+    /// Every voice's level × 0.5, nothing else.
+    static func rtfixHalved(_ kit: DrumKitParams) -> DrumKitParams {
+        var out = kit
+        for voice in DrumVoice.allCases { out[voice].level *= 0.5 }
+        return out
+    }
+
+    /// A different level factor AND pan offset per voice.
+    static func rtfixReshaped(_ kit: DrumKitParams) -> DrumKitParams {
+        var out = kit
+        for voice in DrumVoice.allCases {
+            let s = Double(voice.slot)
+            out[voice].level = min(1, kit[voice].level * (0.45 + 0.07 * s))
+            out[voice].pan = max(-1, min(1, kit[voice].pan + (s - 3.5) * 0.12))
+        }
+        return out
+    }
+
+    /// Before `adoption`: identical; from it on: exactly half. Value equality
+    /// (−0 == 0); the first failing frame is named, never a collection diff.
+    static func rtfixHalvingCheck(plain: [[Float]], published: [[Float]],
+                                  from adoption: Int) -> (ok: Bool, detail: String) {
+        var channel = 0
+        while channel < 2 {
+            let a = plain[channel], b = published[channel]
+            guard a.count == b.count else { return (false, "lengths \(a.count) vs \(b.count)") }
+            var i = 0
+            while i < a.count {
+                let expected = i < adoption ? a[i] : a[i] * 0.5
+                if b[i] != expected {
+                    return (false, "channel \(channel) frame \(i): \(b[i]) vs expected \(expected)")
+                }
+                i += 1
+            }
+            channel += 1
+        }
+        return (true, "")
+    }
+
+    static func rtfixEnergy(_ channels: [[Float]], from start: Int) -> Double {
+        var sum = 0.0
+        for channel in channels {
+            var i = start
+            while i < channel.count { sum += Double(channel[i]) * Double(channel[i]); i += 1 }
+        }
+        return sum
+    }
+
+    /// ⛔ TAKEN ON THE SOURCE BEFORE W8-RTFIX (run B0, 2026-10-06 19:28-19:30,
+    /// `DrumSynthInstrument.swift` and `DrumKit.swift` `cmp`-identical to their
+    /// pre-change copies at that moment). `plain` = the hits alone; `reshaped`
+    /// = the same hits with the per-voice level/pan publish landing at 12 288.
+    static let rtfixDigestsBefore: [String: String] = [
+        "pads.plain": "3884478711cf7197", "pads.reshaped": "3c9603c585474c39",
+        "gm.plain": "e85899cf5941f93c", "gm.reshaped": "ac50ad61d8097275",
+        "trims.plain": "a35a7ff133a29e74", "trims.reshaped": "188d40b80a3f20f8",
+    ]
+
+    static func rtfixKits() throws -> [(label: String, kit: DrumKitParams)] {
+        // W9-DRUMDEF: every factory kit now carries a new drum machine's
+        // hats/cymbals trims (23.4 / 5.7). This pin is about the LAYOUT, and was
+        // taken on trims at 0 — so hold them at the saved-kit neutral here.
+        // W9-HEAD: the factory kits now carry the headroom (lofi 0.63); this pin was taken at lofi's old
+        // 0.9, so read the kit as it was before (`presetsBeforeHeadroom`), every other value identical.
+        var lofi = try #require(DrumKitParams.presetsBeforeHeadroom.first { $0.name == "lofi" }).params
+        lofi.hatsLevelDb = DrumKitParams.savedKitLevelTrimDb
+        lofi.cymbalsLevelDb = DrumKitParams.savedKitLevelTrimDb
+        var trims = gmKit()
+        trims.hatsLevelDb = 9.5
+        trims.cymbalsLevelDb = -4.25
+        return [("pads", DrumKitParams()), ("gm", gmKit(lofi)), ("trims", trims)]
+    }
+
+    @Test("W8-RTFIX byte gate: a live kit publish over eight ringing voices; pads, gm and trimmed kits")
+    func rtfixRefreshByteGate() async throws {
+        for (label, kit) in try Self.rtfixKits() {
+            let events = Self.rtfixEvents(kit.noteLayout)
+            let plain = try await Self.render(Self.makeDrums(kit), events: events,
+                                              frames: Self.rtfixFrames)
+            let halved = try await Self.render(Self.makeDrums(kit), events: events,
+                                               frames: Self.rtfixFrames,
+                                               applyAt: Self.rtfixPublishAt,
+                                               apply: Self.rtfixHalved(kit))
+            let reshaped = try await Self.render(Self.makeDrums(kit), events: events,
+                                                 frames: Self.rtfixFrames,
+                                                 applyAt: Self.rtfixPublishAt,
+                                                 apply: Self.rtfixReshaped(kit))
+            // Non-vacuity: the voices ARE ringing when the kit is adopted, and
+            // the later rounds sound.
+            let ringing = Self.rtfixEnergy(
+                [Array(plain[0][Self.rtfixAdoptionFrame..<(Self.rtfixAdoptionFrame + 2_048)]),
+                 Array(plain[1][Self.rtfixAdoptionFrame..<(Self.rtfixAdoptionFrame + 2_048)])],
+                from: 0)
+            #expect(ringing > 1e-6, "\(label): nothing rings at the adoption frame (\(ringing))")
+            let check = Self.rtfixHalvingCheck(plain: plain, published: halved,
+                                               from: Self.rtfixAdoptionFrame)
+            #expect(check.ok, "\(label): halving every level did not halve the output: \(check.detail)")
+            let plainDigest = Self.digest(plain)
+            let reshapedDigest = Self.digest(reshaped)
+            Self.record("rtfix.digest.\(label).plain", plainDigest)
+            Self.record("rtfix.digest.\(label).reshaped", reshapedDigest)
+            #expect(plainDigest != reshapedDigest, "\(label): the reshaped publish changed nothing")
+            #expect(plainDigest == Self.rtfixDigestsBefore["\(label).plain"],
+                    "\(label): the hits alone no longer render bit-identically")
+            #expect(reshapedDigest == Self.rtfixDigestsBefore["\(label).reshaped"],
+                    "\(label): the live publish no longer renders bit-identically")
+        }
+    }
+
+    /// F1, the differential: 1 000 kit adoptions with all eight voices
+    /// sounding, against 1 000 renders that adopt nothing. `prepare` resets
+    /// the adopted generation, so the next `render` takes the SAME adoption
+    /// path a published kit does (load, compare, copy, `refreshOutputStages`)
+    /// without the main-actor half (`apply(params:)` allocates the snapshot by
+    /// design, on the main actor). 0-frame renders: no voice decays, and the
+    /// frame loop is the same in both. Recorded in B0 on the old scan:
+    /// 192 000 events against 0. ASSERTED since the `switch`: EQUAL counts.
+    @Test("W8-RTFIX F1: adopting a kit with eight voices sounding allocates nothing more than not adopting")
+    func rtfixRefreshAllocationDifferential() throws {
+        guard let slot = MallocProbe.slot() else {
+            Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
+            return
+        }
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: Self.sampleRate, channels: 2))
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(Self.quantum)))
+        buffer.frameLength = AVAudioFrameCount(Self.quantum)
+        let output = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+        let empty = UnsafeBufferPointer<ScheduledMIDIEvent>(start: nil, count: 0)
+        // All eight voices struck at sample 0 of a ONE-frame quantum, so every
+        // one is sounding when the measurement starts.
+        let hits = UnsafeMutablePointer<ScheduledMIDIEvent>.allocate(capacity: 8)
+        defer { hits.deallocate() }
+        var fill = 0
+        for voice in DrumVoice.allCases {
+            (hits + fill).initialize(to: Self.noteOn(voice.note, at: 0, id: UInt64(fill + 1)))
+            fill += 1
+        }
+        let refreshing = Self.makeDrums(DrumKitParams())
+        let steady = Self.makeDrums(DrumKitParams())
+        refreshing.render(events: UnsafeBufferPointer(start: hits, count: 8), renderStart: 0,
+                          frameCount: 1, output: output)
+        steady.render(events: UnsafeBufferPointer(start: hits, count: 8), renderStart: 0,
+                      frameCount: 1, output: output)
+        let rounds = 1_000
+        let adopting = MallocProbe.events(slot: slot, warmup: {
+            var r = 0
+            while r < 8 {
+                refreshing.prepare(sampleRate: Self.sampleRate, maxFramesPerQuantum: Self.quantum,
+                                   channelCount: 2)
+                refreshing.render(events: empty, renderStart: 1, frameCount: 0, output: output)
+                r += 1
+            }
+        }) {
+            var r = 0
+            while r < rounds {
+                refreshing.prepare(sampleRate: Self.sampleRate, maxFramesPerQuantum: Self.quantum,
+                                   channelCount: 2)
+                refreshing.render(events: empty, renderStart: 1, frameCount: 0, output: output)
+                r += 1
+            }
+        }
+        let notAdopting = MallocProbe.events(slot: slot, warmup: {
+            var r = 0
+            while r < 8 {
+                steady.render(events: empty, renderStart: 1, frameCount: 0, output: output)
+                r += 1
+            }
+        }) {
+            var r = 0
+            while r < rounds {
+                steady.render(events: empty, renderStart: 1, frameCount: 0, output: output)
+                r += 1
+            }
+        }
+        Self.record("rtfix.refresh.adopting.events.per1000", "\(adopting)")
+        Self.record("rtfix.refresh.notAdopting.events.per1000", "\(notAdopting)")
+        #expect(adopting == notAdopting,
+                "1 000 kit adoptions raised \(adopting) malloc events; 1 000 plain renders \(notAdopting)")
+        // INVARIANCE CONTROL: re-reading an unchanged kit changes no sample.
+        let a = try #require(AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(Self.quantum)))
+        let b = try #require(AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(Self.quantum)))
+        a.frameLength = AVAudioFrameCount(Self.quantum)
+        b.frameLength = AVAudioFrameCount(Self.quantum)
+        refreshing.render(events: empty, renderStart: 1, frameCount: Self.quantum,
+                          output: UnsafeMutableAudioBufferListPointer(a.mutableAudioBufferList))
+        steady.render(events: empty, renderStart: 1, frameCount: Self.quantum,
+                      output: UnsafeMutableAudioBufferListPointer(b.mutableAudioBufferList))
+        let ca = try #require(a.floatChannelData), cb = try #require(b.floatChannelData)
+        var same = true, energy = 0.0, i = 0
+        while i < Self.quantum {
+            if ca[0][i] != cb[0][i] || ca[1][i] != cb[1][i] { same = false }
+            energy += Double(ca[0][i]) * Double(ca[0][i])
+            i += 1
+        }
+        #expect(same, "re-adopting the same kit changed the audio")
+        #expect(energy > 1e-6, "the eight voices are silent after the measurement (\(energy))")
+    }
+
+    @Test("W8-RTFIX F1: voice(forSlot:) inverts slot for all eight voices, refuses every other slot, allocates nothing")
+    func rtfixVoiceForSlot() throws {
+        for voice in DrumVoice.allCases {
+            #expect(DrumVoice.voice(forSlot: voice.slot) == voice, "slot \(voice.slot)")
+        }
+        for slot: Int32 in [8, 9, 16, -1, .min, .max] {
+            #expect(DrumVoice.voice(forSlot: slot) == nil, "slot \(slot)")
+        }
+        guard let probe = MallocProbe.slot() else {
+            Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
+            return
+        }
+        var sink: Int32 = 0
+        let events = MallocProbe.events(slot: probe, warmup: {
+            var s: Int32 = -1
+            while s <= 8 { sink &+= DrumVoice.voice(forSlot: s)?.slot ?? -1; s += 1 }
+        }) {
+            var call: Int32 = 0
+            while call < 1_000 {
+                sink &+= DrumVoice.voice(forSlot: call % 10)?.slot ?? -1
+                call += 1
+            }
+        }
+        Self.record("rtfix.voiceForSlot.events.per1000", "\(events)")
+        #expect(events == 0, "voice(forSlot:) raised \(events) malloc events in 1 000 calls")
+        #expect(sink != 0)
+    }
+
+    /// F4: the render's kit read. Same value as the KeyPath subscript for
+    /// every voice of a kit whose eight voices all differ, and 0 malloc events
+    /// for 1 000 reads — ASSERTED (F-4's `noteOnKitReadEvents` only records the
+    /// KeyPath read, which main-actor callers keep).
+    @Test("W8-RTFIX F4: voiceParams(_:) reads what the subscript reads, and allocates nothing")
+    func rtfixVoiceParamsAccessor() throws {
+        var kit = DrumKitParams()
+        for voice in DrumVoice.allCases {
+            kit[voice].level = 0.1 + 0.1 * Double(voice.slot)
+            kit[voice].tune += 0.01 * Double(voice.slot)
+        }
+        var distinct = true
+        for voice in DrumVoice.allCases {
+            #expect(kit.voiceParams(voice) == kit[voice], "\(voice): the accessor and the subscript disagree")
+            for other in DrumVoice.allCases where other != voice && kit[other] == kit[voice] {
+                distinct = false
+            }
+        }
+        #expect(distinct, "two voices share parameters, so a mix-up could pass")
+        guard let probe = MallocProbe.slot() else {
+            Issue.record("malloc_logger is unavailable — FAILURE, not a skip.")
+            return
+        }
+        let voices = UnsafeMutablePointer<DrumVoice>.allocate(capacity: 8)
+        defer { voices.deallocate() }
+        var fill = 0
+        for voice in DrumVoice.allCases {
+            (voices + fill).initialize(to: voice)
+            fill += 1
+        }
+        var sink = 0.0
+        let events = MallocProbe.events(slot: probe, warmup: {
+            var v = 0
+            while v < 8 { sink += kit.voiceParams(voices[v]).level; v += 1 }
+        }) {
+            var call = 0
+            while call < 1_000 {
+                sink += kit.voiceParams(voices[call % 8]).level
+                call += 1
+            }
+        }
+        Self.record("rtfix.voiceParams.events.per1000", "\(events)")
+        #expect(events == 0, "voiceParams raised \(events) malloc events in 1 000 reads")
+        #expect(sink > 0)
+    }
+
+    /// F7, RECORDED (a ruling input, not a fix): the hats at the top of their
+    /// trim (+36 dB) and the cymbal at the top of its own (+24 dB), the kit
+    /// gain at the top of `gainRange`, struck at velocity 127. The asserted
+    /// part is the gain law: against the same hit at trim 0 and gain 1, the
+    /// peak rises by exactly 20·log10(2) + trim dB (both are final multiplies).
+    /// With `RTFIX_F7_OUT` set, each render is also written there as a 32-bit
+    /// float WAV for an independent true-peak meter.
+    @Test("W8-RTFIX F7 (recorded): the loudest hats and cymbal the trims allow")
+    func rtfixLoudestTrimPeaks() async throws {
+        var top = DrumKitParams()
+        top.gain = DrumKitParams.gainRange.upperBound
+        top.hatsLevelDb = DrumKitParams.hatsLevelDbRange.upperBound
+        top.cymbalsLevelDb = DrumKitParams.cymbalsLevelDbRange.upperBound
+        var worst = top
+        worst.accentDepth = DrumKitParams.accentDepthRange.upperBound
+        for voice in [DrumVoice.closedHat, .openHat, .cymbal] { worst[voice].level = 1 }
+        let reference = DrumKitParams()
+        func peak(_ channels: [[Float]]) -> Float {
+            var p: Float = 0
+            for channel in channels { for x in channel { p = max(p, abs(x)) } }
+            return p
+        }
+        let outDir = ProcessInfo.processInfo.environment["RTFIX_F7_OUT"]
+        for voice in [DrumVoice.closedHat, .openHat, .cymbal] {
+            let trim = voice == .cymbal ? top.cymbalsLevelDb : top.hatsLevelDb
+            var peaks: [String: Float] = [:]
+            for (label, kit) in [("reference", reference), ("top", top), ("worst", worst)] {
+                let channels = try await Self.render(
+                    Self.makeDrums(kit), events: [Self.noteOn(voice.note, at: 0, velocity: 127, id: 1)],
+                    frames: Self.rtfixFrames)
+                #expect(channels.allSatisfy { channel in channel.allSatisfy { $0.isFinite } },
+                        "\(voice)/\(label): a non-finite sample")
+                let p = peak(channels)
+                peaks[label] = p
+                Self.record("rtfix.f7.\(voice.rawValue).\(label).samplePeakDbfs",
+                            String(format: "%.3f", 20 * log10(Double(p))))
+                if let outDir {
+                    try Self.rtfixWriteWAV(channels, to: URL(fileURLWithPath: outDir)
+                        .appendingPathComponent("f7-\(voice.rawValue)-\(label).wav"))
+                }
+            }
+            let rise = 20 * log10(Double(peaks["top"] ?? 0) / Double(peaks["reference"] ?? 1))
+            let law = 20 * log10(DrumKitParams.gainRange.upperBound) + trim
+            #expect(abs(rise - law) < 0.01, "\(voice): the peak rose \(rise) dB, the gain law says \(law)")
+        }
+    }
+
+    static func rtfixWriteWAV(_ channels: [[Float]], to url: URL) throws {
+        let format = try #require(AVAudioFormat(
+            standardFormatWithSampleRate: sampleRate, channels: 2))
+        let buffer = try #require(AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(channels[0].count)))
+        buffer.frameLength = AVAudioFrameCount(channels[0].count)
+        let data = try #require(buffer.floatChannelData)
+        for channel in 0..<2 {
+            channels[channel].withUnsafeBufferPointer { source in
+                if let base = source.baseAddress { data[channel].update(from: base, count: source.count) }
+            }
+        }
+        try? FileManager.default.removeItem(at: url)
+        let file = try AVAudioFile(forWriting: url, settings: format.settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        try file.write(from: buffer)
     }
 }

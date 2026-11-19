@@ -405,6 +405,23 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     /// intention.
     public let offsetCents: Double
 
+    /// vf-18 leg 3 — what a FOLLOWED slide's neighbours add to where it plays,
+    /// cents: `glideFollow · (from + to) / 2`, the mean of its bridge
+    /// (`PitchEditSet.slideFollowCents(only:)`, DAWCore's one home). 0 for
+    /// every note that does not follow, and for a slide whose neighbours sit
+    /// where they were sung.
+    ///
+    /// ⚠️ **A THIRD FIELD, NOT FOLDED INTO `offsetCents`.** The stored offset
+    /// of a followed slide is RELATIVE to the line between its neighbours
+    /// (natural tuning §4.b.3), so after Select All +12 a carried slide stores
+    /// +0 and plays +12. The blob is drawn where it PLAYS
+    /// (`PitchEditorGeometry.drawnMidi(for:)` adds this), and a drag maps the
+    /// drawn pitch back to the stored offset by taking it out again — so a
+    /// slide left an octave below its line can never invite a hand drag that
+    /// moves it twice (vf-18). The edit stays the edit: `offsetCents` keeps
+    /// its meaning, and this is read from the table, never stored.
+    public let followCents: Double
+
     /// `NoteSegment.isEdited` of the segment this blob was drawn from — ANY
     /// per-note edit, not only a pitch move (m23-ap C-0). A Hard-Tuned note
     /// that already sat in tune carries offset 0 and flattened scales; before
@@ -441,6 +458,13 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     /// is "tuned". A Hard-Tuned note that already sat in tune (offset 0,
     /// flattened drift and vibrato) IS pitch-edited: green, with no ghost
     /// (`isMoved` is the ghost's question, and it is false there).
+    ///
+    /// ⚠️ vf-18 leg 3 — ONE EXTENSION, STATED: `init(segment:frameCount:followCents:)`
+    /// also answers true for a FOLLOWED slide whose neighbours move it
+    /// (`followCents != 0`) while its own segment is pitch-identity — it plays
+    /// tuned, so it is drawn tuned (design REVIEW §3.7). The header badge
+    /// still agrees: a non-zero follow needs a neighbour with a non-zero
+    /// offset, which is itself not pitch-identity, so the set is not either.
     public let isPitchEdited: Bool
 
     /// UE-1 — where the segment this blob was drawn from came from
@@ -453,7 +477,8 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
                 detectedHz: Double, medianConfidence: Double, frameCount: Int,
                 offsetCents: Double = 0, hasEdits: Bool? = nil,
                 isCleared: Bool = false, amplitudeDb: Double = 0,
-                isPitchEdited: Bool? = nil, origin: NoteOrigin = .detected) {
+                isPitchEdited: Bool? = nil, origin: NoteOrigin = .detected,
+                followCents: Double = 0) {
         self.origin = origin
         self.id = id
         self.startSeconds = startSeconds
@@ -463,6 +488,7 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
         self.medianConfidence = medianConfidence
         self.frameCount = frameCount
         self.offsetCents = offsetCents
+        self.followCents = followCents
         self.hasEdits = hasEdits ?? (offsetCents != 0 || isCleared || amplitudeDb != 0)
         self.isCleared = isCleared
         self.amplitudeDb = amplitudeDb
@@ -474,7 +500,12 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     /// One stored note, as the surface draws it (m23-ap C1/C3). `id` is the
     /// SEGMENT's id — which is what makes a drag addressable, a split
     /// attributable, and an undo key derivable without a second table.
-    public init(segment: NoteSegment, frameCount: Int) {
+    ///
+    /// vf-18 leg 3: `followCents` is the segment's follow contribution in its
+    /// table (`PitchEditSet.slideFollowCents(only:)`); a segment alone knows
+    /// nothing of its neighbours. A followed slide that plays away from where
+    /// it was sung wears the tuned colour (design REVIEW §3.7).
+    public init(segment: NoteSegment, frameCount: Int, followCents: Double = 0) {
         self.init(id: segment.id,
                   startSeconds: segment.startSeconds,
                   endSeconds: segment.endSeconds,
@@ -485,8 +516,9 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
                   hasEdits: segment.isEdited,
                   isCleared: segment.isCleared,
                   amplitudeDb: segment.amplitudeDb,
-                  isPitchEdited: !segment.isPitchIdentity,
-                  origin: segment.origin)
+                  isPitchEdited: !segment.isPitchIdentity || followCents != 0,
+                  origin: segment.origin,
+                  followCents: followCents)
     }
 
     /// UE-1 — this blob is a SOUND with no detected pitch: a breath, a
@@ -540,7 +572,12 @@ public struct NoteBlob: Sendable, Equatable, Identifiable {
     /// True when the note was MOVED off where it was sung — the ghost's
     /// question. A note whose only edit is its wobble has no second place to
     /// draw an outline at.
-    public var isMoved: Bool { offsetCents != 0 }
+    ///
+    /// vf-18 leg 3: a followed slide its neighbours carried (`followCents`)
+    /// is drawn off where it was sung too, so it keeps a ghost like every
+    /// note around it — otherwise Select All +12 leaves a ghost under every
+    /// note but the slides.
+    public var isMoved: Bool { offsetCents != 0 || followCents != 0 }
 
     /// The note the EDIT lands on — what the blob's label says once it has been
     /// dragged. ⚠️ Distinct from `nearestMidiNote`, which names the note that
@@ -820,6 +857,22 @@ public struct PitchEditorGeometry: Sendable, Equatable {
         centreMidi + offsetCents / 100 + clipPitchShiftSemitones
     }
 
+    /// vf-18 leg 3 — the forward conversion for a note that may be a FOLLOWED
+    /// slide: its sung centre, plus its own edit AND what its neighbours add
+    /// (`NoteBlob.followCents`), plus the transpose. ⛔ BRANCH ON PRESENCE,
+    /// NEVER `+ 0` (the curve's own law): at `followCents == 0` this is the
+    /// three-term conversion above, verbatim, so every note that does not
+    /// follow is drawn and dragged bit for bit as before.
+    public nonisolated static func drawnMidi(centreMidi: Double, offsetCents: Double,
+                                             followCents: Double,
+                                             clipPitchShiftSemitones: Double) -> Double {
+        if followCents == 0 {
+            return drawnMidi(centreMidi: centreMidi, offsetCents: offsetCents,
+                             clipPitchShiftSemitones: clipPitchShiftSemitones)
+        }
+        return centreMidi + (offsetCents + followCents) / 100 + clipPitchShiftSemitones
+    }
+
     /// **THE ONE CONVERSION, BACK** — what a drag landing on drawn pitch
     /// `drawnMidi` stores: `(drawnMidi − clipPitchShiftSemitones − centreMidi)
     /// × 100` cents. ⛔ Drop the transpose term and every drag on a transposed
@@ -830,9 +883,25 @@ public struct PitchEditorGeometry: Sendable, Equatable {
         (drawnMidi - clipPitchShiftSemitones - centreMidi) * 100
     }
 
-    /// Where a note is DRAWN — the pitch it plays at.
+    /// vf-18 leg 3 — the way BACK for a note that may be a followed slide:
+    /// what its neighbours add (`followCents`) is not the note's own edit, so
+    /// it is taken out of the drawn pitch before the offset is stored. During
+    /// a lone drag of a slide the neighbours stay put, so `followCents` is
+    /// constant and a drag of +D stores +D (natural tuning §4.b.3, kept).
+    /// At `followCents == 0` this is the conversion above, verbatim.
+    public nonisolated static func storedOffsetCents(drawnMidi: Double, centreMidi: Double,
+                                                     followCents: Double,
+                                                     clipPitchShiftSemitones: Double) -> Double {
+        let stored = storedOffsetCents(drawnMidi: drawnMidi, centreMidi: centreMidi,
+                                       clipPitchShiftSemitones: clipPitchShiftSemitones)
+        return followCents == 0 ? stored : stored - followCents
+    }
+
+    /// Where a note is DRAWN — the pitch it plays at. vf-18 leg 3: a followed
+    /// slide's neighbours' contribution included (`NoteBlob.followCents`).
     public func drawnMidi(for blob: NoteBlob) -> Double {
         Self.drawnMidi(centreMidi: blob.centreMidi, offsetCents: blob.offsetCents,
+                       followCents: blob.followCents,
                        clipPitchShiftSemitones: clipPitchShiftSemitones)
     }
 
@@ -1340,6 +1409,27 @@ public struct PitchEditorDragDraft: Sendable, Equatable {
     /// (`PitchEditorModel.updateSoundPitchDrag`), and the readout is §1.7's
     /// sentence, never a number.
     public internal(set) var isUnpitched: Bool = false
+    /// vf-18 leg 3 — the PRESSED note's carry `k` in a GROUP drag: the share
+    /// of the group's delta its OWN offset takes. 1 for every note, sound and
+    /// slide moved without its anchors; `1 − glideFollow` for a followed slide
+    /// whose anchors move with it (their move already reaches it through its
+    /// bridge). Read ONCE, at the press, from DAWCore's one home
+    /// (`PitchEditSet.groupMoveCarries(movingIDs:)`, which reads the rule the
+    /// release will store), and fixed for the gesture — the moving set is.
+    /// 1 for a one-note drag.
+    public internal(set) var carry: Double = 1
+    /// vf-18 leg 3 — what the pressed note's neighbours added to where it
+    /// played when the drag began, cents (`NoteBlob.followCents`). The drag's
+    /// drawn origin includes it, and the one-note drag's drawn → stored
+    /// mapping takes it back out: a lone slide's neighbours do not move, so
+    /// a drag of +D stores +D.
+    public internal(set) var baselineFollowCents: Double = 0
+    /// vf-18 leg 3 — the same contribution NOW, read from the draft set each
+    /// time the draft changes (`PitchEditorModel.rebuildDraftLine`): in a
+    /// group drag a carried slide's anchors move under it, and the blob is
+    /// drawn where the draft PLAYS it. A display read, never an input to the
+    /// stored offset.
+    public internal(set) var followCents: Double = 0
 
     /// Rows this drag grew the window by, both ends.
     public var grownRows: Int { topGrowthRows + bottomGrowthRows }
@@ -1347,9 +1437,11 @@ public struct PitchEditorDragDraft: Sendable, Equatable {
     /// Every note this drag moves — the pressed one first, then `members`.
     public var movingSegmentIDs: [UUID] { [segmentID] + members.map(\.segmentID) }
 
-    /// Where the blob is drawn RIGHT NOW — DRAWN pitch, transpose included.
+    /// Where the blob is drawn RIGHT NOW — DRAWN pitch, transpose included
+    /// (and, vf-18 leg 3, a followed slide's live `followCents`).
     public var targetMidi: Double {
         PitchEditorGeometry.drawnMidi(centreMidi: detectedMidi, offsetCents: offsetCents,
+                                      followCents: followCents,
                                       clipPitchShiftSemitones: clipPitchShiftSemitones)
     }
 
@@ -1382,8 +1474,15 @@ public struct PitchEditorDragDraft: Sendable, Equatable {
     /// on — it prints no cents, because it has no pitch to be moved by cents
     /// from, and what a person needs to know before letting go is what moving
     /// it does to the sound.
+    ///
+    /// vf-18 leg 3: a FOLLOWED slide reads where it is drawn and plays — its
+    /// own offset plus what its neighbours add (`followCents`) — so the cents
+    /// agree with the note name beside them and with the ghost's distance.
+    /// Every other note reads its offset exactly as before (branch on
+    /// presence).
     public var readout: String? {
-        isUnpitched ? PitchEditorReadout.unpitchedSound : PitchEditorReadout.centsReadout(offsetCents)
+        if isUnpitched { return PitchEditorReadout.unpitchedSound }
+        return PitchEditorReadout.centsReadout(followCents == 0 ? offsetCents : offsetCents + followCents)
     }
 
     /// The label drawn ABOVE the moving blob (`PitchEditorDragOverlay`): the
@@ -1418,10 +1517,20 @@ public struct PitchEditorDragMember: Sendable, Equatable {
     /// (the PRESSED blob decides the snap, `PitchEditorModel.updatePitchDrag`);
     /// carried so a surface can draw a moving sound as a sound.
     public let isUnpitched: Bool
+    /// vf-18 leg 3 — this member's carry `k` (`PitchEditorDragDraft.carry`):
+    /// its offset is `baseline + delta·100` at k == 1 (the I4 arithmetic,
+    /// verbatim) and `baseline + delta·100·k` below. Fixed at the press.
+    public let carry: Double
+    /// vf-18 leg 3 — what its neighbours added to where it played at the
+    /// press, cents (`NoteBlob.followCents`): part of its drawn origin.
+    public let baselineFollowCents: Double
+    /// vf-18 leg 3 — the same contribution NOW, from the draft set
+    /// (`PitchEditorModel.rebuildDraftLine`): where the draft plays it.
+    public internal(set) var followCents: Double
 
     public init(segmentID: UUID, startSeconds: Double, endSeconds: Double,
                 detectedMidi: Double, baselineCents: Double, offsetCents: Double,
-                isUnpitched: Bool = false) {
+                isUnpitched: Bool = false, carry: Double = 1, followCents: Double = 0) {
         self.segmentID = segmentID
         self.startSeconds = startSeconds
         self.endSeconds = endSeconds
@@ -1429,12 +1538,36 @@ public struct PitchEditorDragMember: Sendable, Equatable {
         self.baselineCents = baselineCents
         self.offsetCents = offsetCents
         self.isUnpitched = isUnpitched
+        self.carry = carry
+        self.baselineFollowCents = followCents
+        self.followCents = followCents
     }
 
-    /// Where the note is DRAWN right now, on the clip's transposed axis.
+    /// Where the note is DRAWN right now, on the clip's transposed axis (and,
+    /// vf-18 leg 3, a followed slide's live `followCents`).
     public func targetMidi(clipPitchShiftSemitones: Double) -> Double {
         PitchEditorGeometry.drawnMidi(centreMidi: detectedMidi, offsetCents: offsetCents,
+                                      followCents: followCents,
                                       clipPitchShiftSemitones: clipPitchShiftSemitones)
+    }
+
+    /// vf-18 leg 3 — its drawn pitch when the drag began: the group's clamp
+    /// (`groupDeltaBounds`) measures every note's room from here.
+    func originMidi(clipPitchShiftSemitones: Double) -> Double {
+        PitchEditorGeometry.drawnMidi(centreMidi: detectedMidi, offsetCents: baselineCents,
+                                      followCents: baselineFollowCents,
+                                      clipPitchShiftSemitones: clipPitchShiftSemitones)
+    }
+
+    /// vf-18 leg 3 — the offset this member stores for the group's delta
+    /// (drawn semitones): `baseline + delta·100` at k == 1, today's I4
+    /// expression VERBATIM (`ue1NotesOnlyDragIsBitIdenticalToTheFrozenArithmetic`
+    /// pins it), and `baseline + delta·100·k` for a carried slide — the
+    /// expression `PitchEditSet.applyingGroupPitchMove` stores for the same
+    /// move, so the release writes what the one transform would.
+    func movedOffsetCents(forDelta delta: Double) -> Double {
+        let moved = carry == 1 ? baselineCents + delta * 100 : baselineCents + delta * 100 * carry
+        return moved.clamped(to: NoteSegment.pitchOffsetCentsRange)
     }
 
     /// Where its ghost is drawn: the SUNG centre on the transposed axis.
@@ -2113,6 +2246,23 @@ public final class PitchEditorModel {
     /// press that travelled past the slop (I0's `.band` kind).
     public private(set) var band: PitchEditorBand?
 
+    /// vf-19 — the SOUNDS (`NoteBlob.isUnpitched`) that are selected ONLY
+    /// because Select All took every drawn blob. A group pitch drag leaves
+    /// them where they are (`beginSelectionPitchDrag`): a sound keeps its own
+    /// pitch unless the user picks it (natural tuning R21: "a sound the user
+    /// drags on purpose still moves"). Select All still SELECTS them, so
+    /// "Clear Selected Sounds" (UE-2) reads exactly as before.
+    ///
+    /// A sound leaves this set the moment the user chooses it: a ⇧/⌘ click
+    /// (`toggle`), a band that touches it, or a press on it. A plain click
+    /// and Deselect empty it. A table sync only PRUNES it, like the selection
+    /// (`reconcileSelection`), so a second drag after one Select All still
+    /// leaves the sounds. Not observed: nothing draws it.
+    @ObservationIgnored private var soundsSelectedOnlyByAll: Set<UUID> = []
+    /// `soundsSelectedOnlyByAll` when the live band armed, so a band gives
+    /// back exactly what it found, as the selection's frozen `base` does.
+    @ObservationIgnored private var soundsSelectedOnlyByAllAtBandArm: Set<UUID> = []
+
     /// ⭐ **THE COMMIT SEAM, AND THE SPY GATE'S HOME.** Set once by the view;
     /// the model is the ONLY thing that calls it. Every commit this surface
     /// makes goes through here and is counted, so a test can assert that forty
@@ -2568,6 +2718,32 @@ public final class PitchEditorModel {
         draftEditSet = built.table
         draftPlayedLine = built.line
         draftLineRevision &+= 1
+        refreshDragFollow(from: built.table)
+    }
+
+    /// vf-18 leg 3 — a pitch drag's moving notes are drawn where the DRAFT
+    /// plays them: a carried slide's anchors move under it, so its
+    /// `followCents` is re-read from the draft set (`PitchEditSet.slideFollowCents`,
+    /// moving notes only) each time the draft changes. A DISPLAY read: the
+    /// carry `k` was fixed at the press and no stored offset reads this.
+    /// Writes `drag` only when a value changed.
+    private func refreshDragFollow(from table: PitchEditSet) {
+        guard var live = drag else { return }
+        let follows = table.slideFollowCents(only: Set(live.movingSegmentIDs))
+        var changed = false
+        let pressed = follows[live.segmentID] ?? 0
+        if pressed != live.followCents {
+            live.followCents = pressed
+            changed = true
+        }
+        for index in live.members.indices {
+            let value = follows[live.members[index].segmentID] ?? 0
+            if value != live.members[index].followCents {
+                live.members[index].followCents = value
+                changed = true
+            }
+        }
+        if changed { drag = live }
     }
 
     /// The unvoiced stretches, from the SAME frames the line is drawn from —
@@ -2717,6 +2893,10 @@ public final class PitchEditorModel {
         let windowStart = geometry.sourceWindowStartSeconds
         let windowEnd = windowStart + geometry.sourceWindowSeconds
         let points = contourRuns.flatMap(\.points).map(\.sourceSeconds)
+        // vf-18 leg 3: where each followed slide PLAYS, from the whole table
+        // (a slide's anchors may sit outside the window), from DAWCore's one
+        // home.
+        let follows = table.slideFollowCents()
         blobs = table.segments.compactMap { segment in
             guard segment.endSeconds > windowStart, segment.startSeconds < windowEnd else {
                 return nil
@@ -2727,7 +2907,7 @@ public final class PitchEditorModel {
             let count = points.reduce(into: 0) { total, second in
                 if second >= segment.startSeconds && second < segment.endSeconds { total += 1 }
             }
-            return NoteBlob(segment: segment, frameCount: count)
+            return NoteBlob(segment: segment, frameCount: count, followCents: follows[segment.id] ?? 0)
         }
     }
 
@@ -2773,6 +2953,7 @@ public final class PitchEditorModel {
         // I4: nothing is drawn, so nothing can be selected or banded.
         band = nil
         setSelection([])
+        soundsSelectedOnlyByAll = []
         rebuildPlayedLine()
     }
 
@@ -2934,7 +3115,9 @@ public final class PitchEditorModel {
                                     isFree: false,
                                     clipPitchShiftSemitones: geometry.clipPitchShiftSemitones,
                                     windowTopAtPress: geometry.midiRange.upperBound,
-                                    isUnpitched: blob.isUnpitched)
+                                    isUnpitched: blob.isUnpitched,
+                                    baselineFollowCents: blob.followCents,
+                                    followCents: blob.followCents)
         // I6b — growth state is per PRESS: a new drag banks nothing from the last.
         growthRemainder = 0
         dragAuditionHeard = nil
@@ -2971,8 +3154,12 @@ public final class PitchEditorModel {
         // clamp and the snap are all on the axis the user SEES, which on a
         // transposed clip is not the stored one. The way back to a stored
         // offset is the ONE conversion below.
+        // vf-18 leg 3: a followed slide's origin is where it is DRAWN — its
+        // neighbours' contribution at the press included (0 for every other
+        // note, which then takes the three-term conversion verbatim).
         let origin = PitchEditorGeometry.drawnMidi(
             centreMidi: draft.detectedMidi, offsetCents: draft.baselineCents,
+            followCents: draft.baselineFollowCents,
             clipPitchShiftSemitones: draft.clipPitchShiftSemitones)
         let raw = origin + semitones
         // ⭐ UE-1 — A SOUND PRESSED WITHOUT ⌥ takes its own branch, alone or
@@ -3014,8 +3201,12 @@ public final class PitchEditorModel {
             : snapScale.nearestAllowedMidi(
                 to: min(max(raw, window.lowerBound + 1), window.upperBound - 1))
         draft.isFree = free
+        // vf-18 leg 3: a lone drag of a followed slide lands in DRAWN space and
+        // stores the drawn pitch minus what its (unmoving) neighbours add, so
+        // +D drawn is +D stored and the release is `.notePitch` as before.
         draft.offsetCents = PitchEditorGeometry.storedOffsetCents(
             drawnMidi: landed, centreMidi: draft.detectedMidi,
+            followCents: draft.baselineFollowCents,
             clipPitchShiftSemitones: draft.clipPitchShiftSemitones)
             .clamped(to: NoteSegment.pitchOffsetCentsRange)
         let moved = draft.offsetCents != drag?.offsetCents
@@ -3065,6 +3256,15 @@ public final class PitchEditorModel {
         // absolute offset, in table order, and the selection's token for the
         // group undo key. Never N `.notePitch` commits: that would be N undo
         // steps for one gesture (UI design §8.4).
+        // vf-18 leg 3 — the offsets ALREADY carry the carry (a followed slide
+        // moved with its anchors stores `baseline + delta·100·k`, k from
+        // `groupMoveCarries` at the press), so this commit stores exactly what
+        // `PitchEditSet.applyingGroupPitchMove` stores for the same move, and
+        // exactly the set the draft line was drawn from (the app applies it
+        // through `setClipNotePitchOffsets` → `applyingNotePitchOffsets`, the
+        // draft's own transform). The shape is unchanged on purpose: this
+        // model emits commits and never calls the store, and the app's
+        // applier reads every note back against the number committed here.
         let offsets = [NotePitchOffset(segmentId: draft.segmentID, offsetCents: draft.offsetCents)]
             + draft.members.map { NotePitchOffset(segmentId: $0.segmentID, offsetCents: $0.offsetCents) }
         let order = Dictionary(uniqueKeysWithValues: blobs.enumerated().map { ($1.id, $0) })
@@ -4064,25 +4264,39 @@ public final class PitchEditorModel {
     public func selectOnly(_ id: UUID) {
         guard isDrawn(id) else { return }
         setSelection([id])
+        soundsSelectedOnlyByAll = []
     }
 
     /// Add this note to the selection, or take it out — a ⇧ or ⌘ click on it.
+    /// vf-19: either way the user CHOSE it, so a sound clicked back in after
+    /// Select All rides a group drag again.
     public func toggle(_ id: UUID) {
         guard isDrawn(id) else { return }
         var next = selection
         if next.contains(id) { next.remove(id) } else { next.insert(id) }
         setSelection(next)
+        soundsSelectedOnlyByAll.remove(id)
     }
 
     /// Select nothing — a plain click on empty surface, Escape's
     /// `.clearSelection` rung, the debug tier's `clearSelection` act.
-    public func clearSelection() { setSelection([]) }
+    public func clearSelection() {
+        setSelection([])
+        soundsSelectedOnlyByAll = []
+    }
 
     /// Select EVERY DRAWN note — ⌘A / Edit ▸ Select All (routed by
     /// `SelectAllMenuPolicy` to `.pitchEditorNotes`, handed over
     /// `PitchEditorInteractionBridge.selectAllNonce`) and the debug tier's
     /// `selectAll` act. REPLACES, never unions — the roll's `selectAllNotes`.
-    public func selectAll() { setSelection(Set(blobs.map(\.id))) }
+    ///
+    /// vf-19: the SOUNDS it takes are remembered as taken by Select All, so a
+    /// group pitch drag leaves them where they are
+    /// (`soundsSelectedOnlyByAll`). They are still selected.
+    public func selectAll() {
+        setSelection(Set(blobs.map(\.id)))
+        soundsSelectedOnlyByAll = Set(blobs.lazy.filter(\.isUnpitched).map(\.id))
+    }
 
     private func isDrawn(_ id: UUID) -> Bool { blobs.contains { $0.id == id } }
 
@@ -4136,9 +4350,13 @@ public final class PitchEditorModel {
                     && $0.endSeconds == old.endSeconds
             }), drawn.contains(right.id) {
                 next.insert(right.id)
+                // vf-19: a sound Select All took keeps that status in both halves.
+                if soundsSelectedOnlyByAll.contains(parent.id) { soundsSelectedOnlyByAll.insert(right.id) }
             }
         }
         setSelection(next)
+        // vf-19: a sync PRUNES, it never chooses: what Select All took stays so.
+        soundsSelectedOnlyByAll.formIntersection(next)
     }
 
     /// A tick of a promoted `.band` press: arm the band on the promoting tick,
@@ -4151,6 +4369,7 @@ public final class PitchEditorModel {
                 origin: origin, base: selection,
                 additive: ArrangeClickIntent.intent(for: modifiersAtPress) == .toggle,
                 rect: .zero, hits: [])
+            soundsSelectedOnlyByAllAtBandArm = soundsSelectedOnlyByAll
         }
         updateBand(to: location)
     }
@@ -4166,6 +4385,10 @@ public final class PitchEditorModel {
         band = live
         setSelection(PianoRollMarquee.selection(base: live.base, hits: live.hits,
                                                 additive: live.additive))
+        // vf-19: a sound the band touches is CHOSEN; a replacing band chose
+        // everything it holds.
+        soundsSelectedOnlyByAll = live.additive
+            ? soundsSelectedOnlyByAllAtBandArm.subtracting(live.hits) : []
     }
 
     /// The band's release: its final selection lands, and the band goes.
@@ -4181,6 +4404,7 @@ public final class PitchEditorModel {
         guard let live = band else { return }
         band = nil
         setSelection(live.base)
+        soundsSelectedOnlyByAll = soundsSelectedOnlyByAllAtBandArm
     }
 
     // MARK: I4 — the group pitch drag (interaction batch §7)
@@ -4197,6 +4421,14 @@ public final class PitchEditorModel {
     /// other note selected there are no members, `updatePitchDrag` never enters
     /// its group branch, and the release commits `.notePitch` under the
     /// `.segment` undo key exactly as before I4.
+    ///
+    /// ⭐ vf-19: **A SOUND SELECT ALL TOOK DOES NOT RIDE**
+    /// (`soundsSelectedOnlyByAll`). Select All then a drag moves every pitched
+    /// note by the one delta and writes nothing to the sounds, so a breath or
+    /// an "s" keeps its own pitch (and its level: a moved sound enters the
+    /// pitch and formant curves). The PRESSED blob always moves, and pressing
+    /// a sound chooses it. A sound the user picked (a click, a ⇧/⌘ click, a
+    /// band) rides as UE-1 says.
     @discardableResult
     public func beginSelectionPitchDrag(on blob: NoteBlob) -> Bool {
         guard tool == .pointer, isDrawn(blob.id) else { return false }
@@ -4205,15 +4437,31 @@ public final class PitchEditorModel {
                 ArrangeClickIntent.intent(for: $0.modifiersAtPress) == .toggle
             } ?? false
             setSelection(additive ? selection.union([blob.id]) : [blob.id])
+            if !additive { soundsSelectedOnlyByAll = [] }
         }
+        soundsSelectedOnlyByAll.remove(blob.id)
         guard beginPitchDrag(on: blob), var draft = drag else { return false }
-        let others = blobs.filter { $0.id != blob.id && selection.contains($0.id) }
+        let others = blobs.filter {
+            $0.id != blob.id && selection.contains($0.id) && !soundsSelectedOnlyByAll.contains($0.id)
+        }
         guard !others.isEmpty else { return true }
+        // ⭐ vf-18 leg 3 — THE CARRY, ONCE PER GESTURE, FROM DAWCORE'S ONE HOME.
+        // The moving set (the pressed note and every member) is fixed from
+        // here to the release, so each note's `k` is too: read it now from
+        // `PitchEditSet.groupMoveCarries` — the factor `applyingGroupPitchMove`
+        // stores with, under the rule the release will store — and never per
+        // tick. A followed slide whose anchors ride this drag takes `1 − follow`
+        // of the delta (its bridge brings the rest); everything else takes 1,
+        // which keeps the I4 arithmetic verbatim.
+        let moving = Set([blob.id] + others.map(\.id))
+        let carries = noteTable.groupMoveCarries(movingIDs: moving)
+        draft.carry = carries[blob.id] ?? 1
         draft.members = others.map {
             PitchEditorDragMember(segmentID: $0.id, startSeconds: $0.startSeconds,
                                   endSeconds: $0.endSeconds, detectedMidi: $0.centreMidi,
                                   baselineCents: $0.offsetCents, offsetCents: $0.offsetCents,
-                                  isUnpitched: $0.isUnpitched)
+                                  isUnpitched: $0.isUnpitched, carry: carries[$0.id] ?? 1,
+                                  followCents: $0.followCents)
         }
         drag = draft
         rebuildDraftLine()
@@ -4240,10 +4488,13 @@ public final class PitchEditorModel {
     private func updateGroupPitchDrag(_ draft: inout PitchEditorDragDraft,
                                       origin: Double, raw: Double, free: Bool) {
         let shift = draft.clipPitchShiftSemitones
-        let origins = [origin] + draft.members.map {
-            PitchEditorGeometry.drawnMidi(centreMidi: $0.detectedMidi, offsetCents: $0.baselineCents,
-                                          clipPitchShiftSemitones: shift)
-        }
+        // vf-18 leg 3: each member's origin is where it is DRAWN at the press
+        // (`originMidi`, a followed slide's neighbours included; the
+        // three-term conversion verbatim for everything else). The bounds'
+        // cents term still assumes k = 1: for a carried slide (k < 1) that is
+        // TIGHTER than `applyingGroupPitchMove`'s own range, never looser, so
+        // the release can never be refused.
+        let origins = [origin] + draft.members.map { $0.originMidi(clipPitchShiftSemitones: shift) }
         let baselines = [draft.baselineCents] + draft.members.map(\.baselineCents)
         let bounds = Self.groupDeltaBounds(origins: origins, baselines: baselines,
                                            window: geometry.midiRange)
@@ -4260,13 +4511,25 @@ public final class PitchEditorModel {
         // A zero delta writes the baselines back EXACTLY, so a group released
         // where it began is a no-op and commits nothing — never a write of a
         // float's rounding error.
-        draft.offsetCents = delta == 0 ? draft.baselineCents : PitchEditorGeometry.storedOffsetCents(
-            drawnMidi: landed, centreMidi: draft.detectedMidi,
-            clipPitchShiftSemitones: shift).clamped(to: NoteSegment.pitchOffsetCentsRange)
-        for index in draft.members.indices {
-            let member = draft.members[index]
-            draft.members[index].offsetCents = (member.baselineCents + delta * 100)
+        // vf-18 leg 3: the pressed note at k == 1 lands as I4 always did (its
+        // snapped drawn pitch, back through the one conversion, minus what its
+        // unmoving neighbours add when it is a slide pressed without them);
+        // a CARRIED pressed slide (k < 1) stores `baseline + delta·100·k`, the
+        // one transform's expression — its drawn pitch still lands on
+        // `landed`, because its anchors bring the rest.
+        if delta == 0 {
+            draft.offsetCents = draft.baselineCents
+        } else if draft.carry == 1 {
+            draft.offsetCents = PitchEditorGeometry.storedOffsetCents(
+                drawnMidi: landed, centreMidi: draft.detectedMidi,
+                followCents: draft.baselineFollowCents,
+                clipPitchShiftSemitones: shift).clamped(to: NoteSegment.pitchOffsetCentsRange)
+        } else {
+            draft.offsetCents = (draft.baselineCents + delta * 100 * draft.carry)
                 .clamped(to: NoteSegment.pitchOffsetCentsRange)
+        }
+        for index in draft.members.indices {
+            draft.members[index].offsetCents = draft.members[index].movedOffsetCents(forDelta: delta)
         }
         let moved = draft.offsetCents != drag?.offsetCents || draft.members != drag?.members
         drag = draft
@@ -4353,7 +4616,9 @@ public final class PitchEditorModel {
     /// delta, so it stays drawn at the note it borrowed its pitch from — "a
     /// sound drawn away from its word cannot be read as part of it" (§1.5).
     /// A notes-only drag never reaches this function
-    /// (`ue1NotesOnlyDragIsBitIdenticalToTheFrozenArithmetic`).
+    /// (`ue1NotesOnlyDragIsBitIdenticalToTheFrozenArithmetic`). vf-19: "every
+    /// member" never includes a sound only Select All took
+    /// (`beginSelectionPitchDrag`).
     ///
     /// ⛔ **THE CLAMP IS `groupDeltaBounds`', the tightest member's** (the I4
     /// data-loss rule, one home for one sound or many), narrowed to its whole
@@ -4362,10 +4627,12 @@ public final class PitchEditorModel {
     private func updateSoundPitchDrag(_ draft: inout PitchEditorDragDraft,
                                       origin: Double, raw: Double) {
         let shift = draft.clipPitchShiftSemitones
-        let origins = [origin] + draft.members.map {
-            PitchEditorGeometry.drawnMidi(centreMidi: $0.detectedMidi, offsetCents: $0.baselineCents,
-                                          clipPitchShiftSemitones: shift)
-        }
+        // vf-18 leg 3: members' drawn origins and carries as in the I4 group
+        // branch (`originMidi`, `movedOffsetCents(forDelta:)`). A sound cannot be
+        // made to follow (`applyingNoteGlideFollow` refuses it), so the
+        // pressed sound's carry is 1 and its arithmetic below is untouched;
+        // only a hand-written file that gives a sound a follow reaches `k < 1`.
+        let origins = [origin] + draft.members.map { $0.originMidi(clipPitchShiftSemitones: shift) }
         let baselines = [draft.baselineCents] + draft.members.map(\.baselineCents)
         let bounds = Self.groupDeltaBounds(origins: origins, baselines: baselines,
                                            window: geometry.midiRange)
@@ -4373,13 +4640,17 @@ public final class PitchEditorModel {
         draft.isFree = false
         // Zero writes the baseline back EXACTLY: released where it began is a
         // no-op, never a write of a rounding error (the group branch's rule).
-        draft.offsetCents = semitones == 0
-            ? draft.baselineCents
-            : (draft.baselineCents + semitones * 100).clamped(to: NoteSegment.pitchOffsetCentsRange)
-        for index in draft.members.indices {
-            let member = draft.members[index]
-            draft.members[index].offsetCents = (member.baselineCents + semitones * 100)
+        if semitones == 0 {
+            draft.offsetCents = draft.baselineCents
+        } else if draft.carry == 1 {
+            draft.offsetCents = (draft.baselineCents + semitones * 100)
                 .clamped(to: NoteSegment.pitchOffsetCentsRange)
+        } else {
+            draft.offsetCents = (draft.baselineCents + semitones * 100 * draft.carry)
+                .clamped(to: NoteSegment.pitchOffsetCentsRange)
+        }
+        for index in draft.members.indices {
+            draft.members[index].offsetCents = draft.members[index].movedOffsetCents(forDelta: semitones)
         }
         let moved = draft.offsetCents != drag?.offsetCents || draft.members != drag?.members
         drag = draft

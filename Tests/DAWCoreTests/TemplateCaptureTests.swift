@@ -835,4 +835,60 @@ struct TemplateCaptureTests {
         let emptyDecoded = try TrackSetTemplateCodec.decode(emptyData, origin: .inline).template
         #expect(emptyDecoded.tracks[0].instrument == InstrumentDescriptor(kind: .sampler))
     }
+
+    // MARK: - W9-W45: a step sequencer locked to the beat survives capture
+
+    @Test("W45: a synced step source is saved synced, round-trips, and reads back without an unused-rate warning")
+    func w45SyncedStepSourceRoundTrips() throws {
+        let synced = ModulationSource(
+            kind: .stepSequencer, name: "Gate",
+            params: .stepSequencer(StepSequencerSourceParams(
+                steps: [0, 1, 0, 1], stepDivision: "1/16", rateHz: 9.0, edgeMs: 2.0)))
+        let free = ModulationSource(
+            kind: .stepSequencer, name: "Free",
+            params: .stepSequencer(StepSequencerSourceParams(
+                steps: [1, 0], stepDivision: nil, rateHz: 9.0, edgeMs: 2.0)))
+        let track = Track(name: "Pad", kind: .instrument, modulationSources: [synced, free])
+        let captured = try TemplateCapture.capture(tracks: [track], selected: [track.id], name: "Sync")
+
+        // Capture: the division is kept; the unused rate is not (state: it falls
+        // back to the default 4 a second if the sync is cleared later).
+        guard case .stepSequencer(let capturedSynced) = captured.template.tracks[0].modulationSources[0].params,
+              case .stepSequencer(let capturedFree) = captured.template.tracks[0].modulationSources[1].params
+        else { Issue.record("captured sources are not step sequencers"); return }
+        #expect(capturedSynced.stepDivision == "1/16")
+        #expect(capturedSynced.rateHz == 4.0)
+        #expect(capturedFree.stepDivision == nil)
+        #expect(capturedFree.rateHz == 9.0, "a free source keeps its rate")
+
+        // Through the file: canonical == decoded, the division survives, and
+        // NO warning says the rate is unused.
+        let data = try TemplateCapture.canonicalJSON(captured.template)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("\"stepDivision\": \"1/16\""))
+        let decoded = try TrackSetTemplateCodec.decode(data, origin: .inline)
+        #expect(decoded.template == (try TemplateCapture.canonical(captured.template)))
+        #expect(decoded.warnings.isEmpty, "\(decoded.warnings)")
+
+        // Apply: the rebuilt source is synced, to the same division.
+        let rebuilt = try tpl5Built(decoded.template)[0].modulationSources
+        guard case .stepSequencer(let again) = rebuilt[0].params else {
+            Issue.record("rebuilt source is not a step sequencer"); return
+        }
+        #expect(again.syncedDivision == .sixteenth)
+        #expect(again.steps == [0, 1, 0, 1])
+    }
+
+    @Test("W45: a hand-written template that sets both stepDivision and rateHz still warns that the rate is unused")
+    func w45HandWrittenBothStillWarns() throws {
+        let json = """
+        {"format":"dawpro.template","formatVersion":1,"minReaderVersion":1,"name":"Both",
+         "tracks":[{"key":"pad","name":"Pad","kind":"instrument",
+           "modulation":{"sources":[{"key":"gate","kind":"stepSequencer",
+             "params":{"stepDivision":"1/8","rateHz":8}}]}}]}
+        """
+        let result = try TrackSetTemplateCodec.decode(Data(json.utf8), origin: .inline)
+        #expect(result.warnings.contains { $0.message.contains("ignored while") },
+                "\(result.warnings)")
+    }
 }

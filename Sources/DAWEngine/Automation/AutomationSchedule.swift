@@ -76,15 +76,23 @@ final class AutomationSchedule {
     /// Effect-param tracks (each with sorted, owned points). Empty when the
     /// strip has no active effect-param lanes.
     let effectParamTracks: UnsafeBufferPointer<AutomationEffectParamTrack>
+    /// m39-d CR-2 (`docs/design/2026-10-07-effect-control-rate.md` §5.5): the
+    /// OFFLINE render's length in roll frames (`r` of the first frame past the
+    /// end), or nil — live, and any offline arming that does not state it. The
+    /// control grid caps the last cell here, so a class-(a) effect ramps over
+    /// the bounce's partial last block exactly as long as that block is (the
+    /// call length it always ramped over). nil = cells are never capped.
+    let renderEndFrame: Int64?
 
     init(generation: UInt64, mode: Mode, sampleRate: Double,
          volumePoints: [AutomationBreakpoint], panPoints: [AutomationBreakpoint],
          effectParamTracks: [(effectID: UUID, paramSlot: Int, points: [AutomationBreakpoint])] = [],
-         timelineID: UInt64? = nil) {
+         timelineID: UInt64? = nil, renderEndFrame: Int64? = nil) {
         self.generation = generation
         self.timelineID = timelineID ?? generation
         self.mode = mode
         self.sampleRate = sampleRate
+        self.renderEndFrame = renderEndFrame
         self.volumePoints = Self.own(volumePoints)
         self.panPoints = Self.own(panPoints)
         let tracks = effectParamTracks
@@ -281,7 +289,7 @@ final class AutomationSchedule {
         fromCycle: Int = 0, throughCycle: Int,
         tempoMap: TempoMap, sampleRate: Double,
         generation: UInt64, mode: Mode, timelineID: UInt64,
-        requireAnchor: Bool = false
+        requireAnchor: Bool = false, renderEndFrame: Int64? = nil
     ) -> AutomationSchedule? {
         func unrolled(_ points: [AutomationPoint]) -> [AutomationBreakpoint] {
             guard !points.isEmpty else { return [] }
@@ -317,7 +325,7 @@ final class AutomationSchedule {
                                   sampleRate: sampleRate,
                                   volumePoints: volume, panPoints: pan,
                                   effectParamTracks: effectTracks,
-                                  timelineID: timelineID)
+                                  timelineID: timelineID, renderEndFrame: renderEndFrame)
     }
 
     /// Builds one strip's schedule from its ACTIVE volume/pan lanes and
@@ -335,7 +343,9 @@ final class AutomationSchedule {
                       // schedule is inert for automation by construction (every
                       // stage guards `count > 0`), so this cannot change any
                       // existing render.
-                      requireAnchor: Bool = false) -> AutomationSchedule? {
+                      requireAnchor: Bool = false,
+                      // m39-d CR-2: the offline render's end (see the field).
+                      renderEndFrame: Int64? = nil) -> AutomationSchedule? {
         let volume = volumeLane.map {
             buildBreakpoints(points: $0.points, fromBeat: fromBeat,
                              tempoMap: tempoMap, sampleRate: sampleRate)
@@ -355,7 +365,7 @@ final class AutomationSchedule {
                                   sampleRate: sampleRate,
                                   volumePoints: volume, panPoints: pan,
                                   effectParamTracks: effectTracks,
-                                  timelineID: timelineID)
+                                  timelineID: timelineID, renderEndFrame: renderEndFrame)
     }
 
     /// Resolves a track's ACTIVE `.effectParam` lanes against its live effect

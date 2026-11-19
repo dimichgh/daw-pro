@@ -580,6 +580,10 @@ enum PitchEditSetDigest {
     /// **STILL 1 AFTER C5b-1 ADDED THE DRAWN-SHAPE BLOCK (slot 4), FOR THE
     /// SAME REASON.** It is emitted only when some segment `hasShape`, so a
     /// set with no drawn shape keeps its bytes.
+    ///
+    /// **STILL 1 AFTER vf-18 APPENDED THE SLIDE-FOLLOW RULE TO SLOT 9, FOR
+    /// THE SAME REASON.** It is emitted only when a set is not on the legacy
+    /// rule (`slideFollowMarker`), so every legacy set keeps its bytes.
     static let layoutVersion: UInt64 = 1
 
     /// Introduces the generator suffix block. An arbitrary, distinctive
@@ -629,6 +633,31 @@ enum PitchEditSetDigest {
     /// "T1RANSI" plus a 01, in the style of the markers above, and distinct
     /// from all five (the time-warp marker also starts "T1", then differs).
     static let transitionSuffixMarker: UInt64 = 0x5431_5241_4E53_4901
+
+    /// vf-18 (W9-SLFX): introduces the SLIDE-FOLLOW RULE inside slot 9:
+    /// "F1OLLOW" plus a 01, in the style of the markers above, and distinct
+    /// from all of them (the formant marker also starts "F1O", then differs).
+    /// Appended at the END of the transition block, and only when the set is
+    /// NOT on the legacy rule, so every legacy key keeps its bytes and
+    /// `layoutVersion` stays 1 (the blocks' own precedent, applied inside one).
+    static let slideFollowMarker: UInt64 = 0x4631_4F4C_4C4F_5701
+
+    /// The version of what the HOLD rule renders (its anchors and edge values,
+    /// `PitchEditSet.slideAnchorCents` / `slideEdgeValueCents`): bump it when
+    /// they change, so exactly the sets on that rule re-key.
+    /// ⛔ NEVER `PitchEditSet.transitionRenderVersion` for that (its doc says
+    /// why: it would re-key every soft set).
+    static let slideFollowRuleVersion = 1
+
+    /// Each non-legacy rule's code in the slide-follow block. ⚠️ EXPLICIT,
+    /// never a case's position (the `originByte` rule): a new case picks a
+    /// new code here on purpose. The legacy rule has none: it emits nothing.
+    static func slideFollowRuleCode(_ rule: PitchEditSet.SlideFollowRule) -> Int? {
+        switch rule {
+        case .sungAtOpenSide: return nil
+        case .holdAtOpenSide: return 1
+        }
+    }
 
     /// Each origin's byte in the origin block. ⚠️ **EXPLICIT, NEVER A CASE'S
     /// POSITION** (`allCases.firstIndex`): reordering `NoteOrigin`'s cases
@@ -880,6 +909,13 @@ enum PitchEditSetDigest {
         // rule). Gated on `PitchEditSet.usesSoftJoins`, the one predicate, so
         // a legacy set keeps its bytes; an identity set never gets here
         // (`""` above), so a fresh seeded table stays keyless.
+        //
+        // vf-18 (W9-SLFX): the set's SLIDE-FOLLOW RULE, appended after the
+        // per-segment loop and ONLY when it is not the legacy rule (marker,
+        // rule code, version). A legacy set's slot 9 is byte for byte what it
+        // was, so every saved key stays valid; a set that adopts the hold rule
+        // re-keys once. The rule only renders through soft joins, so a set
+        // that does not `usesSoftJoins` needs no key for it.
         if set.usesSoftJoins {
             putBits(transitionSuffixMarker)
             putInt(PitchEditSet.transitionRenderVersion)
@@ -888,6 +924,11 @@ enum PitchEditSetDigest {
             for segment in set.segments {
                 putDouble(segment.transitionOutMs)
                 putDouble(segment.glideFollow)
+            }
+            if let code = Self.slideFollowRuleCode(set.slideFollowRule) {
+                putBits(slideFollowMarker)
+                putInt(code)
+                putInt(slideFollowRuleVersion)
             }
         }
         var hasher = SHA256()

@@ -1233,4 +1233,383 @@ struct InsertSpectrumCoverageTests {
         #expect(engine.insertAnalysis(trackID: trackID, effectID: ninth) == nil)
         #expect(state.armedEffectIDs == Set(effectIDs.prefix(cap)))
     }
+
+    // MARK: - 7. m27-j — the spectrum under a NOTE AUDITION (W8-M27J, 2026-10-07)
+    //
+    // m27-j was filed as "fx_spectrum is dead under note_audition … the tap
+    // appears to need the transport-driven render callback". These legs
+    // MEASURE the mechanism instead. An audition IS fed through the same chain
+    // walk as the compressor's meter (`InstrumentSourceNode.swift` step 10's
+    // `chain.process`, then `EffectChainProcessor.process` runs each unit and
+    // writes its tap last). The two instruments disagree in TIME, not in FEED:
+    // `fx.spectrum` arms and reads in ONE call, a fresh tap holds zero frames,
+    // a lapsed 3 s lease disarms the tap between slow calls, and one drain
+    // analyzes only the newest `InsertSpectrumTap.maxDrainFrames`. The
+    // gain-reduction meter has none of those limits: it is always on and it
+    // holds its peak. Every leg runs the REAL strip (manual-rendering
+    // AVAudioEngine + PlaybackGraph), never an audio device.
+
+    /// Instrument track: test tone (pitch 69 = a 440 Hz pure sine at
+    /// velocity/127 × 0.25 = −12 dBFS) → unity gain (the TAPPED insert) →
+    /// compressor (the METERED insert; threshold −30 dBFS, hard knee, so the
+    /// tone is reduced by roughly 11–14 dB). `scheduledNote` puts the same
+    /// note on the timeline instead, for the transport-path legs.
+    private func m27jTrack(id: UUID, gainID: UUID, compID: UUID,
+                           scheduledNote: Bool) -> Track {
+        let clips = scheduledNote
+            ? [Clip(name: "midi", startBeat: 0, lengthBeats: 8,
+                    notes: [MIDINote(pitch: 69, velocity: 127, startBeat: 0, lengthBeats: 8)])]
+            : []
+        return Track(id: id, name: "Keys", kind: .instrument, clips: clips,
+                     instrument: InstrumentDescriptor(kind: .testTone),
+                     effects: [gainFX(gainID),
+                               EffectDescriptor(id: compID, kind: .compressor,
+                                                compressor: CompressorParams(thresholdDb: -30,
+                                                                             kneeDb: 0))])
+    }
+
+    /// Bands at or below 100 Hz and at or above 4 kHz: each more than two
+    /// octaves from a 440 Hz sine, so a pure tone must leave them far below
+    /// its own band.
+    private static var m27jFarBands: [Int] {
+        Array(0...MasterMixAnalyzer.bandIndex(containing: 100))
+            + Array(MasterMixAnalyzer.bandIndex(containing: 4_000)..<MasterMixAnalyzer.bandCount)
+    }
+
+    @Test("m27-j a NOTE AUDITION on a stopped transport feeds the insert tap: the 440 Hz band rises, far bands stay low, and the compressor's meter agrees on silence and on signal")
+    func m27jAuditionFeedsTheTap() throws {
+        let trackID = UUID()
+        let gainID = UUID()
+        let compID = UUID()
+        let track = m27jTrack(id: trackID, gainID: gainID, compID: compID, scheduledNote: false)
+        let key = InsertAnalysisKey(trackID: trackID, effectID: gainID)
+        // `schedule: false` = the transport has never published a schedule —
+        // the state `note.audition` plays into with the transport stopped.
+        let strips = try Strips(tracks: [track], schedule: false)
+        let renderer = try #require(strips.graph.instrumentRenderer(forTrack: trackID))
+        #expect(renderer.currentSchedule == nil,
+                "a schedule reached the renderer — this is not the stopped-transport audition path")
+        #expect(strips.arm(key))
+        let state = try #require(strips.graph.effectChainState(forTrack: trackID))
+        let tap = try #require(state.analysisTap(forEffect: gainID))
+        let toneBand = MasterMixAnalyzer.bandIndex(containing: 440)
+
+        // 1. SILENCE: both instruments at rest.
+        let quiet = try strips.renderAndPoll(key, quanta: 40)
+        let quietGR = try #require(state.gainReductionDb(forEffect: compID))
+        #expect(quiet.bands.allSatisfy { $0 == Self.floorDB },
+                "the spectrum read above the floor before any note")
+        #expect(quietGR < 0.01, "the compressor reduced gain before any note")
+
+        // 2. SIGNAL: an audition note — no schedule, no transport.
+        #expect(renderer.pushAudition(kind: ScheduledMIDIEvent.noteOn, pitch: 69, velocity: 127))
+        let sounding = try strips.renderAndPoll(key, quanta: 60)
+        let soundingGR = try #require(state.gainReductionDb(forEffect: compID))
+        #expect(tap.framesWritten == UInt64(100 * Self.quantum),
+                "the audition's quanta did not all reach the tap")
+        #expect(tap.droppedFrames == 0, "the drain fell behind")
+        let peak = try #require(sounding.bands.max())
+        #expect(sounding.bands.firstIndex(of: peak) == toneBand,
+                "the audition's loudest band is not the 440 Hz band")
+        #expect(peak > Self.floorDB + 20, "the audition's band sat on the floor")
+        for band in Self.m27jFarBands {
+            #expect(sounding.bands[band] <= peak - 40,
+                    "band \(band) is within 40 dB of a pure 440 Hz tone: \(sounding.bands[band]) dB vs \(peak) dB")
+        }
+        #expect(soundingGR > 3, "the compressor's meter did not see the audition")
+
+        // 3. SILENCE AGAIN: note off, then 2 s — both back at rest.
+        #expect(renderer.pushAudition(kind: ScheduledMIDIEvent.noteOff, pitch: 69, velocity: 0))
+        let after = try strips.renderAndPoll(key, quanta: 188)
+        let afterGR = try #require(state.gainReductionDb(forEffect: compID))
+        #expect(after.bands.allSatisfy { $0 <= Self.floorDB + 1 },
+                "the spectrum did not return to the floor 2 s after the note")
+        #expect(afterGR < 0.1, "the compressor's meter did not return to rest 2 s after the note")
+        #expect(tap.droppedFrames == 0)
+        print("[measured] m27-j audition: silence peak \(quiet.bands.max() ?? .nan) dB / GR \(quietGR) dB; "
+              + "sounding 440 band \(peak) dB (band \(toneBand)), far max "
+              + "\(Self.m27jFarBands.map { sounding.bands[$0] }.max() ?? .nan) dB / GR \(soundingGR) dB; "
+              + "after peak \(after.bands.max() ?? .nan) dB / GR \(afterGR) dB; "
+              + "framesWritten \(tap.framesWritten), dropped \(tap.droppedFrames)")
+    }
+
+    @Test("m27-j a FRESH arm reads the floor while the note is sounding, on the audition path AND the transport path alike; a renewal keeps the tap, a lapse (disarm then re-arm) starts over")
+    func m27jFreshArmReadsTheFloorOnBothPaths() throws {
+        let toneBand = MasterMixAnalyzer.bandIndex(containing: 440)
+        for scheduled in [false, true] {
+            let label = scheduled ? "transport" : "audition"
+            let trackID = UUID()
+            let gainID = UUID()
+            let compID = UUID()
+            let track = m27jTrack(id: trackID, gainID: gainID, compID: compID,
+                                  scheduledNote: scheduled)
+            let key = InsertAnalysisKey(trackID: trackID, effectID: gainID)
+            let strips = try Strips(tracks: [track], schedule: scheduled)
+            let state = try #require(strips.graph.effectChainState(forTrack: trackID))
+            if !scheduled {
+                let renderer = try #require(strips.graph.instrumentRenderer(forTrack: trackID))
+                #expect(renderer.pushAudition(kind: ScheduledMIDIEvent.noteOn, pitch: 69, velocity: 127))
+            }
+            // The note sounds with NOTHING armed: the agent started the note,
+            // THEN asked for the spectrum.
+            try strips.pull(quanta: 20)
+            let gr = try #require(state.gainReductionDb(forEffect: compID))
+            #expect(gr > 3, "\(label): the compressor never saw the note — the premise is broken")
+
+            // `fx.spectrum` arm:true = arm, then read, in ONE call.
+            #expect(strips.arm(key))
+            let tap = try #require(state.analysisTap(forEffect: gainID))
+            let first = try #require(strips.graph.insertAnalysis(forInsert: key))
+            #expect(tap.framesWritten == 0, "\(label): a fresh tap already held frames")
+            #expect(first.bands.allSatisfy { $0 == Self.floorDB },
+                    "\(label): a fresh arm read above the floor with zero frames analyzed")
+
+            // A few quanta later the SAME tap reads the note.
+            try strips.pull(quanta: 8)
+            let second = try #require(strips.graph.insertAnalysis(forInsert: key))
+            let secondPeak = try #require(second.bands.max())
+            #expect(second.bands.firstIndex(of: secondPeak) == toneBand,
+                    "\(label): the armed tap's loudest band is not the 440 Hz band")
+            #expect(secondPeak > Self.floorDB + 20, "\(label): the armed tap never left the floor")
+
+            // A RENEWAL (a second arm:true inside the lease) keeps the tap and
+            // its reading.
+            #expect(strips.arm(key))
+            #expect(state.analysisTap(forEffect: gainID) === tap,
+                    "\(label): renewing the arm replaced the tap")
+            let renewed = try #require(strips.graph.insertAnalysis(forInsert: key))
+            #expect(renewed.bands[toneBand] > Self.floorDB + 20,
+                    "\(label): renewing the arm dropped the reading to the floor")
+
+            // A LAPSE (the 3 s lease swept between two slow calls): the disarm
+            // in production order (`AudioEngine.setInsertAnalysisArmed`, armed:
+            // false — intent, mirror, graph), then the next call's arm.
+            strips.graph.analysisArms = []
+            _ = strips.graph.setAnalysisArmed(false, forInsert: key)
+            #expect(strips.arm(key))
+            let fresh = try #require(state.analysisTap(forEffect: gainID))
+            #expect(fresh !== tap, "\(label): a lapsed arm reused the old tap")
+            let lapsed = try #require(strips.graph.insertAnalysis(forInsert: key))
+            let grAtLapse = try #require(state.gainReductionDb(forEffect: compID))
+            #expect(fresh.framesWritten == 0)
+            #expect(lapsed.bands.allSatisfy { $0 == Self.floorDB },
+                    "\(label): the re-armed tap read above the floor with zero frames analyzed")
+            #expect(grAtLapse > 3,
+                    "\(label): the compressor's meter stopped while the note still sounds")
+            print("[measured] m27-j fresh arm (\(label)): GR before arm \(gr) dB; first read peak "
+                  + "\(first.bands.max() ?? .nan) dB; +8 quanta 440 band \(secondPeak) dB; renewed "
+                  + "\(renewed.bands[toneBand]) dB; lapsed+re-armed peak \(lapsed.bands.max() ?? .nan) dB "
+                  + "with GR \(grAtLapse) dB")
+        }
+    }
+
+    @Test("m27-j a SLOW reader sees only the newest ~85 ms: after the note ends its spectrum is the floor while the compressor's held meter still reads, and a UI-rate reader of the same audio still sees the decaying tone")
+    func m27jSlowReaderSeesOnlyTheNewestWindow() throws {
+        let toneBand = MasterMixAnalyzer.bandIndex(containing: 440)
+        let noteQuanta = 48
+        let tailQuanta = 24
+        let totalFrames = (noteQuanta + tailQuanta) * Self.quantum
+        var slowGR = -1.0
+        var uiGR = -2.0
+        for uiRate in [false, true] {
+            let label = uiRate ? "UI-rate reader" : "slow reader"
+            let trackID = UUID()
+            let gainID = UUID()
+            let compID = UUID()
+            let track = m27jTrack(id: trackID, gainID: gainID, compID: compID, scheduledNote: false)
+            let key = InsertAnalysisKey(trackID: trackID, effectID: gainID)
+            let strips = try Strips(tracks: [track], schedule: false)
+            let renderer = try #require(strips.graph.instrumentRenderer(forTrack: trackID))
+            #expect(strips.arm(key))
+            let state = try #require(strips.graph.effectChainState(forTrack: trackID))
+            let tap = try #require(state.analysisTap(forEffect: gainID))
+
+            // Armed BEFORE the note; the slow reader then never drains while
+            // the note sounds (an agent between two tool calls).
+            #expect(renderer.pushAudition(kind: ScheduledMIDIEvent.noteOn, pitch: 69, velocity: 127))
+            if uiRate {
+                _ = try strips.renderAndPoll(key, quanta: noteQuanta)
+            } else {
+                try strips.pull(quanta: noteQuanta)
+            }
+            #expect(renderer.pushAudition(kind: ScheduledMIDIEvent.noteOff, pitch: 69, velocity: 0))
+            if uiRate {
+                _ = try strips.renderAndPoll(key, quanta: tailQuanta)
+            } else {
+                try strips.pull(quanta: tailQuanta)
+            }
+            let reading = try #require(strips.graph.insertAnalysis(forInsert: key))
+            let gr = try #require(state.gainReductionDb(forEffect: compID))
+            #expect(tap.framesWritten == UInt64(totalFrames), "\(label): the tap missed quanta")
+            #expect(gr > 3, "\(label): the compressor's held meter already released")
+            if uiRate {
+                uiGR = gr
+                #expect(tap.droppedFrames == 0, "\(label): the drain fell behind")
+                #expect(reading.bands[toneBand] > Self.floorDB + 20,
+                        "\(label): a UI-rate reader lost the note's decaying tail")
+            } else {
+                slowGR = gr
+                #expect(tap.droppedFrames
+                        == UInt64(totalFrames - InsertSpectrumTap.maxDrainFrames),
+                        "\(label): the drain did not keep exactly the newest window")
+                #expect(reading.bands.allSatisfy { $0 == Self.floorDB },
+                        "\(label): the newest window held more than the silence after the note")
+            }
+            print("[measured] m27-j \(label): 440 band \(reading.bands[toneBand]) dB, peak "
+                  + "\(reading.bands.max() ?? .nan) dB, dropped \(tap.droppedFrames) of "
+                  + "\(tap.framesWritten), GR \(gr) dB")
+        }
+        // The read cadence moves the SPECTRUM, never the METER: both strips
+        // rendered the same audio, and the tap only copies.
+        #expect(slowGR == uiGR, "the read cadence changed the compressor's meter")
+    }
+
+    // MARK: - 8. m27-j build: the ONE-CALL audition probe on the REAL graph (W8-M27J wave 2)
+    //
+    // `fx.spectrum`'s `audition` parameter runs `AuditionSpectrumProbe.hold`:
+    // arm, start the note, then read every 20 ms and hold the loudest value
+    // each band reaches. These legs run THAT loop against a real strip. The
+    // `wait` closure renders the quanta that would have played during each
+    // pause (2 × 512 = 1,024 frames ≈ 21 ms per 20 ms poll) and, like
+    // `AuditionController`'s release task, ends the note once `durationMs` of
+    // frames have rendered — unless `release: false` holds it past the probe.
+
+    private struct M27jProbeRun {
+        let held: SpectrumPeakHold
+        let reads: [MasterAnalysisSnapshot]
+        let tap: InsertSpectrumTap
+        let toneBand: Int
+    }
+
+    private func m27jProbe(durationMs: Int, release: Bool) async throws -> M27jProbeRun {
+        let trackID = UUID()
+        let gainID = UUID()
+        let compID = UUID()
+        let track = m27jTrack(id: trackID, gainID: gainID, compID: compID, scheduledNote: false)
+        let key = InsertAnalysisKey(trackID: trackID, effectID: gainID)
+        let strips = try Strips(tracks: [track], schedule: false)
+        let renderer = try #require(strips.graph.instrumentRenderer(forTrack: trackID))
+        // `fx.spectrum` arms BEFORE it starts the note.
+        #expect(strips.arm(key))
+        let state = try #require(strips.graph.effectChainState(forTrack: trackID))
+        let tap = try #require(state.analysisTap(forEffect: gainID))
+        let noteOffFrame = durationMs * Int(Self.rate) / 1_000
+        var rendered = 0
+        var sounding = false
+        var reads: [MasterAnalysisSnapshot] = []
+        let held = try await AuditionSpectrumProbe.hold(
+            durationMs: durationMs,
+            start: {
+                #expect(renderer.pushAudition(kind: ScheduledMIDIEvent.noteOn, pitch: 69, velocity: 127))
+                sounding = true
+            },
+            read: {
+                let reading = strips.graph.insertAnalysis(forInsert: key)
+                if let reading { reads.append(reading) }
+                return reading
+            },
+            wait: { _ in
+                do { try strips.pull(quanta: 2) } catch { Issue.record(error) }
+                rendered += 2 * Self.quantum
+                if release, sounding, rendered >= noteOffFrame {
+                    #expect(renderer.pushAudition(kind: ScheduledMIDIEvent.noteOff, pitch: 69, velocity: 0))
+                    sounding = false
+                }
+            },
+            keepAlive: {})
+        return M27jProbeRun(held: held, reads: reads, tap: tap,
+                            toneBand: MasterMixAnalyzer.bandIndex(containing: 440))
+    }
+
+    @Test("m27-j probe, note HELD through the window: one call reads the 440 Hz band at the steady level and every far band stays near the floor")
+    func m27jProbeHeldNoteReadsTheTone() async throws {
+        let run = try await m27jProbe(durationMs: 500, release: false)
+        let held = try #require(run.held.snapshot)
+        let peak = try #require(held.bands.max())
+        #expect(run.held.reads == AuditionSpectrumProbe.pollCount(durationMs: 500))
+        #expect(held.bands.firstIndex(of: peak) == run.toneBand, "the held spectrum's loudest band is not 440 Hz")
+        #expect(abs(peak - (-16.3)) <= 1.5, "the 440 Hz band held \(peak) dB, not the steady ~-16.3 dB")
+        for band in Self.m27jFarBands {
+            #expect(held.bands[band] <= -75,
+                    "far band \(band) held \(held.bands[band]) dB while a pure 440 Hz tone sounded")
+        }
+        #expect(run.tap.droppedFrames == 0, "a gap: the reads fell behind the tap")
+        print("[measured] m27-j probe HELD: reads \(run.held.reads), 440 band \(peak) dB, far max "
+              + "\(Self.m27jFarBands.map { held.bands[$0] }.max() ?? .nan) dB, analyzed "
+              + "\(run.tap.framesAnalyzed) of \(run.tap.framesWritten), dropped \(run.tap.droppedFrames)")
+    }
+
+    @Test("m27-j probe, note RELEASED at durationMs like production: the 440 Hz band holds its steady level, far bands stay well below it, and every rendered frame was analyzed")
+    func m27jProbeReleasedNoteReadsTheTone() async throws {
+        let run = try await m27jProbe(durationMs: 500, release: true)
+        let held = try #require(run.held.snapshot)
+        let peak = try #require(held.bands.max())
+        #expect(held.bands.firstIndex(of: peak) == run.toneBand)
+        #expect(abs(peak - (-16.3)) <= 1.5, "the 440 Hz band held \(peak) dB, not the steady ~-16.3 dB")
+        // The test tone stops HARD at note-off (`TestToneInstrument`), a click
+        // that reaches every band; the hold keeps reading 150 ms past the
+        // note, so far bands may rise — but nowhere near the tone itself.
+        for band in Self.m27jFarBands {
+            #expect(held.bands[band] <= peak - 20,
+                    "far band \(band) held \(held.bands[band]) dB, within 20 dB of the tone (\(peak) dB)")
+        }
+        #expect(run.tap.droppedFrames == 0, "a gap: the reads fell behind the tap")
+        #expect(run.tap.framesAnalyzed == run.tap.framesWritten,
+                "frames reached the tap but never the analyzer")
+        print("[measured] m27-j probe RELEASED: reads \(run.held.reads), 440 band \(peak) dB, far bands "
+              + "\(Self.m27jFarBands.map { held.bands[$0] }) dB, analyzed \(run.tap.framesAnalyzed) of "
+              + "\(run.tap.framesWritten)")
+    }
+
+    @Test("m27-j probe, a SHORT note (40 ms): the hold keeps its loudest moment — above the floor, equal to the max of every read, and well above the decayed last read")
+    func m27jProbeShortNoteIsHeld() async throws {
+        let run = try await m27jProbe(durationMs: 40, release: true)
+        let held = try #require(run.held.snapshot)
+        let last = try #require(run.reads.last)
+        let peak = try #require(held.bands.max())
+        let toneBand = run.toneBand
+        let maxOverReads = run.reads.map { $0.bands[toneBand] }.max() ?? MasterAnalysisSnapshot.floorDB
+        #expect(run.reads.count == AuditionSpectrumProbe.pollCount(durationMs: 40))
+        #expect(held.bands.firstIndex(of: peak) == toneBand, "a 40 ms 440 Hz note's loudest held band is not 440 Hz")
+        #expect(held.bands[toneBand] >= -26, "a 40 ms note was held at only \(held.bands[toneBand]) dB")
+        #expect(held.bands[toneBand] == maxOverReads, "the hold is not the maximum over the reads")
+        #expect(held.bands[toneBand] >= last.bands[toneBand] + 6,
+                "the hold (\(held.bands[toneBand]) dB) is not well above the decayed last read (\(last.bands[toneBand]) dB)")
+        print("[measured] m27-j probe SHORT: reads \(run.reads.count), held 440 band \(held.bands[toneBand]) dB, "
+              + "per-read 440 band \(run.reads.map { $0.bands[toneBand] }) dB")
+    }
+
+    @Test("m27-j coverage: a real engine reports zero analyzed and zero dropped frames on a fresh arm and nil when unarmed; the tap's counters add up after a drop")
+    func m27jCoverageCounters() throws {
+        let trackID = UUID()
+        let gainID = UUID()
+        let other = UUID()
+        let track = Track(id: trackID, name: "SRC", kind: .audio,
+                          effects: [gainFX(gainID), gainFX(other)])
+        let engine = AudioEngine()
+        engine.tracksDidChange([track])
+        #expect(engine.insertAnalysisCoverage(trackID: trackID, effectID: gainID) == nil,
+                "an unarmed insert reported coverage")
+        #expect(engine.setInsertAnalysisArmed(trackID: trackID, effectID: gainID, armed: true))
+        #expect(engine.insertAnalysisCoverage(trackID: trackID, effectID: gainID)
+                == InsertAnalysisCoverage(framesAnalyzed: 0, framesDropped: 0))
+        #expect(engine.insertAnalysisCoverage(trackID: trackID, effectID: other) == nil)
+        #expect(engine.insertAnalysisCoverage(trackID: nil, effectID: gainID) == nil,
+                "the master chain has no such insert")
+
+        // Tap level: 2,048 frames drained → 2,048 analyzed; then 20,480
+        // undrained → one drain keeps the newest 4,096 and drops the rest.
+        let tap = InsertSpectrumTap(sampleRate: Self.rate)
+        let scratch = Scratch(capacity: Self.quantum)
+        scratch.stage(Self.tone(hz: 440, frames: Self.quantum), offset: 0, count: Self.quantum)
+        for _ in 0..<4 { tap.write(buffers: scratch.list, frameCount: Self.quantum) }
+        _ = tap.drainAndSnapshot()
+        #expect(tap.framesAnalyzed == 2_048)
+        #expect(tap.droppedFrames == 0)
+        for _ in 0..<40 { tap.write(buffers: scratch.list, frameCount: Self.quantum) }
+        _ = tap.drainAndSnapshot()
+        #expect(tap.framesAnalyzed == 2_048 + UInt64(InsertSpectrumTap.maxDrainFrames))
+        #expect(tap.droppedFrames == UInt64(40 * Self.quantum - InsertSpectrumTap.maxDrainFrames))
+        #expect(tap.framesAnalyzed + tap.droppedFrames == tap.framesWritten)
+    }
 }

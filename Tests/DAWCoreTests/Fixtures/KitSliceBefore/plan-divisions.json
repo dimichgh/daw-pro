@@ -1,0 +1,226 @@
+{
+  "headSeconds" : 0.25,
+  "midiClipLengthBeats" : 4,
+  "midiClipStartBeat" : 16,
+  "notes" : [
+    {
+      "lengthBeats" : 0.5,
+      "pitch" : 36,
+      "startBeat" : 0,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 0.5,
+      "pitch" : 37,
+      "startBeat" : 0.5,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 0.5,
+      "pitch" : 38,
+      "startBeat" : 1,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 0.5,
+      "pitch" : 39,
+      "startBeat" : 1.5,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 0.5,
+      "pitch" : 40,
+      "startBeat" : 2,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 0.5,
+      "pitch" : 41,
+      "startBeat" : 2.5,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 0.5,
+      "pitch" : 42,
+      "startBeat" : 3,
+      "velocity" : 127
+    },
+    {
+      "lengthBeats" : 0.5,
+      "pitch" : 43,
+      "startBeat" : 3.5,
+      "velocity" : 127
+    }
+  ],
+  "slices" : [
+    {
+      "beat" : 0,
+      "endFrame" : 12000,
+      "index" : 0,
+      "pitch" : 36,
+      "sourceSeconds" : 0,
+      "startFrame" : 0
+    },
+    {
+      "beat" : 0.5,
+      "endFrame" : 24000,
+      "index" : 1,
+      "pitch" : 37,
+      "residualAmplitude" : 0,
+      "snapOffsetFrames" : 0,
+      "sourceSeconds" : 0.25,
+      "startFrame" : 12000
+    },
+    {
+      "beat" : 1,
+      "endFrame" : 36000,
+      "index" : 2,
+      "pitch" : 38,
+      "residualAmplitude" : 0,
+      "snapOffsetFrames" : 0,
+      "sourceSeconds" : 0.5,
+      "startFrame" : 24000
+    },
+    {
+      "beat" : 1.5,
+      "endFrame" : 48000,
+      "index" : 3,
+      "pitch" : 39,
+      "residualAmplitude" : 0,
+      "snapOffsetFrames" : 0,
+      "sourceSeconds" : 0.75,
+      "startFrame" : 36000
+    },
+    {
+      "beat" : 2,
+      "endFrame" : 60000,
+      "index" : 4,
+      "pitch" : 40,
+      "residualAmplitude" : 0,
+      "snapOffsetFrames" : 0,
+      "sourceSeconds" : 1,
+      "startFrame" : 48000
+    },
+    {
+      "beat" : 2.5,
+      "endFrame" : 72000,
+      "index" : 5,
+      "pitch" : 41,
+      "residualAmplitude" : 0,
+      "snapOffsetFrames" : 0,
+      "sourceSeconds" : 1.25,
+      "startFrame" : 60000
+    },
+    {
+      "beat" : 3,
+      "endFrame" : 84000,
+      "index" : 6,
+      "pitch" : 42,
+      "residualAmplitude" : 0,
+      "snapOffsetFrames" : 0,
+      "sourceSeconds" : 1.5,
+      "startFrame" : 72000
+    },
+    {
+      "beat" : 3.5,
+      "index" : 7,
+      "pitch" : 43,
+      "residualAmplitude" : 0,
+      "snapOffsetFrames" : 0,
+      "sourceSeconds" : 1.75,
+      "startFrame" : 84000
+    }
+  ],
+  "warnings" : [
+
+  ],
+  "zones" : [
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 12000,
+      "gain" : 1,
+      "maxPitch" : 36,
+      "minPitch" : 36,
+      "release" : 0.01,
+      "rootPitch" : 36,
+      "startFrame" : 0
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 24000,
+      "gain" : 1,
+      "maxPitch" : 37,
+      "minPitch" : 37,
+      "release" : 0.01,
+      "rootPitch" : 37,
+      "startFrame" : 12000
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 36000,
+      "gain" : 1,
+      "maxPitch" : 38,
+      "minPitch" : 38,
+      "release" : 0.01,
+      "rootPitch" : 38,
+      "startFrame" : 24000
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 48000,
+      "gain" : 1,
+      "maxPitch" : 39,
+      "minPitch" : 39,
+      "release" : 0.01,
+      "rootPitch" : 39,
+      "startFrame" : 36000
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 60000,
+      "gain" : 1,
+      "maxPitch" : 40,
+      "minPitch" : 40,
+      "release" : 0.01,
+      "rootPitch" : 40,
+      "startFrame" : 48000
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 72000,
+      "gain" : 1,
+      "maxPitch" : 41,
+      "minPitch" : 41,
+      "release" : 0.01,
+      "rootPitch" : 41,
+      "startFrame" : 60000
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "endFrame" : 84000,
+      "gain" : 1,
+      "maxPitch" : 42,
+      "minPitch" : 42,
+      "release" : 0.01,
+      "rootPitch" : 42,
+      "startFrame" : 72000
+    },
+    {
+      "attack" : 0,
+      "audioFileURL" : "file:///tmp/w46-pin/break.wav",
+      "gain" : 1,
+      "maxPitch" : 43,
+      "minPitch" : 43,
+      "release" : 0.01,
+      "rootPitch" : 43,
+      "startFrame" : 84000
+    }
+  ]
+}

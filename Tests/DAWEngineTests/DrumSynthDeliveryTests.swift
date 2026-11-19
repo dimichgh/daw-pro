@@ -208,7 +208,7 @@ struct DrumSynthDeliveryTests {
     /// ⭐⭐ THE HIGHEST-VALUE TEST IN THE PLAN: every row of the table is driven
     /// from the TABLE, never from a hand-written list. A parameter that exists
     /// in the schema with no render-path consumer — the m39-e inert-LFO shape,
-    /// generalised to all 75 at once — reddens here.
+    /// generalised to all 77 at once — reddens here.
     ///
     /// ⚠️ It asserts each parameter CHANGES THE RENDER at the ends of its own
     /// range. That is a weaker claim than the per-voice physics rows above and
@@ -216,7 +216,7 @@ struct DrumSynthDeliveryTests {
     /// inert), and `DrumSynthTests`' job is CORRECTNESS (each axis does the
     /// right thing). Distinctness alone proves nothing about direction, which
     /// is exactly why both files exist.
-    @Test("Every one of the 75 parameters reaches the render path")
+    @Test("Every one of the 77 parameters reaches the render path")
     func everyParameterHasAConsumer() throws {
         let frames = Int(1.2 * Self.sampleRate)
         var inert: [String] = []
@@ -224,7 +224,12 @@ struct DrumSynthDeliveryTests {
         for spec in DrumKitParams.paramSpecs {
             // `kit.*` parameters apply to every voice; a voice parameter is
             // heard on its own voice. Trigger a hit that can hear it.
-            let voice = spec.voice ?? .snare
+            // W8-HAT: a level TRIM reaches only its own voices, so it is heard
+            // on the first voice `levelTrimLeaf` names (on the snare it would
+            // read as INERT, which is exactly the false report this avoids).
+            let voice = spec.voice
+                ?? DrumVoice.allCases.first { DrumKitParams.levelTrimLeaf(for: $0) == spec.leaf }
+                ?? .snare
             // ⚠️ VELOCITY 110 IS A FIXTURE DECISION, NOT A DEFAULT. It sits
             // ABOVE the default `kit.accentThreshold` of 100, so an accent
             // actually fires — without which `kit.accentDepth` is multiplied
@@ -367,5 +372,50 @@ struct DrumSynthDeliveryTests {
         drums.publishModulation(nil)
         let withNil = try render(drums, events: events, frames: frames)
         #expect(plain == withNil)
+    }
+
+    // MARK: - W8-HAT: a route on a level trim
+
+    /// A modulation route on `kit.hatsLevelDb` must reach the hats — through
+    /// the spec `code` and the render's `specRow`, whose stride had to grow for
+    /// the two appended leaves — and must NOT touch a voice the trim does not
+    /// reach. Physics, not distinctness: the hats get LOUDER by a margin, the
+    /// kick stays bit-identical.
+    @Test("W8-HAT: a route on kit.hatsLevelDb moves the hats and nothing else")
+    func levelTrimRouteIsDelivered() throws {
+        let frames = Int(0.6 * Self.sampleRate)
+        let source = ModulationSource(kind: .macro,
+            params: .macro(MacroSourceParams(value: 1.0)))
+        let route = ModulationRoute(
+            sourceID: source.id,
+            target: .instrumentParam(paramName: "kit.hatsLevelDb"), depth: 1.0)
+        let snapshot = try #require(ModulationSnapshotBuilder.build(
+            strip: ModulationSnapshotBuilder.Strip(
+                sources: [source], routes: [route],
+                instrument: InstrumentDescriptor(kind: .drumSynth),
+                isInstrumentTrack: true),
+            generation: 1, timelineID: 1, sampleRate: Self.sampleRate,
+            originSample: 0, positionValid: true))
+
+        func pair(_ voice: DrumVoice) throws -> (plain: [Float], routed: [Float]) {
+            let events = [hit(voice, at: 0, id: 1)]
+            let plain = try render(makeDrums(), events: events, frames: frames)
+            let drums = makeDrums()
+            drums.publishModulation(snapshot)
+            return (plain, try render(drums, events: events, frames: frames))
+        }
+        let hat = try pair(.closedHat)
+        let level = { (x: [Float]) in 20 * log10(max(self.rms(x[...]), 1e-12)) }
+        let rise = level(hat.routed) - level(hat.plain)
+        #expect(rise > 6, Comment(rawValue: "a full-depth route on the hats trim raised the "
+            + "closed hat by only \(rise) dB"))
+        // A Bool first: on failure `#expect(a == b)` over two long sample
+        // arrays renders a collection diff that runs for minutes.
+        let kick = try pair(.kick)
+        let kickSame = kick.routed == kick.plain
+        #expect(kickSame, "a hats-trim route changed the kick")
+        let cymbal = try pair(.cymbal)
+        let cymbalSame = cymbal.routed == cymbal.plain
+        #expect(cymbalSame, "a hats-trim route changed the cymbal")
     }
 }

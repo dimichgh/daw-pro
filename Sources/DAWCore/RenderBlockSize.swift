@@ -93,6 +93,21 @@ public enum RenderBlockSize {
     /// Frames per `renderOffline` pull. See the type doc for the measurement.
     public static let offlineFrames = 512
 
+    /// m39-d CR-1 (`docs/design/2026-10-07-effect-control-rate.md` §5.1): the
+    /// EFFECT CONTROL CELL. Built-in effect parameters (automation lanes and
+    /// modulation routes) are evaluated and stored once per cell, at the cell
+    /// line, with cells counted from the ROLL start (`r = 0` at the play or
+    /// render start) — in every path, live and offline, at any device buffer.
+    /// A live render call that contains a cell line is split there; one that
+    /// does not tells the automated effects to hold.
+    ///
+    /// ⛔ DEFINED AS `offlineFrames`, NOT AS A SECOND LITERAL. A production
+    /// bounce pulls `offlineFrames` blocks from `r = 0`, so its blocks ARE the
+    /// cells and it never splits or holds: that identity is why no saved song's
+    /// bytes moved when the grid landed (G1). Change one and the other moves
+    /// with it; `ControlGridTests` pins the equality.
+    public static let controlFrames = offlineFrames
+
     /// The rate at which a hosted AU therefore samples its MIDI input during an
     /// offline bounce, in Hz, at `sampleRate`. This is the number every
     /// controller-lane capability warning is computed from.

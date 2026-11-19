@@ -186,6 +186,20 @@ final class GateEffect: KeyableEffectRendering, GainReductionReporting,
         deriveRenderParams(overlay.effective)
     }
 
+    /// m39-d CR-1 (`docs/design/2026-10-07-effect-control-rate.md` §5.3): the
+    /// automated values stored at this control cell's entry still stand. Adopt
+    /// FIRST, so a knob publish waiting in the slot is seen now, as a store
+    /// would see it (then `overlay.hold()` answers false and the renderer
+    /// re-stores). Render thread; no allocation, no lock.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): deliberately a no-op — class (c): the thresholds step at the
+    /// store; attack/release ramp per sample.
+    func beginControlCell(frames: Int) {}
+
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
         process(buffers: buffers, key: nil, frameCount: frameCount)
     }

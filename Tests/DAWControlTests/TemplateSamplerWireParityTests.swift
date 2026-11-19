@@ -80,6 +80,7 @@ enum TPL5BSamplerParity {
         "endFrame": "500", "attack": "1", "decay": "8", "sustain": "0", "release": "0.001",
         "loopMode": "\"sustain\"", "loopStart": "5", "loopEnd": "900",
         "crossfade": #"{"controller": 11, "ccInLo": 20}"#, "reverse": "true", "chokeGroup": "0",
+        "drumRole": "\"openHat\"",
     ]
 
     /// A valid example for EVERY global key but `zones`.
@@ -90,7 +91,7 @@ enum TPL5BSamplerParity {
         "pedalHoldLimit": "1", "glideTime": "0.5", "glideMode": "\"constantTime\"",
     ]
 
-    static let everyZoneField = #"{"path": "$A", "rootPitch": 48, "minPitch": 36, "maxPitch": 72, "gain": 1.5, "minVelocity": 10, "maxVelocity": 100, "group": 2, "seqLength": 3, "seqPosition": 2, "randMin": 0.25, "randMax": 0.75, "tuneCents": -35.5, "pan": 0, "ampVelTrack": 0.6, "oneShot": true, "startFrame": 100, "endFrame": 40000, "attack": 0.02, "decay": 0.3, "sustain": 0.7, "release": 0.9, "loopMode": "continuous", "loopStart": 2000, "loopEnd": 30000, "crossfade": {"controller": 1, "ccInLo": 0, "ccInHi": 40, "ccOutLo": 80, "ccOutHi": 127, "velInLo": 1, "velInHi": 30, "velOutLo": 90, "velOutHi": 126}, "reverse": false, "chokeGroup": 63}"#
+    static let everyZoneField = #"{"path": "$A", "rootPitch": 48, "minPitch": 36, "maxPitch": 72, "gain": 1.5, "minVelocity": 10, "maxVelocity": 100, "group": 2, "seqLength": 3, "seqPosition": 2, "randMin": 0.25, "randMax": 0.75, "tuneCents": -35.5, "pan": 0, "ampVelTrack": 0.6, "oneShot": true, "startFrame": 100, "endFrame": 40000, "attack": 0.02, "decay": 0.3, "sustain": 0.7, "release": 0.9, "loopMode": "continuous", "loopStart": 2000, "loopEnd": 30000, "crossfade": {"controller": 1, "ccInLo": 0, "ccInHi": 40, "ccOutLo": 80, "ccOutHi": 127, "velInLo": 1, "velInHi": 30, "velOutLo": 90, "velOutHi": 126}, "reverse": false, "chokeGroup": 63, "drumRole": "kick"}"#
 
     static func zone(_ fields: String) -> String { #"{"zones": [{"path": "$A", "# + fields + "}]}" }
 

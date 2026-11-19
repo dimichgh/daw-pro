@@ -291,10 +291,16 @@ extension ProjectStore {
         // STEM class (m13-d): dry by contract — never mastered, never
         // master-lane-faded (m15-c). A converted vocal must not arrive with the
         // master chain baked into it.
+        // W9-PFRT P2: the pan-carrying seam with its inputs stated, for the
+        // AI-fix bounce's reason (`fixClipRegion`): a centred synthetic track
+        // with no modulation, so `.balance` and the constant meter are exactly
+        // what the rule-less call it replaces rendered.
         let rendered = try await engine.renderOffline(
             tracks: [Track(name: "Voice Convert Source", kind: .audio, clips: [dry])],
-            tempoMap: tempoMap, masterVolume: 1,
+            tempoMap: tempoMap, meterMap: MeterMap(constant: TimeSignature()), panLaw: .balance,
+            masterVolume: 1,
             masterEffects: [], masterAutomation: [],
+            masterModulationSources: [], masterModulationRoutes: [],
             fromBeat: clip.startBeat, durationSeconds: seconds,
             forcedCompensationTargets: nil)
         let url = Self.conversionExtractionDestination()

@@ -257,7 +257,7 @@ let package = Package(
         .testTarget(name: "DAWEngineTests", dependencies: ["DAWEngine", "DAWCore", "DAWAppKit"],
                     resources: [.copy("Fixtures")]),
         .testTarget(name: "DAWAppKitTests", dependencies: ["DAWAppKit", "DAWCore", "AIServices"]),
-        .testTarget(name: "AIServicesTests", dependencies: ["AIServices"]),
+        .testTarget(name: "AIServicesTests", dependencies: ["AIServices", "DAWCore"]),
     ],
     // For the CSignalsmithStretch C++ TU; package-wide, but inert for the C
     // and Swift targets (they have no C++ sources).

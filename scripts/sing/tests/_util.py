@@ -5,13 +5,15 @@ Two groups of tests:
     run.sh, install.sh against the fixture mirror, lock and pins;
   * venv tests (test_venv_*.py) need the singing runtime's packages (g2p_en, numpy, scipy, pyloudnorm). They skip
     when those are missing - unless SING_TESTS_REQUIRE_VENV=1, which turns every such skip into a FAILURE.
-Likewise SING_TESTS_REQUIRE_MACHINE=1 turns a skip for a missing machine input (the spike's CPython and upstream
-files the fixture mirror is built from, ffmpeg) into a failure. tests/run_all.sh sets both, one per pass, so a gate
-can never pass by skipping.
+Likewise SING_TESTS_REQUIRE_MACHINE=1 turns a skip for a missing machine input (the installed runtime's CPython,
+uv and upstream files the fixture mirror is built from, ffmpeg) into a failure. tests/run_all.sh sets both, one per
+pass, so a gate can never pass by skipping.
 
+Machine inputs come from the INSTALLED singing runtime (RUNTIME: ~/Library/Application Support/DAWPro/SingingEngine,
+or SING_TEST_RUNTIME), only ever READ; never from the spike folder, which is being deleted (W8-SFIX, 2026-10-06).
 Environment the venv tests read: NLTK_DATA (g2p_en's data), SING_TEST_UPSTREAM (a SoulX-Singer checkout, for
-phone_set.json). SING_TEST_TMP picks where temp folders go (default: the system temp); every temp folder this
-suite makes has a SPACE in its name, like "Application Support".
+phone_set.json; default <RUNTIME>/upstream). SING_TEST_TMP picks where temp folders go (default: the system temp);
+every temp folder this suite makes has a SPACE in its name, like "Application Support".
 """
 import array
 import contextlib
@@ -32,8 +34,8 @@ SING = os.path.dirname(TESTS)
 if SING not in sys.path:
     sys.path.insert(0, SING)
 FIXTURES = os.path.join(TESTS, "fixtures")
-SPIKE = os.path.expanduser("~/DAWPro-spikes/sing-soulx")
-UPSTREAM = os.environ.get("SING_TEST_UPSTREAM") or os.path.join(SPIKE, "src", "SoulX-Singer")
+RUNTIME = os.environ.get("SING_TEST_RUNTIME") or os.path.expanduser("~/Library/Application Support/DAWPro/SingingEngine")
+UPSTREAM = os.environ.get("SING_TEST_UPSTREAM") or os.path.join(RUNTIME, "upstream")
 REQUIRE_VENV = os.environ.get("SING_TESTS_REQUIRE_VENV") == "1"
 REQUIRE_MACHINE = os.environ.get("SING_TESTS_REQUIRE_MACHINE") == "1"
 SYSTEM_PY = "/usr/bin/python3"

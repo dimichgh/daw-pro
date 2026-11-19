@@ -26,7 +26,7 @@ struct TemplateSamplerCodecTests {
             crossfade: SamplerCrossfade(controller: 1, ccInLo: 0, ccInHi: 40, ccOutLo: 80,
                                         ccOutHi: 127, velInLo: 1, velInHi: 30, velOutLo: 90,
                                         velOutHi: 126),
-            reverse: true, chokeGroup: 7)
+            reverse: true, chokeGroup: 7, drumRole: .snare)
     }
 
     /// A Sampler with every global set away from `SamplerParams()`, two full

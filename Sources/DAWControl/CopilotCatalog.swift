@@ -403,7 +403,7 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "track.setInstrument",
-            description: "Select or tweak the instrument on an instrument track — this is what makes its MIDI clips audible. kind picks the instrument; omitted fields keep their current value. ⚠️ Only polySynth and drumSynth can be CONFIGURED from here. drumSynth needs no setup at all — it plays a full 808 kit the moment you select it, on notes 36-43 (kick, snare, closed hat, open hat, clap, tom, rim, cymbal), and its 75 parameters are reachable with instrument.setDrumParam. sampler, soundBank and audioUnit are switchable because each track remembers the settings it was last given in the app, so switching back restores them — but on a track that has never been set up in the app, switching to one of those SUCCEEDS AND PLAYS NOTHING (a sampler with no zones is a legal, silent state). If the user has not configured that instrument in the app UI, pick polySynth or drumSynth, or tell them to set it up there first.",
+            description: "Select or tweak the instrument on an instrument track — this is what makes its MIDI clips audible. kind picks the instrument; omitted fields keep their current value. ⚠️ Only polySynth and drumSynth can be CONFIGURED from here. drumSynth needs no setup at all — it plays a full 808 kit the moment you select it. ⚠️ WHICH NOTE PLAYS WHICH DRUM depends on the kit. A NEW drum machine uses the General MIDI keys: 36 kick, 38 snare, 42 closed hat, 46 open hat, 39 clap, 45 tom, 37 rim, 49 cymbal (so a beat written for General MIDI plays the right drums). An OLDER song's kit may still use the original order, notes 36-43 as kick, snare, closed hat, open hat, clap, tom, rim, cymbal. Before writing drum notes into an existing drum track, call project.snapshot and read that track's instrument.drumKit: each drum voice there has a `note`, and a `noteLayout` of \"gm\" means the General MIDI keys (no noteLayout, or no drumKit at all, means the original 36-43 order). All of its \(MIDIControllerRouting.drumParameterCount) parameters are reachable with instrument.setDrumParam. sampler, soundBank and audioUnit are switchable because each track remembers the settings it was last given in the app, so switching back restores them — but on a track that has never been set up in the app, switching to one of those SUCCEEDS AND PLAYS NOTHING (a sampler with no zones is a legal, silent state). If the user has not configured that instrument in the app UI, pick polySynth or drumSynth, or tell them to set it up there first.",
             schema: schemaObject([
                 ("trackId", stringSchema("Id of the instrument track, from project.snapshot.")),
                 ("kind", stringSchema(
@@ -464,6 +464,32 @@ public enum CopilotToolCatalog {
                     "Notes to write into the clip, up to 4096. Each note's startBeat is relative to the clip's own start. Omit (or pass an empty array) for an empty clip.",
                     items: noteItemSchema)),
             ], required: ["trackId"])
+        ),
+        // m39-w4-10: the ready-made drum beats. "Give me a hip-hop beat" is a
+        // request the copilot could only serve note by note before (the m21-b2
+        // law: a new user-facing capability is visible to the in-app copilot).
+        CopilotTool(
+            command: "clip.addDrumPattern",
+            description: "Write a ready-made drum beat (see pattern.list) onto a drum track as one new clip, in one undo step. The track must play drums: the Drum Machine, the General MIDI drum kit, or a sample sorted into a kit; the beat plays on that kit's own notes. A drum the kit does not have is left out and named in warnings, never replaced by a different drum. Refused, with nothing changed, if the beat would land on another clip or where the song is not in 4 beats to the bar. To fill an EMPTY clip already on the track instead, send its clipId (and no bars or atBeat): the beat fills that clip's own length.",
+            schema: schemaObject([
+                ("trackId", stringSchema("Id of the drum track to add the beat to, from project.snapshot.")),
+                ("pattern", stringSchema(
+                    "Which beat, by its id from pattern.list. basicRock is the everyday backbeat.",
+                    enumValues: DrumPatternLibrary.patterns.map(\.id))),
+                ("bars", integerSchema(
+                    "How many bars to fill, 1-64. The beat repeats to fill them. Omit for the beat's own length (1 or 2 bars).",
+                    minimum: 1, maximum: 64)),
+                ("atBeat", numberSchema(
+                    "Timeline position in beats for the clip's start. Must be >= 0. Omit to add it after the track's last clip, on the next bar line.",
+                    minimum: 0)),
+                ("clipId", stringSchema(
+                    "Id of an EMPTY MIDI clip on this track to fill instead of adding a new clip, from project.snapshot. A clip with any notes is refused. Do not send bars or atBeat with it.")),
+            ], required: ["trackId", "pattern"])
+        ),
+        CopilotTool(
+            command: "pattern.list",
+            description: "List the ready-made drum beats clip.addDrumPattern can write (basic rock, four on the floor, boom bap, trap, half-time, breakbeat, one drop), each with a plain description, its length in bars and the drums it uses. The first is the simplest everyday beat.",
+            schema: schemaObject([])
         ),
         CopilotTool(
             command: "note.audition",
@@ -643,7 +669,7 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "clip.setControllerLane",
-            description: "Add MIDI controller moves — mod wheel, sustain pedal, pitch bend, expression, channel pressure — to a MIDI clip's performance, on top of its notes. Creates or REPLACES the clip's lane of one controller type wholesale. Points are STEPWISE: each value holds until the next point, so two points make a STEP, not a ramp — a ramp is a dense run of points. Values are RAW MIDI: pitchBend is 0-16383 (8192 = center, ±2 semitones on built-in instruments); everything else is 0-127 (CC 64 >= 64 = sustain pedal down). Built-in instruments honor pitch bend and sustain (CC 64); every other CC affects Audio Unit instruments only. Controller values chase at play/seek (a value set earlier keeps its effect). quantize/humanize/groove move only NOTES, never these lanes. Per-note (poly) aftertouch is not supported yet. MIDI clips only.",
+            description: "Add MIDI controller moves — mod wheel, sustain pedal, pitch bend, expression, channel pressure — to a MIDI clip's performance, on top of its notes. Creates or REPLACES the clip's lane of one controller type wholesale. Points are STEPWISE: each value holds until the next point, so two points make a STEP, not a ramp — a ramp is a dense run of points. Values are RAW MIDI: pitchBend is 0-16383 (8192 = center, ±2 semitones on built-in instruments); everything else is 0-127 (CC 64 >= 64 = sustain pedal down). \(MIDIControllerRouting.controllerSupportSummary) Controller values chase at play/seek (a value set earlier keeps its effect). quantize/humanize/groove move only NOTES, never these lanes. Per-note (poly) aftertouch is not supported yet. MIDI clips only.",
             schema: schemaObject([
                 ("clipId", stringSchema("Id of the MIDI clip to edit, from project.snapshot.")),
                 ("type", stringSchema(
@@ -851,7 +877,7 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "clip.deleteTimeRange",
-            description: "Cut a beat range out of a MIDI clip and close the gap (the 'delete a bar' edit): notes after the range move earlier, notes starting inside it are removed, and a note held from before keeps its head. Beats are CLIP-LOCAL (same as clip.setNotes). MIDI clips only.",
+            description: "Cut a beat range out of a MIDI clip and close the gap (the 'delete a bar' edit): notes after the range move earlier, notes starting inside it are removed, and a note held from before keeps its head. Beats are CLIP-LOCAL (same as clip.setNotes). MIDI clips only. Words typed on the clip whose notes are all removed go too, in the same undo step.",
             schema: schemaObject([
                 ("clipId", stringSchema("Id of the MIDI clip to edit, from project.snapshot.")),
                 ("startBeat", numberSchema("Clip-local beat where the excised range begins. Must be within the clip.")),
@@ -924,7 +950,7 @@ public enum CopilotToolCatalog {
         ),
         CopilotTool(
             command: "arrange.deleteBars",
-            description: "Delete a range of bars across the WHOLE arrangement and pull everything after them earlier, in one undoable step — the way to cut a section out (e.g. \"drop the 4-bar intro\"). Bars are 1-based and meter-aware. Clips fully inside the range are removed, ones straddling an edge are trimmed or split, markers inside are removed, and the tempo/meter maps close the gap. A delete that would leave a time-signature change off its barline is refused with a teaching error — delete within one meter region. Returns {fromBeat, deletedBeats, removedClipIds, removedMarkerIds}.",
+            description: "Delete a range of bars across the WHOLE arrangement and pull everything after them earlier, in one undoable step — the way to cut a section out (e.g. \"drop the 4-bar intro\"). Bars are 1-based and meter-aware. Clips fully inside the range are removed, ones straddling an edge are trimmed or split, markers inside are removed, and the tempo/meter maps close the gap. Words typed on a clip whose notes are all removed go too. A delete that would leave a time-signature change off its barline is refused with a teaching error — delete within one meter region. Returns {fromBeat, deletedBeats, removedClipIds, removedMarkerIds}.",
             schema: schemaObject([
                 ("fromBar", integerSchema(
                     "1-based bar number where the deletion starts (bar 1 = the first bar).",

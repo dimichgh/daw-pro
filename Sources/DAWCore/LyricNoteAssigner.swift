@@ -13,7 +13,9 @@ public struct AssignedLyricWord: Equatable, Sendable {
     /// Which breath phrase (0-based) the notes are in.
     public var phrase: Int
     /// The syllable count used for sharing spare notes: the hyphen parts when
-    /// the word was hyphenated, else `EnglishSyllables`' estimate (at least 1).
+    /// the word was hyphenated, else its language's estimate (at least 1):
+    /// `EnglishSyllables` for English, exactly 1 for a Chinese word
+    /// (`LyricLanguage.syllableCounter`).
     public var syllables: Int
     /// Spare notes this word holds across under rule 5.2 (the automatic
     /// melisma). 0 for a word that got none. Notes asked for with `+` are
@@ -92,6 +94,13 @@ public enum LyricRefusal: Error, Equatable, Sendable {
     /// Enough notes overall, but a marked word needs more notes in one
     /// breath than any place the words can flow to offers. NOT in §5.7.
     case markedWordDoesNotFit(word: String, needed: Int)
+    /// Chinese characters typed into an English clip (design 2026-10-06
+    /// §6.7 row 1; wire code `lyricsScriptMismatch`). `word` is the first one.
+    case scriptMismatch(word: String)
+    /// The clip's language cannot be sung (design 2026-10-06 §6.9; wire code
+    /// `lyricsLanguageUnsupported`). Its sentence is PROVISIONAL
+    /// (`LyricLanguage.Copy.languageUnsupported`).
+    case languageUnsupported(language: String)
 
     public var sentence: String {
         switch self {
@@ -114,11 +123,42 @@ public enum LyricRefusal: Error, Equatable, Sendable {
             // PROVISIONAL (not in design §5.7).
             return "'\(word)' needs \(count(needed, "note")) without a breath in between, and the tune has "
                 + "no room for that. Remove some of its + marks or hyphens."
+        case .scriptMismatch:
+            return LyricLanguage.Copy.scriptMismatch
+        case .languageUnsupported:
+            return LyricLanguage.Copy.languageUnsupported
         }
     }
 
     private func count(_ n: Int, _ noun: String) -> String {
         n == 1 ? "1 \(noun)" : "\(n) \(noun)s"
+    }
+}
+
+// MARK: - Words a clip's language cannot sing (p2-sing-x3)
+
+extension LyricRefusal {
+
+    /// The refusal for `word`, which its clip cannot sing (`!word.isSingable`):
+    /// letters that are not English in an English clip, or letters that are
+    /// neither English nor the clip's Chinese in a Chinese clip ("café", "の").
+    /// THE ONE CLASSIFICATION: the assigner refuses through it, and typing a
+    /// word on one note (`LyricTextEdit`) should too, so both say the same.
+    ///
+    /// A word with a Han character (Chinese typed into an English clip) is
+    /// `.scriptMismatch` (design §6.7 row 1: the old "Not English" would send
+    /// a Chinese typist away from a feature that exists); any other is base
+    /// §5.7's "Not English", verbatim. The first unsingable word decides.
+    public static func forUnsingable(_ word: LyricWord) -> LyricRefusal {
+        LyricLanguage.containsHan(word.sung) ? .scriptMismatch(word: word.sung) : .notEnglish(word: word.sung)
+    }
+
+    /// The refusal for lyrics whose clip language cannot be sung
+    /// (`!LyricLanguage.isSupported(language)`): never sung as English.
+    ///
+    /// `.languageUnsupported` (wire code `lyricsLanguageUnsupported`).
+    public static func forUnsupportedLanguage(_ language: String, firstWord: LyricWord) -> LyricRefusal {
+        .languageUnsupported(language: language)
     }
 }
 
@@ -166,7 +206,17 @@ public struct LyricAssignment: Equatable, Sendable {
 ///   two notes that start together are treated as two notes in a row;
 /// - the clip's start beat and the tempo map, only to time rule 7's
 ///   0.3 s in seconds;
-/// - a syllable counter, `EnglishSyllables.estimate` unless a test swaps it.
+/// - a syllable counter for ENGLISH words, `EnglishSyllables.estimate` unless
+///   a test swaps it. A Chinese word (`LyricWord.language` set) is counted by
+///   its language's counter (`LyricLanguage.syllableCounter`: exactly 1),
+///   whatever is passed here.
+///
+/// ## Languages (p2-sing-x3)
+///
+/// The text carries its clip's language (`LyricText.language`). A language
+/// that cannot be sung is refused (`LyricRefusal.forUnsupportedLanguage`), and
+/// so is a word the clip cannot sing (`LyricRefusal.forUnsingable`), both
+/// after "no words": an empty text is `.noWords` whatever its language.
 ///
 /// Notes are grouped into breath phrases by the tree's ONE breath definition,
 /// `PhraseDetection.phrases(in:maxGapBeats:)`, at its threshold,
@@ -224,7 +274,10 @@ public enum LyricNoteAssigner {
     ) throws(LyricRefusal) -> LyricAssignment {
         let words = text.words
         guard !words.isEmpty else { throw .noWords }
-        if let foreign = words.first(where: { !$0.isEnglish }) { throw .notEnglish(word: foreign.sung) }
+        if let language = text.language, !LyricLanguage.isSupported(language) {
+            throw .forUnsupportedLanguage(language, firstWord: words[0])
+        }
+        if let foreign = words.first(where: { !$0.isSingable }) { throw .forUnsingable(foreign) }
 
         let melody = MIDINote.canonicallyOrdered(notes)
         let byID = Dictionary(melody.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -280,7 +333,9 @@ public enum LyricNoteAssigner {
                 continue
             }
             let counted = phraseWords.map { word in
-                word.parts.count > 1 ? word.parts.count : max(1, syllables(word.sung))
+                word.parts.count > 1 ? word.parts.count
+                    : max(1, word.language == nil ? syllables(word.sung)
+                                                  : LyricLanguage.syllableCounter(for: word.language).estimate(word.sung))
             }
             let (counts, heldByLast) = share(words: phraseWords, syllables: counted, notes: notesHere.count)
             var position = 0

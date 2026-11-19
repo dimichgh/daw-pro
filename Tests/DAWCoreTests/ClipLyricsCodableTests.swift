@@ -127,7 +127,9 @@ struct ClipLyricsCodableTests {
     @Test("only the text is stored: the word-to-note assignment is derived, never saved (F16)")
     func onlyTextIsStored() {
         let labels = Mirror(reflecting: ClipLyrics(text: "a b")).children.map(\.label)
-        #expect(labels == ["text"])
+        // p2-sing-x3 (design 2026-10-06 §6.3) adds the clip's language: a property of the TEXT (nil is English),
+        // never a word-to-note record. Still no assignment is stored.
+        #expect(labels == ["text", "language"])
         #expect(ClipLyrics.maxTextLength == 4_000)
     }
 

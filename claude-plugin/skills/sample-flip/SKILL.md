@@ -173,12 +173,22 @@ pads to make something new. This is the MPC / SP-1200 / Recycle chop.
 | `generateMIDI` | write the reconstruction clip, default true |
 | `atBeat` | where the reconstruction lands, default the source clip's own start |
 | `velocityFromStrength` | map detector strength to velocity instead of 127, default false |
+| `mapping` | `"chromatic"` (default: `pitch = baseNote + index`) or `"kit"`: **sort a drum loop into a drum kit.** Each hit is measured and classified, then laid out on General MIDI drum notes: kick 36/35, snare 38/40, closed hat 42/44, open hat 46, everything else from 84 up; the loudest hit of a role takes its first note, and the hats share choke group 0 (an open hat is cut by the next closed one). `baseNote` is REFUSED with `"kit"`. |
+| `roles` | `"kit"` only: override the guess per slice, `{"3": "snare"}` (keys are slice indexes as strings; roles `kick`, `snare`, `closedHat`, `openHat`, `other`). |
+
+⚠️ **The kit sort is a best guess from the sound — read `role` and `confidence`
+on each returned slice, and fix a wrong one with `roles`.** Its rules were fitted
+on synthetic and drum-machine hits at velocity 100 only; measured misses: a GM
+kit's closed hat can sort as OPEN, and a cymbal as an open hat. Use `"kit"` when
+the goal is "play this break from a drum kit's keys / the step grid"; keep the
+default chromatic layout for MPC-style chop-and-replay.
 
 Returns `{trackId, createdTrackId?, midiClipId?, sampleRate, frameCount,
 sliceCount, headSeconds, slices: [{index, pitch, startFrame, endFrame?,
-sourceSeconds, beat, strength?, snapOffsetFrames?, residualAmplitude?}],
-warnings}`. **`sampleRate`/`frameCount` are the SOURCE FILE's own, and every
-frame number is in those units.**
+sourceSeconds, beat, strength?, snapOffsetFrames?, residualAmplitude?,
+role?, confidence?}], kitSummary?, warnings}` (`role`, `confidence` and
+`kitSummary` only with `mapping: "kit"`). **`sampleRate`/`frameCount` are the
+SOURCE FILE's own, and every frame number is in those units.**
 
 Things worth knowing before you call it:
 

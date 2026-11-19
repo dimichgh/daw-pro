@@ -90,7 +90,8 @@ extension SoundBankHostingTests {
         let map = TempoMap(constantBPM: 120)
         let audio = cooperative
             ? try await renderer.renderCooperatively(
-                tracks: [track], tempoMap: map, fromBeat: 0, durationSeconds: seconds)
+                tracks: [track], tempoMap: map, fromBeat: 0, durationSeconds: seconds,
+                meterMap: MeterMap(constant: TimeSignature()))
             : try renderer.render(
                 tracks: [track], tempoMap: map, fromBeat: 0, durationSeconds: seconds)
         return audio.channelData[0]

@@ -867,16 +867,20 @@ struct ModulationTests {
 
     // MARK: - §7.2.1 — the tempo-sync seam
 
-    @Test("⛔ §7.2.1: syncDivision / stepDivision REFUSE in v1, naming m39-c as the prerequisite")
-    func tempoSyncIsRefusedNotHandRolled() {
-        #expect(throws: ModulationError.self) {
+    /// m39-w4-4 (W9-UNLOCK, 2026-10-11) SPLIT the old `tempoSyncIsRefusedNotHandRolled` pin. This, its LFO half, stands
+    /// unchanged in substance: a synced LFO is not built, and the step unlock must not unlock it by accident. The step
+    /// half FLIPPED on purpose and is `stepDivisionIsUnlocked` below.
+    @Test("⛔ §7.2.1: the LFO's syncDivision STILL REFUSES after the step unlock, naming m39-c; null is not a refusal")
+    func lfoSyncDivisionStillRefuses() {
+        #expect(throws: ModulationError.modulationTempoSyncUnavailable(field: "syncDivision")) {
             _ = try ModulationSourceParams.apply(["syncDivision": .string("1/8")],
                                                  to: .defaults(for: .lfo))
         }
-        #expect(throws: ModulationError.self) {
-            _ = try ModulationSourceParams.apply(["stepDivision": .string("1/16")],
-                                                 to: .defaults(for: .stepSequencer))
-        }
+        let message = ModulationError.modulationTempoSyncUnavailable(field: "syncDivision")
+            .errorDescription ?? ""
+        #expect(message.contains("m39-c") && message.contains("rateHz"), "\(message)")
+        // The reason it refuses: the sibling table has no LFO entry.
+        #expect(TempoSync.registration(forSource: .lfo) == nil)
         // Explicit null is NOT a refusal — it is "no sync", which is the v1 state.
         #expect(throws: Never.self) {
             _ = try ModulationSourceParams.apply(["syncDivision": .null],
@@ -946,5 +950,152 @@ struct ModulationTests {
             _ = try ModulationSourceParams.apply(["source": .string("otherTrack")],
                                                  to: .defaults(for: .envelopeFollower))
         }
+    }
+
+    // MARK: - m39-w4-4 / 4e (W9-UNLOCK) — the stepDivision unlock
+
+    /// The step half of the old `tempoSyncIsRefusedNotHandRolled` pin, FLIPPED ON PURPOSE by the unlock.
+    @Test("m39-w4-4 unlock: stepDivision ACCEPTS all 18 NoteDivision values; null clears it; '1/17', a number and a bool refuse, listing every value")
+    func stepDivisionIsUnlocked() throws {
+        let fresh = ModulationSourceParams.defaults(for: .stepSequencer)
+        #expect(NoteDivision.allCases.count == 18)
+        for division in NoteDivision.allCases {
+            let (params, _) = try ModulationSourceParams.apply(
+                ["stepDivision": .string(division.rawValue)], to: fresh)
+            guard case .stepSequencer(let step) = params else { Issue.record("kind"); return }
+            #expect(step.stepDivision == division.rawValue)
+            #expect(step.syncedDivision == division)
+            #expect(TempoSync.syncedDivision(of: params) == division)
+        }
+        let synced = try ModulationSourceParams.apply(["stepDivision": .string("1/16")], to: fresh).params
+        let cleared = try ModulationSourceParams.apply(["stepDivision": .null], to: synced).params
+        guard case .stepSequencer(let free) = cleared else { Issue.record("kind"); return }
+        #expect(free.stepDivision == nil && free.syncedDivision == nil, "null runs the source free again")
+        let valid = NoteDivision.allCases.map(\.rawValue)
+        let refused: [ModulationParamValue] = [.string("1/17"), .string("1/16 "), .string(""), .string("1/4T"),
+                                               .number(16), .bool(true), .numbers([1, 16])]
+        for value in refused {
+            #expect(throws: ModulationError.unknownModulationParam(
+                key: "stepDivision", kind: "stepSequencer", valid: valid)) {
+                _ = try ModulationSourceParams.apply(["stepDivision": value], to: synced)
+            }
+        }
+        let message = ModulationError.unknownModulationParam(
+            key: "stepDivision", kind: "stepSequencer", valid: valid).errorDescription ?? ""
+        #expect(message.contains("1/16") && message.contains("1/32t") && message.contains("1/1d"), "\(message)")
+    }
+
+    @Test("m39-w4-4e: an edit that does not name stepDivision KEEPS it (steps, edgeMs, rateHz, nothing at all)")
+    func editsKeepStepDivision() throws {
+        let synced = try ModulationSourceParams.apply(
+            ["stepDivision": .string("1/8t"), "steps": .numbers([1, 0])],
+            to: .defaults(for: .stepSequencer)).params
+        let edits: [[String: ModulationParamValue]] = [
+            ["steps": .numbers([0, 1, 0.5])], ["edgeMs": .number(5)], ["rateHz": .number(9)], [:],
+        ]
+        for edit in edits {
+            let params = try ModulationSourceParams.apply(edit, to: synced).params
+            guard case .stepSequencer(let step) = params else { Issue.record("kind"); return }
+            #expect(step.stepDivision == "1/8t", "the edit \(edit.keys.sorted()) un-synced the source")
+        }
+    }
+
+    @Test("m39-w4-4e: ONE inert-rateHz sentence, warned when a call sets the division or the rate on a synced source, never on a free source or a steps-only edit")
+    func inertRateSentenceHasOneHome() throws {
+        let fresh = ModulationSourceParams.defaults(for: .stepSequencer)
+        let (synced, addWarnings) = try ModulationSourceParams.apply(["stepDivision": .string("1/16")], to: fresh)
+        let note = try #require(TempoSync.inertRateNote(for: synced))
+        let warning = "\(ModulationWarning.paramIgnored): \(note)"
+        #expect(addWarnings == [warning], "stepDivision alone (mod.addSource's shape) is told")
+        #expect(note.contains("'rateHz' is ignored while 'stepDivision' is set") && note.contains("1/16")
+                && note.contains("null"), "\(note)")
+        let (rated, rateWarnings) = try ModulationSourceParams.apply(["rateHz": .number(8)], to: synced)
+        #expect(rateWarnings == [warning], "rateHz on a synced source is told")
+        guard case .stepSequencer(let ratedStep) = rated else { Issue.record("kind"); return }
+        #expect(ratedStep.rateHz == 8 && ratedStep.stepDivision == "1/16", "the rate is STORED for when sync clears")
+        #expect(try ModulationSourceParams.apply(["steps": .numbers([0, 1])], to: synced).warnings.isEmpty)
+        #expect(try ModulationSourceParams.apply(["rateHz": .number(8)], to: fresh).warnings.isEmpty)
+        let (cleared, clearWarnings) = try ModulationSourceParams.apply(
+            ["stepDivision": .null, "rateHz": .number(8)], to: synced)
+        #expect(clearWarnings.isEmpty, "clearing the division makes the rate live again: nothing to warn")
+        #expect(TempoSync.inertRateNote(for: cleared) == nil)
+        #expect(TempoSync.inertRateNote(for: .lfo(LFOSourceParams())) == nil)
+    }
+
+    @Test("m39-w4-4: the TempoSync sibling table registers the step sequencer ONLY, under names the applier accepts")
+    func modulationSyncSiblingTable() {
+        #expect(TempoSync.modulationSourceRegistrations.map(\.kind) == [.stepSequencer])
+        for kind in ModulationSourceKind.allCases where kind != .stepSequencer {
+            #expect(TempoSync.registration(forSource: kind) == nil, "\(kind) must not sync")
+        }
+        for registration in TempoSync.modulationSourceRegistrations {
+            // The applier's own name list, read from its refusal of a name no kind has (the template reader's probe).
+            var names: [String] = []
+            do {
+                _ = try ModulationSourceParams.apply(["\u{1}probe": .null], to: .defaults(for: registration.kind))
+            } catch let ModulationError.unknownModulationParam(_, _, valid) {
+                names = valid
+            } catch {
+                Issue.record("unexpected \(error)")
+            }
+            #expect(names.contains(registration.divisionParam), "\(names)")
+            #expect(names.contains(registration.freeRateParam), "\(names)")
+        }
+        #expect(TempoSync.divisionValues == NoteDivision.allCases.map(\.rawValue))
+        for raw in TempoSync.divisionValues + ["1/17", ""] {
+            let step = StepSequencerSourceParams(steps: [1, 0], stepDivision: raw)
+            #expect(TempoSync.syncedDivision(of: .stepSequencer(step)) == step.syncedDivision, "\(raw)")
+        }
+        #expect(TempoSync.syncedDivision(of: .stepSequencer(StepSequencerSourceParams())) == nil)
+        #expect(TempoSync.syncedDivision(of: .lfo(LFOSourceParams(syncDivision: "1/8"))) == nil,
+                "a hand-edited LFO division never syncs")
+    }
+
+    @Test("m39-w4-4e: the describe summary — stepsPerBar at the meter in force (16, 12, 5.33), whether the pattern fits the bar, the restart and loop sentences, and the setter's sentence")
+    func syncSummaryReportsBarFitAndRestart() throws {
+        let meter = try MeterMap(changes: [.init(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
+                                           .init(startBeat: 16, beatsPerBar: 3, beatUnit: 4)])
+        let sixteen = StepSequencerSourceParams(steps: Array(repeating: 0, count: 16), stepDivision: "1/16")
+        let in44 = try #require(sixteen.syncSummary(meterMap: meter, atBeat: 4))
+        #expect(in44.stepsPerBar == 16 && in44.meter == "4/4" && in44.division == .sixteenth)
+        #expect(in44.restart.contains("plays 1 time per bar"), "\(in44.restart)")
+        let in34 = try #require(sixteen.syncSummary(meterMap: meter, atBeat: 17))
+        #expect(in34.stepsPerBar == 12 && in34.meter == "3/4")
+        #expect(in34.restart.contains("does not line up"), "16 steps in a 12-step bar: \(in34.restart)")
+        let twelve = StepSequencerSourceParams(steps: Array(repeating: 0, count: 3), stepDivision: "1/16")
+        let twelveIn34 = try #require(twelve.syncSummary(meterMap: meter, atBeat: 17))
+        #expect(twelveIn34.restart.contains("plays 4 times per bar"), "\(twelveIn34.restart)")
+        let dotted = StepSequencerSourceParams(steps: [1, 0, 0], stepDivision: "1/8d")
+        let d = try #require(dotted.syncSummary(meterMap: meter, atBeat: 0))
+        #expect(abs(d.stepsPerBar - 16.0 / 3.0) < 1e-12)
+        #expect(d.restart.contains("5.33"), "\(d.restart)")
+        let twoBars = StepSequencerSourceParams(steps: Array(repeating: 0, count: 32), stepDivision: "1/16")
+        let twoBarsIn44 = try #require(twoBars.syncSummary(meterMap: meter, atBeat: 0))
+        #expect(twoBarsIn44.restart.contains("spans 2 bars"), "\(twoBarsIn44.restart)")
+        for (params, summary) in [(sixteen, in44), (sixteen, in34), (dotted, d)] {
+            #expect(summary.restart.contains("starts again from step 1 at every time-signature change"))
+            #expect(summary.restart.contains("loop"))
+            #expect(summary.rateNote == TempoSync.inertRateNote(for: .stepSequencer(params)))
+        }
+        #expect(StepSequencerSourceParams(steps: [1, 0]).syncSummary(meterMap: meter, atBeat: 0) == nil)
+    }
+
+    /// The DAWCore half of the old-project decode fixture; the render half (byte gate on a bounce) is
+    /// `StepDivisionG8Tests.oldProjectStepSourcePlaysAsBefore`.
+    @Test("m39-w4-4e: an OLD project's step source (no stepDivision key) decodes free-running and re-encodes without the key; a saved synced source round-trips")
+    func oldProjectStepSourceDecodesFree() throws {
+        let old = #"{"id":"6A0B2E1C-3F4D-4E5A-9B6C-7D8E9F0A1B2C","kind":"stepSequencer","name":"Step","params":{"kind":"stepSequencer","steps":[1,0,0.5,-0.5],"rateHz":5.3,"edgeMs":2}}"#
+        let decoded = try JSONDecoder().decode(ModulationSource.self, from: Data(old.utf8))
+        guard case .stepSequencer(let step) = decoded.params else { Issue.record("kind"); return }
+        #expect(step.stepDivision == nil && step.syncedDivision == nil)
+        #expect(TempoSync.syncedDivision(of: decoded.params) == nil)
+        #expect(step.steps == [1, 0, 0.5, -0.5] && step.rateHz == 5.3 && step.edgeMs == 2)
+        let reencoded = String(decoding: try JSONEncoder().encode(decoded), as: UTF8.self)
+        #expect(!reencoded.contains("stepDivision"), "\(reencoded)")
+        var synced = decoded
+        synced.params = try ModulationSourceParams.apply(["stepDivision": .string("1/8d")], to: decoded.params).params
+        let roundTrip = try JSONDecoder().decode(ModulationSource.self, from: try JSONEncoder().encode(synced))
+        #expect(roundTrip == synced)
+        #expect(TempoSync.syncedDivision(of: roundTrip.params) == .eighthDotted)
     }
 }

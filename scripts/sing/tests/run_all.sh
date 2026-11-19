@@ -2,26 +2,29 @@
 #
 # The scripts/sing test suite, in its two passes (item p2-sing-b):
 #   pass 1  stdlib: /usr/bin/python3 -m unittest discover -p 'test_*.py', with SING_TESTS_REQUIRE_MACHINE=1 (a missing
-#           machine input - the spike's CPython and upstream files the fixture mirror is built from, ffmpeg - FAILS
-#           instead of skipping). The test_venv_* modules skip here: they need the runtime's packages.
+#           machine input - the installed runtime's uv, CPython and upstream files the fixture mirror is built from,
+#           ffmpeg - FAILS instead of skipping). The test_venv_* modules skip here: they need the runtime's packages.
 #   pass 2  venv: <runtime venv python> -m unittest discover -p 'test_venv_*.py', with SING_TESTS_REQUIRE_VENV=1 (a
 #           missing package or data FAILS instead of skipping).
-# So no gate can pass by skipping. Neither pass touches the network or the real ~/Library/Application Support.
+# So no gate can pass by skipping. Neither pass touches the network. Machine inputs come from the INSTALLED singing
+# runtime (~/Library/Application Support/DAWPro/SingingEngine), which both passes only READ (no bytecode, every cache
+# in the temp folder); never from the spike folder, which is being deleted (W8-SFIX, 2026-10-06).
 #
 # Environment (all optional):
-#   SING_TEST_VENV_PY   the venv python for pass 2 (default: the spike's venv-alt, used READ-ONLY)
-#   SING_TEST_NLTK      NLTK data for pass 2 (default: the spike's cache/nltk)
-#   SING_TEST_UPSTREAM  a SoulX-Singer checkout (default: the spike's src/SoulX-Singer), read only
+#   SING_TEST_RUNTIME   the installed runtime to read inputs from (default: the one above)
+#   SING_TEST_VENV_PY   the venv python for pass 2 (default: the runtime's venv/bin/python, used READ-ONLY)
+#   SING_TEST_NLTK      NLTK data for pass 2 (default: the runtime's nltk_data)
+#   SING_TEST_UPSTREAM  a SoulX-Singer checkout (default: the runtime's upstream), read only
 #   SING_TEST_TMP       where temp folders go (default: a new folder under $TMPDIR)
 #   SING_TEST_LOG_DIR   where stdlib.log and venv.log go (default: SING_TEST_TMP)
 # Exit 0 iff both passes pass and no test process was left running.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-SPIKE="$HOME/DAWPro-spikes/sing-soulx"
-VENV_PY="${SING_TEST_VENV_PY:-$SPIKE/venv-alt/bin/python}"
-NLTK="${SING_TEST_NLTK:-$SPIKE/cache/nltk}"
-export SING_TEST_UPSTREAM="${SING_TEST_UPSTREAM:-$SPIKE/src/SoulX-Singer}"
+export SING_TEST_RUNTIME="${SING_TEST_RUNTIME:-$HOME/Library/Application Support/DAWPro/SingingEngine}"
+VENV_PY="${SING_TEST_VENV_PY:-$SING_TEST_RUNTIME/venv/bin/python}"
+NLTK="${SING_TEST_NLTK:-$SING_TEST_RUNTIME/nltk_data}"
+export SING_TEST_UPSTREAM="${SING_TEST_UPSTREAM:-$SING_TEST_RUNTIME/upstream}"
 export SING_TEST_TMP="${SING_TEST_TMP:-$(mktemp -d "${TMPDIR:-/tmp}/sing tests.XXXXXX")}"
 LOGS="${SING_TEST_LOG_DIR:-$SING_TEST_TMP}"
 mkdir -p "$SING_TEST_TMP" "$LOGS"

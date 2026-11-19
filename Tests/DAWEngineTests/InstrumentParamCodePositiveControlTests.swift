@@ -141,7 +141,7 @@ struct InstrumentParamCodePositiveControlTests {
         let poly = Set(InstrumentParamSpec.specs(for: .polySynth).map(\.code))
         let drums = Set(InstrumentParamSpec.specs(for: .drumSynth).map(\.code))
         #expect(poly.count == 7)
-        #expect(drums.count == 75)
+        #expect(drums.count == 77)
         #expect(poly.isDisjoint(with: drums))
     }
 

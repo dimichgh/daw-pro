@@ -5168,4 +5168,191 @@ struct PitchCorrectionCommandTests {
             #expect(detuned.result?[key] != nil, "\(key) is missing from the reply")
         }
     }
+
+    // MARK: - vf-18 leg 2: clip.setNotePitches moveByCents + slideFollowRule echo (W9-SLWR)
+
+    /// A followed slide between two held notes, plus a trailing SOUND:
+    /// A 0.1-0.3 | T 0.3-0.5 (follows its neighbours, g = 1) | B 0.5-0.7 ... S 0.8-0.9 (unpitched).
+    /// Seeded through `setClipFormantCorrection(seedIfAbsent:)` (not a hand edit) at a soft-join slope.
+    private func seedSlideFixture(_ store: ProjectStore, clipID: String,
+                                  rule: PitchEditSet.SlideFollowRule = .sungAtOpenSide) throws
+        -> (a: UUID, t: UUID, b: UUID, s: UUID) {
+        let clipUUID = try #require(UUID(uuidString: clipID))
+        let seed = PitchEditSet(segments: [
+            NoteSegment(startSeconds: 0.1, endSeconds: 0.3, detectedHz: 220, detectedConfidence: 0.9),
+            NoteSegment(startSeconds: 0.3, endSeconds: 0.5, detectedHz: 233, detectedConfidence: 0.9,
+                        glideFollow: 1, origin: .transition),
+            NoteSegment(startSeconds: 0.5, endSeconds: 0.7, detectedHz: 247, detectedConfidence: 0.9),
+            NoteSegment(startSeconds: 0.8, endSeconds: 0.9, detectedHz: 0, detectedConfidence: 0,
+                        origin: .unpitched),
+        ], transitionSlopeCentsPerSecond: 3000, slideFollowRule: rule)
+        _ = try store.setClipFormantCorrection(clipId: clipUUID, amount: nil, seedIfAbsent: seed)
+        return (seed.segments[0].id, seed.segments[1].id, seed.segments[2].id, seed.segments[3].id)
+    }
+
+    private func storedOffsets(_ store: ProjectStore, _ ids: [UUID]) -> [Double] {
+        let set = store.tracks.first?.clips.first?.pitchEdits
+        return ids.map { id in set?.segments.first { $0.id == id }?.pitchOffsetCents ?? .nan }
+    }
+
+    private func moveByCents(_ router: CommandRouter, clipID: String, _ cents: Double?,
+                             segmentIds: [UUID]? = nil, notes: [JSONValue]? = nil) async -> ControlResponse {
+        var params: [String: JSONValue] = ["clipId": .string(clipID)]
+        if let cents { params["moveByCents"] = .number(cents) }
+        if let segmentIds { params["segmentIds"] = .array(segmentIds.map { .string($0.uuidString) }) }
+        if let notes { params["notes"] = .array(notes) }
+        return await router.handle(ControlRequest(id: "mv", command: "clip.setNotePitches", params: params))
+    }
+
+    @Test("W1 clip.setNotePitches moveByCents +1200: sung notes move, the sound and the carried slide do not, carriedSlides names the slide, ONE undo")
+    func moveByCentsCarriesTheSlide() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let (a, t, b, s) = try seedSlideFixture(store, clipID: clipID)
+        let before = try #require(store.tracks.first?.clips.first?.pitchEdits)
+        let expected = try before.applyingGroupPitchMove(
+            segmentIDs: [a, t, b], byCents: 1200, clipId: try #require(UUID(uuidString: clipID)))
+
+        let response = await moveByCents(router, clipID: clipID, 1200)
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(response.result?["movedByCents"]?.doubleValue == 1200)
+        #expect(response.result?["carriedSlides"]?.arrayValue?.compactMap(\.stringValue) == [t.uuidString])
+        // The wire stores exactly what the DAWCore transform says (one writer, no re-implementation).
+        let offsets = storedOffsets(store, [a, t, b, s])
+        #expect(offsets[0] == 1200 && offsets[2] == 1200, "sung held notes +1200: \(offsets)")
+        #expect(offsets[1] == 0, "the followed slide's bridge already carries the move: \(offsets)")
+        #expect(offsets[3] == 0, "a sound moves only when named: \(offsets)")
+        #expect(expected.carriedSlideIDs == [t])
+        for note in expected.offsets {
+            #expect(storedOffsets(store, [note.segmentId]) == [note.offsetCents])
+        }
+        // The reply echoes the stored (read-back) offsets of the moved notes.
+        let echoed = try pitchesEcho(response)
+        #expect(echoed.map(\.id) == [a, t, b].map(\.uuidString))
+        #expect(echoed.map(\.cents) == [1200, 0, 1200])
+
+        let undo = await router.handle(ControlRequest(id: "u", command: "edit.undo"))
+        #expect(undo.ok, "\(undo.error ?? "?")")
+        #expect(storedOffsets(store, [a, t, b, s]) == [0, 0, 0, 0], "ONE undo step restores all four")
+    }
+
+    @Test("W2 clip.setNotePitches: exactly one of notes / moveByCents, both and neither are refused in words and nothing changes")
+    func exactlyOneOfNotesOrMoveByCents() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let (a, t, b, s) = try seedSlideFixture(store, clipID: clipID)
+
+        let both = await moveByCents(router, clipID: clipID, 100, notes: [
+            .object(["segmentId": .string(a.uuidString), "cents": .number(50)])])
+        #expect(!both.ok)
+        #expect(both.error?.contains("not both") == true, "\(both.error ?? "nil")")
+        let neither = await moveByCents(router, clipID: clipID, nil)
+        #expect(!neither.ok)
+        #expect(neither.error?.contains("moveByCents") == true && neither.error?.contains("notes") == true,
+                "\(neither.error ?? "nil")")
+        let strayIDs = await moveByCents(router, clipID: clipID, nil, segmentIds: [a])
+        #expect(!strayIDs.ok, "segmentIds alone is not a call")
+        let literalWithIDs = await moveByCents(router, clipID: clipID, nil, segmentIds: [a], notes: [
+            .object(["segmentId": .string(a.uuidString), "cents": .number(50)])])
+        #expect(!literalWithIDs.ok)
+        #expect(literalWithIDs.error?.contains("segmentIds") == true, "\(literalWithIDs.error ?? "nil")")
+        let emptyIDs = await moveByCents(router, clipID: clipID, 100, segmentIds: [])
+        #expect(!emptyIDs.ok)
+        #expect(emptyIDs.error?.contains("segmentIds") == true)
+        let bogus = await router.handle(ControlRequest(id: "x", command: "clip.setNotePitches", params: [
+            "clipId": .string(clipID), "moveByCents": .number(100), "bogus": .bool(true)]))
+        #expect(!bogus.ok)
+        #expect(bogus.error?.contains("unknown parameter 'bogus'") == true)
+        #expect(storedOffsets(store, [a, t, b, s]) == [0, 0, 0, 0])
+    }
+
+    @Test("W3 clip.setNotePitches moveByCents out of range: all-or-nothing refusal naming the range, table untouched")
+    func moveByCentsOutOfRangeRefuses() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let (a, t, b, s) = try seedSlideFixture(store, clipID: clipID)
+        let response = await moveByCents(router, clipID: clipID, 2500)
+        #expect(!response.ok)
+        #expect(response.error?.contains("2400") == true, "\(response.error ?? "nil")")
+        #expect(response.error?.contains("Nothing was changed") == true)
+        #expect(storedOffsets(store, [a, t, b, s]) == [0, 0, 0, 0])
+    }
+
+    @Test("W4 clip.setNotePitches moveByCents with segmentIds: a named sound moves, an unnamed note does not")
+    func moveByCentsSegmentIdsNamesASound() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let (a, t, b, s) = try seedSlideFixture(store, clipID: clipID)
+        let response = await moveByCents(router, clipID: clipID, 300, segmentIds: [s])
+        #expect(response.ok, "\(response.error ?? "?")")
+        #expect(storedOffsets(store, [a, t, b, s]) == [0, 0, 0, 300])
+        #expect(response.result?["carriedSlides"]?.arrayValue?.isEmpty == true)
+        #expect(response.result?["movedByCents"]?.doubleValue == 300)
+    }
+
+    @Test("W5 clip.setNotePitches literal form: absolute meaning unchanged; warns exactly when a slide and its anchor get the same non-zero delta")
+    func literalFormWarnsOnlyForTheDoublingShape() async throws {
+        let (router, store) = makeRouter(engine: nil)
+        let fileURL = try makeRealAudioFile()
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+        let (a, t, b, _) = try seedSlideFixture(store, clipID: clipID)
+        func literal(_ pairs: [(UUID, Double)]) async -> ControlResponse {
+            await setNotePitches(router, clipID: clipID, pairs.map { ($0.0.uuidString, $0.1) })
+        }
+        func warnings(_ r: ControlResponse) -> [String] {
+            r.result?["warnings"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        }
+
+        // The doubling shape: slide AND both anchors +1200 in one call.
+        let doubled = await literal([(a, 1200), (t, 1200), (b, 1200)])
+        #expect(doubled.ok, "\(doubled.error ?? "?")")
+        let found = warnings(doubled)
+        #expect(found.count == 1, "\(found)")
+        #expect(found.first?.contains("1 sung slide follows the notes beside it") == true, "\(found)")
+        #expect(found.first?.contains("twice as far") == true)
+        #expect(found.first?.contains("send moveByCents instead") == true)
+        #expect(storedOffsets(store, [a, t, b]) == [1200, 1200, 1200], "the literal meaning is unchanged")
+
+        // Back to square one (this reset is itself a same-delta call; its warning is not asserted).
+        _ = await literal([(a, 0), (t, 0), (b, 0)])
+        // A lone slide (moved by a delta of its own): no warning, and +1200 is stored ABSOLUTELY on it.
+        let lone = await literal([(t, 1200)])
+        #expect(lone.ok, "\(lone.error ?? "?")")
+        #expect(warnings(lone).isEmpty, "\(warnings(lone))")
+        #expect(storedOffsets(store, [t]) == [1200])
+
+        // Different deltas on slide and anchors: not the doubling shape.
+        let distinct = await literal([(a, 100), (t, 700), (b, 100)])
+        #expect(distinct.ok)
+        #expect(warnings(distinct).isEmpty, "\(warnings(distinct))")
+        // Anchors only (no slide in the call): no warning.
+        let anchorsOnly = await literal([(a, 1500), (b, 1500)])
+        #expect(anchorsOnly.ok)
+        #expect(warnings(anchorsOnly).isEmpty)
+    }
+
+    @Test("W6 clip.getPitchEdits echoes slideFollowRule, legacy and hold")
+    func getPitchEditsEchoesSlideFollowRule() async throws {
+        for rule in PitchEditSet.SlideFollowRule.allCases {
+            let (router, store) = makeRouter(engine: nil)
+            let fileURL = try makeRealAudioFile()
+            defer { try? FileManager.default.removeItem(at: fileURL) }
+            let (_, clipID) = try await addAudioClip(router, path: fileURL.path)
+            _ = try seedSlideFixture(store, clipID: clipID, rule: rule)
+            let get = await router.handle(ControlRequest(
+                id: "g", command: "clip.getPitchEdits", params: ["clipId": .string(clipID)]))
+            #expect(get.ok, "\(get.error ?? "?")")
+            #expect(get.result?["slideFollowRule"]?.stringValue == rule.rawValue)
+            #expect(store.tracks.first?.clips.first?.pitchEdits?.slideFollowRule == rule)
+        }
+    }
 }

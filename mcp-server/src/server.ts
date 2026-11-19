@@ -156,9 +156,8 @@ export const server = new McpServer({
 
 // Append-only call logging (m23-ca, src/mcp-log.ts) — MUST install before the
 // first `registerTool(`/`server.registerTool(` call below, so every one of
-// the 188 registrations (154 local wrapper + 34 direct, re-measured at
-// breath-pad P1 by name-capturing regex — the figure here had been left at the
-// m26-k value of 185 through two later additions)
+// the tool registrations (count measured by `node scripts/gates/doc-count-drift.mjs`
+// and the audit-tools test, append-only surface)
 // is instrumented. See that file's header for the full design (before-snapshot
 // source/cost, redaction, seam choice).
 installMcpLogging(server, bridge);
@@ -542,7 +541,9 @@ registerTool(
       "disable the loop first if you want one plain linear take instead. " +
       "This is rejected if a punch window is ALSO enabled (see " +
       "transport_set_punch), or if the loop is shorter than 1 second per " +
-      "cycle.",
+      "cycle. Also refused while DAW Pro's voice recorder (for recording a " +
+      "singing voice) is open, with the sentence \"The voice recorder is " +
+      "open. Close it before recording in the song.\"",
     inputSchema: {},
   },
   async () => toToolResult(() => bridge.send("transport.record"))
@@ -576,8 +577,10 @@ registerTool(
       "OPPOSITE of layering (several different parts, keep them all). " +
       "Recording INTO a loop region is overdub, which is not supported yet — " +
       "disable the loop first. Also refused with a punch window enabled, " +
-      "when nothing is playing, when a layer is already recording, and when " +
-      "no track is armed. After finishing, check project_snapshot's " +
+      "when nothing is playing, when a layer is already recording, when " +
+      "no track is armed, and while DAW Pro's voice recorder (for recording " +
+      "a singing voice) is open, with the sentence \"The voice recorder is " +
+      "open. Close it before recording in the song.\" After finishing, check project_snapshot's " +
       "`lastRecordingError`: null means the layer landed.",
     inputSchema: {},
   },
@@ -1111,7 +1114,10 @@ registerTool(
     title: "Set track pan",
     description:
       "Set a track's stereo pan position. Range -1 to 1: -1 is hard left, " +
-      "0 is centered, 1 is hard right.",
+      "0 is centered, 1 is hard right. In songs made from now on, the pan knob keeps a " +
+      "sound equally loud as it moves: the near side gets up to 3 dB louder. Older songs " +
+      "keep the original rule (the far side gets quieter, the near side stays as it is). " +
+      "project_snapshot's `panLaw` says which rule this song uses (absent = the original).",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track, from project_snapshot."),
       pan: z.number().min(-1).max(1).describe("Pan position, -1 (hard left) to 1 (hard right), 0 = center."),
@@ -2041,7 +2047,7 @@ const soundBankSchema = z
 //
 // ⭐ GROUND TRUTH: every name, range, unit, curve, default and meaning below is
 // DERIVED from `DrumKitParams.paramSpecs` (Sources/DAWCore/DrumKit.swift),
-// the ONE HOME for all 75 addressable names — re-measure against that table
+// the ONE HOME for all 77 addressable names — re-measure against that table
 // before editing a range here rather than trusting this comment.
 //
 // ⛔ THE EIGHT VOICE SCHEMAS ARE DELIBERATELY NOT ONE SHARED SHAPE. The wire's
@@ -2050,10 +2056,10 @@ const soundBankSchema = z
 // schema reused across all eight voices would make zod say "valid" about a
 // name the wire refuses. Each voice below carries exactly its own rows: kick
 // 10, snare 10, closedHat 8, openHat 8, clap 9, tom 9, rim 8, cymbal 9 = 71,
-// plus 4 kit-wide leaves = 75.
+// plus 6 kit-wide leaves = 77.
 //
-// ⚠️ ADDRESSING ASYMMETRY: the four kit-wide leaves (`gain`, `velocityToTone`,
-// `accentThreshold`, `accentDepth`) are TOP-LEVEL keys directly on `drumKit`
+// ⚠️ ADDRESSING ASYMMETRY: the six kit-wide leaves (`gain`, `velocityToTone`,
+// `accentThreshold`, `accentDepth`, `hatsLevelDb`, `cymbalsLevelDb`) are TOP-LEVEL keys directly on `drumKit`
 // (`{drumKit: {gain: 0.9}}`), NOT nested under a `kit` sub-object — even
 // though instrument_describe_drum_kit reports them grouped under a `kit` key
 // in its response and instrument_set_drum_param addresses them by the dotted
@@ -2090,7 +2096,7 @@ function drumChokeGroupField() {
       "Mutual-cut group, 0-63 (clamped if out of range). Two voices sharing a group cut each " +
         "other off — the classic open/closed hi-hat behaviour (both hats default to group 0, so " +
         "the open hat choking off a ringing closed hat, and vice versa, is the out-of-the-box " +
-        "sound). STRUCTURAL, not one of the 75 addressable names — it cannot be modulated and " +
+        "sound). STRUCTURAL, not one of the 77 addressable names — it cannot be modulated and " +
         "cannot be reached through instrument_set_drum_param, only here. ⛔ NULLABLE WITH NO " +
         "FALLBACK: send `null` to deliberately CLEAR this voice's choke group (chokes nothing, " +
         "is choked by nothing); OMIT the key entirely to leave whatever this voice already has " +
@@ -2106,8 +2112,9 @@ function drumNoteField() {
     .optional()
     .describe(
       "Read-only/derived — the LOWEST MIDI note that triggers this voice in the kit's " +
-        "`noteLayout` (36-43 in the default `pads` layout; in `gm` a voice answers several " +
-        "notes, all listed in instrument_describe_drum_kit's `voiceNotes`). Present so you can " +
+        "`noteLayout` (in `gm`, the layout a NEW drum machine starts on, a voice can answer " +
+        "several notes, all listed in instrument_describe_drum_kit's `voiceNotes`; in `pads` " +
+        "it is one note each, 36-43). Present so you can " +
         "feed instrument_describe_drum_kit's or instrument_load_drum_preset's `drumKit` response " +
         "straight back into this object; IGNORED if you send it, never an error."
     );
@@ -2499,8 +2506,11 @@ const drumKitSchema = z
     rim: drumRimSchema,
     cymbal: drumCymbalSchema,
     gain: drumLeaf(
-      "0-2, \"level\" unit, linear, default 1.0. Output gain for the WHOLE KIT, applied after " +
-        "every voice sums. 0 silences the entire kit."
+      "0-2, \"level\" unit, linear, default 0.7. Output gain for the WHOLE KIT, applied after " +
+        "every voice sums. A NEW drum machine starts at 0.7, and so does every factory kit " +
+        "(instrument_load_drum_preset; lofi and acoustic 0.63, a step below the others), which keeps " +
+        "the loudest hits from clipping. A drum machine in a song saved before then keeps its own " +
+        "level: 1.0 (lofi 0.9) is how it played and still plays. 0 silences the entire kit."
     ),
     velocityToTone: drumLeaf(
       "0-1 linear, default 0.4. How much of EACH voice's velocity response is BRIGHTNESS " +
@@ -2518,19 +2528,37 @@ const drumKitSchema = z
       "0-1 linear, default 0.25. Extra level (and half a share of extra brightness) an " +
         "accented hit receives, on every voice."
     ),
+    hatsLevelDb: drumLeaf(
+      "-24 to +36, \"dB\" unit, linear, default 23.4. How loud the HI-HATS are (closed, open " +
+        "and pedal), in decibels, on top of each hat's own `level`. A NEW drum machine starts " +
+        "at +23.4, which puts its hi-hats about as loud, next to the snare, as the Mac's own " +
+        "drum kit plays them. 0 is how the drum machine sounded before that: a drum machine in " +
+        "a song saved back then still plays at 0 until you change it. Higher is louder, lower " +
+        "is quieter, and about +10 sounds twice as loud. Only the hi-hats change. Takes effect " +
+        "at the next note-on."
+    ),
+    cymbalsLevelDb: drumLeaf(
+      "-24 to +24, \"dB\" unit, linear, default 5.7. How loud the CYMBALS are (every crash and " +
+        "ride), in decibels, on top of the cymbal's own `level`. A NEW drum machine starts at " +
+        "+5.7, which puts its cymbals about as loud, next to the snare, as the Mac's own drum " +
+        "kit plays them. 0 is how the drum machine sounded before that: a drum machine in a " +
+        "song saved back then still plays at 0 until you change it. Higher is louder, lower is " +
+        "quieter. Only the cymbals change. Takes effect at the next note-on."
+    ),
     noteLayout: z
       .enum(["pads", "gm"])
       .optional()
       .describe(
-        "Which MIDI notes play which drum. `pads` (the default, and what every kit made before " +
-          "this field existed reads as): notes 36-43 play kick, snare, closedHat, openHat, clap, " +
-          "tom, rim, cymbal in that order, one note each. `gm`: General MIDI drum notes — 35/36 " +
-          "kick, 37 rim (side stick), 38/40 snare, 39 clap, 42/44 closedHat, 46 openHat, " +
-          "41/43/45/47/48/50 the one tom, 49/51/52/53/55/57/59 the one cymbal; every other GM " +
-          "drum note (tambourine, cowbell, congas…) plays NOTHING. ⚠️ A General MIDI beat " +
+        "Which MIDI notes play which drum. `gm` (what a NEW drum machine starts with): General " +
+          "MIDI drum notes — 35/36 kick, 37 rim (side stick), 38/40 snare, 39 clap, 42/44 " +
+          "closedHat, 46 openHat, 41/43/45/47/48/50 the one tom, 49/51/52/53/55/57/59 the one " +
+          "cymbal; every other GM drum note (tambourine, cowbell, congas…) plays NOTHING. " +
+          "`pads` (the older layout, which a drum machine in a song saved before `gm` became " +
+          "the start still uses): notes 36-43 play kick, snare, closedHat, openHat, clap, tom, " +
+          "rim, cymbal in that order, one note each. ⚠️ A General MIDI beat " +
           "(written from GM drum numbers, or imported from a .mid file) plays the WRONG DRUMS " +
           "on a `pads` kit, with no error: set `gm` for it. STRUCTURAL, like `chokeGroup`: not " +
-          "one of the 75 sound parameters, so instrument_set_drum_param REFUSES it and it cannot " +
+          "one of the 77 sound parameters, so instrument_set_drum_param REFUSES it and it cannot " +
           "be modulated; instrument_load_drum_preset KEEPS it. Omit the key to leave the layout " +
           "untouched. ⭐ Before writing drum notes, read `voiceNotes` from " +
           "instrument_describe_drum_kit: it lists, for THIS kit's layout, exactly which notes " +
@@ -2543,8 +2571,8 @@ const drumKitSchema = z
       "`audioUnit`/`soundBank`, NOT a polySynth parameter — used only when `kind` is (or is " +
       "being set to) `drumSynth`. This is a PARTIAL OVERLAY onto the track's CURRENT kit (the " +
       "`sampler`/`soundBank` precedent's overlay half, not their wholesale-`zones` half): " +
-      "`{drumKit: {kick: {decay: 0.9}}}` moves ONE of the 75 addressable parameters and leaves " +
-      "the other 74 exactly as they were — including on a track that already has a fully-" +
+      "`{drumKit: {kick: {decay: 0.9}}}` moves ONE of the 77 addressable parameters and leaves " +
+      "the other 76 exactly as they were — including on a track that already has a fully-" +
       "dialled kit. Unlike `audioUnit`/`soundBank`, providing `drumKit` does NOT imply " +
       "`kind` `drumSynth` — it stores the kit config regardless of the track's kind (same " +
       "as `sampler`), so it is silently inaudible on a track whose `kind` is not (or is not " +
@@ -2552,13 +2580,20 @@ const drumKitSchema = z
       "one, to actually hear it; read the response's `kind` field to confirm what is " +
       "actually sounding. " +
       "Omit `drumKit` entirely to leave the track's current kit untouched. " +
+      "⭐ A NEW drum machine — `kind: \"drumSynth\"` picked on a track that is not one yet — " +
+      "starts with General MIDI notes (`noteLayout` `gm`), the hi-hats at +23.4 dB and the " +
+      "cymbals at +5.7 dB (`hatsLevelDb`/`cymbalsLevelDb`), the kit `gain` at 0.7 so its " +
+      "loudest hits stay clear of clipping, and the 808 sound otherwise; a " +
+      "`drumKit` overlay on such a track starts from that same kit. A drum machine in a song " +
+      "saved earlier keeps the kit it plays (pad notes 36-43, both levels at 0 and `gain` 1.0, " +
+      "unless it was edited) until you change it. " +
       "Eight voices — `kick`/`snare`/`closedHat`/`openHat`/`clap`/`tom`/`rim`/`cymbal` — each " +
       "carrying ONLY the leaf parameters that voice actually has (10/10/8/8/9/9/8/9 = 71; a " +
       "name outside a voice's own set, e.g. `kick.band` or `rim.spread`, does not exist and is " +
-      "rejected), plus FOUR kit-wide leaves — `gain`/`velocityToTone`/`accentThreshold`/" +
-      "`accentDepth` — as TOP-LEVEL keys on `drumKit` itself (NOT nested under a `kit` key, " +
+      "rejected), plus SIX kit-wide leaves — `gain`/`velocityToTone`/`accentThreshold`/" +
+      "`accentDepth`/`hatsLevelDb`/`cymbalsLevelDb` — as TOP-LEVEL keys on `drumKit` itself (NOT nested under a `kit` key, " +
       "even though the describe/preset-load responses group them that way when reading them " +
-      "back). 71 + 4 = the full 75. " +
+      "back). 71 + 6 = the full 77. " +
       "EVERY VALUE HERE IS CLAMPED INTO ITS RANGE, NEVER REFUSED — the opposite of this " +
       "tool's polySynth richness knobs; see instrument_set_drum_param for the same clamp " +
       "surfaced explicitly via `value` vs `requested`. " +
@@ -2567,17 +2602,17 @@ const drumKitSchema = z
       "NOT change the hit already sounding, only the NEXT one. `level`/`pan` are the voice's " +
       "output stage and move a hit that is already sounding. Not knowing this reads as a " +
       "broken engine; it is a one-shot synth's ordinary behaviour. " +
-      "⚠️ Each voice's own `chokeGroup` (0-63, nullable, structural — not one of the 75 " +
+      "⚠️ Each voice's own `chokeGroup` (0-63, nullable, structural — not one of the 77 " +
       "addressable names) is the one field that does NOT overlay onto a resting default: " +
       "`null` deliberately CLEARS it, omitting the key leaves it untouched. Both hats default " +
       "to group 0 (so they choke each other) — clearing that is a real, supported edit and " +
       "must not be silently undone by an unrelated knob turn. " +
-      "There is deliberately NO discrete/enum parameter among the 75 sound parameters (see " +
+      "There is deliberately NO discrete/enum parameter among the 77 sound parameters (see " +
       "instrument_list_drum_presets) — the 808/909/acoustic/lofi/trap factory kits differ " +
-      "only in these same 75 numbers, never in topology, which is what makes 'every drum " +
+      "only in these same 77 numbers, never in topology, which is what makes 'every drum " +
       "parameter is automatable' literally true here. The two non-number fields, `chokeGroup` " +
-      "(per voice) and `noteLayout` (which MIDI notes play which drum: `pads` 36-43 or General " +
-      "MIDI `gm`), are STRUCTURAL, not sound parameters. For the full picture of a track's " +
+      "(per voice) and `noteLayout` (which MIDI notes play which drum: General MIDI `gm`, a " +
+      "new drum machine's, or `pads` 36-43), are STRUCTURAL, not sound parameters. For the full picture of a track's " +
       "current kit — ranges, defaults, engine-applied values, which settings are silently " +
       "inert right now, route budget — call instrument_describe_drum_kit rather than guessing " +
       "from this schema alone."
@@ -2668,7 +2703,7 @@ registerTool(
       "the kit is stored (same as `sampler`) even when `kind` stays polySynth/sampler/" +
       "audioUnit/soundBank, and stays silently inaudible until `kind: \"drumSynth\"` is " +
       "also sent, in this call or a prior one. It is a PARTIAL " +
-      "OVERLAY onto the track's current 75-parameter kit, unlike `sampler`'s wholesale " +
+      "OVERLAY onto the track's current 77-parameter kit, unlike `sampler`'s wholesale " +
       "`zones` array: send only the leaves you want to change. For a single named parameter " +
       "prefer instrument_set_drum_param, and for a factory starting point prefer " +
       "instrument_load_drum_preset over building this object by hand. " +
@@ -2708,8 +2743,11 @@ registerTool(
             "General MIDI needs no setup), `audioUnit` (hosts an installed Audio Unit " +
             "instrument plugin, selected via `audioUnit`; see instrument_list_audio_units " +
             "to discover installed AUs), or `drumSynth` (the built-in eight-voice one-shot " +
-            "drum machine — kick/snare/closed hat/open hat/clap/tom/rim/cymbal, MIDI notes " +
-            "36-43 — configured via `drumKit`, edited one parameter at a time via " +
+            "drum machine — kick/snare/closed hat/open hat/clap/tom/rim/cymbal; a NEW one " +
+            "plays General MIDI drum notes (36 kick, 38 snare, 42 closed hat, 46 open hat, " +
+            "39 clap, 45 tom, 37 rim, 49 cymbal…), while one in an older song may still use " +
+            "pad notes 36-43, so read `voiceNotes` from instrument_describe_drum_kit before " +
+            "writing drum notes — configured via `drumKit`, edited one parameter at a time via " +
             "instrument_set_drum_param, or loaded wholesale from a factory kit via " +
             "instrument_load_drum_preset; see instrument_describe_drum_kit for the full " +
             "picture of what's currently set). Omit to keep the current instrument."
@@ -4669,17 +4707,17 @@ registerTool(
   {
     title: "Set one Drum Kit parameter by name",
     description:
-      "Set exactly ONE of the Drum Kit's 75 addressable parameters by its dotted name, e.g. " +
+      "Set exactly ONE of the Drum Kit's 77 addressable parameters by its dotted name, e.g. " +
       "`kick.decay`, `closedHat.tune`, or `kit.gain`. THE narrower sibling of " +
       "track_set_instrument's `drumKit` object — reach for that instead when changing several " +
       "parameters in one call. `name` is `<voice>.<leaf>` for a per-voice parameter " +
       "(`kick`/`snare`/`closedHat`/`openHat`/`clap`/`tom`/`rim`/`cymbal`) or `kit.<leaf>` for " +
-      "one of the four kit-wide leaves (`kit.gain`/`kit.velocityToTone`/`kit.accentThreshold`/" +
-      "`kit.accentDepth`) — call instrument_describe_drum_kit first (its `order` field lists " +
-      "all 75 valid names) if you are not sure of the exact spelling. A typo'd or nonexistent " +
+      "one of the six kit-wide leaves (`kit.gain`/`kit.velocityToTone`/`kit.accentThreshold`/" +
+      "`kit.accentDepth`/`kit.hatsLevelDb`/`kit.cymbalsLevelDb`) — call instrument_describe_drum_kit first (its `order` field lists " +
+      "all 77 valid names) if you are not sure of the exact spelling. A typo'd or nonexistent " +
       "name is REFUSED with the valid names for that scope (e.g. asking for `kik.tune` lists " +
       "every valid `kick.*` name), so the error teaches the correct spelling rather than just " +
-      "failing. ⚠️ `chokeGroup` is NOT reachable here — it is structural, not one of the 75 " +
+      "failing. ⚠️ `chokeGroup` is NOT reachable here — it is structural, not one of the 77 " +
       "names; set it via track_set_instrument's `drumKit.<voice>.chokeGroup` instead. " +
       "`noteLayout` (which MIDI notes play which drum) is structural too and is REFUSED here " +
       "with a pointer to track_set_instrument's `drumKit.noteLayout`. " +
@@ -4704,7 +4742,7 @@ registerTool(
         .min(1)
         .describe(
           "Dotted drum parameter name, e.g. `kick.decay`, `closedHat.tune`, `kit.gain`. See " +
-            "instrument_describe_drum_kit's `order` field for the full list of 75 valid names."
+            "instrument_describe_drum_kit's `order` field for the full list of 77 valid names."
         ),
       value: z
         .number()
@@ -4727,7 +4765,7 @@ registerTool(
   {
     title: "Read a track's Drum Kit configuration (read-only)",
     description:
-      "Read the built-in Drum Kit's FULL configuration on an instrument track — all 75 " +
+      "Read the built-in Drum Kit's FULL configuration on an instrument track — all 77 " +
       "parameters' range, unit, curve, default, current value, whether each one is silently " +
       "inert right now, and the modulation route budget — the drum-machine twin of " +
       "instrument_describe_synth/instrument_describe_sampler for the other built-in sound " +
@@ -4735,15 +4773,19 @@ registerTool(
       "like the Sampler/Poly Synth, the kit is carried across kind switches, so you can " +
       "inspect a previously-built kit before switching back to it; `isActiveInstrument` says " +
       "whether `drumSynth` is the kind actually sounding. `isConfigured` says whether this " +
-      "track has ever been given a kit at all — false means you are looking at the untouched " +
-      "factory default (the SAME default track_set_instrument's `drumKit` overlay would start " +
-      "from on this track). " +
+      "track has ever been given a kit at all — a drum machine picked now starts with one (a " +
+      "NEW drum machine's: General MIDI notes, hats +23.4 dB, cymbals +5.7 dB, kit gain 0.7), " +
+      "so it reads true. False means you are looking at the default kit, which is the SAME kit " +
+      "track_set_instrument's `drumKit` overlay would start from on this track: on a drum " +
+      "machine from an older song that was never edited, the 808 kit on pad notes 36-43 with " +
+      "both levels at 0 and kit gain 1.0, exactly as that song plays; on a track that is not a drum machine, " +
+      "the new drum machine's kit. " +
       "Refuses readably for an audio/bus track (only instrument tracks carry an instrument) " +
       "and an unknown trackId — there is deliberately no 'never configured' refusal, matching " +
       "instrument_describe_synth: every instrument track HAS a kit (the default's) even " +
       "untouched. " +
       "Returns {trackId, kind, isActiveInstrument, isConfigured, noteLayout, noteLayoutMeaning, " +
-      "voiceNotes, silentGMNotes, voices, kit, parameterCount (75), order, presets, routesUsed, " +
+      "voiceNotes, silentGMNotes, voices, kit, parameterCount (77), order, presets, routesUsed, " +
       "routeBudget, warnings}. ⭐ READ `voiceNotes` BEFORE WRITING DRUM NOTES: it maps each " +
       "voice name to EVERY MIDI note that plays it in this kit's `noteLayout` (`pads`: one " +
       "note each, 36-43; `gm`: General MIDI drum notes, e.g. the six tom notes all play `tom`), " +
@@ -4755,8 +4797,8 @@ registerTool(
       "leaves that voice actually has, 8-10 of them) and `chokeGroup` (0-63) is present ONLY " +
       "when set — absent means this voice chokes nothing and is choked by nothing, which is " +
       "NOT the same fact as group 0 (both hats default to group 0, so they choke each other " +
-      "out of the box). `kit` holds the four kit-wide parameters " +
-      "(`gain`/`velocityToTone`/`accentThreshold`/`accentDepth`) in the same per-parameter " +
+      "out of the box). `kit` holds the six kit-wide parameters " +
+      "(`gain`/`velocityToTone`/`accentThreshold`/`accentDepth`/`hatsLevelDb`/`cymbalsLevelDb`) in the same per-parameter " +
       "shape. Every entry under `parameters`/`kit` is " +
       "`{name, value, default, min, max, unit, curve, modulatable: true, " +
       "appliesAtNextNoteOn, meaning?}` — `modulatable` is always true (this is the first " +
@@ -4764,11 +4806,11 @@ registerTool(
       "`appliesAtNextNoteOn` is false ONLY for `level`/`pan` on each voice: those two are the " +
       "voice's output stage and move a hit that is already sounding, while every other " +
       "parameter latches at note-on and leaves a sounding hit untouched until the next one. " +
-      "`order` lists all 75 dotted names (`kick.tune`, ..., `kit.accentDepth`) in a sensible " +
+      "`order` lists all 77 dotted names (`kick.tune`, ..., `kit.cymbalsLevelDb`) in a sensible " +
       "read order — pass any of them straight to instrument_set_drum_param. `presets` is the " +
       "five factory kit NAMES (`808`/`909`/`acoustic`/`lofi`/`trap` — pass one to " +
       "instrument_load_drum_preset; call instrument_list_drum_presets for a one-line summary " +
-      "of each). `routesUsed`/`routeBudget` (64) answer a real ceiling: there are 75 " +
+      "of each). `routesUsed`/`routeBudget` (64) answer a real ceiling: there are 77 " +
       "addressable names sharing ONE 64-route modulation budget with this strip's automation " +
       "lanes, so they cannot all be routed at once — this reports the ceiling before it bites " +
       "rather than leaving you to discover it when a route silently goes missing. " +
@@ -4797,7 +4839,7 @@ registerTool(
       "inaudible; check the response's `kind`/`isActiveInstrument` and, if needed, send " +
       "`kind: \"drumSynth\"` via track_set_instrument (before or after this call). " +
       "⚠️ WHOLESALE, NOT AN OVERLAY — unlike track_set_instrument's `drumKit` " +
-      "object (a partial update) this REPLACES all 75 parameters at once; the response's " +
+      "object (a partial update) this REPLACES all 77 parameters at once; the response's " +
       "`replacedAllParameters` is always true, stated explicitly rather than left for you to " +
       "discover by diffing. `name` is matched case-insensitively against the five lineages — " +
       "`808` (the defaults: deep sub kick, slow fall, loose hats, a snare that sits back), " +
@@ -4809,13 +4851,20 @@ registerTool(
       "summary of each, or read the full numeric recipe via instrument_describe_drum_kit " +
       "after loading one. It KEEPS the kit's `noteLayout`: a preset changes how the drums " +
       "sound, never which MIDI note plays which drum (the response's `noteLayout` says which). " +
-      "⭐ THERE IS NO `character` ENUM AND NO DISCRETE PARAMETER AMONG THE 75 SOUND PARAMETERS " +
-      "— the five lineages differ only in these same 75 numbers, never in " +
+      "Every factory kit sets the hi-hats to +23.4 dB and the cymbals to +5.7 dB " +
+      "(`hatsLevelDb`/`cymbalsLevelDb`), the levels a new drum machine starts at — so loading " +
+      "one onto a drum machine from an older song (where both are 0) makes its hats and " +
+      "cymbals louder too. Every factory kit also sets the kit `gain` to 0.7 (lofi and acoustic " +
+      "0.63), the level a NEW drum machine starts at, which keeps the loudest hits from " +
+      "clipping. A drum machine in a song saved before then keeps its own level (1.0, or 0.9 " +
+      "for lofi) until you load a kit or change it. " +
+      "⭐ THERE IS NO `character` ENUM AND NO DISCRETE PARAMETER AMONG THE 77 SOUND PARAMETERS " +
+      "— the five lineages differ only in these same 77 numbers, never in " +
       "topology, so anything a preset sets can also be dialled by hand or reached one knob at " +
       "a time afterward via instrument_set_drum_param. An unknown `name` is REFUSED and lists " +
       "the five valid names rather than a bare 'not found'. " +
       "Returns {trackId, name (the canonical preset name), summary, replacedAllParameters " +
-      "(true), noteLayout (KEPT from the kit), parameterCount (75), kind, isActiveInstrument, " +
+      "(true), noteLayout (KEPT from the kit), parameterCount (77), kind, isActiveInstrument, " +
       "drumKit (the full resulting kit " +
       "— the same per-voice/kit-wide numeric shape instrument_describe_drum_kit's `voices`/" +
       "`kit` use, so you can read exactly what landed without a follow-up describe call)}. " +
@@ -6603,6 +6652,40 @@ registerTool(
 );
 
 registerTool(
+  "fx_get_params",
+  {
+    title: "Read an effect's current values (read-only)",
+    description:
+      "READ what one effect in a track, bus or master insert chain is set to RIGHT NOW, " +
+      "without changing anything. Read values here; never toggle bypass (or re-send a " +
+      "parameter) just to see them: those calls are real edits, each adds an entry to the " +
+      "undo history, and another agent's edit_undo would then undo YOUR no-op instead of the " +
+      "change it meant. This tool adds no undo entry, does not mark the project as changed " +
+      "and never touches the audio engine, so it is safe to call as often as you like. " +
+      "Pass `trackId` as a track/bus id, or the exact string \"master\" for the master output " +
+      "chain, and `effectId` from fx_add's result or project_snapshot. " +
+      "fx_describe is the other half: it describes an effect KIND (names, ranges, defaults, " +
+      "units, what each knob does); this tool gives the CURRENT values on one insert. " +
+      "Returns `{trackId, effectId, effects}`: `effects` is the track's full insert chain in " +
+      "processing order, exactly the shape fx_set_param / fx_set_bypass / fx_add return and " +
+      "project_snapshot carries, so each entry has its `kind`, its bypass state and every " +
+      "parameter's current value in its own units; the entry whose id equals `effectId` is " +
+      "the one you asked about. A hosted Audio Unit insert comes back as the same chain entry " +
+      "those tools give; for its plugin parameters use au_describe_params. An unknown track or " +
+      "effect id is refused with the same sentence fx_set_bypass gives.",
+    inputSchema: {
+      trackId: z.string().min(1).describe("Id of the track or bus that owns the effect, from project_snapshot, OR \"master\" for the master output chain."),
+      effectId: z
+        .string()
+        .min(1)
+        .describe("Id of the effect to read, from fx_add's result or project_snapshot."),
+    },
+  },
+  async ({ trackId, effectId }) =>
+    toToolResult(() => bridge.send("fx.getParams", { trackId, effectId }))
+);
+
+registerTool(
   "fx_set_param",
   {
     title: "Set an effect parameter",
@@ -6737,7 +6820,22 @@ registerTool(
       "a strip reading to a master reading without checking `tapPoint` is how you'd wrongly " +
       "conclude the meter is broken), and `leaseSeconds` (the full lease length, currently 3). " +
       "A refusal never carries analysis fields — an unarmed tap never masquerades as a live " +
-      "silent meter.",
+      "silent meter. " +
+      // m27-j (W8-M27J, 2026-10-07): the one-call audition and the transport recipe.
+      "TO SEE THE SPECTRUM OF ONE NOTE, pass `audition` in this same call, for example " +
+      "{\"pitches\": [69]} (the same keys and limits as note_audition; its `trackId` defaults to the " +
+      "track above and is required when measuring \"master\"). The app arms the meter, plays the " +
+      "note, reads this insert every 20 ms while the note sounds and for 0.15 s after, and returns " +
+      "the LOUDEST level each band reached: `hold: \"peakOverAudition\"` (bands, levelDB and peakDB " +
+      "are those highest values; the other fields come from the loudest moment), `reads` (how many " +
+      "reads), `framesCovered` (how much sound was measured) and `framesMissed` (0 means no gap), " +
+      "plus an `audition` object like note_audition's reply (check `audible`). The call takes about " +
+      "durationMs + 0.15 s. Calling note_audition first and fx_spectrum afterwards does NOT work: by " +
+      "the second call the note has usually ended or the meter has just restarted, and every band " +
+      "reads -80 dB. FOR MUSIC PLAYING ON THE TRANSPORT: call fx_spectrum once to arm, then call it " +
+      "again within 3 seconds while the music is still playing. Each read covers only the last ~85 ms " +
+      "of sound, and a first call (or any call more than 3 seconds after the previous one) reads the " +
+      "floor because the meter has only just started.",
     inputSchema: {
       trackId: z
         .string()
@@ -6757,10 +6855,56 @@ registerTool(
           "Default true: arm (or renew) the 3-second measurement lease and read. False: read " +
             "one last time and release the tap immediately."
         ),
+      audition: z
+        .object({
+          pitches: z
+            .array(z.number().int().min(0).max(127))
+            .min(1)
+            .max(8)
+            .describe(
+              "MIDI note numbers to play while measuring, 1-8 of them (69 = the A above middle C, 440 Hz)."
+            ),
+          velocity: z
+            .number()
+            .int()
+            .min(1)
+            .max(127)
+            .optional()
+            .describe("How hard the notes are struck, 1-127. Defaults to 100."),
+          durationMs: z
+            .number()
+            .int()
+            .min(10)
+            .max(5000)
+            .optional()
+            .describe(
+              "How long the notes sound, 10-5000 ms (default 500). The meter keeps reading for 0.15 s more."
+            ),
+          trackId: z
+            .string()
+            .optional()
+            .describe(
+              "The INSTRUMENT track that plays the notes. Defaults to `trackId` above; required when " +
+                "measuring \"master\"."
+            ),
+        })
+        .strict()
+        .optional()
+        .describe(
+          "Optional: notes to play while measuring, so ONE call measures one note (see the tool " +
+            "description). Cannot be combined with arm:false."
+        ),
     },
   },
-  async ({ trackId, effectId, arm }) =>
-    toToolResult(() => bridge.send("fx.spectrum", { trackId, effectId, arm }))
+  async ({ trackId, effectId, arm, audition }) =>
+    toToolResult(() =>
+      bridge.send(
+        "fx.spectrum",
+        // Forward `audition` ONLY when given, so a call without it sends exactly
+        // what it sent before m27-j.
+        audition === undefined ? { trackId, effectId, arm } : { trackId, effectId, arm, audition }
+      )
+    )
 );
 
 server.registerTool(
@@ -8724,11 +8868,41 @@ registerTool(
       "what THIS call changed (and what undo restores), `sourceTrackMuted` is whether the " +
       "original will be heard at all. They diverge -- an already-muted track gives null + " +
       "true -- so never infer audibility from `mutedTrackId`. " +
+      "SORT INTO A DRUM KIT: pass `mapping: \"kit\"` when the clip is a drum loop or a break. " +
+      "The app listens to each slice and puts it on the standard General MIDI drum note for " +
+      "what it sounds like, instead of numbering the pads upward from `baseNote`: kicks on 36 " +
+      "(then 35), snares on 38 (then 40), closed hi-hats on 42 (then 44), the open hi-hat on 46. " +
+      "When a role has more hits than notes, the LOUDEST hit takes the first note. Anything " +
+      "else -- toms, claps, cymbals, melodic or unclear slices -- lands on the extra pads from " +
+      "note 84 up, in time order. Both hi-hat types share choke group 0, so a closed hat cuts " +
+      "a ringing open hat like a real kit, and each pad remembers its drum type (`drumRole`) so " +
+      "the drum-lane views can name it. Timing, length and velocity are exactly what the " +
+      "default (\"chromatic\") chop gives; only the notes move, so the MIDI clip still replays " +
+      "the original groove. `baseNote` is REFUSED together with \"kit\" (the kit decides every " +
+      "note). Past note 127 the chop is refused, never truncated. " +
+      "THE SORT IS A BEST GUESS FROM THE SOUND, not a certainty: each slice in the reply " +
+      "carries `role` (\"kick\", \"snare\", \"closedHat\", \"openHat\" or \"other\") and " +
+      "`confidence` (0.5 to 1), and `kitSummary` is one sentence you can read out (\"Sorted " +
+      "into 4 kicks, 3 snares, 8 closed hats, 1 open hat and 2 other hits.\"). Check the low " +
+      "`confidence` slices by ear. Measured limits, stated honestly: the rules were fitted on " +
+      "synthetic and drum-machine hits at velocity 100 only -- real recorded loops and soft hits " +
+      "are NOT yet measured; and on the General MIDI drum kit a CLOSED hat can be sorted as " +
+      "OPEN (its tail is long enough), and a cymbal can be sorted as an open hat. When you " +
+      "hear a wrong one, correct it with `roles` (below) and chop again -- the chop never " +
+      "touches the source, so re-running is safe -- or fix a single pad afterwards with " +
+      "instrument_set_sampler_zones. " +
+      "`roles` (\"kit\" only) forces the answer for named slices before the guess: an object from " +
+      "slice index (as text, \"0\", \"1\", ... counting pads in time order, the `index` in the " +
+      "reply) to \"kick\" | \"snare\" | \"closedHat\" | \"openHat\" | \"other\", e.g. " +
+      "{\"3\": \"snare\"}. A forced slice reports `confidence` 1. \"other\" is never folded into a " +
+      "drum. `roles` without \"kit\", a key that is not a slice number, or an index past the " +
+      "last slice is REFUSED by name and changes nothing. " +
       "Everything lands in ONE undo step. Returns {trackId, createdTrackId?, midiClipId?, " +
       "sampleRate, frameCount, sliceCount, headSeconds, slices: [{index, pitch, " +
       "startFrame, endFrame?, sourceSeconds, beat, strength?, snapOffsetFrames?, " +
-      "residualAmplitude?}], warnings, mutedTrackId?, sourceTrackMuted} -- " +
-      "`sampleRate`/`frameCount` are the SOURCE FILE's " +
+      "residualAmplitude?, role?, confidence?}], warnings, mutedTrackId?, sourceTrackMuted, " +
+      "kitSummary?} -- `role`, `confidence` and `kitSummary` appear ONLY with mapping " +
+      "\"kit\"; a default chop's reply is unchanged. `sampleRate`/`frameCount` are the SOURCE FILE's " +
       "own, and every frame number is in those units.",
     inputSchema: {
       clipId: z
@@ -8820,7 +8994,8 @@ registerTool(
         .optional()
         .describe(
           "MIDI note of pad 1 (default 36 = C1, the MPC pad-1 note). Pad i sits at " +
-            "baseNote + i; running past 127 is rejected."
+            "baseNote + i; running past 127 is rejected. Refused together with mapping \"kit\", " +
+            "which puts every hit on its own drum note."
         ),
       snapWindowMs: z
         .number()
@@ -8867,6 +9042,29 @@ registerTool(
             "`mutedTrackId` for what THIS call changed and `sourceTrackMuted` for whether " +
             "the original will be heard -- they differ when the track was already muted."
         ),
+      mapping: z
+        .enum(["chromatic", "kit"])
+        .optional()
+        .describe(
+          "How the pads are numbered (default \"chromatic\": one pad per note from " +
+            "`baseNote` up, in time order). \"kit\" sorts the hits into a General MIDI drum " +
+            "kit by how they SOUND: kicks 36/35, snares 38/40, closed hats 42/44, open hat 46, " +
+            "anything else from 84 up; the hats share choke group 0. A best guess -- read each " +
+            "slice's `role` and `confidence`. Refused together with `baseNote`."
+        ),
+      roles: z
+        .record(
+          z.string().regex(/^(0|[1-9][0-9]*)$/, "roles keys are slice numbers as text: \"0\", \"1\", ..."),
+          z.enum(["kick", "snare", "closedHat", "openHat", "other"])
+        )
+        .optional()
+        .describe(
+          "mapping \"kit\" ONLY: force the drum type of named slices before the app guesses. " +
+            "Keys are slice indexes counted in time order (the reply's `index`), values are " +
+            "\"kick\" | \"snare\" | \"closedHat\" | \"openHat\" | \"other\". Example: " +
+            "{\"2\": \"snare\", \"5\": \"openHat\"}. Use it to fix a wrong guess (a closed hat " +
+            "heard as open, say) and chop again."
+        ),
     },
   },
   async ({
@@ -8885,6 +9083,8 @@ registerTool(
     atBeat,
     velocityFromStrength,
     muteSourceTrack,
+    mapping,
+    roles,
   }) =>
     toToolResult(() =>
       bridge.send("clip.sliceToSampler", {
@@ -8903,6 +9103,8 @@ registerTool(
         atBeat,
         velocityFromStrength,
         muteSourceTrack,
+        mapping,
+        roles,
       })
     )
 );
@@ -9714,7 +9916,25 @@ registerTool(
   {
     title: "Move several sung notes' pitch at once (per-note tuning, one undo step)",
     description:
-      "Moves several detected notes' pitch in ONE call and ONE undo step -- the BATCH " +
+      "TWO FORMS, exactly ONE of `notes` or `moveByCents` per call (both or neither is refused, " +
+      "nothing changes). To \"move this vocal/phrase up/down\" -- shift the notes TOGETHER by the " +
+      "same amount, exactly as selecting them in the pitch editor and dragging does -- send " +
+      "`moveByCents` (a DELTA in cents, 100 = one semitone, positive = up; +1200 = an octave up) " +
+      "and optionally `segmentIds` (which notes; OMIT it to move every SUNG note -- breaths and " +
+      "consonants, the notes with origin \"unpitched\", move only when you name them). It is one " +
+      "undo step, all or nothing: a move that would take any note past +/-2400 cents refuses and " +
+      "names the range the notes can move by. The reply adds `movedByCents`, `notes` (each moved " +
+      "note's stored offset) and `carriedSlides`: the ids of slides that follow the notes beside " +
+      "them (origin \"transition\", glideFollow above 0) whose own stored number moved by LESS " +
+      "than the move, because their neighbours carry them -- so a slide's number not moving by " +
+      "the full amount is expected, and it still plays the full move. " +
+      "The `notes` form below is the LITERAL one: each note's ABSOLUTE own offset, nothing " +
+      "carried. A slide that follows its neighbours stores its offset relative to the line " +
+      "between them, so sending the SAME non-zero change for a followed slide AND the notes " +
+      "beside it in one `notes` call makes the slide play about twice as far; the reply then " +
+      "carries a `warnings` entry saying so (absent when it does not apply) -- to move notes " +
+      "together, use `moveByCents` instead. " +
+      "THE `notes` FORM: moves several detected notes' pitch in ONE call and ONE undo step -- the BATCH " +
       "sibling of clip_set_note_pitch, for retuning a whole phrase without one round trip " +
       "per note. Each note gets its OWN absolute cents -- the intervals between notes are " +
       "whatever you send, nothing is kept or forced (unlike clip_set_note_gain/" +
@@ -9746,6 +9966,23 @@ registerTool(
       "value -- never the `cents` number you sent.",
     inputSchema: {
       clipId: z.string().uuid().describe("Id of the AUDIO clip the notes belong to."),
+      moveByCents: z
+        .number()
+        .optional()
+        .describe(
+          "Move the notes TOGETHER by this many cents (a delta: 100 = 1 semitone, positive = " +
+            "up, negative = down), like dragging them as a group in the pitch editor. Use it " +
+            "INSTEAD of `notes` -- exactly one of the two. The notes keep their intervals, and " +
+            "slides that follow their neighbours glide along without doubling."
+        ),
+      segmentIds: z
+        .array(z.string().uuid())
+        .optional()
+        .describe(
+          "With moveByCents only: the ids of the notes to move (from clip_get_pitch_edits' " +
+            "`segments`). Omit to move every sung note; a breath/consonant (unpitched) moves only " +
+            "if named here. Must not be an empty list."
+        ),
       notes: z
         .array(
           z.object({
@@ -9764,8 +10001,9 @@ registerTool(
             // would otherwise be silently stripped instead of rejected.
             .strict()
         )
+        .optional()
         .describe(
-          "The notes to move, each with its OWN absolute cents. At least one is required " +
+          "The literal form (instead of moveByCents): the notes to set, each with its OWN absolute cents. At least one is required " +
             "(an empty list is refused by the app, naming clip_get_pitch_edits as the way to " +
             "read note ids first). A repeated segmentId whose cents CLAMP to the same value " +
             "is folded; two DIFFERENT stored values for the same id refuse the whole call. " +
@@ -9774,8 +10012,17 @@ registerTool(
         ),
     },
   },
-  async ({ clipId, notes }) =>
-    toToolResult(() => bridge.send("clip.setNotePitches", { clipId, notes }))
+  async ({ clipId, notes, moveByCents, segmentIds }) =>
+    // Only the keys the caller sent are forwarded; the app owns the "exactly one of
+    // notes / moveByCents" refusal text.
+    toToolResult(() =>
+      bridge.send("clip.setNotePitches", {
+        clipId,
+        ...(notes !== undefined ? { notes } : {}),
+        ...(moveByCents !== undefined ? { moveByCents } : {}),
+        ...(segmentIds !== undefined ? { segmentIds } : {}),
+      })
+    )
 );
 
 registerTool(
@@ -10600,7 +10847,10 @@ registerTool(
       "The clip's own length shrinks by the excised amount (floored at one beat, or " +
       "at the furthest surviving note's end, whichever is longer — a clip never " +
       "strands a note past its own end). One call = one undo step (edit_undo " +
-      "restores the exact prior notes and length). MIDI CLIPS ONLY: an audio clip " +
+      "restores the exact prior notes, length and lyrics). If the clip has lyrics " +
+      "(clip_set_lyrics), a word whose notes were ALL removed is deleted from the " +
+      "text in the same step; a word that keeps at least one note stays; lyrics " +
+      "that cannot be placed on the notes are kept unchanged. MIDI CLIPS ONLY: an audio clip " +
       "is rejected; a take-comp member clip is rejected (change the comp with " +
       "take_set_comp/take_select, or take_flatten first — the clip_quantize " +
       "precedent). Errors readably if `startBeat` falls outside [0, clip length) or " +
@@ -11823,7 +12073,9 @@ registerTool(
       "one clip). METER-AWARE, same as arrange_insert_bars. Clips fully inside the " +
       "removed range are deleted outright (their ids come back in " +
       "`removedClipIds`); a clip straddling either edge is trimmed or split-and-" +
-      "closed so it never leaves a hole. Markers inside the removed range are " +
+      "closed so it never leaves a hole. If a clip has lyrics (clip_set_lyrics), " +
+      "a word whose notes were ALL removed is deleted from the text in the same " +
+      "step; a word that keeps a note stays. Markers inside the removed range are " +
       "deleted (`removedMarkerIds`); tempo/meter map changes inside the range are " +
       "removed and the rest pulls left; a loop or punch region swallowed by the " +
       "delete is disabled at the splice point rather than left dangling. A delete " +
@@ -12358,7 +12610,13 @@ registerTool(
       "kit), lofi-tape (warm, dulled tape/vinyl character). To fine-tune afterwards, nudge individual effects " +
       "with fx_set_param, or build a chain by hand with fx_add. Returns `{trackId, effects}`: the " +
       "strip's full new insert chain (same shape as project_snapshot's per-track `effects` array), " +
-      "so you can see exactly what the preset laid down.",
+      "so you can see exactly what the preset laid down, plus `removedSidechainKeys` (ALWAYS present; [] when " +
+      "nothing was keyed): every sidechain key the replaced chain carried, removed along with the effect that " +
+      "held it — `[{effectId, kind, sourceTrackId, sourceTrackName (null when that track is no longer in the " +
+      "song), message}]`, where `message` is a plain sentence to pass on (for example that the bass will no " +
+      "longer duck when the kick plays). While a take is recording, applying a preset over a chain that holds a " +
+      "sidechain-keyed effect is refused (\"cannot apply a preset that removes a sidechain-keyed effect while " +
+      "recording — stop first\"); a chain with no key can still be replaced mid-take.",
     inputSchema: {
       trackId: z
         .string()
@@ -12706,24 +12964,34 @@ registerTool(
 registerTool(
   "audio_profile_file",
   {
-    title: "Windowed peak/RMS profile of a file on disk",
+    title: "Windowed peak/RMS (and, on request, loudness) of a file on disk",
     description:
       "Read an ARBITRARY audio file on disk (any absolute path -- not a project track, not " +
       "a clip, not the reference slot) and report SAMPLE peak + RMS per consecutive time " +
       "window, plus a file-header block (duration, sample rate, channel count, on-disk bit " +
       "depth/float-ness -- the ffprobe readback). This answers \"what is the peak level " +
-      "between 53s and 54s of this WAV\" -- a WINDOWING question. It is NOT a loudness " +
-      "meter and NOT a substitute for one: `peakDb` is the raw inter-sample maximum, NOT " +
-      "the 4x-oversampled BS.1770 true peak render_measure_loudness/reference_analyze " +
-      "report as `truePeakDbtp` -- a window can read under 0 dBFS sample peak here and " +
-      "still exceed 0 dBTP true peak between samples. Use render_measure_loudness (the " +
-      "rendered SESSION, before quantization) or reference_analyze (a whole file, occupying " +
-      "the project's one reference slot) for LUFS/true-peak questions; use this tool when " +
+      "between 53s and 54s of this WAV\" -- a WINDOWING question. ON ITS OWN it is NOT a " +
+      "loudness meter: `peakDb` is the raw inter-sample maximum, NOT the 4x-oversampled " +
+      "BS.1770 true peak render_measure_loudness/reference_analyze report as " +
+      "`truePeakDbtp` -- a window can read under 0 dBFS sample peak here and still exceed " +
+      "0 dBTP true peak between samples. To CHECK A BOUNCE'S LOUDNESS WITHOUT IMPORTING " +
+      "IT, pass `loudness: true`: the reply gains `loudness` -- integrated LUFS, true peak " +
+      "(dBTP), max momentary/short-term LUFS and loudness range (LU) of the profiled range, " +
+      "from the SAME meter reference_import/reference_analyze use, so the numbers match " +
+      "theirs exactly. Prefer this over reference_import for a check: reference_import " +
+      "COPIES the file into the References library every time (and reference_remove leaves " +
+      "the copy on disk), while this copies nothing. render_measure_loudness measures the " +
+      "rendered SESSION instead of a file. Use this tool when " +
       "you need to see what a specific stretch of a file on disk actually contains -- e.g. " +
       "verifying a bounce/render landed correctly, or checking exactly where a tail decays " +
       "to silence, without leaving the app. Returns `{durationSeconds, sampleRateHz, " +
       "channelCount, bitDepth?, isFloat?, windows: [{startSeconds, durationSeconds, " +
-      "peakDb?, rmsDb?}]}`. The header `durationSeconds` is the WHOLE file, independent of " +
+      "peakDb?, rmsDb?}], loudness?: {integratedLufs?, truePeakDbtp?, maxMomentaryLufs?, " +
+      "maxShortTermLufs?, loudnessRangeLu?}}`; `loudness` appears ONLY when you asked for " +
+      "it, and a field inside it is omitted when the range holds no evidence (under 0.4 s " +
+      "has no integrated reading, under 3 s no short-term reading or range, digital " +
+      "silence none at all) -- never a made-up number. The range is measured as if it " +
+      "were its own file. The header `durationSeconds` is the WHOLE file, independent of " +
       "any fromSeconds/durationSeconds sub-range requested; `bitDepth`/`isFloat` are " +
       "omitted for formats with no fixed PCM bit depth (compressed codecs) -- never " +
       "fabricated. Each window's own `durationSeconds` is usually the requested " +
@@ -12738,8 +13006,9 @@ registerTool(
       "for gated-silent audio; treat a missing field as silence, never as a number. " +
       "Read-only: never writes anything, never copies the file, and never touches the " +
       "project's reference slot or the References library -- call this as often as you " +
-      "like without side effects. Errors readably: no file at path (names the path); no " +
-      "audio engine attached (a profile is never fabricated, so this needs the app running).",
+      "like without side effects, with or without `loudness`. Errors readably: no file at " +
+      "path (names the path); no audio engine attached (a profile is never fabricated, so " +
+      "this needs the app running).",
     inputSchema: {
       path: z
         .string()
@@ -12777,11 +13046,27 @@ registerTool(
             "EOF). The final window truncates at this boundary (or at EOF) and reports its " +
             "own, shorter `durationSeconds`."
         ),
+      loudness: z
+        .boolean()
+        .optional()
+        .describe(
+          "Optional, default false. true ADDS `loudness` to the reply: integrated LUFS, " +
+            "true peak (dBTP), max momentary/short-term LUFS and loudness range (LU) of the " +
+            "profiled range (fromSeconds to fromSeconds+durationSeconds), from the same meter " +
+            "reference_analyze uses. This is the way to check a bounce's loudness without " +
+            "importing it: nothing is copied and the reference slot is untouched."
+        ),
     },
   },
-  async ({ path, windowSeconds, fromSeconds, durationSeconds }) =>
+  async ({ path, windowSeconds, fromSeconds, durationSeconds, loudness }) =>
     toToolResult(() =>
-      bridge.send("audio.profileFile", { path, windowSeconds, fromSeconds, durationSeconds })
+      bridge.send("audio.profileFile", {
+        path,
+        windowSeconds,
+        fromSeconds,
+        durationSeconds,
+        loudness,
+      })
     )
 );
 
@@ -13022,51 +13307,15 @@ const songSkeletonGenreSchema = z
   ])
   .describe(
     "Which genre skeleton to scaffold — each sets a default tempo and a ready-made track roster. " +
-      "⚠️ TRACK KIND MATTERS: every track below is `instrument` (takes MIDI clips) EXCEPT the " +
-      "ones marked `[audio]` (takes recordings/imports ONLY — a MIDI clip is rejected with " +
-      "'track kind audio cannot host an instrument'). This is NOT only a vocal-track thing: " +
-      "`lo-fi` has no vocal at all and STILL carries two `[audio]` tracks (Samples, Vinyl FX) — " +
-      "notably, `lo-fi`'s \"Samples\" track is audio-only and canNOT host the Sampler instrument " +
-      "(the Sampler goes on an INSTRUMENT track; use track_add kind=instrument for a sample-" +
-      "playback part, or clip_add_audio on the roster's \"Samples\" track for actual audio " +
-      "recordings/loops). Check the `[audio]` tags below before writing a MIDI clip to a roster " +
-      "track by name. " +
-      "`pop` (120 BPM): Drums, Bass (bass-tight preset), Keys (warm-keys), Lead, Vocals [audio] " +
-      "(vocal-presence). `house` (124 BPM): Drums, Bass (bass-tight), Synth, Pads (warm-keys), " +
-      "FX [audio]. " +
-      "`hip-hop` (90 BPM): Drums, 808 Bass (bass-tight), Samples [audio], Lead, Vocals [audio] " +
-      "(vocal-presence). " +
-      "`rock` (140 BPM): Drums, Bass (bass-tight), Rhythm Guitar, Lead Guitar, Vocals [audio] " +
-      "(vocal-presence). `ballad` (72 BPM): Piano (warm-keys), Strings, Bass (bass-tight), " +
-      "Vocals [audio] (vocal-presence). `blues` (84 BPM): Drums (drum-room), Bass (bass-round), " +
-      "Rhythm Guitar, Lead Guitar (guitar-crunch), Organ (warm-keys), Vocals [audio] " +
-      "(vocal-presence) — and a genuine TWELVE-BAR form (Intro 4, Head 12, Verse 12, Solo 12, " +
-      "Verse 12, Outro 4). " +
-      "`jazz` (132 BPM): Drums (drum-room), Upright Bass (bass-round), Piano (warm-keys), Horn " +
-      "(horn-section), Guitar — ALL instrument, a combo with no vocal track, in head/solos/head " +
-      "form with 32-bar choruses. `country` (100 BPM): Drums (drum-bus-glue), Bass (bass-round), " +
-      "Acoustic Guitar (acoustic-sparkle), Electric Guitar, Pedal Steel, Vocals [audio] " +
-      "(vocal-presence). " +
-      "`r-and-b` (88 BPM): Drums (drum-bus-glue), Bass (bass-round), Keys (warm-keys), Pads, Lead " +
-      "Vocal [audio] (vocal-presence), Backing Vocals [audio] — with a Pre-Chorus in the form. " +
-      "`funk` (108 BPM): Drums (drum-bus-glue), Bass (bass-tight — funk's bass wants the clamp), " +
-      "Rhythm Guitar, Clavinet (warm-keys), Horns (horn-section), Vocals [audio] (vocal-presence), " +
-      "with 16-bar verses and a Breakdown. `metal` (170 BPM): Drums (drum-bus-glue), Bass " +
-      "(bass-tight), Rhythm Guitar L and Rhythm Guitar R (both guitar-crunch, for the hard-panned " +
-      "double-track), Lead Guitar (guitar-crunch), Vocals [audio] (vocal-presence). " +
-      "`folk` (96 BPM): Acoustic Guitar (acoustic-sparkle), Vocals [audio] (vocal-presence), Bass " +
-      "(bass-round), Fiddle, Percussion. `reggae` (76 BPM): Drums (drum-bus-glue), Bass " +
-      "(bass-round), Skank Guitar, Organ (warm-keys), Vocals [audio] (vocal-presence), with a Dub " +
-      "Break. " +
-      "`lo-fi` (78 BPM): Drums (lofi-tape), Bass (bass-round), Keys (warm-keys), Samples [audio] " +
-      "(lofi-tape), Vinyl FX [audio] — NO vocal track, a loop-based form (Intro, Loop A, Loop B, " +
-      "Loop A, Outro) rather than verse/chorus. " +
-      "Instrument tracks host built-in instruments (including the Sampler) and take MIDI clips; " +
-      "`[audio]` tracks take recordings or imports only. Named mixer presets are applied to the " +
-      "strips shown in parentheses. " +
-      "If none of these fits, keep the nearest `genre` and pass your own `tracks` roster and " +
-      "`sections` — both override the genre's defaults outright, and there you choose `kind` " +
-      "explicitly instead of reading it off this list."
+      "`pop` (120 BPM), `house` (124), `hip-hop` (90), `rock` (140), `ballad` (72), `blues` (84; a " +
+      "twelve-bar form), `jazz` (132; an all-instrument combo with no vocal track), `country` (100), " +
+      "`r-and-b` (88; has a Pre-Chorus), `funk` (108), `metal` (170), `folk` (96), `reggae` (76; has " +
+      "a Dub Break), `lo-fi` (78; a loop-based form with no vocal track). " +
+      "⚠️ TRACK KIND MATTERS: a roster mixes `instrument` tracks (take MIDI clips and host the Sampler) " +
+      "with `[audio]` tracks (take recordings and imports ONLY — a MIDI clip on one is rejected with " +
+      "'track kind audio cannot host an instrument'). Even `lo-fi`, which has no vocal, carries audio " +
+      "tracks. Call this tool with `dryRun: true` to see exactly which tracks, kinds, sounds and mixer " +
+      "settings a genre creates before you commit to it."
   );
 
 const songSkeletonSectionSchema = z
@@ -13107,6 +13356,12 @@ const songSkeletonTrackSchema = z
           "An unknown name is a field-named error listing every valid preset."
       ),
   })
+  // .passthrough(), NOT strip and NOT .strict() (m39-tpl-7, D2): a strip-mode nested
+  // object silently drops a misspelled or unsupported key before the app sees it, and a
+  // .strict() one would refuse at THIS boundary with a generic zod message. Passing every
+  // key through lets the app's own per-track refusal reach the agent by path, including
+  // the teaching sentence for `program` ("A track list can't pick sounds...").
+  .passthrough()
   .describe("One roster track: a name, its kind, and an optional mixer preset.");
 
 registerTool(
@@ -13117,7 +13372,8 @@ registerTool(
       "Scaffold a working session for a genre in ONE undoable step. Sets the tempo, adds the genre's " +
       "named tracks (instrument and audio, with curated mixer presets pre-applied where noted), lays " +
       "the song's sections out as named EMPTY MIDI clips on a dedicated instrument \"Arrangement\" " +
-      "guide track (each clip positioned back-to-back: its start = the running sum of prior section " +
+      "guide track (created MUTED, so it never sounds or reaches a bounce — leave it muted; each " +
+      "clip positioned back-to-back: its start = the running sum of prior section " +
       "lengths, its length = bars x 4 beats), DROPS A REAL SESSION MARKER at every section start " +
       "(so marker_list returns the song's beat map immediately — you do NOT have to lay the section " +
       "map by hand or re-derive it for a later composer/mix step; each marker is named exactly like " +
@@ -13136,11 +13392,30 @@ registerTool(
       "`genre` stays required even with a full roster override — it supplies the default tempo. " +
       "An unknown genre returns an error listing every valid genre; a bad tempo, section, or roster " +
       "track is a " +
-      "field-named error. Returns `{genre, tempoBPM, tracks: [{id, name}], sectionClips: [{name, " +
+      "field-named error. A track in `tracks` takes only `name`, `kind` and `mixerPreset`: any other " +
+      "key is refused by name, and `program` gets a teaching error (a track list can't pick sounds — " +
+      "pass a `template` to choose instruments). " +
+      "The scaffold sets the song's tempo, so it is refused exactly when transport_set_tempo is (the dry run " +
+      "too), after every other check: while recording (\"cannot change tempo while recording — stop first\") " +
+      "and on a song whose tempo changes along the timeline (\"this project has a multi-segment tempo map — use " +
+      "tempo.setMap to edit it (transport.setTempo sets a single project-wide tempo and would flatten the " +
+      "map)\"). " +
+      "To get a band with chosen SOUNDS (a GM drum kit, a bass, keys, …), pass `template` — a template " +
+      "id from template_list, or a whole template object — instead of `tracks`; the template's roster " +
+      "REPLACES the genre's roster (passing both `template` and `tracks` is refused), while the " +
+      "Arrangement guide track, section clips, markers and loop are still added. Read a template with " +
+      "template_describe first. " +
+      "Pass `dryRun: true` to PREVIEW the whole call: it plans everything exactly as the real call would " +
+      "and returns what it would create — each track's name, kind, a one-sentence `sound`, its insert " +
+      "chain, plus the section clips, markers, loop and any warnings — with `applied: false` and NO ids, " +
+      "changing nothing (no undo step). Use it instead of memorising a genre's roster. " +
+      "Returns `{genre, tempoBPM, tracks: [{id, name}], sectionClips: [{name, " +
       "startBeat, lengthBeats}], markers: [{id, name, beat}], loopStart, loopEnd, " +
-      "arrangementTrackId}` with real ids — `tracks` " +
+      "arrangementTrackId, warnings}` with real ids — `tracks` " +
       "lists every created track (the roster then the Arrangement track last), and `markers` lists " +
-      "just the ones this call created (marker_list returns the whole project's).",
+      "just the ones this call created (marker_list returns the whole project's). When a `template` " +
+      "was used the reply also carries `templateKeys: {templateTrackKey: trackId}` so you can address " +
+      "each template track by the key you saw in template_describe.",
     inputSchema: {
       genre: songSkeletonGenreSchema,
       tempoBPM: z
@@ -13171,10 +13446,1094 @@ registerTool(
             "what this macro exists for, so an override can never remove or move them. Omit to use the " +
             "genre's default roster."
         ),
+      template: templateParamSchema(
+        "Optional. Build the roster from a template instead of the genre's default: a template id (from " +
+          "template_list) or a whole template object (the same shape template_describe returns under " +
+          "`template`). The template's tracks replace the genre roster, so passing `tracks` as well is " +
+          "refused. Omit to use the genre's roster."
+      ).optional(),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true, plan the whole call and return what it WOULD create (`applied: false`, no ids), " +
+            "changing nothing. Default false."
+        ),
     },
   },
-  async ({ genre, tempoBPM, sections, tracks }) =>
-    toToolResult(() => bridge.send("macro.songSkeleton", { genre, tempoBPM, sections, tracks }))
+  async ({ genre, tempoBPM, sections, tracks, template, dryRun }) =>
+    toToolResult(() =>
+      bridge.send("macro.songSkeleton", { genre, tempoBPM, sections, tracks, template, dryRun })
+    )
+);
+
+// ---------------------------------------------------------------------------
+// Templates (m39-tpl-7) — saved and built-in "bands": a set of tracks with their
+// instruments, effects and routing, applied as ONE undoable step
+// ---------------------------------------------------------------------------
+
+/**
+ * The `template` argument of template_describe / template_apply / macro_song_skeleton:
+ * EITHER a template id (string) OR a whole template object. The object branch is
+ * deliberately `z.record(z.string(), z.unknown())`, NEVER a nested `z.object`: a nested
+ * object in zod's default strip mode silently drops a misspelled key before the app sees
+ * it (the m30-c gap, test/nested-strict-gap.test.ts). A record keeps every key, so the
+ * app's own codec sees the typo and refuses it with its exact path. Writing a zod copy of
+ * the whole template schema would be a second home that goes stale with every new effect
+ * setting. Tested by test/template-tools.test.ts (the inverted m30-c test).
+ */
+function templateParamSchema(description: string) {
+  return z
+    .union([z.string().min(1), z.record(z.string(), z.unknown())])
+    .describe(description);
+}
+
+const TEMPLATE_WHAT_IS_IT =
+  "A template is a saved \"band\": a set of tracks with their instruments, effects, mixer settings " +
+  "and routing, ready to drop into a song. ";
+
+server.registerTool(
+  "template_list",
+  {
+    title: "List the available band templates",
+    description:
+      TEMPLATE_WHAT_IS_IT +
+      "Lists every template on offer — the built-in ones that ship with DAW Pro (one for every " +
+      "genre) plus any the user saved — as `{templates: [{id, name, summary, source: \"builtIn\"|\"saved\", " +
+      "genres, songForm, trackCount, instruments, hasRouting, hasAudioUnits}], unreadable: [{file, " +
+      "message}]}`. Use an `id` from here as the `template` argument of template_describe, " +
+      "template_apply or macro_song_skeleton. `instruments` is each instrument track's instrument " +
+      "kind; `hasRouting` means the template also builds buses/sends; `hasAudioUnits` means it needs " +
+      "third-party plug-ins installed. A saved file that cannot be read is listed under `unreadable` " +
+      "with the reason, never silently skipped. Read-only; takes no parameters. To see what a template " +
+      "actually contains before using it, call template_describe.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("template.list", {}))
+);
+
+server.registerTool(
+  "template_describe",
+  {
+    title: "Read what a band template contains",
+    description:
+      TEMPLATE_WHAT_IS_IT +
+      "Read one WITHOUT changing the song — do this before template_apply. Returns `{template: " +
+      "<the full canonical template JSON>, tracks: [{key, name, kind, sound}], slotsUsed, hasRouting, " +
+      "warnings}`: `tracks` gives each track's `key` (its address inside the template), name, kind " +
+      "(\"instrument\", \"audio\" or \"bus\") and `sound`, one plain sentence on what it plays; `template` " +
+      "is the exact JSON you could edit and pass back as an inline `template` to template_apply or " +
+      "template_save. `slotsUsed` counts the engine resources the template would use. Errors readably " +
+      "for an unknown id (call template_list for the valid ones) or a template object the app cannot " +
+      "read — the error names the exact place (for example `tracks[2].inserts[0]`) and what to fix.",
+    inputSchema: {
+      template: templateParamSchema(
+        "A template id from template_list (a built-in like \"lofi-chill\" or a saved \"user-…\" id), or a " +
+          "whole template object. A misspelled key inside an object is refused by name, not ignored."
+      ),
+    },
+  },
+  async ({ template }) => toToolResult(() => bridge.send("template.describe", { template }))
+);
+
+registerTool(
+  "template_apply",
+  {
+    title: "Add a band template's tracks to the song",
+    description:
+      TEMPLATE_WHAT_IS_IT +
+      "Adds the template's tracks (with their instruments, effects, sends and buses) to the song as ONE " +
+      "undoable step — a single edit_undo removes them all. It ONLY ADDS: it never removes, replaces or " +
+      "changes a track that is already in the song, so applying twice adds the band twice (the reply " +
+      "lists `duplicateTrackNames` when names repeat). Read the template first with template_describe. " +
+      "Pass `dryRun: true` to preview what would be added (`applied: false`, no track ids) without " +
+      "changing anything. Returns `{applied, name, tracks: [{key, id, name, kind}], warnings, " +
+      "duplicateTrackNames, undoLabel, hasRouting, slotsUsed}` — `key` is the track's address inside the " +
+      "template, `id` is the new track's real id for later calls. `warnings` lists anything the app " +
+      "worked around (each `{code, path, message}`), such as a setting it clamped or a plug-in that is " +
+      "not installed on this Mac. Refused, with nothing changed, for an unknown id, an unreadable " +
+      "template (the error names the exact place and what to fix), a sound-bank or sample file that is " +
+      "missing, or a template that adds routing while recording is running (stop recording first). " +
+      "To build a whole song around a template (tempo, sections, markers) use macro_song_skeleton with " +
+      "`template` instead.",
+    inputSchema: {
+      template: templateParamSchema(
+        "A template id from template_list, or a whole template object (as returned by template_describe " +
+          "under `template`). A misspelled key inside an object is refused by name, not ignored."
+      ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("When true, report what would be added (no ids) and change nothing. Default false."),
+    },
+  },
+  async ({ template, dryRun }) => toToolResult(() => bridge.send("template.apply", { template, dryRun }))
+);
+
+registerTool(
+  "template_save",
+  {
+    title: "Save tracks as a reusable band template",
+    description:
+      TEMPLATE_WHAT_IS_IT +
+      "Saves the chosen tracks — their instruments, effects, mixer settings and routing, but NOT their " +
+      "clips or recordings — as a new template file in the user's template library, so the same band can " +
+      "be added to any song with template_apply. Any bus a chosen track plays into or sends to is saved " +
+      "with it automatically. This writes a file only: it does not change the song and makes no undo " +
+      "step. `name` is required (1-40 characters). Saving never overwrites: to update one of the user's " +
+      "own saved templates, pass its id as `replaceId`. Returns `{id, name, template, warnings}` — the " +
+      "new template's `id` works everywhere a template id is accepted. Refused for an empty or unknown " +
+      "`trackIds`, more than 24 tracks once buses are added, a name over 40 characters, or a " +
+      "`replaceId` that is a built-in or does not exist.",
+    inputSchema: {
+      name: z.string().min(1).max(40).describe("Name for the template, 1-40 characters, e.g. \"My trio\"."),
+      trackIds: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe("Ids of the tracks to save (from project_snapshot or track_add). At least one."),
+      summary: z.string().optional().describe("Optional one-sentence description shown in template_list."),
+      songForm: z
+        .string()
+        .optional()
+        .describe("Optional note on the song form this band suits, e.g. \"verse-chorus\"."),
+      genres: z
+        .array(z.string().min(1))
+        .optional()
+        .describe("Optional genre names this band suits, e.g. [\"jazz\", \"blues\"]."),
+      replaceId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Optional id of one of the user's OWN saved templates to overwrite in place. Built-in ids are refused."
+        ),
+    },
+  },
+  async ({ name, trackIds, summary, songForm, genres, replaceId }) =>
+    toToolResult(() =>
+      bridge.send("template.save", { name, trackIds, summary, songForm, genres, replaceId })
+    )
+);
+
+registerTool(
+  "template_remove",
+  {
+    title: "Delete a saved band template",
+    description:
+      TEMPLATE_WHAT_IS_IT +
+      "Deletes one of the user's OWN saved templates from the library. This deletes a file, so it cannot be " +
+      "undone, and it never touches the song or tracks already added from the template. Built-in " +
+      "templates cannot be removed (the error says so). Find the id with template_list (`source` is " +
+      "\"saved\" for removable ones). Returns `{removed: id}`. Errors readably for an unknown id.",
+    inputSchema: {
+      id: z.string().min(1).describe("Id of a saved template, from template_list."),
+    },
+  },
+  async ({ id }) => toToolResult(() => bridge.send("template.remove", { id }))
+);
+
+registerTool(
+  "template_import",
+  {
+    title: "Import a band template from a file",
+    description:
+      TEMPLATE_WHAT_IS_IT +
+      "Reads a `.dawtemplate` file (one exported with template_export, or shared by someone else) and adds " +
+      "it to the user's template library. It does not change the song and makes no undo step. The file " +
+      "keeps its id unless that id is missing, belongs to a built-in, or is already taken — then it gets " +
+      "a fresh id and a warning says so. Returns `{id, name, warnings}`; use the `id` with template_describe " +
+      "or template_apply. `path` must be absolute (or start with ~). Errors readably for a path that is " +
+      "not absolute, a file that is missing, over 2 MB, or not a template (the error names the exact " +
+      "place in the file).",
+    inputSchema: {
+      path: z
+        .string()
+        .min(1)
+        .describe("Absolute (or ~-prefixed) path of the .dawtemplate file to import. A relative path is refused."),
+    },
+  },
+  async ({ path }) => toToolResult(() => bridge.send("template.import", { path }))
+);
+
+registerTool(
+  "template_export",
+  {
+    title: "Export a band template to a file",
+    description:
+      TEMPLATE_WHAT_IS_IT +
+      "Writes a template (built-in or saved) to a `.dawtemplate` file at `path` so it can be backed up, " +
+      "shared, or brought back with template_import. It does not change the song and makes no undo step. " +
+      "An existing file at `path` is never overwritten unless you pass `overwrite: true`. `path` must be " +
+      "absolute (or start with ~), the same rule project_export_midi uses. Returns `{path, bytes}` — read " +
+      "`path` rather than assuming where the file landed. Errors readably for an unknown id, a path " +
+      "that is not absolute, or an existing file without `overwrite`.",
+    inputSchema: {
+      id: z.string().min(1).describe("Id of the template to export, from template_list."),
+      path: z
+        .string()
+        .min(1)
+        .describe("Absolute (or ~-prefixed) path to write the .dawtemplate file to. A relative path is refused."),
+      overwrite: z
+        .boolean()
+        .optional()
+        .describe("When true, replace an existing file at `path`. Default false: an existing file is refused."),
+    },
+  },
+  async ({ id, path, overwrite }) =>
+    toToolResult(() => bridge.send("template.export", { id, path, overwrite }))
+);
+
+// ---------------------------------------------------------------------------
+// Singing (p2-sing-e) — lyrics on a melody clip, the on-device singing engine,
+// singing voices, sung takes as pollable jobs, and the one song-wide key change.
+// Same order as the wire table (design 2026-09-27-p2-sing-integration.md §6).
+// ---------------------------------------------------------------------------
+
+const SING_WHAT_IS_IT =
+  "DAW Pro can SING a melody: give a MIDI melody clip some lyrics (one word per note) and it renders a sung vocal " +
+  "onto a new audio track, using an on-device singing engine (it runs on this Mac; nothing sung leaves it). ";
+
+/** The refusal shape every singing verb shares, said once. */
+const SING_REFUSALS =
+  "A refusal comes back as an error whose text starts with a stable code and a colon (for example " +
+  "\"singEngineNotInstalled: …\"), followed by a plain sentence saying what to do; nothing is changed by a refusal. ";
+
+server.registerTool(
+  "sing_sidecar_status",
+  {
+    title: "Check the singing engine",
+    description:
+      SING_WHAT_IS_IT +
+      "Reports the singing engine's state WITHOUT starting or installing anything. `state` is one of " +
+      "\"notInstalled\" (call sing_install_engine), \"needsUpdate\" (the installed copy is out of date; " +
+      "sing_install_engine repairs it), \"awaitingUserConsent\" (an install was asked for and is waiting for someone " +
+      "to click Install in DAW Pro's window), \"installing\", \"installedNotRunning\" (installed and stopped; " +
+      "sing_render starts it on its own), \"starting\", \"ready\", \"stopping\" or \"error\". Also returns `message` " +
+      "(a plain sentence for the user), `install` (the running or last install: its step and progress), `runtime` " +
+      "(what is installed), `health` (only when ready), `pid`, `resident` (whether it currently holds memory), " +
+      "`problems` (what is missing from a broken install), `consent` (requests waiting for a click) and `lastError`. " +
+      "Pass `verify: true` to also re-check the downloaded model file byte-for-byte against its pinned checksum — " +
+      "that reads the whole file (gigabytes), so it is slow; without it this answers at once. Read-only.",
+    inputSchema: {
+      verify: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true, also re-check the engine's model file against its pinned checksum (slow: reads the whole file). " +
+            "Default false."
+        ),
+    },
+  },
+  async ({ verify }) => toToolResult(() => bridge.send("sing.sidecarStatus", { verify }))
+);
+
+registerTool(
+  "sing_sidecar_start",
+  {
+    title: "Start the singing engine",
+    description:
+      SING_WHAT_IS_IT +
+      "Starts the installed singing engine and waits until it is ready (about 20 seconds the first time; it answers " +
+      "at once if it is already running). You rarely need this: sing_render starts the engine by itself. Returns " +
+      "`{state: \"ready\", message, pid}`. " +
+      SING_REFUSALS +
+      "Refusals: singEngineNotInstalled / singEngineNeedsUpdate (call sing_install_engine first), singPortBusy " +
+      "(another program is using the engine's port; the sentence names it), singStartFailed (the cause, and to try " +
+      "again). Takes no parameters.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("sing.sidecarStart", {}))
+);
+
+registerTool(
+  "sing_sidecar_stop",
+  {
+    title: "Stop the singing engine",
+    description:
+      SING_WHAT_IS_IT +
+      "Stops the singing engine and frees the memory it holds. Returns the stop's evidence — " +
+      "`{state, message, stopped, evidence, cancelledJobs}` — where `stopped: true` means the process and its " +
+      "children are gone and its port answers nothing. Voices, lyrics and songs are untouched; the next " +
+      "sing_render starts it again. " +
+      SING_REFUSALS +
+      "Refused with singJobsRunning while a take is being sung, unless you pass `cancelJobs: true`, which cancels " +
+      "those takes first (their ids come back in `cancelledJobs`).",
+    inputSchema: {
+      cancelJobs: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true, cancel any take that is still being sung, then stop. Default false: a running take refuses " +
+            "the stop."
+        ),
+    },
+  },
+  async ({ cancelJobs }) => toToolResult(() => bridge.send("sing.sidecarStop", { cancelJobs }))
+);
+
+registerTool(
+  "sing_install_engine",
+  {
+    title: "Ask to install the singing engine",
+    description:
+      SING_WHAT_IS_IT +
+      "Asks for the singing engine to be installed: a one-time download of about 7 GB. An agent can only ASK — " +
+      "nothing downloads until someone clicks Install in DAW Pro's window, so the usual answer is `{state: " +
+      "\"awaitingUserConsent\", requestId, message}`; tell the user to look at DAW Pro's window, then poll " +
+      "sing_sidecar_status until `state` is \"installing\" and, later, \"installedNotRunning\" (asking again while a " +
+      "request waits returns the same request). Other answers: `{state: \"alreadyInstalled\"}` (nothing to do — just " +
+      "call sing_render), or `{state: \"installing\"}` when the install began at once. " +
+      SING_REFUSALS +
+      "Refusals: singInstallInProgress (one is already running — poll sing_sidecar_status), singDiskFull (says how " +
+      "much space is needed and how much is free), singUnsupportedMac (needs Apple silicon and macOS 14 or later). " +
+      "Cancel a waiting request or a running install with sing_cancel_install. Takes no parameters.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("sing.installEngine", {}))
+);
+
+registerTool(
+  "sing_cancel_install",
+  {
+    title: "Cancel the singing engine's install",
+    description:
+      SING_WHAT_IS_IT +
+      "Cancels a singing-engine install: withdraws a request that is still waiting for a click (the reply then " +
+      "carries `withdrewRequestId`), or asks a running download to stop. Returns `{cancelRequested: true, install}`; " +
+      "a running install stops at its next safe point, so poll sing_sidecar_status to see it reach \"cancelled\". " +
+      SING_REFUSALS +
+      "Refused with singNoInstallRunning when there is nothing to cancel. Takes no parameters.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("sing.cancelInstall", {}))
+);
+
+registerTool(
+  "sing_uninstall_engine",
+  {
+    title: "Ask to remove the singing engine",
+    description:
+      SING_WHAT_IS_IT +
+      "Asks for the singing engine to be removed from this Mac to free its disk space (several GB). Saved voices and " +
+      "songs (including sung takes already in a song) stay. With `dryRun: true` it only reports how much would be " +
+      "freed: `{installed, dryRun: true, wouldFreeBytes, message}`. Otherwise an agent can only ASK — the answer is " +
+      "`{state: \"awaitingUserConsent\", requestId, wouldFreeBytes, message}` and nothing is deleted until someone " +
+      "clicks Remove in DAW Pro's window. If it is not installed the reply says so (`installed: false`). " +
+      SING_REFUSALS +
+      "Refusals: singInstallInProgress (an install is running — cancel it or let it finish), singJobsRunning (a " +
+      "take is being sung — wait, or cancel it with sing_cancel_job).",
+    inputSchema: {
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("When true, only report how many bytes removing it would free; change nothing. Default false."),
+    },
+  },
+  async ({ dryRun }) => toToolResult(() => bridge.send("sing.uninstallEngine", { dryRun }))
+);
+
+server.registerTool(
+  "sing_list_voices",
+  {
+    title: "List the singing voices",
+    description:
+      SING_WHAT_IS_IT +
+      "Lists the voices sing_render can sing with, built-in singer first: `{voices: [{id, name, kind, createdAt, " +
+      "durationS, range: {p10Midi, p50Midi, p90Midi, lowNote, medianNote}, alignment: {method, verdict}, " +
+      "wordCheck, source, available}], unreadable}`. `id` is what sing_render and sing_propose_key take as " +
+      "`voiceId` (\"builtin-1\" is the built-in singer). `range` is where the voice comfortably sits, as MIDI note " +
+      "numbers (60 = middle C) and note names: p10 is its low end, p50 its middle, p90 its high end. `available: " +
+      "false` on the built-in singer means the engine is not installed yet. A voice folder that could not be read " +
+      "is listed under `unreadable` rather than skipped. Works with the engine stopped. Read-only; no parameters.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("sing.listVoices", {}))
+);
+
+registerTool(
+  "sing_add_voice",
+  {
+    title: "Make a singing voice from a recording",
+    description:
+      SING_WHAT_IS_IT +
+      "Saves a new singing voice from a short recording of ONE person singing alone, so sing_render can sing in " +
+      "that voice. Pass EXACTLY ONE of `path` (an audio file on this Mac: WAV, AIFF, M4A or MP3) or `clipId` (an " +
+      "audio clip already in the song, e.g. a vocal take). The recording should be 3 to 12 seconds of clear singing " +
+      "with a moment of quiet before and after (the line \"Row, row, row your boat, gently down the stream\" works " +
+      "well); sing it at whatever height feels natural. The recording is checked, its range measured and its notes " +
+      "labelled on this Mac in a few seconds — the singing engine is NOT needed. Returns the saved voice (the same " +
+      "fields as sing_list_voices) plus `message`, a sentence such as \"Your voice sits around G#2…\", and " +
+      "`wordCheckRunning: true` (a check that the words are understandable follows in the background; see its " +
+      "result later in sing_list_voices). " +
+      SING_REFUSALS +
+      "When the recording fails the check, the code says why and the sentence says how to record it again: " +
+      "singVoiceTooShort, singVoiceTooLong, singVoiceNoVoice, singVoiceCutStart, singVoiceCutEnd, singVoiceTooLoud, " +
+      "singVoiceNoGap, singVoiceNoisy, singVoiceGuideLeak. Also: singVoiceFileUnreadable, singVoiceNeedsAudioClip " +
+      "(a MIDI clip has no recording), singVoiceClipStretched (a time-stretched clip no longer sounds as sung), " +
+      "clipNotFound. To have the user record a voice instead, call sing_open_voice_recorder.",
+    inputSchema: {
+      path: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Absolute (or ~-prefixed) path of an audio file holding 3-12 seconds of one person singing. Give this OR " +
+            "clipId, not both."
+        ),
+      clipId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Id of an AUDIO clip in the song (from project_snapshot) to use as the recording; only the part the clip " +
+            "plays is used. Give this OR path, not both."
+        ),
+      name: z
+        .string()
+        .max(80)
+        .optional()
+        .describe("A name for the voice, up to 80 characters. Default \"My voice\"."),
+    },
+  },
+  async ({ path, clipId, name }) => toToolResult(() => bridge.send("sing.addVoice", { path, clipId, name }))
+);
+
+registerTool(
+  "sing_remove_voice",
+  {
+    title: "Remove a singing voice",
+    description:
+      SING_WHAT_IS_IT +
+      "Moves one saved voice to the Trash (it can be dragged back from there). Sung takes already in a song are " +
+      "untouched. Returns `{voiceId, movedToTrash}` where `movedToTrash` is where it went. " +
+      SING_REFUSALS +
+      "Refusals: singVoiceNotFound (call sing_list_voices for the ids), singVoiceBuiltIn (the built-in singer " +
+      "comes with the engine and cannot be removed).",
+    inputSchema: {
+      voiceId: z.string().min(1).describe("Id of the voice to remove, from sing_list_voices (e.g. \"voice-…\")."),
+    },
+  },
+  async ({ voiceId }) => toToolResult(() => bridge.send("sing.removeVoice", { voiceId }))
+);
+
+registerTool(
+  "sing_open_voice_recorder",
+  {
+    title: "Open the voice recorder for the user",
+    description:
+      SING_WHAT_IS_IT +
+      "Opens DAW Pro's voice recorder in its window so the USER can record their own singing voice. Only the user " +
+      "can press Record — an agent cannot record for them — so tell the user the recorder is open and what to do: " +
+      "pick the tune that is easiest, sing the one short line, and save. Returns `{opened: true}`; afterwards " +
+      "sing_list_voices shows the new voice. Opening the recorder stops playback. " +
+      SING_REFUSALS +
+      "Refused with singNoWindow when no DAW Pro window can show it (then a recording the user already has can be " +
+      "added with sing_add_voice). Takes no parameters.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("sing.openVoiceRecorder", {}))
+);
+
+server.registerTool(
+  "sing_propose_key",
+  {
+    title: "Fit a melody to a singing voice",
+    description:
+      SING_WHAT_IS_IT +
+      "Compares a MIDI melody clip with a voice's comfortable range and recommends how to make them meet, WITHOUT " +
+      "changing anything. Returns `{voice: {id, name, range}, melody: {lowMidi, highMidi, medianMidi, lowNote, " +
+      "highNote}, recommendation: {kind, octaveShift, songTranspose, vocalOffset, calibrated, fits}, alternatives, " +
+      "sentence, alternativeSentence, bestOctaveOnly}`. `kind` \"octave\" means: render with that `octaveShift` " +
+      "(whole octaves; the vocal stays in tune with the song). `kind` \"songKey\" means the best fit also moves the " +
+      "WHOLE SONG by `songTranspose` half-steps — do that with project_transpose, then render with `octaveShift`. " +
+      "`bestOctaveOnly` is the best choice that keeps the song's key. `sentence` explains the recommendation in " +
+      "plain words for the user. `recommendation.fits` false means even the recommendation leaves some notes " +
+      "outside the voice's comfortable range (often a melody wider than the voice); `sentence` then says so and " +
+      "which side — tell the user rather than calling it a fit. sing_render with `octaveShift: \"auto\"` already " +
+      "applies the best octave-only choice. " +
+      SING_REFUSALS +
+      "Refusals: clipNotFound, singNeedsMIDIClip (an audio clip has no notes to fit), singDrumTrack, " +
+      "singClipHasNoNotes, singVoiceNotFound. Read-only.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI melody clip to fit, from project_snapshot."),
+      voiceId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Id of the voice to fit to, from sing_list_voices. Default the built-in singer (\"builtin-1\")."),
+    },
+  },
+  async ({ clipId, voiceId }) => toToolResult(() => bridge.send("sing.proposeKey", { clipId, voiceId }))
+);
+
+registerTool(
+  "clip_set_lyrics",
+  {
+    title: "Write the words a melody clip will sing",
+    description:
+      SING_WHAT_IS_IT +
+      "Stores the lyrics on a MIDI melody clip, as ONE undoable step. Each note sings one word, in order, " +
+      "earliest note first; when there are more notes than words, a word is held across the extra notes. Line " +
+      "breaks separate the lines. `text: \"\"` clears the lyrics. With `dryRun: true` nothing is stored but the reply is " +
+      "the same, so you can check how the words land first. Returns `{clipId, text, stored, changed, assignment: " +
+      "{words: [{text, noteIds, startBeat, endBeat, held}], lines, phrases, unsungNoteIds}, warnings}`: `words` " +
+      "shows which notes each word sits on (beats on the song's timeline); `held` means the word is stretched over " +
+      "extra notes; `warnings` are plain sentences worth telling the user (held words, chords, a squeezed word). " +
+      "`changed: false` means the clip already had exactly this text. " +
+      "LANGUAGE: lyrics are English unless you pass `language`: \"zh\" (Chinese, Mandarin) or \"yue\" (Chinese, " +
+      "Cantonese) — each Chinese character is one sung syllable on one note, and pinyin/jyutping with a tone number " +
+      "(\"ni3\") also works; \"en\" sets English. Without `language` the clip keeps the language it has. Call " +
+      "sing_capabilities for the list. The reply echoes `language` only when you sent it. " +
+      "NO WORDS: instead of `text`, pass `wordless`: \"ooh\", \"aah\" or \"mm\" — the words are written FOR you " +
+      "from the melody's own breath phrases: one held sound per phrase (\"ooh+++\", each + holds it onto one " +
+      "more note), or with `wordlessPerNote: true` the sound once per note. The result is ordinary text the user " +
+      "can edit. Send `text` OR `wordless`, never both. " +
+      SING_REFUSALS +
+      "Refusals: clipNotFound, lyricsNeedMIDIClip (an audio clip has no notes), lyricsTooManyWords (more words " +
+      "than notes; the sentence says how many to remove or add), lyricsNotEnglish (names the word), lyricsTooLong " +
+      "(over 4,000 characters), lyricsScriptMismatch (Chinese characters in an English clip: pass language), " +
+      "lyricsLanguageUnsupported (a language that can't be sung yet), lyricsWordlessWithText, lyricsWordlessInvalid, " +
+      "lyricsWordlessPerNoteAlone, singClipHasNoNotes (wordless on a clip with no notes). To change ONE note's " +
+      "word, use clip_set_note_word. To sing the result, call sing_render.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI melody clip, from project_snapshot."),
+      text: z
+        .string()
+        .max(4000)
+        .optional()
+        .describe(
+          "The lyrics: one word per note, line breaks between lines. \"\" clears them. At most 4,000 characters. " +
+            "Required unless you pass `wordless` instead."
+        ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("When true, report how the words would land and store nothing. Default false."),
+      language: z
+        .enum(["en", "zh", "yue"])
+        .optional()
+        .describe(
+          "The language the words are sung in: \"en\" English, \"zh\" Chinese (Mandarin), \"yue\" Chinese " +
+            "(Cantonese). Omit to keep the clip's current language (English for a new clip)."
+        ),
+      wordless: z
+        .enum(["ooh", "aah", "mm"])
+        .optional()
+        .describe(
+          "Sing without words: write the lyrics as this one sound, from the melody's breath phrases. Use INSTEAD " +
+            "of `text`."
+        ),
+      wordlessPerNote: z
+        .boolean()
+        .optional()
+        .describe(
+          "With `wordless`: true sings the sound once per note (\"ooh ooh ooh\"); false (default) holds one sound " +
+            "across each phrase (\"ooh++\")."
+        ),
+    },
+  },
+  async ({ clipId, text, dryRun, language, wordless, wordlessPerNote }) =>
+    toToolResult(() =>
+      bridge.send("clip.setLyrics", { clipId, text, dryRun, language, wordless, wordlessPerNote })
+    )
+);
+
+server.registerTool(
+  "clip_get_lyrics",
+  {
+    title: "Read a melody clip's lyrics",
+    description:
+      SING_WHAT_IS_IT +
+      "Reads the lyrics stored on a clip and how they land on its notes RIGHT NOW (worked out fresh, so edits to " +
+      "the notes since the words were written are reflected). Returns `{clipId, text, assignment: {words, lines, " +
+      "phrases, unsungNoteIds}, warnings, problem}` — the same shapes as clip_set_lyrics. `text` is \"\" when the " +
+      "clip has none. `problem` is null unless the stored words no longer fit the notes (for example notes were " +
+      "deleted since), in which case it is `{code, sentence}` explaining what to fix. `language` (\"zh\" or " +
+      "\"yue\") is present ONLY when the clip is sung in a language other than English. " +
+      SING_REFUSALS +
+      "Refused with clipNotFound. Read-only.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the clip, from project_snapshot."),
+    },
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("clip.getLyrics", { clipId }))
+);
+
+registerTool(
+  "sing_render",
+  {
+    title: "Sing a melody clip",
+    description:
+      SING_WHAT_IS_IT +
+      "Starts singing a MIDI melody clip's lyrics in a chosen voice and returns AT ONCE with a job: `{jobId, plan, " +
+      "status}`. Poll sing_job_status with `jobId` (every few seconds) until `state` is \"landed\" or \"done\" (the " +
+      "sung take is then on a new audio track: `result.trackId`, `result.clipId`), or \"failed\"/\"cancelled\". It " +
+      "starts the singing engine itself if needed, so one call is enough. Pass `lyrics` to store new words first " +
+      "(the same as clip_set_lyrics, as its own undo step); otherwise the clip's stored lyrics are sung. The take " +
+      "lands as one more undo step. `octaveShift` moves the VOICE by whole octaves so it stays in tune with the " +
+      "song: \"auto\" (the default) picks the best octave for the voice's range; -2…2 forces one. `plan` shows what " +
+      "will be sung: the lines (`units`, each with its words), the word-to-note `assignment`, `warnings`, the " +
+      "octave choice, `estimatedSeconds` and `engine` (whether an install or a start is needed first). With " +
+      "`dryRun: true` only `{dryRun: true, plan}` comes back and nothing is stored or sung. " +
+      SING_REFUSALS +
+      "Refusals: clipNotFound, singNeedsMIDIClip, singClipHasNoNotes, singDrumTrack, singNeedsLyrics (give " +
+      "`lyrics` or call clip_set_lyrics), lyricsTooManyWords, lyricsNotEnglish, singVoiceNotFound, " +
+      "singOctaveShiftInvalid (a vocal moves by whole octaves only; to change the song's key use " +
+      "project_transpose), singNoteTooLong, singEngineNotInstalled / singEngineNeedsUpdate (call " +
+      "sing_install_engine), singQueueFull. " +
+      "HARMONIES AND DOUBLES: pass `parts` (at most 3) to sing more lines in the SAME job, each on its own new " +
+      "track, a little quieter and panned to the side: {kind: \"harmony\", interval, direction} is a line worked " +
+      "out from the tune in the song's key (\"third\" above is sweet and close, \"sixth\" below sits warm under " +
+      "it; preview one first with sing_propose_harmony); {kind: \"chordTones\"} sings the clip's own chord notes " +
+      "under the tune; {kind: \"clip\", sourceClipId} sings another MIDI melody clip; {kind: \"double\"} sings the " +
+      "tune again on another seed for a fuller sound. `key`/`mode` set the key a harmony is counted in (only with " +
+      "`parts`). With `parts` the reply's `plan` gains `parts: [{role (\"lead\"|\"harmony\"|\"double\"), name, " +
+      "units (how many lines it sings), octaveShift (each part moves by whole octaves to fit the voice), range: " +
+      "{sentence, fits}, warnings, voiceId, seed, trackName}]`, the lead first, and sing_job_status reports each " +
+      "part. Every landed line is ONE undo step (\"Land Sung Harmony\"). `dryRun` previews the parts too " +
+      "(the same `plan.parts`, over new `lyrics` too; nothing is sung or saved). Part refusals: singTooManyParts, " +
+      "singPartInvalid (names the field), " +
+      "singHarmonyIntervalInvalid, singHarmonyNeedsKey (pass key and mode), singPartClipNotFound, and a part's own " +
+      "plan (\"The part '…': …\"). With `lyrics` and `parts`, the request is checked over the new words before " +
+      "anything is saved, so a refused request changes nothing (not the words, not the undo or redo history); the " +
+      "new words are saved as their own undo step only when it is accepted.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI melody clip to sing, from project_snapshot."),
+      lyrics: z
+        .string()
+        .max(4000)
+        .optional()
+        .describe(
+          "New lyrics to store on the clip before singing (one word per note, line breaks between lines). Omit to " +
+            "sing the clip's stored lyrics."
+        ),
+      voiceId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Id of the voice to sing with, from sing_list_voices. Default the built-in singer (\"builtin-1\")."),
+      octaveShift: z
+        .union([z.literal("auto"), z.number().int()])
+        .optional()
+        .describe(
+          "\"auto\" (default) picks the octave that best fits the voice; or a whole number of octaves from -2 to 2 " +
+            "(-1 = one octave lower). Anything else is refused with a sentence pointing at project_transpose."
+        ),
+      seed: z
+        .number()
+        .int()
+        .min(0)
+        .max(Number.MAX_SAFE_INTEGER)
+        .optional()
+        .describe(
+          "A whole number that picks the performance. Omit it and the take uses one fixed starting number, so " +
+            "singing the same tune and words again gives the same take; pass a different number to hear a different " +
+            "performance. A harmony part sings its own performance on the lead's seed + 2 unless it has its own."
+        ),
+      trackName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Name for the new vocal track. Default \"Vocals — <voice name>\"."),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("When true, return the plan only; store nothing and sing nothing. Default false."),
+      parts: z
+        .array(
+          z
+            .object({
+              kind: z
+                .enum(["harmony", "chordTones", "clip", "double"])
+                .describe(
+                  "\"harmony\": a line worked out from the tune (needs interval and direction). \"chordTones\": " +
+                    "the clip's own chord notes under the tune. \"clip\": another MIDI melody clip (needs " +
+                    "sourceClipId). \"double\": the tune again on another seed, to the side."
+                ),
+              interval: z
+                .enum(["third", "sixth", "fifth", "octave"])
+                .optional()
+                .describe(
+                  "harmony (required): how far from the tune, counted in the song's scale. chordTones: the line " +
+                    "that fills in where the clip has no chord note, below the tune (default \"third\")."
+                ),
+              direction: z.enum(["above", "below"]).optional().describe("harmony (required): above or below the tune."),
+              chordSource: z
+                .enum(["auto", "none", "thisClip", "otherTracks"])
+                .optional()
+                .describe(
+                  "harmony / chordTones: which chords a note may move to — \"auto\" (default: this clip's own " +
+                    "chord, else the other tracks'), \"none\", \"thisClip\" or \"otherTracks\"."
+                ),
+              sourceClipId: z
+                .string()
+                .uuid()
+                .optional()
+                .describe(
+                  "clip (required): id of ANOTHER MIDI melody clip, from project_snapshot. It sings its own lyrics, " +
+                    "else the lead's."
+                ),
+              voiceId: z
+                .string()
+                .min(1)
+                .optional()
+                .describe("Voice for this part, from sing_list_voices. Default the lead's voice."),
+              seed: z
+                .number()
+                .int()
+                .min(0)
+                .max(Number.MAX_SAFE_INTEGER)
+                .optional()
+                .describe(
+                  "A whole number. Default: a harmony, chordTones or clip part sings its own performance on the " +
+                    "lead's seed + 2; a double on the lead's + 7919 (a double on the lead's own seed is refused, it " +
+                    "would be an exact copy). A seed you pass is used as given."
+                ),
+              trackName: z
+                .string()
+                .min(1)
+                .optional()
+                .describe(
+                  "Name for the part's new track. Default like \"Harmony — third above · Built-in singer\" or " +
+                    "\"Vocals — double · Built-in singer\"."
+                ),
+              pan: z
+                .number()
+                .optional()
+                .describe(
+                  "-1 (left) … 1 (right). Default ±0.3 for the first part on a side (above = right), ±0.5 for the " +
+                    "next; a double +0.4."
+                ),
+              volumeDb: z
+                .number()
+                .optional()
+                .describe("Level in dB, -60 … +6. Default -4 for the first part on a side, -6 for the next; a double -4."),
+            })
+            .strict()
+        )
+        .optional()
+        .describe(
+          "Up to 3 more lines sung in the same job, each landing on its own new track (one undo step for all). " +
+            "Omit for a single vocal."
+        ),
+      key: z
+        .number()
+        .int()
+        .min(0)
+        .max(11)
+        .optional()
+        .describe(
+          "Only with `parts`: the song's key note a harmony is counted in, 0 = C, 1 = C# … 11 = B. Omit to work it " +
+            "out from the song. To CHANGE the song's key use project_transpose."
+        ),
+      mode: z.enum(["major", "minor"]).optional().describe("With `key`: \"major\" (default) or \"minor\"."),
+    },
+  },
+  async ({ clipId, lyrics, voiceId, octaveShift, seed, trackName, dryRun, parts, key, mode }) =>
+    toToolResult(() =>
+      bridge.send("sing.render", {
+        clipId,
+        lyrics,
+        voiceId,
+        octaveShift,
+        seed,
+        trackName,
+        dryRun,
+        parts,
+        key,
+        mode,
+      })
+    )
+);
+
+server.registerTool(
+  "sing_job_status",
+  {
+    title: "Check on a sung take",
+    description:
+      SING_WHAT_IS_IT +
+      "Reports a singing job started by sing_render (or in DAW Pro's window). With `jobId`, that job; without it, " +
+      "`{jobs: [...]}`, the last 20, newest first. Each job: `{jobId, clipId, state, phase, stageText, unit: " +
+      "{index, count}, progress, etaSeconds, waitingFor, cancelRequested, seed, warnings, notices, result, gates, " +
+      "error, keptTakePath, fromAgent, submittedAt, finishedAt}`. `state` is the one to poll on: \"queued\", " +
+      "\"running\", \"landed\" (the take is in the song; its checks are still running), \"done\", \"failed\" or " +
+      "\"cancelled\". `stageText` is a plain sentence for the user (\"Singing line 3 of 8…\"); `progress` is 0-1. " +
+      "When it has landed, `result` is `{trackId, clipId, loudness, noteAccuracy, wordCheck: {state, wer, heard, " +
+      "verdict}, gates, melodyChanged, transposedSemitones}`; on failure `error` is `{code, message, detail}`. " +
+      "A job started with `parts` (harmonies, a double) also has `parts: [{role (\"lead\"|\"harmony\"|\"double\"), " +
+      "name, state (\"waiting\"|\"singing\"|\"sung\"|\"landed\"|\"failed\"|\"cancelled\"), trackId, clipId, error}]`, " +
+      "the lead first; a part that fails is named and skipped while the others land. In such a job `result` (and its " +
+      "word check) is the LEAD's take when the lead landed, otherwise the FIRST part that landed: read " +
+      "`parts[].role` and `parts[].trackId` to know whose it is. A job without parts has no `parts` key. " +
+      SING_REFUSALS +
+      "Refused with singJobNotFound for an unknown id. Read-only.",
+    inputSchema: {
+      jobId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("The `jobId` sing_render returned. Omit it to list the last 20 jobs."),
+    },
+  },
+  async ({ jobId }) => toToolResult(() => bridge.send("sing.jobStatus", { jobId }))
+);
+
+registerTool(
+  "sing_cancel_job",
+  {
+    title: "Cancel a sung take",
+    description:
+      SING_WHAT_IS_IT +
+      "Asks a singing job to stop. The line being sung finishes first, then the job stops and nothing lands in the " +
+      "song. Returns `{cancelRequested: true, jobId, status}`; poll sing_job_status until `state` is \"cancelled\" " +
+      "(a job that already landed cannot be cancelled — undo it instead). Once a take has started landing in the " +
+      "song, cancel cannot stop it (it is refused, or does nothing); use edit_undo to remove the take. " +
+      SING_REFUSALS +
+      "Refusals: singJobNotFound, singJobFinished (it already ended).",
+    inputSchema: {
+      jobId: z.string().min(1).describe("The `jobId` sing_render returned."),
+    },
+  },
+  async ({ jobId }) => toToolResult(() => bridge.send("sing.cancelJob", { jobId }))
+);
+
+registerTool(
+  "project_transpose",
+  {
+    title: "Change the whole song's key",
+    description:
+      "Moves the WHOLE SONG up or down by a number of half-steps (semitones), as ONE undoable step: every " +
+      "instrument track's notes move, and recorded audio is pitch-shifted to match. Drum tracks never move (their " +
+      "notes pick drum sounds, not pitches). Use it when sing_propose_key recommends a key change, or whenever the " +
+      "song should sit higher or lower. `semitones` is -12…12 (12 = one octave up). `excludeTrackIds` keeps chosen " +
+      "tracks where they are. With `dryRun: true` nothing changes and the reply says what WOULD move. Returns what " +
+      "moved and what was skipped, per track and clip, plus `warnings` (for example that a recorded track will be " +
+      "pitch-shifted, which can sound slightly processed). " +
+      SING_REFUSALS +
+      "Refusals: transposeOutOfRange, transposeNoteOutOfRange (a note would leave the MIDI range; names the clip " +
+      "and note), transposeAudioShiftOutOfRange (an audio clip would be shifted too far; names the clip), " +
+      "transposeLooperOpen (finish the live loop first), trackNotFound (an id in excludeTrackIds).",
+    inputSchema: {
+      semitones: z
+        .number()
+        .int()
+        .min(-12)
+        .max(12)
+        .describe("Half-steps to move the song: -12 to 12. Positive is up (2 = a whole step up), negative down."),
+      excludeTrackIds: z
+        .array(z.string().uuid())
+        .optional()
+        .describe("Ids of tracks to leave where they are, from project_snapshot. Default: none."),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("When true, report what would move and change nothing. Default false."),
+    },
+  },
+  async ({ semitones, excludeTrackIds, dryRun }) =>
+    toToolResult(() => bridge.send("project.transpose", { semitones, excludeTrackIds, dryRun }))
+);
+
+// ---------------------------------------------------------------------------
+// Singing, the expansion (p2-sing-x7 part A; design 2026-10-06-p2-sing-expansion.md §3.4, §5.6, §4.7, §6.9):
+// one word on one note, the singing style (vibrato, breathiness, note loudness), a harmony plan, and what
+// singing can do on this Mac. Same order as the wire's `allCommands`.
+// ---------------------------------------------------------------------------
+
+registerTool(
+  "clip_set_note_word",
+  {
+    title: "Change the word one note sings",
+    description:
+      SING_WHAT_IS_IT +
+      "Puts ONE word on ONE note of a melody clip that already has lyrics, as one undoable step (\"Type Word\"). " +
+      "The clip's lyrics TEXT is rewritten so the words box shows exactly why each word sits where it does (it " +
+      "may gain + marks, which hold a word onto the next note); every other note keeps its word. `word` is one " +
+      "word, or \"+\" to make the word before hold onto this note, or \"\" to clear this note's word (the word " +
+      "before then holds on). Get note ids from clip_get_notes or the `noteIds` in clip_get_lyrics. With " +
+      "`dryRun: true` nothing is stored but the reply is the same. Returns the clip_set_lyrics shape: `{clipId, " +
+      "text, stored, changed, assignment: {words: [{text, noteIds, startBeat, endBeat, held}], lines, phrases, " +
+      "unsungNoteIds}, warnings}`. To write a whole line at once, use clip_set_lyrics. " +
+      SING_REFUSALS +
+      "Refusals: clipNotFound, lyricsNeedMIDIClip, lyricsNoText (write the words with clip_set_lyrics first), " +
+      "noteNotFound, noteNotSung (a chord note, or a line the words do not reach), lyricWordHasSpace (one word " +
+      "per note), lyricWordHasMarks, lyricWordHasNoLetters, lyricNothingToHold (+ on the first note of a line), " +
+      "lyricNoteInsideWord (the note sings part of a hyphenated word), the lyrics' own (lyricsTooManyWords, " +
+      "lyricsNotEnglish, lyricsScriptMismatch, …), lyricEditUnstable, lyricsTooLong, clipInTakeGroup.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI melody clip, from project_snapshot."),
+      noteId: z.string().uuid().describe("Id of the note to put the word on, from clip_get_notes or clip_get_lyrics."),
+      word: z
+        .string()
+        .max(200)
+        .describe(
+          "One word to sing on this note; \"+\" holds the word before onto it; \"\" clears the note's word (the " +
+            "word before holds on)."
+        ),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("When true, report the new text and how the words land, and store nothing. Default false."),
+    },
+  },
+  async ({ clipId, noteId, word, dryRun }) =>
+    toToolResult(() => bridge.send("clip.setNoteWord", { clipId, noteId, word, dryRun }))
+);
+
+const VIBRATO_TEXT =
+  "Vibrato, the gentle wobble singers put on long notes: \"normal\" (a medium wobble — the default when none is " +
+  "chosen), \"asSung\" (the singer's own, untouched), \"straight\" (no wobble), \"gentle\" or \"wide\".";
+const AIR_TEXT = "Air (breathiness): 0 = none (the default) up to 1 = lots. A soft breathy layer on the notes.";
+const vibratoSchema = z.enum(["asSung", "straight", "gentle", "normal", "wide"]);
+const airSchema = z.number().min(0).max(1);
+
+const noteSingStyleSchema = z
+  .object({
+    noteId: z.string().uuid().describe("Id of the note, from clip_get_notes."),
+    vibrato: vibratoSchema.optional().describe(VIBRATO_TEXT + " Omit to follow the clip's vibrato."),
+    air: airSchema.optional().describe(AIR_TEXT + " Omit to follow the clip's air."),
+  })
+  .strict();
+
+registerTool(
+  "clip_set_sing_style",
+  {
+    title: "Set how a melody is sung (vibrato, breathiness, note loudness)",
+    description:
+      SING_WHAT_IS_IT +
+      "Sets the SINGING STYLE stored on a MIDI melody clip, used by the next sing_render of that clip, as ONE " +
+      "undoable step (\"Set Singing Style\"). Clip-wide: `vibrato` (\"normal\" when none is chosen; \"asSung\" " +
+      "keeps the singer's own wobble, untouched), `air` (breathiness, 0-1) and " +
+      "`followVelocity` (true: quieter notes in the melody are sung quieter). Fields you leave out keep their " +
+      "current value. Per note: `notes: [{noteId, vibrato?, air?}]` — each entry REPLACES that note's own choice " +
+      "(send just {noteId} to make the note follow the clip again); at the note level \"asSung\" and air 0 are " +
+      "real choices (\"no wobble / no air on this note\"). `clear: true`, on its own, removes the whole style " +
+      "(back to the defaults). All " +
+      "or nothing: if anything is refused, nothing changes. Returns `{clipId, style, changed, orphanedNoteIds}`: " +
+      "`style` is null when the clip has no style (it is sung with the defaults: \"normal\" vibrato, no air, every " +
+      "note at one level); otherwise `{vibrato, air, " +
+      "followVelocity, notes: [{noteId, vibrato, air}]}` where null means the default. `orphanedNoteIds` lists " +
+      "per-note choices whose notes had been deleted; this write removed them. " +
+      SING_REFUSALS +
+      "Refusals: clipNotFound, singStyleNeedsMIDIClip, singStyleVibratoInvalid, singStyleAirOutOfRange, " +
+      "noteNotFound (names the id; nothing changes), singStyleClearAlone (send clear on its own), " +
+      "nothingToChange, singStyleLoopNotes (single notes of a live loop that is still recording can't be styled " +
+      "yet; the whole clip can), clipInTakeGroup.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI melody clip, from project_snapshot."),
+      vibrato: vibratoSchema.optional().describe(VIBRATO_TEXT),
+      air: airSchema.optional().describe(AIR_TEXT),
+      followVelocity: z
+        .boolean()
+        .optional()
+        .describe("True: quieter notes (lower velocity) are sung quieter. False (the default): every note at one level."),
+      notes: z
+        .array(noteSingStyleSchema)
+        .max(10000)
+        .optional()
+        .describe("Per-note choices, each REPLACING that note's own choice: [{noteId, vibrato?, air?}]."),
+      clear: z
+        .boolean()
+        .optional()
+        .describe("True, on its own: remove the whole singing style from the clip."),
+    },
+  },
+  async ({ clipId, vibrato, air, followVelocity, notes, clear }) =>
+    toToolResult(() => bridge.send("clip.setSingStyle", { clipId, vibrato, air, followVelocity, notes, clear }))
+);
+
+server.registerTool(
+  "clip_get_sing_style",
+  {
+    title: "Read how a melody is sung",
+    description:
+      SING_WHAT_IS_IT +
+      "Reads the singing style stored on a clip (see clip_set_sing_style). Returns `{clipId, style, " +
+      "orphanedNoteIds}`: `style` is null when the clip has none (it is sung with the defaults: \"normal\" vibrato, " +
+      "no air, every note at one level), otherwise `{vibrato, air, followVelocity, notes: " +
+      "[{noteId, vibrato, air}]}` (null = the default). `orphanedNoteIds` lists per-note choices whose notes were " +
+      "deleted since: they do nothing, and the next clip_set_sing_style removes them. " +
+      SING_REFUSALS +
+      "Refused with clipNotFound. Read-only.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the clip, from project_snapshot."),
+    },
+  },
+  async ({ clipId }) => toToolResult(() => bridge.send("clip.getSingStyle", { clipId }))
+);
+
+server.registerTool(
+  "sing_propose_harmony",
+  {
+    title: "Plan a harmony line for a melody",
+    description:
+      SING_WHAT_IS_IT +
+      "Works out a HARMONY part for a MIDI melody clip WITHOUT changing or singing anything (works with the " +
+      "singing engine stopped): one harmony note per melody note, the same rhythm, `interval` away in the song's " +
+      "key — \"third\" above is sweet and close, \"sixth\" below sits warm under the tune. Where a chord sounds, " +
+      "a note may move to the nearest chord note (`chordSource`). The key comes from `key`/`mode` if you pass " +
+      "them, else it is worked out from every pitched note in the song. Returns `{clipId, harmony, key: {tonic " +
+      "(0 = C … 11 = B), mode, name, source (\"given\" or \"estimated\"), confidence}, notes: [{leadNoteId, " +
+      "leadPitch, pitch, rule}], range: {voiceId, octaveShift, leadOctaveShift, outOfBandSemitones, fits, " +
+      "sentence}, warnings}`: pitches are MIDI note numbers (60 = middle C); `range` says whether the voice can " +
+      "sing the part and at what octave, with a plain `sentence` for the user. " +
+      SING_REFUSALS +
+      "Refusals: clipNotFound, singNeedsMIDIClip, singDrumTrack, singClipHasNoNotes, singHarmonyNeedsKey (the " +
+      "key can't be heard: pass key and mode), singHarmonyIntervalInvalid, singVoiceNotFound. Read-only.",
+    inputSchema: {
+      clipId: z.string().uuid().describe("Id of the MIDI melody clip, from project_snapshot."),
+      interval: z
+        .enum(["third", "sixth", "fifth", "octave"])
+        .describe("How far the harmony sits from the tune, counted in the song's scale."),
+      direction: z.enum(["above", "below"]).describe("Whether the harmony sits above or below the tune."),
+      chordSource: z
+        .enum(["auto", "none", "thisClip", "otherTracks"])
+        .optional()
+        .describe(
+          "Which chords a harmony note may move to: \"auto\" (default: this clip's own chord, else the other " +
+            "tracks'), \"none\" (never move), \"thisClip\" or \"otherTracks\"."
+        ),
+      key: z
+        .number()
+        .int()
+        .min(0)
+        .max(11)
+        .optional()
+        .describe("The song's key note: 0 = C, 1 = C#, 2 = D … 11 = B. Omit to work it out from the song."),
+      mode: z
+        .enum(["major", "minor"])
+        .optional()
+        .describe("With `key`: \"major\" (default) or \"minor\"."),
+      voiceId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Id of the voice that would sing it, from sing_list_voices. Default the built-in singer (\"builtin-1\")."),
+    },
+  },
+  async ({ clipId, interval, direction, chordSource, key, mode, voiceId }) =>
+    toToolResult(() =>
+      bridge.send("sing.proposeHarmony", { clipId, interval, direction, chordSource, key, mode, voiceId })
+    )
+);
+
+server.registerTool(
+  "sing_capabilities",
+  {
+    title: "What singing can do on this Mac",
+    description:
+      SING_WHAT_IS_IT +
+      "Reports what singing can do here, WITHOUT starting or installing anything (works with the engine " +
+      "stopped). Returns `{languages: [{code, name, status, needsEngineUpdate}], expression: [...], maxParts, " +
+      "engine}`: `languages` are the codes clip_set_lyrics' `language` takes (\"en\" English, \"zh\" Chinese " +
+      "(Mandarin), \"yue\" Chinese (Cantonese)); `needsEngineUpdate: true` means the installed singing engine must " +
+      "be updated (sing_install_engine) before it can sing that language. `expression` lists the singing-style " +
+      "choices clip_set_sing_style takes; `maxParts` is how many harmony parts one take can carry. `engine` is " +
+      "`{installed, scriptsVersion, shippedScriptsVersion, needsUpdate}`, or null when this session has no " +
+      "singing engine connected. Takes no parameters. Read-only.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("sing.capabilities", {}))
 );
 
 // ---------------------------------------------------------------------------
@@ -13634,19 +14993,19 @@ const modulationSourceParamsSchema = z
       .describe(
         "Free-running rate, 0.01-40 (out-of-range clamps and returns a warning). For lfo: " +
           "cycles/second (default 1.0). For stepSequencer: steps/second (default 4.0 — a " +
-          "1/16 at 60 BPM). Ignored once `syncDivision`/`stepDivision` land (NOT AVAILABLE " +
-          "yet — see those fields)."
+          "1/16 at 60 BPM). A step sequencer ignores it while `stepDivision` is set (the " +
+          "reply warns you, and the value is kept for when you clear `stepDivision`)."
       ),
     syncDivision: z
       .string()
       .nullable()
       .optional()
       .describe(
-        "lfo only. NOT AVAILABLE IN v1 — any non-null value is REFUSED " +
-          "(modulationTempoSyncUnavailable), naming m39-c (the generalised tempo-sync " +
-          "resolver every other tempo-synced verb shares) as the prerequisite. The field " +
-          "exists and persists now so the wire/save shape never changes when sync lands; " +
-          "use `rateHz` for a free-running rate today. Omit or pass null."
+        "lfo only. NOT AVAILABLE for the LFO yet — any non-null value is REFUSED " +
+          "(modulationTempoSyncUnavailable): an LFO that locks to the song's beat is not " +
+          "built. Use `rateHz` for a free-running LFO. (A step sequencer's `stepDivision` " +
+          "DOES follow the beat.) The field exists so the saved shape never changes if a " +
+          "synced LFO arrives. Omit or pass null."
       ),
     phaseDeg: z
       .number()
@@ -13710,12 +15069,24 @@ const modulationSourceParamsSchema = z
           "add_route's description, before shipping one."
       ),
     stepDivision: z
-      .string()
+      .enum([
+        "1/1", "1/1d", "1/1t",
+        "1/2", "1/2d", "1/2t",
+        "1/4", "1/4d", "1/4t",
+        "1/8", "1/8d", "1/8t",
+        "1/16", "1/16d", "1/16t",
+        "1/32", "1/32d", "1/32t",
+      ])
       .nullable()
       .optional()
       .describe(
-        "stepSequencer only. NOT AVAILABLE IN v1 — same refusal and m39-c prerequisite as " +
-          "`syncDivision`. Omit or pass null; use `rateHz` (steps/second) today."
+        "stepSequencer only. Locks every step to a note length of the song, so the steps " +
+          "follow the beat. `stepDivision: \"1/16\"` locks the steps to the song's sixteenth " +
+          "notes, so step 1 is always on the bar line. Values are 1/1 (whole note) down to " +
+          "1/32; add `d` for dotted (1.5x longer) or `t` for triplet (3 in the space of 2). " +
+          "The pattern starts again from step 1 at every time-signature change. While it is " +
+          "set, `rateHz` is unused (the reply warns, and mod_describe's `tempoSync` block " +
+          "explains it). Pass `null` to clear it and run free on `rateHz` again."
       ),
     // envelopeFollower
     source: z
@@ -13766,8 +15137,9 @@ const modulationSourceParamsSchema = z
       "A key valid for a DIFFERENT kind (e.g. `steps` on an `lfo`) is REFUSED here at the " +
       "wire, naming the valid keys for this one; a MISSPELLED key is rejected already at " +
       "this MCP boundary. Every numeric field out of range clamps and returns a warning " +
-      "rather than failing the call, EXCEPT `steps`' length/finiteness and `syncDivision`/" +
-      "`stepDivision`'s value (any non-null value), which are refused outright."
+      "rather than failing the call, EXCEPT `steps`' length/finiteness, a non-null " +
+      "`syncDivision` (an LFO cannot sync yet), and a `stepDivision` value that is not on " +
+      "the list, which are refused outright."
   );
 
 server.registerTool(
@@ -13783,7 +15155,8 @@ server.registerTool(
       "(16 sources/strip, 64 routes/strip SHARED with automation lanes, 64 steps per " +
       "stepSequencer); `kinds` (all four source kinds — lfo, stepSequencer, " +
       "envelopeFollower, macro — each with its own param table: name/type/range/default/" +
-      "unit/curve/notes); and `targets` (per-target delivery path and honesty notes for " +
+      "unit/curve/notes; a step sequencer's `stepDivision` param lists every allowed " +
+      "note length in its `values`); and `targets` (per-target delivery path and honesty notes for " +
       "volume/pan/effectParam/instrumentParam/sendLevel). No params. " +
       "There is deliberately NO mod_trigger tool: every modulation source is a pure " +
       "function of transport position (an LFO's phase, a step index) with no phase " +
@@ -13812,7 +15185,9 @@ registerTool(
       "mod_set_macro — a knob, not a timeline; it STAYS LIVE while the transport is " +
       "stopped, unlike lfo/stepSequencer sources, which hold neutral (0) then). See " +
       "mod_describe_kinds for the full per-kind param table, defaults, and the POLARITY/" +
-      "depth-law teaching. Cap: 16 sources per strip. Returns `{sourceId, source, " +
+      "depth-law teaching. A step sequencer can lock to the song's beat with `stepDivision` " +
+      "(e.g. \"1/16\"); if you also pass `rateHz`, the reply warns that `rateHz` is unused " +
+      "while `stepDivision` is set. Cap: 16 sources per strip. Returns `{sourceId, source, " +
       "warnings}` — `warnings` names any param that was clamped into range.",
     inputSchema: {
       trackId: z
@@ -13855,7 +15230,9 @@ registerTool(
       "`kind` cannot change this way (mod_remove_source it and mod_add_source a new one " +
       "instead). Omitted param keys keep their current value; see mod_describe_kinds for " +
       "each kind's param table and mod_add_source's `params` field for the POLARITY " +
-      "convention on `steps`/`pulseWidth`/`bipolar`. Returns `{source, warnings}`.",
+      "convention on `steps`/`pulseWidth`/`bipolar`. A step sequencer accepts " +
+      "`stepDivision` here too (a value locks it to the beat, `null` frees it again); " +
+      "while it is set, `rateHz` is unused and the reply warns so. Returns `{source, warnings}`.",
     inputSchema: {
       trackId: z.string().min(1).describe("Id of the track that owns the source, or the exact string \"master\"."),
       sourceId: z
@@ -14057,7 +15434,11 @@ server.registerTool(
       "STOPPED value (lfo/stepSequencer hold neutral; envelopeFollower/macro stay live) " +
       "so this call, the UI, and the render always agree. An envelopeFollower source's " +
       "value is reported `null` (with a note) — it depends on render history, not " +
-      "transport position, so it has no meaningful value outside a running render.",
+      "transport position, so it has no meaningful value outside a running render. A step " +
+      "sequencer locked to the beat also carries a `tempoSync` block: `{stepDivision, " +
+      "stepsPerBar (at the time signature in force at `atBeat`), meter, restart (where the " +
+      "pattern starts again), rateHzNote (why `rateHz` is unused)}`. A free-running " +
+      "source has no such block.",
     inputSchema: {
       trackId: z
         .string()
@@ -14247,18 +15628,19 @@ registerTool(
       "render_mixdown wrote. To check a file that already exists, use " +
       "audio_profile_file (windowed sample peak/RMS + real header — proves a " +
       "bounce isn't silence-padded and where the tail decays) or, for true " +
-      "BS.1770 LUFS of a file, reference_import (which analyzes on import, but " +
-      "copies the file, occupies the project's single reference slot, and lands " +
-      "as an undoable edit). (2) A WINDOWED measurement is not an excerpt of the " +
-      "full render: a MIDI note whose note-ON falls BEFORE `fromBeat` is dropped " +
-      "entirely from the render (no note-on and no note-off), so measuring a " +
-      "window that starts mid-note reports gated silence for a passage that " +
-      "sounds perfectly fine from the top. A straddling AUDIO clip does NOT " +
-      "behave this way — it is entered mid-file and sounds. So an unexpectedly " +
-      "silent window over sustained MIDI (pads, held strings, long tails) is " +
-      "far more likely to be this scheduling rule than a real hole in your " +
-      "arrangement: re-measure from beat 0, or from the start of the clip in " +
-      "question, before reporting silence. Note the MIXED UNITS in one call: " +
+      "BS.1770 LUFS of a file, audio_profile_file with `loudness: true` (the " +
+      "same meter, and it copies nothing; reference_import also analyzes, but " +
+      "it copies the file, occupies the project's single reference slot, and " +
+      "lands as an undoable edit). (2) A WINDOWED measurement RE-STRIKES held " +
+      "notes: a MIDI note whose note-ON falls BEFORE `fromBeat` is played again " +
+      "at the window start at full velocity (the same rule the play button " +
+      "uses), so a window over sustained MIDI is not silent. The cost: a note " +
+      "that was already fading at `fromBeat` restarts its attack there, so a " +
+      "window that starts mid-decay can read a little LOUDER than that passage " +
+      "sounds in the full song. Measure from beat 0, or from the start of the " +
+      "clip in question, when the level at the window's start must match the " +
+      "whole render. A straddling AUDIO clip is entered mid-file and sounds. " +
+      "Note the MIXED UNITS in one call: " +
       "`fromBeat` is BEATS, `durationSeconds` is SECONDS, and there is no " +
       "beat-range form.",
     inputSchema: {
@@ -14271,11 +15653,11 @@ registerTool(
         .describe(
           "Timeline position, in BEATS (quarter notes), to start measuring " +
             "from. Must be >= 0. Defaults to 0 (the very start of the timeline). " +
-            "A non-zero value does NOT give you an excerpt of the whole render: " +
             "MIDI notes already sounding at this beat (note-on earlier) are " +
-            "omitted from the render entirely, so a window starting mid-note " +
-            "under-reports, sometimes as total silence. Measure from 0 when the " +
-            "number has to be trustworthy."
+            "struck again here at full velocity, so a held note never makes the " +
+            "window silent; a note that was fading here restarts its attack, " +
+            "which can read slightly louder than the full song. Measure from 0 " +
+            "when the number has to match the whole render."
         ),
       durationSeconds: z
         .number()
@@ -14717,7 +16099,13 @@ registerTool(
       "does not delete media). Returns `{track, clip, file, sourceTrackId, " +
       "sourceMuted, measurement}` where `track`/`clip` are the new objects, " +
       "`file` is the WAV path, and `measurement` is the same un-normalized " +
-      "loudness report a render_stems stem carries.",
+      "loudness report a render_stems stem carries. If the song changes " +
+      "while the track is bouncing (a new song is started or another song " +
+      "is opened), the bounce is refused and nothing is added to either " +
+      "song; the error reads: \"The song changed while the track was " +
+      "bouncing (a new song was started or another song was opened), so " +
+      "nothing was added to either song. Bounce the track again from the " +
+      "song it belongs to.\"",
     inputSchema: {
       trackId: z
         .string()
@@ -14771,6 +16159,143 @@ registerTool(
     toToolResult(() =>
       bridge.send("track.bounceInPlace", { trackId, fromBeat, durationSeconds, muteSource, name })
     )
+);
+
+// ---------------------------------------------------------------------------
+// Ready-made drum beats (m39-w4-10)
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  "pattern_list",
+  {
+    title: "List the ready-made drum beats (read-only)",
+    description:
+      "List the ready-made drum beats that clip_add_drum_pattern can write, " +
+      "in menu order: {patterns: [{id, name, description, bars, roles}], " +
+      "count}. There are seven: basicRock, fourOnTheFloor, boomBap, trap, " +
+      "halfTime, breakbeat and oneDrop. `id` is what you pass to " +
+      "clip_add_drum_pattern; `description` says in plain words how the " +
+      "beat feels; `bars` is how long the beat is on its own (1 or 2); " +
+      "`roles` are the drums it uses, in the Drum Machine's spelling " +
+      "(kick, snare, closedHat, openHat, clap, tom, rim, cymbal). If a " +
+      "drum track's kit lacks one of a beat's drums, that drum is left " +
+      "out when the beat is written (see clip_add_drum_pattern). No params. " +
+      "Read-only: it needs no track and changes nothing.",
+    inputSchema: {},
+  },
+  async () => toToolResult(() => bridge.send("pattern.list", {}))
+);
+
+registerTool(
+  "clip_add_drum_pattern",
+  {
+    title: "Add a ready-made drum beat to a drum track",
+    description:
+      "Write a ready-made drum beat (see pattern_list) onto a DRUM track as " +
+      "ONE new MIDI clip, in one undo step. Use it to start a song from a " +
+      "real groove instead of placing every kick and snare by hand; edit " +
+      "the notes afterwards with clip_get_notes / clip_patch_notes. The " +
+      "track must play drums: the Drum Machine, the General MIDI drum " +
+      "kit, or a Sampler whose pads are sorted into a kit. Each drum in " +
+      "the beat lands on the key that track's own kit uses for it, so the " +
+      "same beat works on any of them. `pattern` is a beat's id (or name) " +
+      "from pattern_list. `bars` is optional, a whole number from 1 to 64: " +
+      "leave it out for the beat's own length (1 or 2 bars); a bigger " +
+      "number repeats the beat, and a smaller one stops at a bar line. " +
+      "`atBeat` is optional, in beats from the start of the song (0 or " +
+      "more): leave it out and the beat starts at the next bar line after " +
+      "the track's last clip, so calling the tool again adds the next " +
+      "section after the first. " +
+      "A beat is REFUSED, not trimmed, when it would land on top of " +
+      "another clip on the track, so no clip is ever cut. The error reads: " +
+      "\"The beat would land on top of the clip '<name>' (<id>) on this " +
+      "track, and adding it there would cut that clip, so nothing was " +
+      "added. Leave 'atBeat' out to add the beat after the last clip (it " +
+      "would start at beat <n>), choose a free spot, or move that clip " +
+      "first.\" " +
+      "A drum the kit does not have is LEFT OUT and NAMED, never replaced " +
+      "by a different drum. For each one the reply carries a warning: " +
+      "\"This kit has no <Drum>, so the beat's <n> <Drum> hits were left " +
+      "out. Nothing else plays in their place.\" " +
+      "If the kit has none of the beat's drums, nothing is added and the " +
+      "error reads: \"This kit has none of the drums this beat uses " +
+      "(<drums>), so nothing was added. Pick a beat that uses the drums " +
+      "this kit has.\" " +
+      "These beats are written for 4 beats to a bar, so a spot where the " +
+      "song is in another time signature is refused (nothing is added). A " +
+      "track that does not play drums is refused too. " +
+      "Returns the new clip's fields at the top level (the clip_add_midi " +
+      "shape, with note ids) PLUS `pattern`, `patternName`, `bars`, " +
+      "`notesWritten`, `rolesWritten` [{role, name, note, hits}], " +
+      "`rolesLeftOut` [{role, name, hits}] and `warnings` [sentence]. The " +
+      "three lists are always present, empty on the ordinary path. " +
+      "Check `rolesLeftOut` / `warnings` before telling the user the beat " +
+      "is complete. " +
+      "FILL A CLIP YOU ALREADY MADE: pass `clipId` (an EMPTY MIDI clip on " +
+      "`trackId`, such as one from clip_add_midi with no notes) and the " +
+      "beat goes INTO that clip instead of a new one: it fills the clip " +
+      "from its first beat to its end (a longer clip repeats the beat, a " +
+      "shorter one stops at a bar line), still in one undo step, and the " +
+      "reply has the same fields, for that clip. The clip decides where " +
+      "the beat starts and how long it runs, so `atBeat` and `bars` are " +
+      "refused when `clipId` is given. A clip that already has notes is " +
+      "REFUSED, never overwritten or mixed with: nothing you wrote is " +
+      "changed. A clip that is on a different track than `trackId` is " +
+      "refused too.",
+    inputSchema: {
+      trackId: z
+        .string()
+        .min(1)
+        .describe(
+          "Id of the DRUM track to write the beat on (the Drum Machine, the " +
+            "General MIDI drum kit, or a Sampler sorted into a kit), from " +
+            "project_snapshot or track_add."
+        ),
+      clipId: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Optional. Id of an EMPTY MIDI clip on `trackId` to fill with the " +
+            "beat instead of adding a new clip (from clip_add_midi or " +
+            "project_snapshot). The beat fills the clip's own length. " +
+            "Refused if the clip has any notes. Do not send `atBeat` or " +
+            "`bars` with it."
+        ),
+      pattern: z
+        .string()
+        .min(1)
+        .describe(
+          "Which beat: an id from pattern_list, such as 'basicRock', " +
+            "'fourOnTheFloor', 'boomBap', 'trap', 'halfTime', 'breakbeat' or " +
+            "'oneDrop'."
+        ),
+      bars: z
+        .number()
+        .int()
+        .min(1)
+        .max(64)
+        .optional()
+        .describe(
+          "How many bars to fill, a whole number from 1 to 64. Omit it for " +
+            "the beat's own length (1 or 2 bars). More bars repeat the beat; " +
+            "fewer stop at a bar line."
+        ),
+      atBeat: z
+        .number()
+        .min(0)
+        .max(TIMELINE_MAX_BEATS, PAST_TIMELINE)
+        .optional()
+        .describe(
+          "Where the clip starts, in beats (quarter notes) from the start of " +
+            "the song, 0 or more. Omit it to start at the next bar line " +
+            "after the track's last clip. A start that would land on another " +
+            "clip is refused."
+        ),
+    },
+  },
+  async ({ trackId, clipId, pattern, bars, atBeat }) =>
+    toToolResult(() => bridge.send("clip.addDrumPattern", { trackId, clipId, pattern, bars, atBeat }))
 );
 
 // ---------------------------------------------------------------------------
@@ -15117,6 +16642,11 @@ server.registerTool(
       "entries and every fx_* mutation result. Chains are capped at " +
       "16 entries — see fx_add/fx_remove/fx_reorder/fx_set_bypass/fx_set_param " +
       "to edit it and fx_describe for each kind's parameter names/ranges/units. " +
+      "Includes `panLaw` when the song uses the equal-loudness pan knob (`\"equalPower\"`, " +
+      "every song made from now on): the pan knob then keeps a sound equally loud as it " +
+      "moves, so the near side gets up to 3 dB louder. The key is ABSENT for an older song, " +
+      "and absent means the original rule (`\"balance\"`: the far side gets quieter, the " +
+      "near side stays as it is) — read a missing `panLaw` as `balance`. " +
       "May also include `masterAutomation` (m15-c): the whole-mix master VOLUME " +
       "automation lanes as a top-level `[{id, target, points, isEnabled}]` array (same " +
       "lane shape as a track's, driven by automation_add_lane/_set_points/_set_lane_" +
@@ -16060,7 +17590,16 @@ registerTool(
       "\"anthropic\" or \"openai\"). If NEITHER provider has a key in the app, it " +
       "errors with an actionable message pointing at the app's Settings panel (⌘,) " +
       "and ai_provider_status — key values are never sent over this channel, so ask " +
-      "the user to set one there rather than pasting it to you.",
+      "the user to set one there rather than pasting it to you. " +
+      "WORDS THAT FIT A TUNE: pass `fitClipId` (a MIDI melody clip) to get ONE plain line per breath phrase of " +
+      "that melody, no section tags, each with at most as many syllables as its phrase has notes. The reply is " +
+      "CHECKED, not trusted: if a line doesn't fit, the writer is asked once more with those lines named, and the " +
+      "result comes back with `fit: {lines: [{phrase, notes, syllables, fits}], allFit, attempts, sentence}` " +
+      "(`sentence` is a plain note for the user naming the lines that still don't fit, else null). Nothing is " +
+      "stored: put the words on the clip with clip_set_lyrics (or sing_render's `lyrics`). `language` (\"en\", " +
+      "\"zh\" Chinese Mandarin, \"yue\" Cantonese) asks for that language; with `fitClipId` it defaults to the " +
+      "clip's own words' language. Refusals with `fitClipId`: clipNotFound, lyricsNeedMIDIClip, " +
+      "singClipHasNoNotes, lyricsLanguageUnsupported, and `structure` (a fitted write has no sections).",
     inputSchema: {
       prompt: z
         .string()
@@ -16100,6 +17639,22 @@ registerTool(
         .string()
         .optional()
         .describe("REFINE mode: how to revise, e.g. \"make the chorus more hopeful\"."),
+      fitClipId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Id of a MIDI melody clip (from project_snapshot): write one line per phrase of its tune, checked to fit " +
+            "its notes. Not with `structure`."
+        ),
+      language: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Language to write in: \"en\" (English), \"zh\" (Chinese, Mandarin) or \"yue\" (Chinese, Cantonese). " +
+            "With fitClipId the default is the clip's own words' language."
+        ),
     },
   },
   async (params) => toToolResult(() => bridge.send("ai.writeLyrics", params))

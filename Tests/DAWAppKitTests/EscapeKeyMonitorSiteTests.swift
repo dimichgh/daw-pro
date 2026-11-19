@@ -199,8 +199,19 @@ struct EscapeKeyMonitorSiteTests {
         // MEASURED 2026-09-25: the explain mode's hidden button (ContentView)
         // and the preset card's Cancel. Both are covered: explain by
         // `escapeIsOwnedElsewhere`, the card by `isModalPresented`.
-        #expect(hits.sorted() == ["ContentView.swift×1", "PresetReplaceConfirmCard.swift×1"],
+        // p2-sing-f (2026-10-07): the Sing cards' shared header ✕
+        // (`SingCardChrome.swift`, used ONLY by the Sing sheet, the voice recorder
+        // and the singing-engine consent card) — all three listed in
+        // `isModalPresented` (`singSheet.isOpen`, `singRecorder.isOpen`,
+        // `singConsent.isOpen`); a card under another is `.disabled`
+        // (`SingCardMount`), so only the top card's ✕ is live.
+        #expect(hits.sorted() == ["ContentView.swift×1", "PresetReplaceConfirmCard.swift×1", "SingCardChrome.swift×1"],
                 "a `.cancelAction` Escape consumer appeared or vanished (\(hits.sorted())) — the key monitor AND the `.onKeyPress` mounts run BEFORE a key equivalent (measured, I7b-2 A/B), so a new one must be named in `escapeIsOwnedElsewhere` (or be a listed modal) or either route will eat its Escape")
+        // The Sing cards' ✕ is covered only because all three cards are listed modals: pin that half too.
+        let modal = Self.required("var isModalPresented: Bool {", in: Self.code(Self.appPath), Self.appPath)
+        for term in ["singSheet.isOpen", "singRecorder.isOpen", "singConsent.isOpen"] {
+            #expect(modal.contains(term), "a Sing card's ✕ consumes Escape, but `\(term)` is not in isModalPresented")
+        }
     }
 
     /// The CENSUS of every SwiftUI Escape consumer, by the METHOD, not a

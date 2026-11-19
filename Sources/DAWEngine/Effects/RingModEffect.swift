@@ -209,6 +209,15 @@ final class RingModEffect: EffectRendering, @unchecked Sendable {
         filterL.clear()
         filterR.clear()
         needsPrime = true
+        // m39-d CR-2: a reset drops the ramp and the coefficient block in flight
+        // (`needsPrime` re-seats the values); the cell geometry is the renderer's.
+        rampFramesLeft = 0
+        rampElapsed = 0
+        rampIncrementDelta = 0
+        rampMixDelta = 0
+        rampSpreadDelta = 0
+        rampHighCutDelta = 0
+        blockFramesLeft = 0
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -251,6 +260,7 @@ final class RingModEffect: EffectRendering, @unchecked Sendable {
         // `eq`/`djFilter` slopes it is modelled on. THROUGH THE LAW — this is
         // the only place in the engine that turns the number into a shape.
         waveform = RingModParams.waveform(at: p.waveform)
+        rampPending = true  // m39-d CR-2: the next `process` starts a ramp
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
@@ -375,6 +385,55 @@ final class RingModEffect: EffectRendering, @unchecked Sendable {
         }
     }
 
+    // MARK: - m39-d CR-2: the control cell (docs/design/2026-10-07-effect-control-rate.md §5.4)
+    //
+    // Render-thread only. A ramp starts in the `process` call after a derive
+    // (`rampPending`). On the control grid (`cellFramesLeft` covers the whole
+    // call) it spans the REST OF THE CELL and carries across calls; off it,
+    // it spans the call, exactly as before the grid. A ramp in flight that
+    // would end INSIDE a call is re-spanned over that call, so no ramp ever
+    // ends mid-call and the per-sample loop is untouched. In a 512 bounce the
+    // cell is the call: the same delta expression, run the same number of
+    // times (G1 byte gate).
+    /// Frames from the next `process` call to the next control-cell line
+    /// (0 = off the grid). Set by `beginControlCell`, counted down here.
+    private var cellFramesLeft = 0
+    /// Frames left in the ramp in flight (0 = values sit at their targets).
+    private var rampFramesLeft = 0
+    /// A derive landed since the ramp in flight began.
+    private var rampPending = false
+    /// The ramp in flight. The carrier increment, mix and spread ACCUMULATE
+    /// per sample (their `previous*` carries what a call reached); the input
+    /// high-cut interpolates PARAMETRICALLY per block (`previous + delta · t`),
+    /// so `previousHighCut` stays the ramp's start and `rampElapsed` is the
+    /// position. (0 at rest.)
+    private var rampIncrementDelta = 0.0
+    private var rampMixDelta = 0.0
+    private var rampSpreadDelta = 0.0
+    private var rampHighCutDelta = 0.0
+    private var rampSpan = 1.0
+    private var rampElapsed = 0
+    /// Frames left in the 32-frame coefficient block in flight (its biquad
+    /// coefficients persist in `b0…a2`): on the grid a block never crosses a
+    /// cell line and one a call ends inside CARRIES into the next call.
+    private var blockFramesLeft = 0
+
+    /// m39-d CR-1 (design §5.3): the automated values stored at this control
+    /// cell's entry still stand. Adopt FIRST, so a knob publish waiting in the
+    /// slot is seen now, as a store would see it (then `overlay.hold()`
+    /// answers false and the renderer re-stores). Render thread; no allocation.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): the ramp toward a new value spans the
+    /// rest of the cell (`frames`), carried across calls, and the 32-frame
+    /// coefficient stride counts from the cell line.
+    func beginControlCell(frames: Int) {
+        cellFramesLeft = max(0, frames)
+    }
+
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
         adoptPendingParams()
         // Automation lane(s) vanished: knob params restore, no republish.
@@ -404,13 +463,41 @@ final class RingModEffect: EffectRendering, @unchecked Sendable {
         guard channelCount > 0, minFrames > 0, let left = channelData[0] else { return }
         let right = channelCount > 1 ? channelData[1] : nil
 
-        let span = Double(minFrames)
-        let incrementDelta = (targetIncrement - previousIncrement) / span
-        let mixDelta = (targetMix - previousMix) / span
-        let spreadDelta = (targetSpread - previousSpread) / span
-        let highCutDelta = targetHighCut - previousHighCut
+        // m39-d CR-2: start (or re-span) the ramp — see the MARK above. A ramp
+        // re-started in flight first moves the high-cut's start to where it is
+        // now (the accumulating fields already carry theirs). The delta
+        // expressions are the pre-grid ones, verbatim.
+        if rampPending || (rampFramesLeft > 0 && rampFramesLeft < minFrames) {
+            if rampFramesLeft > 0 {
+                previousHighCut = previousHighCut
+                    + rampHighCutDelta * (Double(rampElapsed) / rampSpan)
+            }
+            rampPending = false
+            let rampFrames = cellFramesLeft >= minFrames ? cellFramesLeft : minFrames
+            let span = Double(rampFrames)
+            rampIncrementDelta = (targetIncrement - previousIncrement) / span
+            rampMixDelta = (targetMix - previousMix) / span
+            rampSpreadDelta = (targetSpread - previousSpread) / span
+            rampHighCutDelta = targetHighCut - previousHighCut
+            rampSpan = span
+            rampElapsed = 0
+            rampFramesLeft = rampFrames
+        }
+        // At rest the deltas are 0, so `t` multiplies nothing — the pre-grid
+        // per-call `target − previous` was 0 there too.
+        let span = rampFramesLeft > 0 ? rampSpan : Double(minFrames)
+        let elapsed = rampFramesLeft > 0 ? rampElapsed : 0
+        let incrementDelta = rampIncrementDelta
+        let mixDelta = rampMixDelta
+        let spreadDelta = rampSpreadDelta
+        let highCutDelta = rampHighCutDelta
         let stereo = right != nil
         let shape = waveform
+        // m39-d CR-2: on the grid a block is capped at the CELL's end (and may
+        // carry into the next call); off it, at the CALL's end, as before. In a
+        // 512 bounce the two are the same frame.
+        let onGrid = cellFramesLeft >= minFrames
+        var blockLeft = blockFramesLeft
 
         var increment = previousIncrement
         var mix = previousMix
@@ -423,13 +510,16 @@ final class RingModEffect: EffectRendering, @unchecked Sendable {
         // allocation gates can assert an absolute zero at all.
         var frame = 0
         while frame < minFrames {
-            var blockEnd = frame + Self.coefficientStride
+            if blockLeft == 0 {
+                let regionLeft = onGrid ? cellFramesLeft - frame : minFrames - frame
+                blockLeft = regionLeft < Self.coefficientStride ? regionLeft : Self.coefficientStride
+                // One coefficient recompute per block; the carrier and the gains
+                // interpolate inside it, per sample.
+                let t = Double(elapsed + frame) / span
+                deriveCoefficients(highCutHz: previousHighCut + highCutDelta * t)
+            }
+            var blockEnd = frame + blockLeft
             if blockEnd > minFrames { blockEnd = minFrames }
-
-            // One coefficient recompute per block; the carrier and the gains
-            // interpolate inside it, per sample.
-            let t = Double(frame) / span
-            deriveCoefficients(highCutHz: previousHighCut + highCutDelta * t)
             let c0 = b0, c1 = b1, c2 = b2, d1 = a1, d2 = a2
 
             var i = frame
@@ -469,10 +559,32 @@ final class RingModEffect: EffectRendering, @unchecked Sendable {
                 spread += spreadDelta
                 i += 1
             }
+            blockLeft -= blockEnd - frame
             frame = blockEnd
         }
+        blockFramesLeft = blockLeft
 
         carrierPhase = phase
+
+        // m39-d CR-2: a ramp still in flight carries what it reached (the
+        // high-cut keeps its start and advances its position); at the ramp's end
+        // the values are SNAPPED to their targets, exactly as every call end did
+        // before the grid (and still does off it).
+        cellFramesLeft = cellFramesLeft > minFrames ? cellFramesLeft - minFrames : 0
+        if rampFramesLeft > minFrames {
+            rampFramesLeft -= minFrames
+            rampElapsed += minFrames
+            previousIncrement = increment
+            previousMix = mix
+            previousSpread = spread
+            return
+        }
+        rampFramesLeft = 0
+        rampElapsed = 0
+        rampIncrementDelta = 0
+        rampMixDelta = 0
+        rampSpreadDelta = 0
+        rampHighCutDelta = 0
 
         previousIncrement = targetIncrement
         previousMix = targetMix

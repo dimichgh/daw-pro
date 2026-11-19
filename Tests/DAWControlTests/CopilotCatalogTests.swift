@@ -73,7 +73,7 @@ struct CopilotCatalogTests {
         // group delete/move, and strictly better undo atomicity for a
         // capability (clip.remove/clip.move) already IN the catalog — took it
         // 69 -> 71.
-        #expect(CopilotToolCatalog.v1.count == 84)   // 84 at m39-tpl-6 (template.list/describe/apply — the m21-b2 law: a new user-facing capability must be visible to the in-app copilot, and "set up a lo-fi beat" is exactly the request the copilot could not previously serve one call at a time; template.save/remove/import/export are deliberately absent — file-system side effects, same rationale as project.save staying off this surface) <- 81 at m23-cw (au.listPresets/au.loadPreset — the m21-b2 law: a new user-facing capability must be visible to the in-app copilot, and "give me a cathedral reverb" is exactly the request the copilot could not previously serve, because starting from the right PRESET is how a plugin's sound space is actually reached). 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape) -> 78 at m31-c (clip.repeatNotes — the in-app copilot composes music too, and this is the exact "author one bar, repeat it" efficiency verb an autonomous agent wants; siblings clip.setNotes/clip.addMIDI are both already in the catalog) -> 79 at m26-a/m27-n (clip.patchNotes — the most obvious autonomous-agent framing of any verb in this file: it exists BECAUSE an agent doing "raise the velocity of 48 shaker notes out of 907" should not have to round-trip the other 859)
+        #expect(CopilotToolCatalog.v1.count == 86)   // 86 at m39-w4-10 (clip.addDrumPattern + pattern.list, W9-PAT — the m21-b2 law: "give me a hip-hop beat" is a request the copilot could only serve note by note before) <- 84 at m39-tpl-6 (template.list/describe/apply — the m21-b2 law: a new user-facing capability must be visible to the in-app copilot, and "set up a lo-fi beat" is exactly the request the copilot could not previously serve one call at a time; template.save/remove/import/export are deliberately absent — file-system side effects, same rationale as project.save staying off this surface) <- 81 at m23-cw (au.listPresets/au.loadPreset — the m21-b2 law: a new user-facing capability must be visible to the in-app copilot, and "give me a cathedral reverb" is exactly the request the copilot could not previously serve, because starting from the right PRESET is how a plugin's sound space is actually reached). 72 at m23-af (transport.panic) -> 74 at m23-aj-2 (moveManyByTracks/moveManyToTrack) -> 75 at m25-d (transport.setStopAtContentEnd) -> 76 at m27 leg D (clip.applyBreathContour) -> 77 at breath pad P1 (clip.applyEffortShape) -> 78 at m31-c (clip.repeatNotes — the in-app copilot composes music too, and this is the exact "author one bar, repeat it" efficiency verb an autonomous agent wants; siblings clip.setNotes/clip.addMIDI are both already in the catalog) -> 79 at m26-a/m27-n (clip.patchNotes — the most obvious autonomous-agent framing of any verb in this file: it exists BECAUSE an agent doing "raise the velocity of 48 shaker notes out of 907" should not have to round-trip the other 859)
         // m39-tpl-6: the three READ/APPLY template verbs are visible to the
         // in-app copilot; save/remove/import/export are deliberately absent
         // (file-system side effects, same rationale as project.save staying
@@ -172,6 +172,20 @@ struct CopilotCatalogTests {
         // is genuinely absent rather than the filter above being a no-op.
         #expect(offered.count >= 13)
         #expect(!offered.contains("audioUnit"))
+    }
+
+    @Test("W9-PATF: clip.addDrumPattern tells the copilot it can fill an empty clip by clipId")
+    func copilotDrumPatternOffersClipID() throws {
+        let tool = try #require(CopilotToolCatalog.tool(command: "clip.addDrumPattern"))
+        let properties = try #require(tool.schema["properties"]?.objectValue)
+        #expect(properties["clipId"] != nil,
+                "the wire fills an existing empty clip by clipId; a copilot that cannot see the key cannot use it")
+        // CONTROL: the lookup can see the keys it should, so the absence check
+        // above is not blind.
+        #expect(properties["trackId"] != nil)
+        #expect(properties["pattern"] != nil)
+        let required = tool.schema["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        #expect(!required.contains("clipId"), "clipId is optional: without it the beat lands as a new clip")
     }
 
     @Test("m39-dm-copilot: track.setInstrument's copilot kind enum is EVERY instrument kind, derived from the enum")
@@ -352,5 +366,23 @@ struct CopilotCatalogTests {
             found[String(text[verbRange])] = keys
         }
         return found
+    }
+
+    // W9-W45 — the drum machine's notes are no longer one fixed range.
+    @Test("W45: track.setInstrument tells the copilot a new drum machine plays General MIDI keys and to read the kit's layout")
+    func w45DrumNotesNameBothLayoutsAndTheReadBack() throws {
+        let tool = try #require(CopilotToolCatalog.v1.first { $0.command == "track.setInstrument" })
+        let text = tool.description
+        // The new General MIDI keys, in pad order.
+        #expect(text.contains("36 kick, 38 snare, 42 closed hat, 46 open hat, 39 clap, 45 tom, 37 rim, 49 cymbal"))
+        // The older song's original order is still named.
+        #expect(text.contains("notes 36-43 as kick, snare, closed hat, open hat, clap, tom, rim, cymbal"))
+        // And the copilot is told where to read the truth, with a tool it HAS.
+        #expect(text.contains("project.snapshot"))
+        #expect(text.contains("instrument.drumKit"))
+        #expect(text.contains("noteLayout"))
+        #expect(CopilotToolCatalog.allCommands.contains("project.snapshot"))
+        // The old unqualified claim is gone.
+        #expect(!text.contains("on notes 36-43 (kick"))
     }
 }

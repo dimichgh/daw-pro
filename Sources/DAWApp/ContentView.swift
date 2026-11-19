@@ -460,6 +460,15 @@ struct ContentView: View {
         // HERE, in the builder `body` mounts BEFORE `.presetReplaceConfirmOverlay(model)`, so
         // the "Replace your hand edits?" card its Apply can raise draws ON TOP of it.
         TuneToMelodyCardMount(model: model)
+        // TEMPLATE PICKER (m39-tpl-8): "Start with a band" and its Save as Template card,
+        // plus the notice that fades after a band lands. In this always-present builder so
+        // the root body chain gains no link (the type-checker limit). Every press is the
+        // store call a `template.*` / `macro.songSkeleton` verb makes.
+        TemplatePickerCardMount(model: model)
+        // SING (p2-sing-f): the Sing sheet, the voice recorder, the singing-engine consent card
+        // and the sung take's results card, in one always-present builder (the type-checker
+        // limit, as above). Every press is the call the `sing.*` / `clip.setLyrics` verbs make.
+        SingCardMount(model: model)
         // AU-effect picker (m13-g, audit F6): opened by a Pro channel/bus strip's
         // insert add-menu "Audio Units…" item; UI-only — Add routes through the SAME
         // `store.addEffect(kind:.audioUnit)` the wire uses. Never opened for master.
@@ -545,7 +554,7 @@ struct ContentView: View {
         // type-checker's limit). Status chrome sits UNDER the centered modals
         // above by declaration order — a modal legitimately covers it.
         if model.generationPresence.isVisible {
-            GenerationPresenceCard(presence: model.generationPresence)
+            GenerationPresenceCard(presence: model.generationPresence, singTakes: model.singTakes)
                 .padding(.trailing, 24)
                 .padding(.bottom, 84)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -866,6 +875,8 @@ struct ContentView: View {
                 // Breath pad (m28-p7): the third chip in the roll header — the
                 // only thing a human can click to reach `applyEffortShape`.
                 onOpenBreathPad: { model.openBreathPad(clipID: clip.id) },
+                // Sing (p2-sing-f): the roll header's SING chip opens the Sing sheet.
+                onOpenSing: { model.openSingSheet(clipID: clip.id) },
                 // Controller strip (m16-b4) commits through the same store call the
                 // clip.setControllerLane wire verb uses; returns the updated clip so
                 // the strip reseeds its edit model.
@@ -960,6 +971,18 @@ struct ContentView: View {
                 // `debug.stepSequencer` drives the SAME path the chips do.
                 stepSequencer: model.stepSequencer,
                 isDrumKit: isDrumKitTrack(ofClip: clip.id),
+                // m39-w4-2: the step grid's rows and its default mode come
+                // from the drum lane map, so our `pads` drum machine opens in
+                // Steps with Kick … Cymbal rows.
+                drumLanes: drumLaneMap(ofClip: clip.id),
+                // m39-w4-10: "Start from a beat" on an EMPTY drum clip. The
+                // store writes the beat into THIS clip from the track's own
+                // instrument (one undo step) and the roll reseeds from it.
+                onStartFromBeat: { patternID in
+                    StepStartFromBeat.outcome {
+                        try store.fillDrumPattern(named: patternID, intoClip: clip.id)
+                    }
+                },
                 // m23-x: the roll publishes whether it holds a NOTE selection,
                 // which is what the arrange's arrow-key nudge refuses on (with
                 // focus). Same object carries the debug seam's staged selection
@@ -1297,6 +1320,8 @@ struct ContentView: View {
             // Breath pad (m28-p7, Pro clip menu, MIDI only): the same centered
             // panel the piano-roll BREATH chip opens.
             onOpenBreathPad: { clip in model.openBreathPad(clipID: clip.id) },
+            // Sing these notes… (p2-sing-f, MIDI only, BOTH densities): the Sing sheet.
+            onOpenSing: { clip in model.openSingSheet(clipID: clip.id) },
             onExtractGroove: { clip in
                 model.openQuantizePanel(clipID: clip.id, startExtract: true)
             },
@@ -1922,6 +1947,18 @@ struct ContentView: View {
         guard let track = store.tracks.first(where: { $0.clips.contains { $0.id == clipID } })
         else { return false }
         return SMFProjectExporter.isDrumKit(track)
+    }
+
+    /// The drum rows of the track owning this clip (m39-w4-2), or nil for a
+    /// melodic track. Asks `DrumLaneMap.lanes(for:)`, the ONE home for "which
+    /// rows does a drum instrument have". A non-nil map opens the clip in the
+    /// step grid with those rows. Deliberately NOT `isDrumKitTrack` above: that
+    /// is the General MIDI export question (channel 10), which a `pads` drum
+    /// machine answers "no" (design §3.3: two questions, two predicates).
+    private func drumLaneMap(ofClip clipID: UUID) -> [DrumLane]? {
+        guard let track = store.tracks.first(where: { $0.clips.contains { $0.id == clipID } })
+        else { return nil }
+        return DrumLaneMap.lanes(for: track.instrument)
     }
 
     /// The selected clip when it's a plain AUDIO clip, paired with its track id —

@@ -240,6 +240,15 @@ final class DJFilterEffect: EffectRendering, @unchecked Sendable {
         sectionBR.clear()
         wetGain = 0
         needsPrime = true
+        // m39-d CR-2: a reset drops the ramp and the coefficient block in flight
+        // (`needsPrime` re-seats the values); the cell geometry is the renderer's.
+        rampFramesLeft = 0
+        rampElapsed = 0
+        rampPositionDelta = 0
+        rampResonanceDelta = 0
+        rampDeadZoneDelta = 0
+        rampTrackDelta = 0
+        blockFramesLeft = 0
     }
 
     /// Adopts a newly published main-actor snapshot (borrowed — retire bin
@@ -280,6 +289,7 @@ final class DJFilterEffect: EffectRendering, @unchecked Sendable {
         slopeIs24 = EQParams.snapSlope(
             (p.slopeDbPerOct.isFinite ? p.slopeDbPerOct : 24)
                 .clamped(to: DJFilterParams.slopeRange)) == 24
+        rampPending = true  // m39-d CR-2: the next `process` starts a ramp
     }
 
     /// RENDER-THREAD automation store (M4 vii-c). Slot order =
@@ -347,6 +357,57 @@ final class DJFilterEffect: EffectRendering, @unchecked Sendable {
         resonanceNormalisation = Float((Self.butterworthQ / qEffective).squareRoot())
     }
 
+    // MARK: - m39-d CR-2: the control cell (docs/design/2026-10-07-effect-control-rate.md §5.4)
+    //
+    // Render-thread only. A ramp starts in the `process` call after a derive
+    // (`rampPending`). On the control grid (`cellFramesLeft` covers the whole
+    // call) it spans the REST OF THE CELL and carries across calls; off it,
+    // it spans the call, exactly as before the grid. A ramp in flight that
+    // would end INSIDE a call is re-spanned over that call, so no ramp ever
+    // ends mid-call and the per-sample loop is untouched. In a 512 bounce the
+    // cell is the call: the same delta expression, run the same number of
+    // times (G1 byte gate).
+    /// Frames from the next `process` call to the next control-cell line
+    /// (0 = off the grid). Set by `beginControlCell`, counted down here.
+    private var cellFramesLeft = 0
+    /// Frames left in the ramp in flight (0 = values sit at their targets).
+    private var rampFramesLeft = 0
+    /// A derive landed since the ramp in flight began.
+    private var rampPending = false
+    /// The ramp in flight. This kind interpolates PARAMETRICALLY — each block
+    /// reads `previous + delta · t`, `t` = frames since the ramp began / span —
+    /// so mid-ramp `previous*` stays the ramp's START and `rampElapsed` is the
+    /// position. (0 / 0 at rest.)
+    private var rampPositionDelta = 0.0
+    private var rampResonanceDelta = 0.0
+    private var rampDeadZoneDelta = 0.0
+    private var rampTrackDelta = 0.0
+    private var rampSpan = 1.0
+    private var rampElapsed = 0
+    /// The 32-frame coefficient block in flight and its wet-gain step: on the
+    /// grid a block never crosses a cell line and one a call ends inside
+    /// CARRIES into the next call (its SVF coefficients persist in the fields
+    /// above), so the stride is counted from the cell line.
+    private var blockFramesLeft = 0
+    private var blockWetStep: Float = 0
+
+    /// m39-d CR-1 (design §5.3): the automated values stored at this control
+    /// cell's entry still stand. Adopt FIRST, so a knob publish waiting in the
+    /// slot is seen now, as a store would see it (then `overlay.hold()`
+    /// answers false and the renderer re-stores). Render thread; no allocation.
+    func holdAutomatedParams() -> Bool {
+        adoptPendingParams()
+        return overlay.hold()
+    }
+
+    /// m39-d CR-2 (design §5.4): the ramp toward a new value spans the
+    /// rest of the cell (`frames`), carried across calls, and the 32-frame
+    /// coefficient stride counts from the cell line (design §5.4: "a 64-frame call
+    /// picks the stride up where the last one left it").
+    func beginControlCell(frames: Int) {
+        cellFramesLeft = max(0, frames)
+    }
+
     func process(buffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
         adoptPendingParams()
         // Automation lane(s) vanished: knob params restore, no republish.
@@ -376,13 +437,43 @@ final class DJFilterEffect: EffectRendering, @unchecked Sendable {
         guard channelCount > 0, minFrames > 0, let left = channelData[0] else { return }
         let right = channelCount > 1 ? channelData[1] : nil
 
-        let span = Double(minFrames)
-        let positionDelta = targetPosition - previousPosition
-        let resonanceDelta = targetResonance - previousResonance
-        let deadZoneDelta = targetDeadZone - previousDeadZone
-        let trackDelta = targetTrack - previousTrack
+        // m39-d CR-2: start (or re-span) the ramp — see the MARK above. A ramp
+        // re-started in flight first moves its start to where it is now. The
+        // delta expressions are the pre-grid ones, verbatim.
+        if rampPending || (rampFramesLeft > 0 && rampFramesLeft < minFrames) {
+            if rampFramesLeft > 0 {
+                let reached = Double(rampElapsed) / rampSpan
+                previousPosition = previousPosition + rampPositionDelta * reached
+                previousResonance = previousResonance + rampResonanceDelta * reached
+                previousDeadZone = previousDeadZone + rampDeadZoneDelta * reached
+                previousTrack = previousTrack + rampTrackDelta * reached
+            }
+            rampPending = false
+            let rampFrames = cellFramesLeft >= minFrames ? cellFramesLeft : minFrames
+            rampSpan = Double(rampFrames)
+            rampElapsed = 0
+            rampPositionDelta = targetPosition - previousPosition
+            rampResonanceDelta = targetResonance - previousResonance
+            rampDeadZoneDelta = targetDeadZone - previousDeadZone
+            rampTrackDelta = targetTrack - previousTrack
+            rampFramesLeft = rampFrames
+        }
+        // At rest the deltas are 0, so `t` multiplies nothing — the pre-grid
+        // per-call `target − previous` was 0 there too.
+        let span = rampFramesLeft > 0 ? rampSpan : Double(minFrames)
+        let elapsed = rampFramesLeft > 0 ? rampElapsed : 0
+        let positionDelta = rampPositionDelta
+        let resonanceDelta = rampResonanceDelta
+        let deadZoneDelta = rampDeadZoneDelta
+        let trackDelta = rampTrackDelta
         let stereo = right != nil
         let cascade = slopeIs24
+        // m39-d CR-2: on the grid a block is capped at the CELL's end (and may
+        // carry into the next call); off it, at the CALL's end, as before. In a
+        // 512 bounce the two are the same frame.
+        let onGrid = cellFramesLeft >= minFrames
+        var blockLeft = blockFramesLeft
+        var wStep = blockWetStep
 
         // ⚠️ `while`, not `for i in 0..<n` — measured at
         // `EffectChainProcessor.swift:402-412`, a `Range` iteration raises
@@ -390,23 +481,29 @@ final class DJFilterEffect: EffectRendering, @unchecked Sendable {
         // allocation gates can assert an absolute zero at all.
         var frame = 0
         while frame < minFrames {
-            var blockEnd = frame + Self.coefficientStride
+            if blockLeft == 0 {
+                let regionLeft = onGrid ? cellFramesLeft - frame : minFrames - frame
+                let blockLength = regionLeft < Self.coefficientStride
+                    ? regionLeft : Self.coefficientStride
+
+                // One interpolation point per coefficient block. The knob is what
+                // is interpolated; cutoff, mode and wet gain are DERIVED from it,
+                // which is what makes a centre crossing coherent.
+                let t = Double(elapsed + frame) / span
+                let position = previousPosition + positionDelta * t
+                let resonance = previousResonance + resonanceDelta * t
+                let deadZone = previousDeadZone + deadZoneDelta * t
+                let track = previousTrack + trackDelta * t
+                deriveCoefficients(position: position, resonance: resonance, track: track)
+
+                let wTarget = Float(DJFilterParams.wetGain(
+                    atPosition: position, deadZoneWidth: deadZone))
+                wStep = (wTarget - wetGain) / Float(blockLength)
+                blockLeft = blockLength
+            }
+            var blockEnd = frame + blockLeft
             if blockEnd > minFrames { blockEnd = minFrames }
-
-            // One interpolation point per coefficient block. The knob is what
-            // is interpolated; cutoff, mode and wet gain are DERIVED from it,
-            // which is what makes a centre crossing coherent.
-            let t = Double(frame) / span
-            let position = previousPosition + positionDelta * t
-            let resonance = previousResonance + resonanceDelta * t
-            let deadZone = previousDeadZone + deadZoneDelta * t
-            let track = previousTrack + trackDelta * t
-            deriveCoefficients(position: position, resonance: resonance, track: track)
-
-            let wTarget = Float(DJFilterParams.wetGain(
-                atPosition: position, deadZoneWidth: deadZone))
             var w = wetGain
-            let wStep = (wTarget - w) / Float(blockEnd - frame)
             let highPass = highPassMode
             let norm = resonanceNormalisation
 
@@ -446,8 +543,27 @@ final class DJFilterEffect: EffectRendering, @unchecked Sendable {
                 i += 1
             }
             wetGain = w
+            blockLeft -= blockEnd - frame
             frame = blockEnd
         }
+        blockFramesLeft = blockLeft
+        blockWetStep = wStep
+
+        // m39-d CR-2: a ramp still in flight keeps its start and advances its
+        // position; at the ramp's end the values are SNAPPED to their targets,
+        // exactly as every call end did before the grid (and still does off it).
+        cellFramesLeft = cellFramesLeft > minFrames ? cellFramesLeft - minFrames : 0
+        if rampFramesLeft > minFrames {
+            rampFramesLeft -= minFrames
+            rampElapsed += minFrames
+            return
+        }
+        rampFramesLeft = 0
+        rampElapsed = 0
+        rampPositionDelta = 0
+        rampResonanceDelta = 0
+        rampDeadZoneDelta = 0
+        rampTrackDelta = 0
 
         previousPosition = targetPosition
         previousResonance = targetResonance

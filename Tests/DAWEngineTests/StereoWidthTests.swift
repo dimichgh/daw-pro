@@ -1288,31 +1288,12 @@ struct StereoWidthTests {
     /// libmalloc's hook behind `MallocStackLogging`; it fires on EVERY malloc
     /// AND free, so a transient allocation is counted twice rather than
     /// cancelling out. Unavailable is a FAILURE, never a skip.
-    private typealias MallocLoggerFn =
-        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
-
-    private nonisolated(unsafe) static let eventCount =
-        UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private nonisolated(unsafe) static let watchedThread =
-        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-
-    private static let eventHook: MallocLoggerFn = { _, _, _, _, _, _ in
-        var tid: UInt64 = 0
-        pthread_threadid_np(nil, &tid)  // no allocation, safe under malloc
-        if tid == StereoWidthTests.watchedThread.pointee {
-            StereoWidthTests.eventCount.pointee &+= 1
-        }
-    }
-
-    private static func mallocLoggerSlot() -> UnsafeMutablePointer<MallocLoggerFn?>? {
-        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
-                              "malloc_logger") else { return nil }
-        return raw.assumingMemoryBound(to: MallocLoggerFn?.self)
-    }
+    // The hook, the counter cells and the process-wide window lock live in
+    // `Support/MallocProbe.swift` (m39-test-mallocprobe): one measurement at a time.
 
     @Test("L11: 4000 quanta of process() raise ZERO malloc/free events — an ABSOLUTE zero, not a delta")
     func processAllocatesNothing() throws {
-        let slot = try #require(Self.mallocLoggerSlot(),
+        let slot = try #require(MallocProbe.slot(),
                                 "malloc_logger is unavailable — this gate scored NOTHING")
         let chunk = 512
         let effect = StereoWidthEffect(
@@ -1342,34 +1323,27 @@ struct StereoWidthTests {
         // real and is not a render-path allocation.
         effect.process(buffers: list, frameCount: chunk)
 
-        pthread_threadid_np(nil, &Self.watchedThread.pointee)
-        Self.eventCount.pointee = 0
-        let previous = slot.pointee
-        slot.pointee = Self.eventHook
-        var quantum = 0
-        while quantum < 4_000 {
-            effect.process(buffers: list, frameCount: chunk)
-            // The automation store is on the same render thread and must be
-            // allocation-free too.
-            effect.storeAutomatedParam(slot: 0, value: 1.2 + Double(quantum % 7) * 0.05)
-            quantum += 1
+        let events = MallocProbe.events(slot: slot) {
+            var quantum = 0
+            while quantum < 4_000 {
+                effect.process(buffers: list, frameCount: chunk)
+                // The automation store is on the same render thread and must be
+                // allocation-free too.
+                effect.storeAutomatedParam(slot: 0, value: 1.2 + Double(quantum % 7) * 0.05)
+                quantum += 1
+            }
         }
-        slot.pointee = previous
-        let events = Self.eventCount.pointee
         print("[measured] m23-dj L11 — \(events) malloc/free events across 4000 quanta")
         #expect(events == 0, "the render path raised \(events) malloc/free events")
 
         // POSITIVE CONTROL: the probe must be capable of counting. If this
         // reads 0 too, the hook never fired and the assertion above is
         // meaningless.
-        pthread_threadid_np(nil, &Self.watchedThread.pointee)
-        Self.eventCount.pointee = 0
-        slot.pointee = Self.eventHook
         var sink: [Int] = []
-        var index = 0
-        while index < 200 { sink.append(index); index += 1 }
-        slot.pointee = previous
-        let controlEvents = Self.eventCount.pointee
+        let controlEvents = MallocProbe.events(slot: slot) {
+            var index = 0
+            while index < 200 { sink.append(index); index += 1 }
+        }
         print("[measured] m23-dj L11 control — \(controlEvents) events from a growing array")
         #expect(controlEvents > 0, """
             the malloc probe counted NOTHING while an array grew 200 times — the hook never \

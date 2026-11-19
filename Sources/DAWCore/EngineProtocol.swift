@@ -684,6 +684,78 @@ public enum ClipSpanAuditionDelivery: Sendable, Equatable {
     case dropped
 }
 
+// MARK: - Input-only capture (p2-sing-e, "Add your voice")
+
+/// How one input-only capture ended (p2-sing-e, the "Add your voice"
+/// recorder). Delivered EXACTLY ONCE, on the main actor, for every
+/// `startInputOnlyCapture` call that RETURNED; a call that threw never
+/// reports. Only `.recorded` leaves a file behind.
+public enum InputOnlyCaptureOutcome: Sendable, Equatable {
+    /// The recording is finished and on disk.
+    case recorded(InputOnlyCaptureRecording)
+    /// `cancelInputOnlyCapture()` (or an engine shutdown) ended it. The file
+    /// is deleted.
+    case cancelled
+    /// Nothing usable was recorded. `reason` is one sentence written for a
+    /// beginner. The file is deleted.
+    case failed(reason: String)
+}
+
+/// Why a finished input-only capture stopped.
+public enum InputOnlyCaptureEnd: String, Sendable, Equatable, Codable {
+    /// `stopInputOnlyCapture()` ended it.
+    case stopped
+    /// It reached `maxSeconds` of audio and stopped by itself.
+    case reachedMaxSeconds
+}
+
+/// A finished input-only capture: a 32-bit float WAV at the input device's
+/// own rate, one or two channels (the take writer's format).
+public struct InputOnlyCaptureRecording: Sendable, Equatable {
+    public var fileURL: URL
+    public var info: AudioFileInfo
+    /// Exact frames in the file. Never more than `maxSeconds` × rate, rounded.
+    public var frameCount: Int64
+    public var endedBy: InputOnlyCaptureEnd
+
+    public init(fileURL: URL, info: AudioFileInfo, frameCount: Int64,
+                endedBy: InputOnlyCaptureEnd) {
+        self.fileURL = fileURL
+        self.info = info
+        self.frameCount = frameCount
+        self.endedBy = endedBy
+    }
+}
+
+/// Why `startInputOnlyCapture` refused. `message` is the sentence to show a
+/// beginner; `kind` lets a caller (the wire, the recorder sheet) branch
+/// without parsing it.
+public struct InputOnlyCaptureError: Error, LocalizedError, Sendable, Equatable {
+    public enum Kind: String, Sendable, Equatable, Codable {
+        /// This engine cannot record on its own (fakes, headless engines).
+        case unsupported
+        /// A take, or another input-only capture, is already running.
+        case busy
+        /// The request itself is unusable: a length out of range, a URL that
+        /// is not a file, or a file that already exists there.
+        case invalidRequest
+        /// The file could not be created where the caller asked.
+        case fileUnavailable
+        /// No input device, or it would not start.
+        case inputUnavailable
+    }
+
+    public var kind: Kind
+    public var message: String
+
+    public init(kind: Kind, message: String) {
+        self.kind = kind
+        self.message = message
+    }
+
+    public var errorDescription: String? { message }
+}
+
 /// The contract between the domain layer and the real-time audio engine.
 /// DAWCore (and everything above it) never sees AVFoundation types.
 @MainActor
@@ -762,6 +834,14 @@ public protocol AudioEngineControlling: AnyObject {
     func resolveSliceBoundaries(inFileAt url: URL, boundarySeconds: [Double],
                                 snapWindowSeconds: Double) async throws -> SliceBoundaryGeometry
 
+    /// m39-w4-6: measure each chopped slice's timbre, for kit-aware slicing
+    /// (`clip.sliceToSampler` `mapping: "kit"`). `frameRanges` are in the
+    /// file's OWN frames (a `SliceReport`'s `startFrame`/`endFrame`); the
+    /// result is index-aligned with them. The file is read once. Runs in
+    /// async/detached context only — never touches the render thread.
+    func analyzeSliceTimbres(inFileAt url: URL,
+                             frameRanges: [SliceFrameSpan]) async throws -> [SliceTimbre]
+
     /// Offline audio-content analysis of the file at `url` over the source
     /// window `[windowStartSeconds, +windowDurationSeconds)` (m21-e,
     /// design-clip-analyze-audio): key / tempo / spectral-balance / level
@@ -789,6 +869,15 @@ public protocol AudioEngineControlling: AnyObject {
     /// cache, no project slot, nothing persisted, nothing copied.
     func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
                      durationSeconds: Double?) async throws -> FileProfile
+
+    /// m27-k: the same profile plus, when `measuringLoudness` is true, ONE
+    /// BS.1770 program reading for the profiled range in
+    /// `FileProfile.loudness`: `Loudness.Stream`, the meter
+    /// `analyzeReferenceFile` feeds, through a second door (never a second
+    /// copy of its math). Still read-only: nothing copied, no slot. With
+    /// `false` it must return exactly what the 4-argument `profileFile` does.
+    func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                     durationSeconds: Double?, measuringLoudness: Bool) async throws -> FileProfile
 
     /// Offline per-frame pitch detection over the source window
     /// `[fromSeconds, fromSeconds + durationSeconds)` of the file at `url`
@@ -903,6 +992,26 @@ public protocol AudioEngineControlling: AnyObject {
     /// the modulation snapshot is rebuilt and published. Pushed on every master
     /// modulation mutation AND every undo/redo/project-boundary restore.
     func masterModulationChanged(sources: [ModulationSource], routes: [ModulationRoute])
+
+    /// The song's pan rule (m39-panlaw-new) — see `PanLaw`. Pushed when the
+    /// store attaches its engine; a song's rule never changes inside the song,
+    /// so undo never pushes it. Live engines cache it for every LIVE graph
+    /// they build and run one parameter pass, which moves every knob to the
+    /// mixer node or to the render stage. The cache is the live graph's ONLY:
+    /// an offline render takes the rule as an input (the pan-carrying
+    /// `renderOffline` / `renderMixdown` below, W9-PLRT R1). An export that
+    /// read this cache after an await rendered a saved song on a new song's
+    /// rule when New Project landed mid-export.
+    func panLawChanged(_ law: PanLaw)
+
+    /// The rule at a PROJECT BOUNDARY (new / open / recover; W9-PLRT R5):
+    /// cache it for the live graph WITHOUT a parameter pass. The caller pushes
+    /// the incoming tracks next (`tracksDidChange`), and that pass moves the
+    /// knobs; a pass here would only re-pan the outgoing song's strips under
+    /// the incoming rule for the moment before they are replaced. The
+    /// protocol default forwards to `panLawChanged`, so an engine that
+    /// implements only that still hears every boundary.
+    func setPanLaw(_ law: PanLaw)
 
     /// Bounce the given project state to a WAV file, offline (no hardware).
     /// Async so hosted Audio Unit instruments can be instantiated/prepared for
@@ -1027,6 +1136,76 @@ public protocol AudioEngineControlling: AnyObject {
                        fromBeat: Double, durationSeconds: Double,
                        to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo
 
+    /// `renderOffline` carrying the project's METER MAP next to its tempo map
+    /// (m39-w4-4a). The meter is where a tempo-synced step pattern restarts
+    /// (the musical clock's pattern origin). Without this parameter every
+    /// bounce, mixdown and stem compiled origin 0 everywhere, so after the
+    /// first time-signature change a synced pattern sounded different live and
+    /// in the export (W8-W44R N1).
+    ///
+    /// Every SESSION render passes `transport.meterMap`. The meter reaches
+    /// nothing but a synced source's clock (no click renders on this path, and
+    /// a strip without a synced source compiles no clock), so every other
+    /// project renders exactly as before. The render class rules are the
+    /// m39-e-2 requirement's, verbatim, with no default anywhere. The protocol
+    /// extension's default REFUSES a meter it would drop when dropping it can
+    /// change the render (`OfflineMeterSeam`).
+    func renderOffline(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                       masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       masterModulationSources: [ModulationSource],
+                       masterModulationRoutes: [ModulationRoute],
+                       fromBeat: Double, durationSeconds: Double,
+                       forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio
+
+    /// The format-aware, master-modulation mixdown carrying the meter map
+    /// (m39-w4-4a). `render.mixdown` needs its own seam because here the
+    /// ENGINE renders and writes (the m23-m2 lesson).
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                       masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       masterModulationSources: [ModulationSource],
+                       masterModulationRoutes: [ModulationRoute],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo
+
+    /// `renderOffline` carrying the song's PAN RULE next to its meter map
+    /// (m39-panlaw-new, W9-PLRT R1). The rule is an INPUT of the render, like
+    /// every other song-level value (tracks, tempo, meter, master): the store
+    /// captures it ONCE per operation and hands the same value to every pass,
+    /// so a New Project or Open that lands while a multi-pass export waits
+    /// between passes cannot move the later passes onto another rule.
+    /// `panLawChanged` / `setPanLaw` feed the LIVE graph only.
+    ///
+    /// Every SESSION render passes the store's rule. The render class rules
+    /// are the m39-e-2 requirement's, verbatim, with no default anywhere. The
+    /// protocol extension's default REFUSES a rule it would drop when
+    /// dropping it can change the render (`OfflinePanLawSeam`).
+    func renderOffline(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                       panLaw: PanLaw,
+                       masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       masterModulationSources: [ModulationSource],
+                       masterModulationRoutes: [ModulationRoute],
+                       fromBeat: Double, durationSeconds: Double,
+                       forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio
+
+    /// The format-aware, master-modulation, meter-carrying mixdown carrying
+    /// the pan rule (W9-PLRT R1): `render.mixdown`'s seam, where the ENGINE
+    /// renders and writes (the m23-m2 lesson).
+    func renderMixdown(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                       panLaw: PanLaw,
+                       masterVolume: Double,
+                       masterEffects: [EffectDescriptor],
+                       masterAutomation: [AutomationLane],
+                       masterModulationSources: [ModulationSource],
+                       masterModulationRoutes: [ModulationRoute],
+                       fromBeat: Double, durationSeconds: Double,
+                       to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo
+
     /// Total fixed algorithmic latency of the track's insert-effect chain, in
     /// samples at the engine rate — the sum of the chain's non-bypassed
     /// effects (e.g. the limiter's 5 ms lookahead = 240 @ 48 kHz); M4 (viii)
@@ -1135,6 +1314,13 @@ public protocol AudioEngineControlling: AnyObject {
     /// OLDEST frames rather than blocking — never pin an exact dB value
     /// across differing poll cadences, pin the band INDEX instead.
     func insertAnalysis(trackID: UUID?, effectID: UUID) -> MasterAnalysisSnapshot?
+
+    /// m27-j (W8-M27J): how much of one armed insert's sound has reached its
+    /// analyzer since the arm — frames analyzed and frames dropped (a read
+    /// came too late). `fx.spectrum`'s `audition` hold reports these so a
+    /// caller can see the measurement had no gap. nil = not armed (or the
+    /// engine cannot tap inserts). Main actor; consumer-side counters only.
+    func insertAnalysisCoverage(trackID: UUID?, effectID: UUID) -> InsertAnalysisCoverage?
 
     /// The engine's latest latency-compensation report (M4 viii-c, spec §6):
     /// per-strip all-effects chain latency and applied ring targets plus the
@@ -1341,6 +1527,47 @@ public protocol AudioEngineControlling: AnyObject {
     /// refusal is the precedent).
     func startTakeInPlayback(_ transport: TransportState, audioURL: URL?, captureMIDI: Bool,
                              completion: @escaping @MainActor (Result<TakeResult, Error>) -> Void) throws
+
+    /// INPUT-ONLY CAPTURE (p2-sing-e, "Add your voice"): record the input to
+    /// `url` WITHOUT the transport. No playback starts, no track is armed, no
+    /// clip is created, and the playback engine is neither started nor
+    /// changed. It records from the input a take would use (the selected
+    /// input, else the system default) and never changes any device.
+    ///
+    /// Capture ends in one of three ways: by itself after `maxSeconds` of
+    /// audio (frame-exact: the file never holds more than `maxSeconds` × rate,
+    /// rounded; 0 < maxSeconds ≤ 600); on `stopInputOnlyCapture()`, which keeps
+    /// the file; or on `cancelInputOnlyCapture()`, which deletes it. Engine
+    /// `shutdown()` also cancels a running capture (`AudioEngine.swift`).
+    ///
+    /// Throws `InputOnlyCaptureError` synchronously, with nothing started, no
+    /// file left behind and `completion` NEVER called, when a take is rolling,
+    /// another input-only capture is running, the request is unusable, a file
+    /// already exists at `url` (it is never overwritten), or the input will
+    /// not start. Otherwise `completion` fires EXACTLY ONCE, on the main actor.
+    ///
+    /// The caller owns microphone permission: ask through
+    /// `requestRecordPermission` first. This method does not.
+    func startInputOnlyCapture(to url: URL, maxSeconds: Double,
+                               completion: @escaping @MainActor (InputOnlyCaptureOutcome) -> Void) throws
+
+    /// Ends the running input-only capture and keeps the file (`.recorded`,
+    /// or `.failed` when no audio had arrived). Returns false, and does
+    /// nothing, when none is running.
+    @discardableResult
+    func stopInputOnlyCapture() -> Bool
+
+    /// Ends the running input-only capture and deletes the file
+    /// (`.cancelled`). Returns false, and does nothing, when none is running.
+    @discardableResult
+    func cancelInputOnlyCapture() -> Bool
+
+    /// The input level while an input-only capture runs: the highest sample
+    /// magnitude in the latest completed window of at least 50 ms of recorded
+    /// audio, in dBFS (floored at −120, never NaN). nil when no input-only
+    /// capture is running. Read it at UI rate (~30 Hz). Peak hold and decay
+    /// belong to the meter view (docs/DESIGN-LANGUAGE.md), not to the engine.
+    func inputOnlyCapturePeakDbfs() -> Double?
 
     /// MIDI input sources as CoreMIDI enumerates them (hot-plug refreshes the
     /// list). First call may lazily create the engine's MIDI client.
@@ -1840,6 +2067,36 @@ extension AudioEngineControlling {
         )
     }
 
+    /// Input-only capture is optional capability (p2-sing-e, the
+    /// `startTakeInPlayback` precedent): fakes and headless engines have no
+    /// input to record, so the default THROWS `.unsupported` rather than
+    /// returning quietly. A silent no-op would leave the recorder showing
+    /// "Recording…" over nothing, waiting for a completion that never comes.
+    ///
+    /// ⚠️ THE VACUITY RISK, stated here as at its siblings: an `AudioEngine`
+    /// that forgot to override this would refuse forever, and every model
+    /// test would still pass because the sheet is written to show a refusal.
+    /// `Tests/DAWEngineTests/InputOnlyCaptureTests.swift` calls it THROUGH THE
+    /// PROTOCOL on the real engine, with a synthetic input source, and asserts
+    /// the real implementation ran.
+    public func startInputOnlyCapture(to url: URL, maxSeconds: Double,
+                                      completion: @escaping @MainActor (InputOnlyCaptureOutcome) -> Void) throws {
+        throw InputOnlyCaptureError(
+            kind: .unsupported,
+            message: "This audio engine can't record from the microphone.")
+    }
+
+    /// Nothing is ever running on an engine without input-only capture.
+    @discardableResult
+    public func stopInputOnlyCapture() -> Bool { false }
+
+    /// Nothing is ever running on an engine without input-only capture.
+    @discardableResult
+    public func cancelInputOnlyCapture() -> Bool { false }
+
+    /// No capture, no level: nil, never a fabricated floor reading.
+    public func inputOnlyCapturePeakDbfs() -> Double? { nil }
+
     /// The audition all-stop is optional capability (m23-d): an engine with no
     /// audition support holds no voices, so the default is a no-op.
     public func stopAllAudition() {}
@@ -1953,6 +2210,17 @@ extension AudioEngineControlling {
     public func masterModulationChanged(sources: [ModulationSource],
                                         routes: [ModulationRoute]) {}
 
+    /// The pan rule is optional capability (m39-panlaw-new, the
+    /// `masterModulationChanged` precedent): fakes and headless engines pan
+    /// nothing, so the default is a no-op and existing conformers compile
+    /// unchanged.
+    public func panLawChanged(_ law: PanLaw) {}
+
+    /// W9-PLRT R5: an engine that implements only the full push still hears
+    /// every project boundary (its extra parameter pass is the pre-R5
+    /// behaviour, harmless).
+    public func setPanLaw(_ law: PanLaw) { panLawChanged(law) }
+
     /// Engine notices are optional capability (m15-e): engines without
     /// schedule-time degradation reporting (fakes, headless) discard the
     /// installed handler, so existing conformers compile unchanged.
@@ -1990,6 +2258,17 @@ extension AudioEngineControlling {
         throw ProjectError.engineUnavailable
     }
 
+    /// Slice-timbre analysis is optional capability (m39-w4-6). The default
+    /// measures nothing and returns `[]`, like `detectTransients`. That cannot
+    /// pass for a measurement: the store REFUSES a kit sort whose timbre count
+    /// does not match its slice count (`KitSliceLayout.apply`), so an engine
+    /// without the surface gets a sentence, never a kit sorted by numbers
+    /// nobody measured. Fakes that need the surface override it.
+    public func analyzeSliceTimbres(inFileAt url: URL,
+                                    frameRanges: [SliceFrameSpan]) async throws -> [SliceTimbre] {
+        []
+    }
+
     /// Audio-content analysis is optional capability — but unlike
     /// `detectTransients` (an empty marker list is honest data), a fabricated
     /// all-floors analysis would be a lie, so the default THROWS
@@ -2016,6 +2295,18 @@ extension AudioEngineControlling {
     public func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
                             durationSeconds: Double?) async throws -> FileProfile {
         throw ProjectError.engineUnavailable
+    }
+
+    /// m27-k: an engine without the loudness capability forwards a NO-flag
+    /// request to its 4-argument `profileFile` (so every existing fake keeps
+    /// working unchanged) and REFUSES a flagged one with `engineUnavailable`:
+    /// a profile silently missing the reading it was asked for would read as
+    /// "no loudness", the silent-wrong-answer shape.
+    public func profileFile(at url: URL, windowSeconds: Double, fromSeconds: Double,
+                            durationSeconds: Double?, measuringLoudness: Bool) async throws -> FileProfile {
+        guard !measuringLoudness else { throw ProjectError.engineUnavailable }
+        return try await profileFile(at: url, windowSeconds: windowSeconds,
+                                     fromSeconds: fromSeconds, durationSeconds: durationSeconds)
     }
 
     /// Pitch detection is optional capability (m23-ap-3) — and like
@@ -2085,6 +2376,9 @@ extension AudioEngineControlling {
                                        armed: Bool) -> Bool { false }
     public func insertAnalysis(trackID: UUID?,
                                effectID: UUID) -> MasterAnalysisSnapshot? { nil }
+    /// m27-j: no tap, no counters — the reply then omits its coverage fields.
+    public func insertAnalysisCoverage(trackID: UUID?,
+                                       effectID: UUID) -> InsertAnalysisCoverage? { nil }
 
     public func availableAudioUnits() -> [AudioUnitComponentInfo] { [] }
     public func audioUnitStatus(forTrack id: UUID) -> AudioUnitTrackStatus? { nil }
@@ -2281,5 +2575,182 @@ extension AudioEngineControlling {
             masterEffects: masterEffects, masterAutomation: masterAutomation,
             fromBeat: fromBeat, durationSeconds: durationSeconds,
             to: url, format: format)
+    }
+
+    /// Meter-carrying rendering is optional capability (m39-w4-4a), and this
+    /// default REFUSES rather than drops: the m39-e-2 / m23-m2 precedent, for
+    /// the same reason. The defect it closes IS the meter silently missing
+    /// from a render (W8-W44R N1), and a discarding default would recreate it
+    /// in every engine that implements only the requirements before it. When
+    /// dropping the meter cannot change the render
+    /// (`OfflineMeterSeam.meterChangesRender` is false: no meter change, or no
+    /// enabled route reads a tempo-synced step source) it forwards unchanged,
+    /// so every existing conformer, and every project without a synced
+    /// source, renders exactly as before.
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                              masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
+        guard !OfflineMeterSeam.meterChangesRender(
+            meterMap, tracks: tracks, masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: forcedCompensationTargets)
+    }
+
+    /// The meter-carrying mixdown twin (m39-w4-4a): same refusal, and it
+    /// forwards to the master-modulation, format-aware mixdown, so an engine
+    /// that plumbs those but not the meter still writes what it was asked for.
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                              masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo {
+        guard !OfflineMeterSeam.meterChangesRender(
+            meterMap, tracks: tracks, masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderMixdown(
+            tracks: tracks, tempoMap: tempoMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            to: url, format: format)
+    }
+
+    /// Pan-carrying rendering is optional capability (W9-PLRT R1), and this
+    /// default REFUSES rather than drops: the m39-w4-4a / m39-e-2 / m23-m2
+    /// precedent, for the same reason. The defect R1 closes IS a render on a
+    /// rule the song does not have, and a discarding default would recreate
+    /// it in every engine that implements only the requirements before it.
+    /// When dropping the rule cannot change the render
+    /// (`OfflinePanLawSeam.lawChangesRender` is false: the original rule, or
+    /// no knob off centre) it forwards unchanged, so every existing conformer,
+    /// and every saved song, renders exactly as before.
+    public func renderOffline(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                              panLaw: PanLaw,
+                              masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              forcedCompensationTargets: [UUID: Int]?) async throws -> RenderedAudio {
+        guard !OfflinePanLawSeam.lawChangesRender(panLaw, tracks: tracks) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderOffline(
+            tracks: tracks, tempoMap: tempoMap, meterMap: meterMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            forcedCompensationTargets: forcedCompensationTargets)
+    }
+
+    /// The pan-carrying mixdown twin (W9-PLRT R1): same refusal, and it
+    /// forwards to the meter-carrying mixdown, so an engine that plumbs the
+    /// meter, the format and master modulation but not the rule still writes
+    /// what it was asked for.
+    public func renderMixdown(tracks: [Track], tempoMap: TempoMap, meterMap: MeterMap,
+                              panLaw: PanLaw,
+                              masterVolume: Double,
+                              masterEffects: [EffectDescriptor],
+                              masterAutomation: [AutomationLane],
+                              masterModulationSources: [ModulationSource],
+                              masterModulationRoutes: [ModulationRoute],
+                              fromBeat: Double, durationSeconds: Double,
+                              to url: URL, format: DeliveryFormat) async throws -> AudioFileInfo {
+        guard !OfflinePanLawSeam.lawChangesRender(panLaw, tracks: tracks) else {
+            throw ProjectError.engineUnavailable
+        }
+        return try await renderMixdown(
+            tracks: tracks, tempoMap: tempoMap, meterMap: meterMap, masterVolume: masterVolume,
+            masterEffects: masterEffects, masterAutomation: masterAutomation,
+            masterModulationSources: masterModulationSources,
+            masterModulationRoutes: masterModulationRoutes,
+            fromBeat: fromBeat, durationSeconds: durationSeconds,
+            to: url, format: format)
+    }
+}
+
+/// W9-PLRT R1: the ONE home for "can dropping the pan rule change this
+/// render?", asked by the protocol's refusing defaults above.
+///
+/// The rule reaches a render through exactly one door: the pan KNOB
+/// (`Track.pan`). A centred knob is unity under both rules (the balance node
+/// at 0; the automation rule's √2·cos(π/4) = 1, which the knob stage
+/// short-circuits), and a pan lane or a pan route pans the same way under
+/// both. So the original rule (`.balance`, what every render without a rule
+/// has always rendered) is safe to forward, and so is a song with no knob off
+/// centre.
+public enum OfflinePanLawSeam {
+    /// Whether rendering `tracks` on `law` can differ from rendering them on
+    /// the original rule: a rule that is not the original AND a knob that is
+    /// not centred (a NaN knob counts as not centred: refuse rather than guess).
+    public static func lawChangesRender(_ law: PanLaw, tracks: [Track]) -> Bool {
+        law != .balance && tracks.contains { $0.pan != 0 }
+    }
+}
+
+/// m39-w4-4a: the ONE home for "can dropping the meter map change this
+/// render?". The protocol's refusing defaults above ask it, and so do
+/// `AudioEngine`'s meter-less overloads, so the two can never disagree.
+///
+/// The meter reaches an offline render through exactly one door: the musical
+/// clock of a TEMPO-SYNCED step source
+/// (`StepSequencerSourceParams.syncedDivision`), whose pattern restarts at
+/// every time-signature change. A source that no ENABLED route reads is inert
+/// (the m39-e law: an unrouted source or a disabled route changes nothing),
+/// and a single-change map puts the pattern origin at beat 0 everywhere,
+/// exactly like the constant default.
+public enum OfflineMeterSeam {
+    /// Whether an ENABLED route on any track, or on the master strip, reads a
+    /// tempo-synced step source: whether the render has a musical clock that a
+    /// meter could move.
+    public static func readsSyncedSource(tracks: [Track],
+                                         masterModulationSources: [ModulationSource],
+                                         masterModulationRoutes: [ModulationRoute]) -> Bool {
+        tracks.contains { stripReadsSyncedSource(sources: $0.modulationSources,
+                                                 routes: $0.modulationRoutes) }
+            || stripReadsSyncedSource(sources: masterModulationSources,
+                                      routes: masterModulationRoutes)
+    }
+
+    /// Whether rendering with `meterMap` can differ from rendering with the
+    /// constant default: a real meter change AND a synced source that is read.
+    public static func meterChangesRender(_ meterMap: MeterMap, tracks: [Track],
+                                          masterModulationSources: [ModulationSource],
+                                          masterModulationRoutes: [ModulationRoute]) -> Bool {
+        meterMap.changes.count > 1
+            && readsSyncedSource(tracks: tracks,
+                                 masterModulationSources: masterModulationSources,
+                                 masterModulationRoutes: masterModulationRoutes)
+    }
+
+    private static func stripReadsSyncedSource(sources: [ModulationSource],
+                                               routes: [ModulationRoute]) -> Bool {
+        routes.contains { route in
+            guard route.enabled,
+                  let source = sources.first(where: { $0.id == route.sourceID }),
+                  case .stepSequencer(let params) = source.params else { return false }
+            return params.syncedDivision != nil
+        }
     }
 }

@@ -142,4 +142,57 @@ struct SidechainEquivalenceTests {
         #expect(integrated > -70 && integrated < 0)
         #expect(measured.durationSeconds > 0)
     }
+
+    // MARK: - m27-m: a windowed measure over a HELD note (the level the user meets)
+
+    /// One poly-synth note (A4) on an instrument track; the clip is 16 beats long
+    /// either way so a window at beat 8 is always inside the project.
+    private func heldNoteStore(noteLengthBeats: Double) -> (store: ProjectStore, engine: AudioEngine) {
+        let clip = Clip(name: "held", startBeat: 0, lengthBeats: 16, notes: [
+            MIDINote(pitch: 69, velocity: 100, startBeat: 0, lengthBeats: noteLengthBeats)])
+        // nil instrument descriptor -> the built-in poly synth (the default voice).
+        let track = Track(name: "Held", kind: .instrument, clips: [clip])
+        let engine = AudioEngine()
+        let store = ProjectStore()
+        store.engine = engine   // weak in the store: the caller must hold the engine
+        store.tracks = [track]
+        return (store, engine)
+    }
+
+    @Test("m27-m: a window opening mid-note reads the held note (re-attack), an empty stretch reads silent")
+    func windowedMeasureOverHeldNote() async throws {
+        // 120 BPM: beat 8 = 4.0 s. The note spans beats 0-16 (0-8 s), so a 2 s window
+        // at beat 8 opens 4 s INTO the note and closes 2 s before it ends.
+        let (held, heldEngine) = heldNoteStore(noteLengthBeats: 16)
+        _ = heldEngine
+        let mid = try await held.measureLoudness(fromBeat: 8, durationSeconds: 2.0)
+        let fromZero = try await held.measureLoudness(fromBeat: 0, durationSeconds: 2.0)
+        // CONTROL: the note ends at beat 4 (2 s); the 2 s window at beat 8 (4-6 s) is
+        // past its release, inside the same 16-beat clip.
+        let (short, shortEngine) = heldNoteStore(noteLengthBeats: 4)
+        _ = shortEngine
+        let empty = try await short.measureLoudness(fromBeat: 8, durationSeconds: 2.0)
+
+        print("[measured] m27-m held note: mid-note (beat 8) integrated \(String(describing: mid.measurement.integratedLufs)) "
+              + "LUFS / peak \(String(describing: mid.measurement.truePeakDbtp)) dBTP; "
+              + "from beat 0 \(String(describing: fromZero.measurement.integratedLufs)) LUFS; "
+              + "empty stretch \(String(describing: empty.measurement.integratedLufs)) LUFS / "
+              + "peak \(String(describing: empty.measurement.truePeakDbtp)) dBTP")
+
+        // THRESHOLD -50 LUFS integrated / -50 dBTP peak: the absolute gate is -70 LUFS
+        // (nil below it) and a poly-synth A4 at velocity 100 renders far louder; -50
+        // keeps >20 LU of margin yet is nowhere near silence. A dropped note reads nil.
+        let midLufs = try #require(mid.measurement.integratedLufs,
+            "a window opening mid-note must re-attack the held note, not read silent (m23-bv)")
+        let midPeak = try #require(mid.measurement.truePeakDbtp)
+        #expect(midLufs > -50)
+        #expect(midPeak > -50)
+        // Invariance: the same steady tone from beat 0 is non-silent and the same order.
+        let zeroLufs = try #require(fromZero.measurement.integratedLufs)
+        #expect(zeroLufs > -50)
+        #expect(abs(zeroLufs - midLufs) < 6)
+        // Control: past the note's end the window is silent (nil = below the -70 gate).
+        #expect((empty.measurement.integratedLufs ?? -.infinity) <= -70)
+        #expect((empty.measurement.truePeakDbtp ?? -.infinity) < -80)
+    }
 }

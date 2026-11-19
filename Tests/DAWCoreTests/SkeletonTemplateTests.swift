@@ -225,3 +225,137 @@ extension SongSkeletonTests {
         #expect(checked >= 27, "expected the drum and bass parts to still exist; checked \(checked)")
     }
 }
+
+// MARK: - m39-tpl-f8: the skeleton's tempo change refuses exactly when `setTempo` does
+
+// Design §5.5, finding F-8: the skeleton sets the tempo, so it refuses while recording and on a multi-segment tempo
+// map, with `setTempo`'s OWN error (same case, same sentence). The reference is always `setTempo` itself, called on a
+// twin of the store under test, so a test cannot pass by comparing the skeleton's sentence to a copy of it.
+// Helpers carry a `tplf` prefix.
+extension SongSkeletonTests {
+    /// What `setTempo` throws on a twin of `store` (same tracks, same transport), or nil if it would succeed. The
+    /// twin keeps `store` itself untouched when the call is allowed.
+    func tplfSetTempoRefusal(_ store: ProjectStore) -> ProjectError? {
+        let twin = ProjectStore(tracks: store.tracks, transport: store.transport)
+        do { try twin.setTempo(100); return nil } catch { return error as? ProjectError }
+    }
+
+    /// The error's case, by name, so two errors can be compared without `ProjectError` being `Equatable`.
+    static func tplfCase(_ error: (any Error)?) -> String {
+        switch error as? ProjectError {
+        case .transportBusy?: "transportBusy"
+        case .tempoMapMultiSegment?: "tempoMapMultiSegment"
+        case nil: error.map { "not a ProjectError: \($0)" } ?? "no error"
+        case let other?: "other: \(other)"
+        }
+    }
+
+    static func tplfTwoSegmentMap() throws -> TempoMap {
+        try TempoMap(segments: [.init(startBeat: 0, bpm: 120), .init(startBeat: 8, bpm: 90)])
+    }
+
+    /// Runs the skeleton (or its dry run) and checks it refused with `setTempo`'s own error, changing nothing.
+    func tplfExpectSetTempoRefusal(_ store: ProjectStore, engine: FakeEngine, template: TrackSetTemplate?,
+                                   dryRun: Bool, expectedCase: String, tag: String) throws {
+        let want = tplfSetTempoRefusal(store)
+        // ANTI-VACUITY: `setTempo` really refuses here, with the case this row is about.
+        #expect(Self.tplfCase(want) == expectedCase, "\(tag): setTempo itself: \(String(describing: want))")
+        let bytes = try tpl2Bytes(store)
+        let depth = store.journal.undoStack.count
+        let canUndo = store.canUndo
+        let got = tpl2Refusal {
+            if dryRun {
+                _ = try store.planSongSkeleton(genre: "pop", template: template)
+            } else {
+                _ = try store.applySongSkeleton(genre: "pop", template: template)
+            }
+        }
+        #expect(Self.tplfCase(got) == expectedCase, "\(tag): \(String(describing: got))")
+        #expect((got as? LocalizedError)?.errorDescription == want?.errorDescription,
+                "\(tag): not setTempo's sentence: \(String(describing: got))")
+        #expect(try tpl2Bytes(store) == bytes, "\(tag): the project changed")
+        #expect(store.journal.undoStack.count == depth, "\(tag): an undo entry was recorded")
+        #expect(store.canUndo == canUndo, "\(tag): canUndo moved")
+        #expect(engine.calls.isEmpty, "\(tag): the engine was told \(engine.calls)")
+    }
+
+    @Test("m39-tpl-f8: mid-take, the skeleton refuses with setTempo's own sentence — with no template and with a plain one, by the apply and by its dry run — and nothing changes")
+    func tplfSkeletonRefusedMidTake() throws {
+        // The plain template has no routing, so the template's own recording guard does not fire: the refusal can
+        // only come from the tempo guard.
+        let plain = tpl2Plain()
+        #expect(try TemplateBuilder.plan(plain).hasRouting == false)
+        for (label, template) in [("no template", nil), ("a plain template", plain)] as [(String, TrackSetTemplate?)] {
+            for dryRun in [false, true] {
+                let engine = FakeEngine()
+                let store = try tpl3Store(recording: true, engine: engine)
+                #expect(store.transport.tempoMapOverride == nil, "the map must not be what refuses here")
+                try tplfExpectSetTempoRefusal(store, engine: engine, template: template, dryRun: dryRun,
+                                              expectedCase: "transportBusy",
+                                              tag: "\(label)\(dryRun ? " (dry run)" : "")")
+            }
+        }
+        // The sentence the user reads, once, so a change to it is a decision someone makes on purpose.
+        let store = try tpl3Store(recording: true, engine: FakeEngine())
+        #expect(tplfSetTempoRefusal(store)?.errorDescription == "cannot change tempo while recording — stop first")
+    }
+
+    @Test("m39-tpl-f8: on a multi-segment tempo map, the skeleton refuses with setTempo's own error — by the apply and by its dry run — and the map survives")
+    func tplfSkeletonRefusedOnMultiSegmentMap() throws {
+        let map = try Self.tplfTwoSegmentMap()
+        for (label, template) in [("no template", nil), ("a plain template", tpl2Plain())] as [(String, TrackSetTemplate?)] {
+            for dryRun in [false, true] {
+                let store = ProjectStore()
+                store.media = FakeMedia()
+                try store.setTempoMap(map)
+                let engine = FakeEngine()
+                store.engine = engine
+                #expect(!store.transport.isRecording, "recording must not be what refuses here")
+                try tplfExpectSetTempoRefusal(store, engine: engine, template: template, dryRun: dryRun,
+                                              expectedCase: "tempoMapMultiSegment",
+                                              tag: "\(label)\(dryRun ? " (dry run)" : "")")
+                #expect(store.transport.tempoMapOverride == map, "the authored map was touched")
+                #expect(store.transport.tempoBPM == 120)
+            }
+        }
+    }
+
+    @Test("m39-tpl-f8: idle on a single-segment map the skeleton is NOT refused — a fresh song, a map that went multi and back, and a meter map with one tempo, all of which setTempo also allows")
+    func tplfSkeletonAllowedOnSingleSegmentMap() throws {
+        let pop = try #require(SongSkeletonCatalog.genre(named: "pop"))
+        let rows: [(label: String, prepare: (ProjectStore) throws -> Void)] = [
+            ("a fresh song", { _ in }),
+            ("a map that went multi-segment and back", { store in
+                try store.setTempoMap(try Self.tplfTwoSegmentMap())
+                try store.setTempoMap(TempoMap(constantBPM: 132))
+            }),
+            ("one tempo with a multi-change meter map", { store in
+                try store.setTempoMap(TempoMap(constantBPM: 132), meterMap: try MeterMap(changes: [
+                    .init(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
+                    .init(startBeat: 8, beatsPerBar: 3, beatUnit: 4),
+                ]))
+                #expect(store.transport.meterMapOverride != nil, "the meter row must really carry a meter map")
+            }),
+        ]
+        for row in rows {
+            for dryRun in [false, true] {
+                let tag = "\(row.label)\(dryRun ? " (dry run)" : "")"
+                let store = ProjectStore()
+                store.media = FakeMedia()
+                try row.prepare(store)
+                #expect(store.transport.tempoMapOverride == nil, "\(tag): the tempo map is not single-segment")
+                // ANTI-VACUITY: setTempo allows this state; the skeleton must too.
+                #expect(tplfSetTempoRefusal(store) == nil, "\(tag): setTempo itself refuses here")
+                if dryRun {
+                    let plan = try store.planSongSkeleton(genre: "pop")
+                    #expect(plan.tempoBPM == pop.defaultTempoBPM, "\(tag)")
+                } else {
+                    let result = try store.applySongSkeleton(genre: "pop")
+                    #expect(result.tempoBPM == pop.defaultTempoBPM, "\(tag)")
+                    #expect(store.transport.tempoBPM == pop.defaultTempoBPM, "\(tag): the tempo did not land")
+                    #expect(store.undoLabel == "Song Skeleton 'Pop'", "\(tag)")
+                }
+            }
+        }
+    }
+}

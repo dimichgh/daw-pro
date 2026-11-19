@@ -191,4 +191,213 @@ struct OfflineBufferRenderTests {
         #expect(result.sampleRate == 48_000)
         #expect(abs(result.durationSeconds - 2.0) < 0.001)
     }
+
+    // MARK: - m39-w4-4a (W8-W44F): the PRODUCTION render entry's byte gate
+
+    /// A 440 Hz stereo Float32 sine at 48 kHz, amplitude 0.5: a tone, so the
+    /// follower follows something real and the gain insert sees a real signal.
+    private func w44fSineWAV(seconds: Double) throws -> URL {
+        let frames = Int(seconds * 48_000)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("w44f-sine-\(UUID().uuidString).wav")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 48_000.0,
+            AVNumberOfChannelsKey: 2,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings,
+                                   commonFormat: .pcmFormatFloat32, interleaved: false)
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format,
+                                                   frameCapacity: AVAudioFrameCount(frames)))
+        buffer.frameLength = AVAudioFrameCount(frames)
+        let data = try #require(buffer.floatChannelData)
+        for frame in 0..<frames {
+            let value = Float(0.5 * sin(2 * Double.pi * 440 * Double(frame) / 48_000))
+            data[0][frame] = value
+            data[1][frame] = value
+        }
+        try file.write(from: buffer)
+        return url
+    }
+
+    /// Every modulation kind that existed before the musical clock, plus "none".
+    private static let w44fKinds = ["none", "stepFree", "lfo", "follower", "macro"]
+
+    /// W44's G1 fixture shape: the source rides the fader (the per-sample
+    /// stage) AND a gain insert's `gainLinear` (the block-rate effect path).
+    private func w44fTrack(clip url: URL, kind: String) -> Track {
+        let gain = EffectDescriptor(kind: .gain)
+        var track = Track(name: "W44F \(kind)", kind: .audio,
+                          clips: [Clip(name: "tone", startBeat: 0, lengthBeats: 24,
+                                       audioFileURL: url)],
+                          effects: [gain])
+        let source: ModulationSource
+        switch kind {
+        case "stepFree":
+            source = ModulationSource(kind: .stepSequencer, params: .stepSequencer(
+                StepSequencerSourceParams(steps: [1, 0, 0.5, -0.5, 0.25], rateHz: 7.3, edgeMs: 3)))
+        case "lfo":
+            source = ModulationSource(kind: .lfo, params: .lfo(
+                LFOSourceParams(waveform: .sine, rateHz: 3.1, bipolar: false)))
+        case "follower":
+            source = ModulationSource(kind: .envelopeFollower, params: .envelopeFollower(
+                EnvelopeFollowerSourceParams(detector: .peak, attackMs: 10, releaseMs: 120,
+                                             floorDb: -60)))
+        case "macro":
+            source = ModulationSource(kind: .macro, params: .macro(MacroSourceParams(value: 0.6)))
+        default:
+            return track
+        }
+        track.modulationSources = [source]
+        track.modulationRoutes = [
+            ModulationRoute(sourceID: source.id, target: .volume, depth: -0.4),
+            ModulationRoute(sourceID: source.id,
+                            target: .effectParam(effectID: gain.id, paramName: "gainLinear"),
+                            depth: 0.3),
+        ]
+        return track
+    }
+
+    /// The drum machine with a FREE-RUNNING step source on `openHat.decay`:
+    /// the instrument-side latch path, read at note-on.
+    private func w44fDrums() -> Track {
+        var notes: [MIDINote] = []
+        var beat = 0.0
+        while beat < 16 {
+            notes.append(MIDINote(pitch: 39, velocity: 90, startBeat: beat, lengthBeats: 0.25))
+            beat += 0.5
+        }
+        var track = Track(name: "W44F drums", kind: .instrument,
+                          clips: [Clip(name: "hats", startBeat: 0, lengthBeats: 16, notes: notes)],
+                          instrument: InstrumentDescriptor(kind: .drumSynth))
+        let source = ModulationSource(kind: .stepSequencer, params: .stepSequencer(
+            StepSequencerSourceParams(steps: [1, -1, 0.5], rateHz: 5.3, edgeMs: 2)))
+        track.modulationSources = [source]
+        track.modulationRoutes = [ModulationRoute(
+            sourceID: source.id, target: .instrumentParam(paramName: "openHat.decay"), depth: 0.5)]
+        return track
+    }
+
+    /// Raw little-endian Float32, channel after channel.
+    private func w44fWriteRaw(_ channels: [[Float]], to url: URL) throws {
+        var data = Data()
+        for channel in channels {
+            channel.withUnsafeBufferPointer { data.append(Data(buffer: $0)) }
+        }
+        try data.write(to: url)
+    }
+
+    /// ⭐ m39-w4-4a BG: the byte gate over the PRODUCTION render entry, which
+    /// W44's G1 cannot see (G1 drives `OfflineRenderer` directly). Every
+    /// pre-clock modulation kind through (1) the engine's legacy
+    /// `renderOffline` overload, which exists before AND after the meter seam,
+    /// and (2) the store's session renders (bounce, mixdown, stems with their
+    /// 00 Mixdown) with a master macro, under a constant meter and under a
+    /// mid-song meter change, across a tempo change.
+    ///
+    /// With `W44F_BYTEGATE_OUT=<folder>` each capture's raw Float32 lands
+    /// there; the lane captured BEFORE the meter seam existed and AFTER, and
+    /// compared the folders with `cmp`. Without it the test still proves the
+    /// gate can see: no capture is silent, every modulated engine render
+    /// differs from the unmodulated one, and, because no source here is
+    /// tempo-synced, the meter change leaves every store capture bit-identical
+    /// (the meter may reach nothing but a synced source's clock).
+    @Test("m39-w4-4a byte gate: the production render entry (engine overload + store bounce/mixdown/stems) over every pre-clock modulation kind, with and without a meter change")
+    func w44fProductionEntryByteGate() async throws {
+        let tempo = try TempoMap(segments: [.init(startBeat: 0, bpm: 120), .init(startBeat: 8, bpm: 90)])
+        let meterChange = try MeterMap(changes: [.init(startBeat: 0, beatsPerBar: 4, beatUnit: 4),
+                                                 .init(startBeat: 16, beatsPerBar: 3, beatUnit: 4)])
+        let tone = try w44fSineWAV(seconds: 12)
+        defer { try? FileManager.default.removeItem(at: tone) }
+        let outFolder = ProcessInfo.processInfo.environment["W44F_BYTEGATE_OUT"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+        if let outFolder {
+            try FileManager.default.createDirectory(at: outFolder, withIntermediateDirectories: true)
+        }
+        var captures: [(name: String, channels: [[Float]])] = []
+
+        // (1) The engine's legacy overload: 10 s from beat 0, across 120 → 90 at 4 s.
+        let engine = AudioEngine()
+        for kind in Self.w44fKinds {
+            let audio = try await engine.renderOffline(
+                tracks: [w44fTrack(clip: tone, kind: kind)], tempoMap: tempo, masterVolume: 1,
+                fromBeat: 0, durationSeconds: 10, forcedCompensationTargets: nil)
+            captures.append(("engine-\(kind)", audio.channelData))
+        }
+        let drums = try await engine.renderOffline(
+            tracks: [w44fDrums()], tempoMap: tempo, masterVolume: 1,
+            fromBeat: 0, durationSeconds: 9, forcedCompensationTargets: nil)
+        captures.append(("engine-drums-stepFree", drums.channelData))
+
+        // (2) The store's session renders, a master macro on the master fader.
+        let store = ProjectStore()
+        store.engine = engine
+        store.tracks = Self.w44fKinds.map { kind -> Track in
+            var track = w44fTrack(clip: tone, kind: kind)
+            track.volume = 0.3
+            return track
+        } + [w44fDrums()]
+        let macro = try store.addModulationSource(on: .master, kind: .macro,
+                                                  params: ["value": .number(0.6)]).source
+        try store.addModulationRoute(on: .master, sourceID: macro.id, target: .volume, depth: -0.3)
+        let root = try makeTempDir("w44f-bytegate")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let meterStates: [(label: String, meter: MeterMap?)] = [("constant", nil),
+                                                                ("meterChange", meterChange)]
+        for (label, meter) in meterStates {
+            try store.setTempoMap(tempo, meterMap: meter)
+            // A setter's return is not proof it took: the store must now hold it.
+            #expect(store.transport.meterMap.changes.count == (meter == nil ? 1 : 2))
+            #expect(store.transport.tempoMap == tempo)
+            let dir = root.appendingPathComponent(label)
+            let bounce = try await store.renderBounce(
+                toPath: dir.appendingPathComponent("bounce.wav").path, durationSeconds: 10)
+            captures.append(("store-\(label)-bounce",
+                             try TestSignals.readFile(URL(fileURLWithPath: bounce.path))))
+            let mix = try await store.renderMixdown(
+                toPath: dir.appendingPathComponent("mixdown.wav").path, durationSeconds: 10)
+            captures.append(("store-\(label)-mixdown",
+                             try TestSignals.readFile(URL(fileURLWithPath: mix.path))))
+            let stems = try await store.renderStems(
+                toDirectory: dir.appendingPathComponent("stems").path, durationSeconds: 10,
+                includeMixdown: true)
+            for (index, stem) in stems.stems.enumerated() {
+                captures.append(("store-\(label)-stem\(index)",
+                                 try TestSignals.readFile(URL(fileURLWithPath: stem.path))))
+            }
+            let reference = try #require(stems.mixdown)
+            captures.append(("store-\(label)-stems00",
+                             try TestSignals.readFile(URL(fileURLWithPath: reference.path))))
+        }
+
+        func bits(_ channels: [[Float]]) -> [[UInt32]] { channels.map { $0.map(\.bitPattern) } }
+        let engineNone = try #require(captures.first { $0.name == "engine-none" })
+        for capture in captures {
+            let peak = capture.channels.flatMap { $0 }.reduce(Float(0)) { max($0, abs($1)) }
+            #expect(peak > 0.01, "\(capture.name) is silent (peak \(peak))")
+            if capture.name.hasPrefix("engine-"), capture.name != "engine-none",
+               !capture.name.hasPrefix("engine-drums") {
+                #expect(bits(capture.channels) != bits(engineNone.channels),
+                        "\(capture.name) is byte-identical to no modulation")
+            }
+            if capture.name.hasPrefix("store-meterChange-") {
+                let twinName = capture.name.replacingOccurrences(of: "meterChange", with: "constant")
+                let twin = try #require(captures.first { $0.name == twinName })
+                #expect(bits(capture.channels) == bits(twin.channels),
+                        "\(capture.name): a meter change moved bytes in a project with no synced source")
+            }
+            print("[measured] W44F BG \(capture.name): frames \(capture.channels.first?.count ?? 0), "
+                  + "peak \(peak)")
+            if let outFolder {
+                try w44fWriteRaw(capture.channels,
+                                 to: outFolder.appendingPathComponent("\(capture.name).f32"))
+            }
+        }
+        // 6 engine renders + per meter state: bounce, mixdown, 6 stems, the 00 Mixdown.
+        #expect(captures.count == 6 + 2 * (2 + Self.w44fKinds.count + 1 + 1))
+    }
 }

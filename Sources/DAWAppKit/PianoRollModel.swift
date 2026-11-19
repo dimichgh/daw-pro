@@ -488,13 +488,23 @@ public final class PianoRollModel {
 
     // MARK: - Draft edits
 
-    /// Adds a note at a snapped position with a one-grid-cell length and default
-    /// velocity 100. Returns the new note (already in the draft).
+    /// Adds a note at a snapped position with a one-grid-cell length, born at the
+    /// entry velocity. Returns the new note (already in the draft).
+    ///
+    /// m39-w4-3: the velocity comes from `NoteEntryDefaults`, the ONE home the
+    /// step grid's toggle also reads, asked with the track's drum rows
+    /// (`drumLanes`: `DrumLaneMap.lanes(for:)` of its instrument, nil for a
+    /// melodic track). A LANE LIST, not a Bool, on purpose: the export
+    /// predicate `isDrumKit` sits beside it in the view and answers "no" for
+    /// our drum machine, so a Bool here would be one word from the wrong
+    /// answer. `entry` is for tests holding a fixture constant.
     @discardableResult
-    public func addNote(atBeat beat: Double, pitch: Int, resolution: SnapResolution) -> MIDINote {
+    public func addNote(atBeat beat: Double, pitch: Int, resolution: SnapResolution,
+                        drumLanes: [DrumLane]? = nil,
+                        entry: NoteEntryDefaults.Values = .shipped) -> MIDINote {
         let note = MIDINote(
             pitch: pitch.clamped(to: MIDINote.pitchRange),
-            velocity: 100,
+            velocity: entry.velocity(drumLanes: drumLanes),
             startBeat: snap(beat: beat, resolution: resolution),
             lengthBeats: defaultLength(for: resolution)
         )

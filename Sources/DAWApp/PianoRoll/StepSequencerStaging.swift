@@ -57,6 +57,14 @@ extension AppModel {
     ///   - `{act:"toggle", stepIndex, pitch}` — click that cell. Runs the view's
     ///     own `applyStepToggle`, i.e. the same draft mutation and the same
     ///     `commit()` funnel the mouse runs.
+    ///   - `{act:"startFromBeat", pattern:<id>}` (W9-PATF) — pick that beat from
+    ///     the "Start from a beat" strip's menu. The grid runs the SAME
+    ///     `pickBeat` the menu item runs (→ `fillDrumPattern`, one undo step); no
+    ///     second writer. Refused with a teaching error while the strip is not
+    ///     offered (not a drum clip, a clip with notes, no grid showing). The
+    ///     echo's `beatStrip` is what the strip DREW: `offered`, `hasResult`,
+    ///     `changed`, `isWarning`, `lines` (the result line, then each warning,
+    ///     or the refusal verbatim) and `picks`.
     ///
     /// Echoes GROUND TRUTH throughout: every reported field is what the grid
     /// DREW (reported up from inside the drawing layer), never the seam's input,
@@ -87,8 +95,8 @@ extension AppModel {
         }
 
         if let act = params["act"]?.stringValue {
-            guard act == "toggle" else {
-                throw DebugError("unknown act \"\(act)\" — expected \"toggle\"")
+            guard act == "toggle" || act == "startFromBeat" else {
+                throw DebugError("unknown act \"\(act)\" — expected \"toggle\" or \"startFromBeat\"")
             }
             // Apply any mode/step change FIRST and wait for the grid to redraw,
             // so a one-call `{mode:"steps", act:"toggle", …}` addresses the grid
@@ -101,6 +109,24 @@ extension AppModel {
             guard stepSequencer.reportedMode == .steps else {
                 throw DebugError("the step sequencer is not showing — call "
                     + "debug.stepSequencer {mode:\"steps\"} first (a MIDI clip must be open)")
+            }
+            if act == "startFromBeat" {
+                guard let pattern = params["pattern"]?.stringValue, !pattern.isEmpty else {
+                    throw DebugError("act \"startFromBeat\" needs 'pattern' (an id from pattern.list, "
+                        + "such as \"\(DrumPatternLibrary.firstPattern.id)\")")
+                }
+                // The strip's own report decides: the menu is only there on an
+                // EMPTY drum clip, and the seam must not reach what the mouse cannot.
+                guard stepSequencer.reportedBeatOffered else {
+                    throw DebugError("the \"Start from a beat\" menu is not offered — it shows only on an "
+                        + "EMPTY clip on a drum track with the step grid showing (call "
+                        + "debug.stepSequencer {mode:\"steps\"} with an empty drum clip open)")
+                }
+                let before = stepSequencer.reportSeq
+                stepSequencer.stageStartFromBeat(pattern)
+                awaitStepSequencerApplied(after: before)
+                awaited = true
+                return stepSequencerEcho()
             }
             guard let step = params["stepIndex"]?.doubleValue.map({ Int($0) }),
                   let pitch = params["pitch"]?.doubleValue.map({ Int($0) }) else {
@@ -136,6 +162,13 @@ extension AppModel {
             awaitStepSequencerApplied(after: stepSequencer.reportSeq)
         }
 
+        return stepSequencerEcho()
+    }
+
+    /// The echo every call answers with: ground truth the grid reported, plus the
+    /// open clip's facts. Split out so `act:"startFromBeat"` answers through the
+    /// same assembly.
+    func stepSequencerEcho() -> JSONValue {
         // Assembled in named pieces rather than as one literal: the whole-object
         // form defeated the type checker outright ("unable to type-check this
         // expression in reasonable time"), which is what a big heterogeneous
@@ -162,6 +195,13 @@ extension AppModel {
         let drumKit: Bool = editorClip.flatMap { clip in
             store.tracks.first { $0.clips.contains { $0.id == clip.id } }
         }.map { SMFProjectExporter.isDrumKit($0) } ?? false
+        // m39-w4-2: how many drum rows the open clip's track has (the lane
+        // map's own row count; 0 = no drum rows, the melodic window).
+        // `isDrumKit` above keeps its meaning (the General MIDI export
+        // question); existing gates read it.
+        let drumLaneCount: Int = editorClip.flatMap { clip in
+            store.tracks.first { $0.clips.contains { $0.id == clip.id } }
+        }.flatMap { DrumLaneMap.lanes(for: $0.instrument)?.count } ?? 0
 
         var object: [String: JSONValue] = [:]
         // WHAT IS ON SCREEN. `.steps` only while a grid is mounted and
@@ -192,8 +232,18 @@ extension AppModel {
         // is open" instead of "the grid is empty".
         object["editorClipId"] = editorClip.map { .string($0.id.uuidString) } ?? .null
         object["isDrumKit"] = .bool(drumKit)
+        object["drumLanes"] = .number(Double(drumLaneCount))
         object["density"] =
             .string(panelDensity.density(forPanel: PianoRollView.panelID).rawValue)
+        // W9-PATF: the "Start from a beat" strip, as the grid DREW it.
+        object["beatStrip"] = .object([
+            "offered": .bool(stepSequencer.reportedBeatOffered),
+            "hasResult": .bool(stepSequencer.reportedBeatHasResult),
+            "changed": .bool(stepSequencer.reportedBeatChanged),
+            "isWarning": .bool(stepSequencer.reportedBeatIsWarning),
+            "lines": .array(stepSequencer.reportedBeatLines.map { .string($0) }),
+            "picks": .number(Double(stepSequencer.reportedBeatPicks)),
+        ])
         object["reportSeq"] = .number(Double(stepSequencer.reportSeq))
         return .object(object)
     }

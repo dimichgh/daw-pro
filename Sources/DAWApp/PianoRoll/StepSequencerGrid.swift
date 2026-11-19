@@ -8,7 +8,8 @@ import DAWAppKit
 ///
 /// Thin over `DAWAppKit.StepSequencerGeometry` / `StepSequencerEdit`: every
 /// decision (which rows, which columns, which cell a point is in, what a toggle
-/// writes) is headless and tested; this file draws and routes ONE gesture.
+/// writes) is headless and tested; this file draws and routes TWO gestures: the
+/// cell click, and (m39-w4-3) the Accent row's column click (`StepAccent`).
 ///
 /// ⚠️ **MOUSE-ONLY. NO keyboard shortcut belongs on this surface** — not DELETE,
 /// not arrows, not space. The click is simultaneously the entry path and the
@@ -40,9 +41,26 @@ struct StepSequencerBand: View {
     /// Toggles a cell. Routed to the parent, which owns the ONE note draft and
     /// the ONE commit funnel — this view never touches the store.
     var onToggle: (StepCell) -> Void
+    /// m39-w4-3: the Accent row's lit columns (`StepAccent.columns`). Empty on a
+    /// melodic grid, which draws no Accent row at all (`StepAccent.hasRow`).
+    var accentColumns: [StepAccentColumn] = []
+    /// Clicks an Accent cell (a column index). Routed to the parent, which owns
+    /// the ONE note draft and the ONE commit funnel, like `onToggle`.
+    var onAccent: (Int) -> Void = { _ in }
+    /// m39-w4-10: the ready-made beats this EMPTY drum clip offers
+    /// (`StepStartFromBeat.choices`), or nil when the clip is not an empty drum
+    /// clip, which draws no "Start from a beat" strip.
+    var beatChoices: [StepBeatChoice]? = nil
+    /// Writes the chosen beat (its id) into the clip and answers what happened.
+    /// Routed to the parent, which hands it to the store (one undo step); this
+    /// view never touches the store.
+    var onStartFromBeat: (String) -> StepBeatOutcome = { _ in .nothing }
 
     /// Height of the frozen step-number ruler pinned over the top of the grid.
     private static let rulerHeight: CGFloat = 16
+    /// Height of the Accent row: a touch shorter than a drum row (24 pt), so it
+    /// reads as a control strip under the kit rather than a ninth drum.
+    private static let accentRowHeight: CGFloat = 22
     private static let scrollSpace = "stepSequencerGridScroll"
 
     /// Live horizontal scroll offset, read from the content's leading edge (the
@@ -54,6 +72,24 @@ struct StepSequencerBand: View {
     /// its own report (`StepSequencerBridge.reportNoGrid(from:)` — the clip
     /// switch race).
     @State private var reportToken = UUID()
+
+    /// m39-w4-10: what the last "Start from a beat" pick did, shown in the strip
+    /// until the next click in the grid, the dismiss button, or the clip going
+    /// empty again (an undo).
+    @State private var beatOutcome: StepBeatOutcome? = nil
+
+    /// W9-PATF: how many beat picks this grid has run (the menu's and the
+    /// debug seam's), so the strip's report fires even when a refused pick
+    /// answers with the same sentence twice.
+    @State private var beatPicks = 0
+
+    /// What the strip shows, as ONE value for the reporter (the `DrawnState`
+    /// idiom): the debug seam reads this back instead of echoing its input.
+    private struct BeatStripState: Equatable {
+        var offered: Bool
+        var outcome: StepBeatOutcome?
+        var picks: Int
+    }
 
     /// Everything the reporter publishes, as ONE value. The Canvas is given the
     /// same `geometry`/`fills` this is composed from, and the `.onChange` that
@@ -104,9 +140,146 @@ struct StepSequencerBand: View {
     /// only one of them.
     var body: some View {
         VStack(spacing: 0) {
+            // m39-w4-10: the "Start from a beat" strip is a row in the flow
+            // too, above the ruler, for the ruler's reason: an overlay would sit
+            // over drum cells the user may want to click.
+            if beatChoices != nil || beatOutcome != nil { beatStrip }
             stepRuler
             gridBody
+            // m39-w4-3: the Accent row is ALSO a row in the flow, for the
+            // ruler's reason above: its label and its cells share one HStack,
+            // so they cannot sit at different heights. Pinned under the grid,
+            // it stays in view however far the drum rows are scrolled.
+            if StepAccent.hasRow(geometry) { accentRow }
         }
+        // The clip went empty again (an undo of the beat): a "beat added" line
+        // would now be false, so the strip goes back to offering the menu.
+        .onChange(of: beatChoices != nil) { _, offered in
+            if offered, beatOutcome?.changed == true { beatOutcome = nil }
+        }
+        // W9-PATF: the strip reports what it shows (offered? which result line?)
+        // so `debug.stepSequencer` can echo ground truth, and takes a staged
+        // pick through the SAME function the menu item runs.
+        .onChange(of: BeatStripState(offered: beatChoices != nil, outcome: beatOutcome, picks: beatPicks),
+                  initial: true) { _, strip in
+            bridge.reportBeatStrip(token: reportToken, offered: strip.offered,
+                                   outcome: strip.outcome, picks: strip.picks)
+        }
+        .onChange(of: bridge.beatNonce) { _, _ in
+            guard beatChoices != nil, let id = bridge.stagedBeat else { return }
+            pickBeat(id)
+        }
+    }
+
+    /// THE ONE PICK: the menu item and the debug seam both run exactly this.
+    private func pickBeat(_ patternID: String) {
+        beatOutcome = onStartFromBeat(patternID)
+        beatPicks += 1
+    }
+
+    // MARK: - "Start from a beat" (m39-w4-10)
+
+    /// The strip's height: a touch taller than a drum row, so the chip has room.
+    private static let beatStripHeight: CGFloat = 30
+
+    /// ONE ROW OVER THE RULER (design §8, last bullet). On an empty drum clip it
+    /// says so and offers the menu; after a pick it shows what happened (the
+    /// result line, and a sentence naming any drum this kit lacks), with the
+    /// menu still there when the pick was refused and the clip is still empty.
+    private var beatStrip: some View {
+        HStack(alignment: .center, spacing: 8) {
+            if let outcome = beatOutcome {
+                Image(systemName: outcome.isWarning
+                      ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(outcome.isWarning ? DAWTheme.record : DAWTheme.signal)
+                beatOutcomeLines(outcome)
+                if let choices = beatChoices { beatMenu(choices) }
+                beatDismissButton
+            } else if let choices = beatChoices {
+                Text(StepStartFromBeat.emptyPrompt)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(DAWTheme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                beatMenu(choices)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, minHeight: Self.beatStripHeight, alignment: .leading)
+        .background(DAWTheme.panelRaised)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(DAWTheme.hairline).frame(height: 0.5)
+        }
+    }
+
+    /// The result line first (what was added), then each warning, one per line.
+    /// Prose, so SF Pro; a warning in the warning colour, the refusal bubble's
+    /// amber, and the words are the store's, verbatim.
+    private func beatOutcomeLines(_ outcome: StepBeatOutcome) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(outcome.lines.enumerated()), id: \.offset) { index, line in
+                Text(line)
+                    .font(.system(size: 11, weight: index == 0 ? .medium : .regular))
+                    .foregroundStyle(index == 0 && outcome.changed
+                                     ? DAWTheme.textPrimary : DAWTheme.record)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(outcome.lines.joined(separator: " "))
+    }
+
+    /// THE MENU: every beat in library order (the first is the user's L2 pick),
+    /// each with its one-line description as help. A themed chip, the step-size
+    /// picker's grammar (`panelRaised`, hairline, SF Mono caps): never a stock
+    /// gray control.
+    private func beatMenu(_ choices: [StepBeatChoice]) -> some View {
+        Menu {
+            ForEach(choices) { choice in
+                Button(choice.name) {
+                    pickBeat(choice.id)
+                }
+                .help(choice.help)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(StepStartFromBeat.menuTitle.uppercased())
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+            }
+            .foregroundStyle(DAWTheme.textPrimary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(DAWTheme.panel)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke(DAWTheme.gridEmphasis, lineWidth: 1))
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(StepStartFromBeat.menuHelp)
+        .accessibilityLabel(StepStartFromBeat.menuTitle)
+    }
+
+    /// Clears the result line.
+    private var beatDismissButton: some View {
+        Button {
+            beatOutcome = nil
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(DAWTheme.textDim)
+                .frame(width: 18, height: 18)
+        }
+        .buttonStyle(.plain)
+        .help("Hide this message")
+        .accessibilityLabel("Hide this message")
     }
 
     private var gridBody: some View {
@@ -221,6 +394,71 @@ struct StepSequencerBand: View {
         .allowsHitTesting(false)
     }
 
+    // MARK: - Accent row (m39-w4-3)
+
+    /// Novice copy for the row. Source: design
+    /// `docs/design/2026-10-07-loop-drum-depth.md` §3.1 ("click a column and
+    /// every hit in it plays harder") and §3.5 (click again to go back; a
+    /// column with no hits has nothing to accent).
+    static let accentRowLabel = "Accent"
+    static let accentRowHelp = "Accent: click a step to make every hit in it play harder. "
+        + "Click it again to go back. A step with no hits has nothing to accent."
+
+    /// ONE ROW UNDER THE DRUM ROWS, labelled "Accent" (design §3.5). Its cells
+    /// sit under the grid's columns: the canvas is the grid's drawn width,
+    /// shifted by the live horizontal scroll exactly as the ruler's numbers
+    /// are, so column k of the row is under column k of the grid.
+    ///
+    /// Mouse-only like the rest of this surface. The tap is caught on the
+    /// CLIPPED frame (the visible strip right of the gutter), never on the
+    /// shifted canvas, so a click on the "Accent" label cannot land on a
+    /// column scrolled under it.
+    private var accentRow: some View {
+        HStack(spacing: 0) {
+            Text(Self.accentRowLabel)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(DAWTheme.textSecondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .frame(width: StepSequencerGeometry.laneGutterWidth,
+                       height: Self.accentRowHeight)
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(DAWTheme.hairline).frame(width: 1)
+                }
+            StepAccentCanvas(geometry: geometry, columns: accentColumns, noteColor: noteColor)
+                .equatable()
+                .frame(width: drawnWidth, height: Self.accentRowHeight)
+                .offset(x: -scrollX)
+                .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: Self.accentRowHeight, alignment: .leading)
+                .clipped()
+                .contentShape(Rectangle())
+                .hoverCursor(CursorAffordance.stepCell.restCursor)
+                .gesture(accentTap)
+        }
+        .frame(height: Self.accentRowHeight)
+        .background(DAWTheme.panel)
+        .overlay(alignment: .top) {
+            Rectangle().fill(DAWTheme.hairline).frame(height: 0.5)
+        }
+        .help(Self.accentRowHelp)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Self.accentRowLabel)
+    }
+
+    /// CLICK AN ACCENT CELL: the visible x plus the scroll offset is the
+    /// content x, and `StepAccent.step(atX:)` asks the grid's own hit test.
+    private var accentTap: some Gesture {
+        SpatialTapGesture(count: 1)
+            .onEnded { value in
+                guard let step = StepAccent.step(atX: value.location.x + scrollX,
+                                                 geometry: geometry) else { return }
+                beatOutcome = nil
+                onAccent(step)
+            }
+    }
+
     // MARK: - Playhead
 
     /// A 1 pt glowing cyan hairline at the transport position — OFFSET, never a
@@ -251,6 +489,7 @@ struct StepSequencerBand: View {
         SpatialTapGesture(count: 1)
             .onEnded { value in
                 guard let cell = geometry.cell(at: value.location) else { return }
+                beatOutcome = nil
                 onToggle(cell)
             }
     }
@@ -409,6 +648,90 @@ private struct StepGridCanvas: View, Equatable {
                 with: .color(s.noteColor.opacity(0.22)))
             context.fill(path, with: .color(s.noteColor.opacity(opacity)))
             context.stroke(path, with: .color(s.noteColor.opacity(0.95)), lineWidth: 0.5)
+        }
+    }
+}
+
+/// m39-w4-3 — THE ACCENT ROW's Canvas: one slot per column, and each column with
+/// hits drawn in its state (`StepAccentState`).
+///
+/// The note colour, not a new hue: an accent IS a note velocity (nothing else
+/// is stored), so it wears the same cyan, or violet on an AI clip, as the hits
+/// it lifts (DESIGN-LANGUAGE: semantic accents only; violet = AI-touched).
+///  - `on`: a lit bar with the cells' glow rings.
+///  - `mixed`: the bottom half lit, under an outline: some hits are accented.
+///  - `off`: an outline only: hits you could accent.
+///  - empty: the faint slot every column has, so the row reads as clickable.
+///
+/// Equatable and mounted `.equatable()`, the `StepGridCanvas` rule: a transport
+/// tick that changes nothing drawn does not redraw it.
+private struct StepAccentCanvas: View, Equatable {
+    var geometry: StepSequencerGeometry
+    var columns: [StepAccentColumn]
+    var noteColor: Color
+
+    nonisolated static func == (lhs: StepAccentCanvas, rhs: StepAccentCanvas) -> Bool {
+        lhs.geometry == rhs.geometry && lhs.columns == rhs.columns
+            && lhs.noteColor == rhs.noteColor
+    }
+
+    private struct Snapshot {
+        var geometry: StepSequencerGeometry
+        var columns: [StepAccentColumn]
+        var noteColor: Color
+    }
+
+    var body: some View {
+        let s = Snapshot(geometry: geometry, columns: columns, noteColor: noteColor)
+        return Canvas { @Sendable context, size in
+            Self.drawSlots(&context, size: size, s: s)
+            Self.drawColumns(&context, size: size, s: s)
+        }
+    }
+
+    private nonisolated static func slotRect(step: Int, size: CGSize, s: Snapshot) -> CGRect {
+        CGRect(x: s.geometry.x(forStep: step), y: 0,
+               width: s.geometry.stepWidth, height: size.height)
+            .insetBy(dx: 3.5, dy: 5)
+    }
+
+    /// A faint slot under every column the grid has, so a beginner sees where
+    /// to click before anything is lit. Neutral chrome, no accent hue.
+    private nonisolated static func drawSlots(_ context: inout GraphicsContext,
+                                              size: CGSize, s: Snapshot) {
+        for step in 0..<s.geometry.stepCount {
+            let rect = slotRect(step: step, size: size, s: s)
+            context.fill(Path(roundedRect: rect, cornerRadius: 2.5),
+                         with: .color(Color.white.opacity(0.04)))
+        }
+    }
+
+    private nonisolated static func drawColumns(_ context: inout GraphicsContext,
+                                                size: CGSize, s: Snapshot) {
+        for column in s.columns {
+            let rect = slotRect(step: column.step, size: size, s: s)
+            let path = Path(roundedRect: rect, cornerRadius: 2.5)
+            switch column.state {
+            case .empty:
+                continue
+            case .off:
+                context.stroke(path, with: .color(s.noteColor.opacity(0.40)), lineWidth: 0.75)
+            case .mixed:
+                let lower = CGRect(x: rect.minX, y: rect.midY,
+                                   width: rect.width, height: rect.height / 2)
+                context.fill(Path(roundedRect: lower, cornerRadius: 2),
+                             with: .color(s.noteColor.opacity(0.60)))
+                context.stroke(path, with: .color(s.noteColor.opacity(0.70)), lineWidth: 0.75)
+            case .on:
+                context.fill(
+                    Path(roundedRect: rect.insetBy(dx: -3, dy: -3), cornerRadius: 4.5),
+                    with: .color(s.noteColor.opacity(0.10)))
+                context.fill(
+                    Path(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), cornerRadius: 3.5),
+                    with: .color(s.noteColor.opacity(0.22)))
+                context.fill(path, with: .color(s.noteColor.opacity(0.92)))
+                context.stroke(path, with: .color(s.noteColor.opacity(0.95)), lineWidth: 0.5)
+            }
         }
     }
 }

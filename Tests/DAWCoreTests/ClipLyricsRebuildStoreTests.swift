@@ -148,27 +148,89 @@ extension ProjectStoreClipEditTests {
         #expect(store.tracks == before)
     }
 
-    @Test("p2-sing-d1b delete bars through a clip (clipAfterDelete): the tail keeps the deleted words, as a trim")
+    @Test("p2-sing-e delete bars through a clip (clipAfterDelete): a word whose notes were ALL deleted goes, in the same undo step")
     func lyricsDeleteBarsSplitsText() throws {
+        // Rewritten for the 2026-10-05 ruling (p2-sing-e), which replaces
+        // p2-sing-d1b's "the deleted words ride with the tail": that left the
+        // tail with more words than notes until the user edited the text.
         let (store, _, clip) = try Self.lyricStore(onsets: [0, 2, 4, 6, 8, 10], length: 12,
                                                    text: "one two three four five six")
         let before = store.tracks
-        try store.deleteBars(fromBar: 2, count: 1)                  // beats 4..<8
+        let bytes = try Self.lyricBytes(before)
+        let history = store.undoHistory().undo
+        try store.deleteBars(fromBar: 2, count: 1)                  // beats 4..<8: "three" and "four"
         let clips = Self.lyricClips(store)
         let notes = clips.map { $0.notes?.count ?? 0 }
         #expect(notes == [2, 2], "control: head and tail both survived")
-        // The words sung on the deleted notes go with the tail: the split rule
-        // at the delete's start, then the tail's leading edge is a trim, which
-        // keeps text (the sing-time W > N refusal says so, nothing is lost).
-        #expect(Self.lyricTexts(clips) == ["one two", "three four five six"])
+        #expect(Self.lyricTexts(clips) == ["one two", "five six"], "the words sung on the deleted notes are gone")
+        #expect(store.undoHistory().undo.count == history.count + 1, "ONE undo step for the bars and the words")
         _ = try store.undo()
         #expect(store.tracks == before)
+        #expect(try Self.lyricBytes(store.tracks) == bytes, "undo brings the words back, byte for byte")
 
-        // One survivor is a trim: it keeps everything.
+        // One survivor (only the head is left): its words with no note left go too.
         try store.deleteBars(fromBar: 3, count: 1)                  // beats 8..<12: no tail survives
         let only = Self.lyricClips(store)
         #expect(only.count == 1)
-        #expect(only.first?.lyrics == clip.lyrics)
+        #expect(only.first?.id == clip.id)
+        #expect(only.first?.lyrics == ClipLyrics(text: "one two three four"))
+        _ = try store.undo()
+        #expect(try Self.lyricBytes(store.tracks) == bytes)
+
+        // Only the tail is left: the words before it go, and it keeps the clip's id.
+        try store.deleteBars(fromBar: 1, count: 1)                  // beats 0..<4
+        let tail = Self.lyricClips(store)
+        #expect(tail.map { $0.id } == [clip.id])
+        #expect(tail.first?.lyrics == ClipLyrics(text: "three four five six"))
+    }
+
+    @Test("p2-sing-e delete bars: a word that keeps at least one of its notes stays (control: no word removed is the split rule)")
+    func lyricsDeleteBarsKeepsAWordWithANoteLeft() throws {
+        // "three +" sings beats 7 and 8; deleting beats 4..<8 takes its first
+        // note and leaves its second, so it stays (with the tail, where its
+        // first note started). "two" sings beat 4 alone, so it goes.
+        let (store, _, _) = try Self.lyricStore(onsets: [0, 4, 7, 8, 10], length: 12,
+                                                text: "one two three + four")
+        let before = store.tracks
+        try store.deleteBars(fromBar: 2, count: 1)
+        let clips = Self.lyricClips(store)
+        #expect(clips.map { $0.notes?.count ?? 0 } == [1, 2], "control: one head note, two tail notes")
+        #expect(Self.lyricTexts(clips) == ["one", "three + four"])
+        _ = try store.undo()
+        #expect(store.tracks == before)
+
+        // Control: a delete that empties no word is exactly the split rule.
+        let (other, _, _) = try Self.lyricStore(onsets: [0, 2, 7, 8, 10], length: 12, text: "one two three + four")
+        try other.deleteBars(fromBar: 2, count: 1)
+        #expect(Self.lyricTexts(Self.lyricClips(other)) == ["one two", "three + four"])
+    }
+
+    @Test("p2-sing-e delete bars: text that cannot be placed is shared as before and nothing is removed")
+    func lyricsDeleteBarsUnplaceableTextIsKept() throws {
+        let (store, _, _) = try Self.lyricStore(onsets: [0, 2, 4, 6, 8, 10], length: 12,
+                                                text: "one two three four five six seven")   // 7 words, 6 notes
+        try store.deleteBars(fromBar: 2, count: 1)
+        let clips = Self.lyricClips(store)
+        #expect(Self.lyricTexts(clips) == ["one two three four five six seven", nil],
+                "nothing typed is lost: the head keeps it all, as a split does")
+    }
+
+    @Test("p2-sing-e removingWords: a removed run keeps ONE line break between kept lines, never a blank line")
+    func lyricsRemovingWordsKeepsLines() {
+        func remove(_ text: String, _ keeps: [Bool]) -> String {
+            ClipLyrics.removingWords(text, offsets: LyricTokenizer.wordStartOffsets(text), keeps: keeps)
+        }
+        #expect(remove("one two\nthree four\nfive six", [true, true, false, false, true, true]) == "one two\nfive six")
+        #expect(remove("one two three\nfour five", [true, true, false, true, true]) == "one two\nfour five")
+        #expect(remove("one two\nthree four", [true, false, false, true]) == "one\nfour")
+        #expect(remove("one two three four", [true, false, true, true]) == "one three four")
+        #expect(remove("one two three four", [true, true, false, false]) == "one two")
+        #expect(remove("one two\nthree four", [false, false, true, true]) == "three four")
+        #expect(LyricTokenizer.wordStartOffsets("twin-kle +\nlit-tle star").count == 3, "control: three words")
+        #expect(remove("twin-kle +\nlit-tle star", [false, true, true]) == "lit-tle star",
+                "a removed word takes its own + hold; at the start, nothing of the run is kept")
+        #expect(remove("one two", [true]) == "one two", "a keeps list of the wrong length changes nothing")
+        #expect(remove("one two", [true, true]) == "one two", "control: nothing removed is the text itself")
     }
 
     // MARK: - Take comp and flatten

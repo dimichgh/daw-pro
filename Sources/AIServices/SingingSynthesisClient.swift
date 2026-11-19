@@ -41,13 +41,31 @@ public struct SingingPhraseNote: Sendable, Equatable {
 public struct SingingPhraseWord: Sendable, Equatable {
     public var text: String
     public var noteIndices: [Int]
+    /// The language the facade sings this word in (facadeVersion 2's per-word `lang`, design
+    /// `docs/design/2026-10-06-p2-sing-expansion.md` §7.2; `scripts/sing/singlib/langs.py`): `"zh"` (Mandarin) or
+    /// `"yue"` (Cantonese), each word one Chinese character or one tonal pinyin/jyutping syllable. nil is English,
+    /// the facade's default, and is never written: an English word's JSON is exactly the v1 word's.
+    public var lang: String?
 
     public init(text: String, noteIndices: [Int]) {
         self.text = text
         self.noteIndices = noteIndices
     }
 
-    var jsonObject: [String: Any] { ["text": text, "noteIndices": noteIndices] }
+    /// A word sung in `lang` (nil: English). A separate init, so the old one's symbol stays (the tree's rule for
+    /// additive fields, `SingWord.init(text:typed:noteIndices:language:)`).
+    public init(text: String, noteIndices: [Int], lang: String?) {
+        self.text = text
+        self.noteIndices = noteIndices
+        self.lang = lang
+    }
+
+    /// `lang` only when set: under facadeVersion 1 the facade refuses it as an unknown key.
+    var jsonObject: [String: Any] {
+        var object: [String: Any] = ["text": text, "noteIndices": noteIndices]
+        if let lang { object["lang"] = lang }
+        return object
+    }
 }
 
 /// One note of an OWN voice's prompt window (design §2.4's `voice.prompt.notes`) — Route N's
@@ -112,7 +130,19 @@ public enum SingingVoiceReference: Sendable, Equatable {
 /// `rejectUnknownKeys`, so this type must never grow an extra field without the facade growing a
 /// matching one first.
 public struct SingingPhraseRequest: Sendable, Equatable {
+    /// The version every request that uses nothing new sends, and what `/health` reports (`schema.py`'s
+    /// `FACADE_VERSION`, unchanged by v2: design §7.5).
     public static let facadeVersion = 1
+    /// The version a request needs once a word carries a `lang` (`schema.py`'s `FACADE_VERSIONS`, design §7.1).
+    public static let languageFacadeVersion = 2
+
+    /// The `facadeVersion` this body sends (design §7.1, "the client sends facadeVersion 2 ONLY when the request
+    /// carries a v2 key"): 2 when at least one word has a `lang`, else 1. So an English phrase's body, and the
+    /// phrase-cache key that hashes it, stay byte for byte what they were (§9.2 S5). `control` is never sent: v2
+    /// makes it optional with today's "score" as its default.
+    public var bodyFacadeVersion: Int {
+        words.contains { $0.lang != nil } ? Self.languageFacadeVersion : Self.facadeVersion
+    }
 
     public var voice: SingingVoiceReference
     public var notes: [SingingPhraseNote]
@@ -149,7 +179,7 @@ public struct SingingPhraseRequest: Sendable, Equatable {
 
     func jsonObject() -> [String: Any] {
         [
-            "facadeVersion": Self.facadeVersion,
+            "facadeVersion": bodyFacadeVersion,
             "voice": voice.jsonObject,
             "phrase": ["notes": notes.map(\.jsonObject), "words": words.map(\.jsonObject)],
             "leadS": leadS,

@@ -32,6 +32,18 @@ const LONG_RUNNING_COMMANDS: ReadonlySet<string> = new Set([
   // spectrum + stereo) before responding — seconds-class for typical songs,
   // but well past the 5 s default for long files on slow disks.
   "reference.import",
+  // p2-sing-e (design 2026-09-27 §6): starting the singing engine waits for it
+  // to load (the app's own startup budget is 120 s,
+  // SingingSidecarManager.Configuration.startupTimeoutSeconds), and removing
+  // it stops the engine and deletes several GB. `sing.sidecarStop` is here too,
+  // a deviation from §6's "default": its graceful stop alone may take the
+  // manager's 5 s stopTimeoutSeconds before the SIGKILL, plus a 2 s health
+  // probe, which is past the 5 s default. A stop that finishes fast still
+  // answers fast. `sing.sidecarStatus` joins this tier only with
+  // `verify: true` (see bridgeTimeoutMs).
+  "sing.sidecarStart",
+  "sing.sidecarStop",
+  "sing.uninstallEngine",
 ]);
 /** vc.convertVocals (m10-p-4) BLOCKS on a real RVC voice conversion —
  * measured ~37x real time (m10-p-2) plus a cold-engine load, so a real
@@ -110,7 +122,28 @@ const CLIP_DETECT_PITCH_TIMEOUT_MS = 60000;
 const CLIP_DETECT_PITCH_COMMANDS: ReadonlySet<string> = new Set([
   "clip.detectPitch",
   "clip.autoCorrectPitch",
+  // p2-sing-e: sing.addVoice runs the same SwiftF0 detection over a 3-12 s
+  // recording, then the clip check and the note labelling (design §6 row 8).
+  "sing.addVoice",
 ]);
+
+/**
+ * The bridge-side wait for one command, in ms. Pure, so the tiers are
+ * testable without a socket (test/sing-tools.test.ts). The only
+ * params-dependent tiers: vc.convertClips (per clip) and
+ * `sing.sidecarStatus` with `verify: true`, which re-hashes the singing
+ * engine's multi-GB model file before answering (a deviation from design §6's
+ * "default", which did not price the verify).
+ */
+export function bridgeTimeoutMs(command: string, params: Record<string, unknown> = {}): number {
+  if (VOICE_CONVERT_CLIPS_COMMANDS.has(command)) return voiceConvertClipsTimeoutMs(params);
+  if (VOICE_CONVERT_COMMANDS.has(command)) return VOICE_CONVERT_TIMEOUT_MS;
+  if (CLIP_TRANSCRIBE_COMMANDS.has(command)) return CLIP_TRANSCRIBE_TIMEOUT_MS;
+  if (CLIP_DETECT_PITCH_COMMANDS.has(command)) return CLIP_DETECT_PITCH_TIMEOUT_MS;
+  if (LONG_RUNNING_COMMANDS.has(command)) return LONG_RUNNING_TIMEOUT_MS;
+  if (command === "sing.sidecarStatus" && params["verify"] === true) return LONG_RUNNING_TIMEOUT_MS;
+  return REQUEST_TIMEOUT_MS;
+}
 
 interface ControlResponse {
   id: string;
@@ -154,17 +187,7 @@ export class DawBridge {
   async send(command: string, params: Record<string, unknown> = {}): Promise<unknown> {
     const socket = await this.ensureConnected();
     const id = `mcp-${this.nextId++}-${Date.now()}`;
-    const timeoutMs = VOICE_CONVERT_CLIPS_COMMANDS.has(command)
-      ? voiceConvertClipsTimeoutMs(params)
-      : VOICE_CONVERT_COMMANDS.has(command)
-      ? VOICE_CONVERT_TIMEOUT_MS
-      : CLIP_TRANSCRIBE_COMMANDS.has(command)
-        ? CLIP_TRANSCRIBE_TIMEOUT_MS
-        : CLIP_DETECT_PITCH_COMMANDS.has(command)
-          ? CLIP_DETECT_PITCH_TIMEOUT_MS
-          : LONG_RUNNING_COMMANDS.has(command)
-            ? LONG_RUNNING_TIMEOUT_MS
-            : REQUEST_TIMEOUT_MS;
+    const timeoutMs = bridgeTimeoutMs(command, params);
 
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {

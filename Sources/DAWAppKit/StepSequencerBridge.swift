@@ -53,6 +53,14 @@ public final class StepSequencerBridge {
     /// update for one request.
     @ObservationIgnored public private(set) var stagedCell: StepCell?
 
+    /// W9-PATF — bumped per staged "Start from a beat" pick, for the toggle's
+    /// reason: asking for the same beat twice is two requests with one payload.
+    public private(set) var beatNonce = 0
+
+    /// The beat (a `pattern.list` id) the staged pick names. `@ObservationIgnored`
+    /// like `stagedCell`: the nonce is what observers watch.
+    @ObservationIgnored public private(set) var stagedBeat: String?
+
     // MARK: - State the DRAWING LAYER reports back
 
     /// The mode the pane is ACTUALLY showing.
@@ -89,6 +97,18 @@ public final class StepSequencerBridge {
     public private(set) var reportedPhaseBeats: Double = 0
     public private(set) var reportedFirstStepSongBeat: Double = 0
     public private(set) var reportedBarMarks: [StepBarMark] = []
+
+    /// W9-PATF — what the "Start from a beat" STRIP is showing, reported by the
+    /// grid from its own state (never by the seam): whether the strip offers its
+    /// menu (an empty drum clip), whether it shows a result line, and that
+    /// line's text, in order (the result first, then each warning, or the
+    /// refusal sentence). `reportedBeatPicks` counts the picks the grid ran.
+    public private(set) var reportedBeatOffered = false
+    public private(set) var reportedBeatHasResult = false
+    public private(set) var reportedBeatChanged = false
+    public private(set) var reportedBeatIsWarning = false
+    public private(set) var reportedBeatLines: [String] = []
+    public private(set) var reportedBeatPicks = 0
 
     /// The grid instance whose report is currently standing, or nil when no grid
     /// is mounted. Never observable — it is the reporters' own bookkeeping, not
@@ -132,7 +152,28 @@ public final class StepSequencerBridge {
         toggleNonce += 1
     }
 
+    /// Ask the visible grid to pick a ready-made beat from its "Start from a
+    /// beat" strip — the SAME call the strip's menu item makes. Inert with no
+    /// grid mounted, or while the strip is not offered.
+    public func stageStartFromBeat(_ patternID: String) {
+        stagedBeat = patternID
+        beatNonce += 1
+    }
+
     // MARK: - Reports (called BY the drawing layer)
+
+    /// The grid's "Start from a beat" strip drew this. Bumps `reportSeq` like
+    /// `report`, so a staged pick can wait for it.
+    public func reportBeatStrip(token: UUID, offered: Bool, outcome: StepBeatOutcome?, picks: Int) {
+        lastReporter = token
+        reportedBeatOffered = offered
+        reportedBeatHasResult = outcome != nil
+        reportedBeatChanged = outcome?.changed ?? false
+        reportedBeatIsWarning = outcome?.isWarning ?? false
+        reportedBeatLines = outcome?.lines ?? []
+        reportedBeatPicks = picks
+        reportSeq &+= 1
+    }
 
     /// The grid drew this. Called from the same view that hosts the Canvas, off
     /// the same value the Canvas is given, so removing the layer removes the
@@ -190,6 +231,12 @@ public final class StepSequencerBridge {
         reportedPhaseBeats = 0
         reportedFirstStepSongBeat = 0
         reportedBarMarks = []
+        reportedBeatOffered = false
+        reportedBeatHasResult = false
+        reportedBeatChanged = false
+        reportedBeatIsWarning = false
+        reportedBeatLines = []
+        reportedBeatPicks = 0
         reportSeq &+= 1
     }
 }

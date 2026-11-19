@@ -817,18 +817,73 @@ public final class EffectEditorModel {
     /// property, and `ParamCurveConformanceTests` pins that every shipping
     /// param still resolves to exactly the curve the old `unit == "Hz"`
     /// inference gave it.
+    ///
+    /// ⚠️ m27-r: this stays the DECLARED curve even where the knob travels
+    /// differently. The gain utility's `gainLinear` declares `.linear` (that is
+    /// the wire's and the modulation depth law's domain) but its on-screen
+    /// knob takes the power taper below — read `fraction(forValue:spec:)` /
+    /// `value(forFraction:spec:)` for where the knob actually sits.
     public static func scale(for spec: EffectParamSpec) -> Scale {
         spec.curve
     }
 
-    /// The 0…1 slider fraction for a value (through the row's declared curve).
+    /// The 0…1 slider fraction for a value: the row's declared curve, except
+    /// the gain utility's knob (m27-r, `gainTravelExponent(for:)`).
     public static func fraction(forValue value: Double, spec: EffectParamSpec) -> Double {
-        spec.curve.fraction(forValue: value, in: spec.range)
+        if let k = gainTravelExponent(for: spec) {
+            let v = value.clamped(to: spec.range)
+            return pow(v / spec.range.upperBound, 1 / k).clamped(to: 0...1)
+        }
+        return spec.curve.fraction(forValue: value, in: spec.range)
     }
 
-    /// The value at a 0…1 slider fraction (through the row's declared curve).
+    /// The value at a 0…1 slider fraction: the row's declared curve, except
+    /// the gain utility's knob (m27-r, `gainTravelExponent(for:)`). The exact
+    /// inverse of `fraction(forValue:spec:)`.
     public static func value(forFraction fraction: Double, spec: EffectParamSpec) -> Double {
-        spec.curve.value(forFraction: fraction, in: spec.range)
+        if let k = gainTravelExponent(for: spec) {
+            let f = fraction.clamped(to: 0...1)
+            return (spec.range.upperBound * pow(f, k)).clamped(to: spec.range)
+        }
+        return spec.curve.value(forFraction: fraction, in: spec.range)
+    }
+
+    // MARK: - The gain utility's knob travel (m27-r)
+
+    /// The exponent of the gain utility knob's power taper, or nil for every
+    /// other row (which keeps its declared curve, bit for bit).
+    ///
+    /// WHY: m27-c widened `gainLinear` from 0…4 to 0…16 (+24.08 dB in one
+    /// insert) and left the knob travelling LINEARLY, so unity sat at 6.25 % of
+    /// the travel and one percent of it near unity was about 1.3–1.5 dB — four
+    /// times twitchier than before, at the value people dial most.
+    ///
+    /// THE TAPER: `value = hi · fraction^k` with `k = log2(hi)`, which puts
+    /// unity (×1, 0 dB) at EXACTLY half travel — straight up on the 270° knob —
+    /// whatever the ceiling is. For a 0…2 range `k` is 1 and the formula IS the
+    /// house fader (`MixerMath`: linear, unity at half travel), so this is that
+    /// rule generalised to a 16× ceiling, and a future range change cannot move
+    /// unity again. At 0…16 (`k` = 4) one percent of travel at unity is about
+    /// 0.7 dB; the boost half gets half the travel; deep cuts are coarse
+    /// (≈1.4 dB per percent at −24 dB), and the readout still shows the exact
+    /// value. Continuous down to silence: every value has exactly one position.
+    ///
+    /// ⚠️ EDITOR-ONLY. The spec still declares `.linear`; the wire, the stored
+    /// value, `fx.describe` and the modulation depth law (which read
+    /// `spec.curve`, never this) do not move. Name-keyed, the same predicate
+    /// shape as the dB readout and `isLevelParam`. The range must start at
+    /// silence and reach above unity; otherwise nil and the declared curve
+    /// applies (a test pins that the shipping range passes).
+    public static func gainTravelExponent(for spec: EffectParamSpec) -> Double? {
+        guard spec.name == "gainLinear",
+              spec.range.lowerBound == 0, spec.range.upperBound > 1 else { return nil }
+        return log2(spec.range.upperBound)
+    }
+
+    /// Whether a row's knob takes the gain utility's power taper instead of
+    /// its declared curve (true for `gain.gainLinear` only).
+    public static func usesGainTravelTaper(_ spec: EffectParamSpec) -> Bool {
+        gainTravelExponent(for: spec) != nil
     }
 
     /// The current row fraction (for the thin view's slider position).

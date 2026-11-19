@@ -201,3 +201,50 @@ enum ClipLyricsPersistenceFixture {
     }
 }
 // END FIXTURE
+
+// MARK: - S1 (p2-sing-x3, design docs/design/2026-10-06-p2-sing-expansion.md §9.2)
+
+extension ClipLyricsPersistenceTests {
+
+    /// PIN-BEFORE: these bytes were confirmed by W8-X3 on 2026-10-06 against the tree BEFORE
+    /// `ClipLyrics.language` existed (run PB2 in the lane's STATUS). Lyrics without a language must keep
+    /// encoding to exactly them, alone, inside a clip, and inside the project file.
+    static let s1LyricsBytes = #"{"text":"twin-kle +\nlit-tle star"}"#
+    static let s1ClipBytes =
+        #"{"id":"00000000-0000-0000-0000-000000000011","isAIGenerated":false,"lengthBeats":8,"lyrics":{"text":"twin-kle +\nlit-tle star"},"name":"Melody","notes":[{"id":"00000000-0000-0000-0000-000000000101","lengthBeats":1,"pitch":60,"startBeat":0,"velocity":100},{"id":"00000000-0000-0000-0000-000000000102","lengthBeats":0.5,"pitch":62,"startBeat":1,"velocity":90},{"id":"00000000-0000-0000-0000-000000000103","lengthBeats":2,"pitch":64,"startBeat":2,"velocity":80}],"startBeat":4}"#
+
+    static func sortedKeysJSON<T: Encodable>(_ value: T) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return String(decoding: try encoder.encode(value), as: UTF8.self)
+    }
+
+    @Test("S1: lyrics without a language encode to the pin-before bytes: alone, in a clip, in the file; old bytes decode")
+    func languageAbsentIsByteIdentical() throws {
+        let lyrics = ClipLyrics(text: "twin-kle +\nlit-tle star")
+        let lyricsJSON = try Self.sortedKeysJSON(lyrics)
+        #expect(lyricsJSON == Self.s1LyricsBytes)
+        let melody = try #require(F.tracks(lyrics: true).first?.clips.first)
+        let clipJSON = try Self.sortedKeysJSON(melody)
+        #expect(clipJSON == Self.s1ClipBytes)
+        let fileJSON = try Self.encode(F.document(F.tracks(lyrics: true)))
+        #expect(fileJSON == Self.goldenWithLyrics)
+        // An old clip's lyrics (no language key) decode, and re-encode to the same bytes.
+        let old = try JSONDecoder().decode(ClipLyrics.self, from: Data(Self.s1LyricsBytes.utf8))
+        #expect(old == lyrics)
+        let oldJSON = try Self.sortedKeysJSON(old)
+        #expect(oldJSON == Self.s1LyricsBytes)
+        let oldClip = try JSONDecoder().decode(Clip.self, from: Data(Self.s1ClipBytes.utf8))
+        #expect(oldClip.lyrics == lyrics)
+        let oldClipJSON = try Self.sortedKeysJSON(oldClip)
+        #expect(oldClipJSON == Self.s1ClipBytes)
+        // Added after the change (p2-sing-x3): an old clip is English, and "en" writes nothing.
+        #expect(old.language == nil, "an old clip's lyrics are English")
+        #expect(oldClip.lyrics?.language == nil)
+        let english = try Self.sortedKeysJSON(ClipLyrics(text: "twin-kle +\nlit-tle star", language: "en"))
+        #expect(english == Self.s1LyricsBytes, "\"en\" is English: stored as nil, written as nothing")
+        let reopened = try Self.reopened(Self.goldenWithLyrics)
+        let languages = reopened.flatMap { $0.clips }.compactMap { $0.lyrics }.map { $0.language }
+        #expect(languages == [nil, nil], "the file's lyrics come back English (control: two clips carry lyrics)")
+    }
+}

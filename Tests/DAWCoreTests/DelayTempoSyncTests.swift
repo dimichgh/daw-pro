@@ -253,4 +253,30 @@ struct DelayTempoSyncTests {
         _ = try store.addAutomationLane(
             trackID: track.id, target: .effectParam(effectID: fx.id, paramName: "highCutHz"))
     }
+
+    @Test("m39-c: the store refuses a lane on EVERY param the tempo-sync registry calls control-plane-only")
+    func storeRefusesEveryRegisteredControlPlaneParam() throws {
+        let store = ProjectStore()
+        var refused = 0
+        for registration in TempoSync.effectRegistrations {
+            let track = store.addTrack(kind: .audio)
+            let fx = try store.addEffect(toTrack: track.id, kind: registration.kind)
+            for name in registration.controlPlaneParams {
+                #expect(throws: ProjectError.self,
+                        "\(registration.kind.rawValue).\(name) must be refused as a lane") {
+                    try store.addAutomationLane(
+                        trackID: track.id, target: .effectParam(effectID: fx.id, paramName: name))
+                }
+                refused += 1
+            }
+            // Positive control: a render param on the same insert is accepted.
+            let renderParams = EffectParamSpec.specs(for: registration.kind)
+                .filter { !registration.controlPlaneParams.contains($0.name) }
+            let renderParam = try #require(renderParams.first)
+            _ = try store.addAutomationLane(
+                trackID: track.id,
+                target: .effectParam(effectID: fx.id, paramName: renderParam.name))
+        }
+        #expect(refused >= 2)
+    }
 }

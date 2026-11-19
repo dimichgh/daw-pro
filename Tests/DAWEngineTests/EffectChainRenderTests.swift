@@ -34,6 +34,9 @@ struct EffectChainRenderTests {
         }
         func reset() {}
         var latencySamples: Int { 0 }
+        // m39-d CR-1/CR-2: required, no default (EffectRendering) — inert here.
+        func holdAutomatedParams() -> Bool { true }
+        func beginControlCell(frames: Int) {}
     }
 
     /// Writes a DC constant — proves the walk RAN (a gain on silence would
@@ -51,6 +54,9 @@ struct EffectChainRenderTests {
         }
         func reset() {}
         var latencySamples: Int { 0 }
+        // m39-d CR-1/CR-2: required, no default (EffectRendering) — inert here.
+        func holdAutomatedParams() -> Bool { true }
+        func beginControlCell(frames: Int) {}
     }
 
     /// Records the walk's calls in order — pins reset-before-process.
@@ -62,6 +68,9 @@ struct EffectChainRenderTests {
         }
         func reset() { calls.append("reset") }
         var latencySamples: Int { 0 }
+        // m39-d CR-1/CR-2: required, no default (EffectRendering) — inert here.
+        func holdAutomatedParams() -> Bool { true }
+        func beginControlCell(frames: Int) {}
     }
 
     // MARK: - Helpers

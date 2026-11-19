@@ -220,4 +220,180 @@ extension ProjectStoreClipEditTests {
         }
         #expect(store.tracks.count == before.count + 1, "control: only the drum track the test added")
     }
+
+    // MARK: - p2-sing-e: the song transposed while singing (design §4.5, amended 2026-09-27 10:10)
+
+    /// A landed track's clip, encoded, with its random id and the copy's
+    /// job-derived file name taken out: what two landings of the same take
+    /// must agree on byte for byte.
+    private static func singComparableClip(_ clip: Clip) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var text = String(decoding: try encoder.encode(clip), as: UTF8.self)
+        text = text.replacingOccurrences(of: clip.id.uuidString, with: "CLIP-ID")
+        if let file = clip.audioFileURL?.lastPathComponent {
+            text = text.replacingOccurrences(of: file, with: "FILE")
+        }
+        return text
+    }
+
+    @Test("p2-sing-e landSungVocal: the song moved +3 while singing; the take lands moved +3 in ONE undo step, with its notice")
+    func singLandsMovedWithATransposedSong() throws {
+        let (store, clip) = try Self.singStore()
+        let planning = try store.planSungVocal(clipId: clip.id, octaveShift: 0)
+        #expect(planning.landingGuard.plan == planning.plan, "planSungVocal carries the whole plan in the guard")
+        try store.transposeProject(semitones: 3)
+        let transposed = store.tracks
+        let history = store.undoHistory().undo
+        let landing = try store.landSungVocal(fileURL: try Self.singTake(), trackName: "Vocals",
+                                              atBeat: planning.plan.atBeat, provenance: Self.singRecord(for: clip),
+                                              planned: planning.landingGuard)
+        #expect(!landing.melodyChanged)
+        #expect(landing.transposedSemitones == 3)
+        #expect(landing.notice
+                == "The song moved up 3 half-steps while I was singing, so I moved this take up 3 half-steps to match.")
+        let take = try #require(store.tracks.first { $0.id == landing.trackID }?.clips.first)
+        #expect(take.pitchShiftSemitones == 3, "what project.transpose would have done had it landed first")
+        #expect(abs(take.startBeat - planning.plan.atBeat) < 1e-12)
+        #expect(store.undoHistory().undo.count == history.count + 1, "the shift is inside the landing's ONE step")
+        #expect(try store.undo() == "Land Sung Vocal")
+        #expect(store.tracks == transposed, "undo removes the take, shift and all; the song stays transposed")
+    }
+
+    @Test("p2-sing-e landSungVocal: down one half-step reads in the singular and shifts −1")
+    func singLandsMovedDownOne() throws {
+        let (store, clip) = try Self.singStore()
+        let planning = try store.planSungVocal(clipId: clip.id, octaveShift: 0)
+        try store.transposeProject(semitones: -1)
+        let landing = try store.landSungVocal(fileURL: try Self.singTake(), trackName: "Vocals",
+                                              atBeat: planning.plan.atBeat, provenance: Self.singRecord(for: clip),
+                                              planned: planning.landingGuard)
+        #expect(landing.transposedSemitones == -1)
+        #expect(landing.notice
+                == "The song moved down 1 half-step while I was singing, so I moved this take down 1 half-step to match.")
+        let take = try #require(store.tracks.first { $0.id == landing.trackID }?.clips.first)
+        #expect(take.pitchShiftSemitones == -1)
+    }
+
+    @Test("p2-sing-e landSungVocal: Δ = 0 lands byte-identical to the landing before p2-sing-e (a guard with no plan)")
+    func singUnmovedLandingIsByteIdentical() throws {
+        let (store, clip) = try Self.singStore()
+        let planning = try store.planSungVocal(clipId: clip.id, octaveShift: 0)
+        let record = Self.singRecord(for: clip)
+        let withPlan = try store.landSungVocal(fileURL: try Self.singTake(), trackName: "Vocals",
+                                               atBeat: planning.plan.atBeat, provenance: record,
+                                               planned: planning.landingGuard)
+        let a = try #require(store.tracks.first { $0.id == withPlan.trackID })
+        _ = try store.undo()
+        let legacy = SungVocalLandingGuard(projectGeneration: planning.landingGuard.projectGeneration,
+                                           signature: planning.landingGuard.signature)
+        #expect(legacy.plan == nil, "control: the old guard carries no plan")
+        let withoutPlan = try store.landSungVocal(fileURL: try Self.singTake(), trackName: "Vocals",
+                                                  atBeat: planning.plan.atBeat, provenance: record, planned: legacy)
+        let b = try #require(store.tracks.first { $0.id == withoutPlan.trackID })
+        #expect(withPlan.notice == nil && withoutPlan.notice == nil)
+        #expect(withPlan.transposedSemitones == 0 && withoutPlan.transposedSemitones == 0)
+        #expect(!withPlan.melodyChanged && !withoutPlan.melodyChanged)
+        let clipA = try #require(a.clips.first)
+        let clipB = try #require(b.clips.first)
+        #expect(try Self.singComparableClip(clipA) == Self.singComparableClip(clipB))
+        #expect(clipA.id != clipB.id, "control: the comparison really took two different ids out")
+        #expect(a.name == b.name && a.kind == b.kind && a.isAIGenerated == b.isAIGenerated)
+        #expect(a.sungVocalProvenance == b.sungVocalProvenance)
+    }
+
+    @Test("p2-sing-e landSungVocal: a melody edit AND a transposition fall back to 'melody changed', unmoved")
+    func singTransposedAndEditedFallsBack() throws {
+        let (store, clip) = try Self.singStore()
+        let planning = try store.planSungVocal(clipId: clip.id, octaveShift: 0)
+        try store.transposeProject(semitones: 3)
+        let t = try #require(store.tracks.firstIndex { $0.clips.contains { $0.id == clip.id } })
+        let c = try #require(store.tracks[t].clips.firstIndex { $0.id == clip.id })
+        store.tracks[t].clips[c].notes![0].pitch += 1               // one note moved alone, after the song moved
+        let landing = try store.landSungVocal(fileURL: try Self.singTake(), trackName: "Vocals",
+                                              atBeat: planning.plan.atBeat, provenance: Self.singRecord(for: clip),
+                                              planned: planning.landingGuard)
+        #expect(landing.melodyChanged)
+        #expect(landing.transposedSemitones == 0)
+        #expect(landing.notice == ProjectStore.sungVocalMelodyChangedNotice)
+        let take = try #require(store.tracks.first { $0.id == landing.trackID }?.clips.first)
+        #expect(take.pitchShiftSemitones == 0)
+    }
+
+    @Test("p2-sing-e SungVocalReplanComparison: the same plan, a pure transposition, and every change that is not one")
+    func singReplanComparison() throws {
+        let (store, clip) = try Self.singStore()
+        let plan = try store.planSungVocal(clipId: clip.id, octaveShift: 0).plan
+        func compare(_ current: SingPlan?) -> SungVocalReplanComparison {
+            SungVocalReplanComparison.compare(planned: plan, current: current)
+        }
+        func moved(_ by: Int) -> SingPlan {
+            var p = plan
+            for u in p.units.indices {
+                for n in p.units[u].notes.indices {
+                    p.units[u].notes[n].midi += by
+                    p.units[u].notes[n].sourcePitch += by
+                }
+            }
+            p.signature = "moved \(by)"
+            return p
+        }
+        #expect(compare(plan) == .unchanged)
+        #expect(compare(nil) == .changed, "the clip is gone")
+        #expect(compare(moved(3)) == .transposed(semitones: 3))
+        #expect(compare(moved(-24)) == .transposed(semitones: -24), "the edge of Clip.pitchShiftSemitonesRange")
+        #expect(compare(moved(25)) == .changed, "past the range Clip.init would clamp it: off-key, so no shift")
+
+        var oneNote = plan
+        oneNote.units[0].notes[0].midi += 2
+        oneNote.units[0].notes[0].sourcePitch += 2
+        oneNote.signature = "one note"
+        #expect(compare(oneNote) == .changed, "one note moved alone is an edit")
+        var retimed = moved(2)
+        retimed.units[0].notes[0].endSeconds += 0.01
+        #expect(compare(retimed) == .changed)
+        var reworded = moved(2)
+        reworded.units[0].words[0].text = "star"
+        #expect(compare(reworded) == .changed)
+        var reidentified = moved(2)
+        reidentified.units[0].notes[0].noteID = UUID()
+        #expect(compare(reidentified) == .changed)
+        var octave = moved(12)
+        octave.octaveShift = 1
+        #expect(compare(octave) == .changed, "another octave shift is another plan")
+        var sungOnly = plan
+        for n in sungOnly.units[0].notes.indices { sungOnly.units[0].notes[n].midi += 2 }
+        sungOnly.signature = "sung only"
+        #expect(compare(sungOnly) == .changed, "the sung pitch moved but the melody did not")
+        var replaced = moved(2)
+        replaced.atBeat += 1
+        #expect(compare(replaced) == .changed, "the placement moved")
+    }
+
+    @Test("p2-sing-e recordSungVocalChecks: writes into the landed record, outside undo; refuses a gone track or another project")
+    func singRecordsChecksAfterLanding() throws {
+        let (store, clip) = try Self.singStore()
+        let planning = try store.planSungVocal(clipId: clip.id, octaveShift: 0)
+        let landing = try store.landSungVocal(fileURL: try Self.singTake(), trackName: "Vocals",
+                                              atBeat: planning.plan.atBeat, provenance: Self.singRecord(for: clip),
+                                              planned: planning.landingGuard)
+        let history = store.undoHistory()
+        let notes = SungNoteAccuracy(hitRate: 1, meanAbsErrorCents: 4, voicedCoverage: 0.95, inTune: true)
+        let words = SungWordCheck(state: SungWordCheck.State.checked, wer: 0, heard: "twinkle little",
+                                  verdict: "clear")
+        #expect(store.recordSungVocalChecks(trackId: landing.trackID, projectGeneration: store.projectGeneration,
+                                            noteAccuracy: notes, wordCheck: words))
+        let record = try #require(store.tracks.first { $0.id == landing.trackID }?.sungVocalProvenance)
+        #expect(record.noteAccuracy == notes)
+        #expect(record.wordCheck == words)
+        #expect(store.undoHistory() == history, "not an undo step")
+
+        #expect(!store.recordSungVocalChecks(trackId: landing.trackID, projectGeneration: store.projectGeneration &+ 1,
+                                             noteAccuracy: nil, wordCheck: words), "another project")
+        #expect(!store.recordSungVocalChecks(trackId: UUID(), projectGeneration: store.projectGeneration,
+                                             noteAccuracy: nil, wordCheck: words), "no such track")
+        _ = try store.undo()
+        #expect(!store.recordSungVocalChecks(trackId: landing.trackID, projectGeneration: store.projectGeneration,
+                                             noteAccuracy: nil, wordCheck: words), "undone")
+    }
 }

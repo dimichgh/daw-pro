@@ -269,7 +269,13 @@ public enum CompFlattener {
                 // Lossless either way at the model layer: the lane keeps its own
                 // clip with the full set, and flatten is re-runnable from it.
                 pitchEdits: source.pitchEdits,
-                lyrics: memberLyrics
+                lyrics: memberLyrics,
+                // Singing style (p2-sing-x5): the lane's clip-wide choices and
+                // the per-note choices of the notes in THIS member's window
+                // (`windowNotes` keeps note ids), so no member reports another
+                // member's notes as orphans. MIDI joins are clean cuts: the
+                // crossfade pass below never widens a MIDI member.
+                singStyle: source.singStyle?.keepingOverrides(for: windowedNotes)
             )
             member.takeGroupID = group.id
 

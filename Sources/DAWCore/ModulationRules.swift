@@ -72,17 +72,17 @@ public enum ModulationRules {
             }
             switch spec.modulatable {
             case .refused:
-                // `delay.sync` / `delay.division` are refused for a DIFFERENT
-                // reason than a boolean is, and an agent branches on the reason.
+                // Tempo-sync params (`delay.sync` / `delay.division` today) are
+                // refused for a DIFFERENT reason than a boolean is, and an agent
+                // branches on the reason. WHICH params those are lives in ONE
+                // home, `TempoSync.effectRegistrations` (m39-c).
                 let reason: ModulationTargetUnsupportedReason =
-                    (effect.kind == .delay && (paramName == "sync" || paramName == "division"))
+                    TempoSync.isControlPlaneOnly(kind: effect.kind, paramName: paramName)
                         ? .controlPlaneOnly : .discrete
                 throw ModulationError.modulationTargetUnsupported(
                     target: "\(effect.kind.rawValue).\(paramName)", reason: reason,
                     detail: reason == .controlPlaneOnly
-                        ? "this parameter is resolved off the render thread (the effective "
-                            + "delay time derives from the tempo on the main actor), so a "
-                            + "modulator could not reach it. Automation refuses it too."
+                        ? TempoSync.controlPlaneOnlyDetail(kind: effect.kind)
                         : "this parameter is discrete — a boolean, an enum or a rounded "
                             + "step — and a modulator cannot drive it meaningfully. "
                             + "Continuously modulatable parameters on "

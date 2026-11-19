@@ -6,6 +6,8 @@
 |---|---|---|
 | Lyrics, song structure, naming, music-theory reasoning, "Explain this" | Anthropic (Claude) primary, OpenAI fallback | `AIServices` in-app + `mcp-server` tools |
 | Full song / vocal / singing generation | **ACE-Step-1.5 (local sidecar)** — primary | local FastAPI service on `127.0.0.1:8001` |
+| Voice conversion (turn a vocal into a trained voice) | RVC sidecar, loopback only | local service on `127.0.0.1:8002` (`Sources/AIServices/VoiceConversionManager.swift`, `VoiceConversionClient.swift`) |
+| Singing typed words on a melody | SoulX-Singer behind our own facade, loopback only | local service on `127.0.0.1:8004` (`Sources/AIServices/SingingSidecarManager.swift`, launched by `scripts/sing/run.sh`) |
 | Song generation, cloud fallback | Suno — dormant/opt-in only (no official public API as of 2026-07-05) | `mcp-server` + `AIServices` (disabled without key) |
 | UI asset generation (icons, textures, backgrounds) | OpenAI GPT Image (`gpt-image-2`) | `scripts/gen-art.mjs` (build-time only, never runtime) |
 | DAW control by agents | MCP (`mcp-server/`) → control WebSocket | external MCP clients (Claude Code, Claude Desktop, any) |
@@ -45,6 +47,18 @@ Verified 2026-07-05 — full detail in `docs/research/2026-07-05-ace-step-local-
 ## Voices & singing — current position
 
 **Singing is now a local capability**: ACE-Step-1.5 generates sung vocals from our lyrics (Anthropic/OpenAI-written or user-written) directly on this machine. Recorded human vocals are first-class via M2 recording. Suno remains a dormant cloud fallback behind the same `SongGenerating` protocol, enabled only if an official API materializes and the user opts in.
+
+**What singing does now (2026-10-07).** You can type words, put them on a MIDI melody clip, and have a voice sing that melody. The sung take lands on a new audio track as one undo step.
+
+- **Words on a melody.** One word goes on each note. The app plans which word goes on which note, sings the lines one at a time, then checks the result.
+- **Languages.** English, Chinese (Mandarin, `zh`) and Chinese (Cantonese, `yue`). Spanish is not supported yet. Any other language code is refused when you sing; it is never sung as English by mistake.
+- **Harmonies.** One singing job can add up to 3 extra parts (a harmony line, the clip's own chord notes, another melody clip, or a double of the tune). Each part goes on its own new track.
+- **Your own voice.** Give the app a short recording of one person singing alone, from a file or from a clip already in your song, and it saves it as a voice that can sing your words.
+- **Consent first.** The singing engine is a large one-time download. It installs only after you agree by clicking Install in DAW Pro's window. An AI agent can ask for the install but cannot approve it.
+- **Everything stays on this Mac.** Both sidecars listen on `127.0.0.1` only.
+- **The scripts ship inside the app.** `scripts/bundle.sh` copies `scripts/sing` into the app's `Contents/Resources/sing` before code signing, so an installed app can start the engine without the source tree.
+
+Designs: `docs/design/2026-09-27-p2-sing-integration.md` (the engine, the install, the job) and `docs/design/2026-10-06-p2-sing-expansion.md` (languages, harmonies, singing style).
 
 ## Model selection (runtime app features)
 

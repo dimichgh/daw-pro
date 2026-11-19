@@ -1,0 +1,22 @@
+{
+  "_doc": "ONE TABLE for both the audio cut (cut-loops.py) and the screen take (record-all.sh), so the bar on screen cannot drift from the bar in the viewer's ears (features/record-all.sh: two hand-kept tables drifted 43 s apart). `src` is a render in out/renders/<src>.wav; `start`/`len` are seconds IN THAT FILE; `srcSong` is the song second at the file's t=0 (0 for whole-song mixes, 4.86 for the vocal stems, which start at the clip's first beat 8.1 x 0.6 s). `view`: arrange | steps:<beat> (the drum clip covering that beat, step grid) | roll:<clip name> (piano roll) | editor:<row pt> (the note editor, maximized). `group`: an A/B pair; both halves get ONE shared static gain so their level relation survives. `record:false` = no screen take (the stage holds stills).",
+  "tempo": 100,
+  "takes": [
+    {"burst": "open",         "state": "tuned",       "view": "arrange",    "src": "tuned-song",       "srcSong": 0,    "start": 14.0, "len": 12.4},
+    {"burst": "drums",        "state": "s-drums",     "view": "steps:8",    "src": "sung-drums",       "srcSong": 0,    "start": 4.8,  "len": 4.8},
+    {"burst": "band",         "state": "s-band",      "view": "arrange",    "src": "sung-band",        "srcSong": 0,    "start": 7.2,  "len": 9.6},
+    {"burst": "lead",         "state": "s-lead",      "view": "roll:Lead melody", "src": "sung-bandlead", "srcSong": 0, "start": 4.2,  "len": 10.2},
+    {"burst": "sung",         "state": "sung",        "view": "arrange",    "src": "sung-song",        "srcSong": 0,    "start": 4.2,  "len": 12.6},
+    {"burst": "hear",         "state": "sung",        "view": "editor:14",  "src": "sung-vocal",       "srcSong": 4.86, "start": 2.90, "len": 1.15, "record": false},
+    {"burst": "sour",         "state": "sour",        "view": "editor:14",  "src": "sour-song",        "srcSong": 0,    "start": 14.0, "len": 12.4},
+    {"burst": "ttm-before",   "state": "sour",        "view": "editor:14",  "src": "sour-song",        "srcSong": 0,    "start": 4.2,  "len": 10.2, "group": "ttm"},
+    {"burst": "ttm-after",    "state": "tuned",       "view": "editor:14",  "src": "tuned-song",       "srcSong": 0,    "start": 4.2,  "len": 10.2, "group": "ttm"},
+    {"burst": "hard-before",  "state": "tuned",       "view": "editor:14",  "src": "tuned-vocal",      "srcSong": 4.86, "start": 5.0,  "len": 8.8,  "group": "hard"},
+    {"burst": "hard-after",   "state": "hard",        "view": "editor:14",  "src": "hard-vocal",       "srcSong": 4.86, "start": 5.0,  "len": 8.8,  "group": "hard"},
+    {"burst": "size-before",  "state": "octave-off",  "view": "editor:10",  "src": "octave-off-mix",   "srcSong": 0,    "start": 4.2,  "len": 10.2, "group": "size"},
+    {"burst": "size-after",   "state": "octave-keep", "view": "editor:10",  "src": "octave-keep-mix",  "srcSong": 0,    "start": 4.2,  "len": 10.2, "group": "size"},
+    {"burst": "voice-before", "state": "tuned",       "view": "editor:14:voice", "src": "tuned-song",       "srcSong": 0,    "start": 18.6, "len": 7.8,  "group": "voice"},
+    {"burst": "voice-after",  "state": "deeper",      "view": "editor:14:voice", "src": "deeper-song",      "srcSong": 0,    "start": 18.6, "len": 7.8,  "group": "voice"},
+    {"burst": "close",        "state": "tuned",       "view": "arrange",    "src": "tuned-song",       "srcSong": 0,    "start": 3.0,  "len": 11.4}
+  ]
+}

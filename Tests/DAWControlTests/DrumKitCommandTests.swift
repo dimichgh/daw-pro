@@ -26,6 +26,18 @@ struct DrumKitCommandTests {
         return id
     }
 
+    /// W9-DRUMDEF: `drumTrack` is a NEW drum machine, which since the user's
+    /// 2026-10-07 picks starts on General MIDI notes with the hats at +23.4 and
+    /// the cymbals at +5.7. This one holds the FACTORY kit — pad-order notes,
+    /// both trims 0 — which is how every song saved before then plays. The
+    /// tests about the pads layout and the trims' neutral use it.
+    private func factoryPadsDrumTrack(_ router: CommandRouter, _ store: ProjectStore) throws -> UUID {
+        let id = try drumTrack(router, store)
+        _ = try store.setInstrument(id: id, drumKit: DrumKitParams())
+        #expect(store.tracks.first { $0.id == id }?.instrument?.drumKit == DrumKitParams())
+        return id
+    }
+
     private func call(_ router: CommandRouter, _ verb: String,
                       _ params: [String: JSONValue] = [:]) async -> ControlResponse {
         await router.handle(ControlRequest(id: "1", command: verb, params: params))
@@ -80,6 +92,8 @@ struct DrumKitCommandTests {
         ])
         _ = try payload(selected)
         #expect(store.tracks.first { $0.id == id }?.instrument?.kind == .drumSynth)
+        // W9-DRUMDEF: picked over the wire, it is born a NEW drum machine.
+        #expect(store.tracks.first { $0.id == id }?.instrument?.drumKit == .newDrumMachineKit)
 
         // A PARTIAL object must overlay, never reset the other 74.
         _ = await call(router, "track.setInstrument", [
@@ -88,7 +102,7 @@ struct DrumKitCommandTests {
         ])
         let kit = try #require(store.tracks.first { $0.id == id }?.instrument?.drumKit)
         #expect(kit.kick.decay == 1.1)
-        var expected = DrumKitParams()
+        var expected = DrumKitParams.newDrumMachineKit
         expected.setValue(1.1, forParamName: "kick.decay")
         #expect(kit == expected, "a partial drumKit object reset parameters it never mentioned")
     }
@@ -109,7 +123,11 @@ struct DrumKitCommandTests {
         #expect(kit["snare"]?["snap"]?.doubleValue == 0.8)
         #expect(kit["velocityToTone"]?.doubleValue == 0.7)
         // The derived trigger note is emitted so a caller knows what to play.
-        #expect(kit["snare"]?["note"]?.doubleValue == Double(DrumVoice.snare.note))
+        // W9-DRUMDEF: a new drum machine is on General MIDI notes, so it is the
+        // lowest GM snare note (38), not the pad note (37).
+        #expect(kit["snare"]?["note"]?.doubleValue
+                == Double(DrumVoice.snare.notes(in: DrumKitParams.newKitNoteLayout).first ?? 0))
+        #expect(kit["snare"]?["note"]?.doubleValue == 38)
     }
 
     /// The additive-optional contract: a project that never touched the drum
@@ -226,17 +244,17 @@ struct DrumKitCommandTests {
 
     // MARK: - describeDrumKit
 
-    @Test("describeDrumKit reports all 75 names with their schema")
+    @Test("describeDrumKit reports all 77 names with their schema")
     func describeDrumKitIsComplete() async throws {
         let (router, store) = makeRouter()
         let id = try drumTrack(router, store)
         let response = try payload(await call(router, "instrument.describeDrumKit", [
             "trackId": .string(id.uuidString),
         ]))
-        #expect(response["parameterCount"]?.doubleValue == 75)
+        #expect(response["parameterCount"]?.doubleValue == 77)
         #expect(response["isActiveInstrument"]?.boolValue == true)
         let order = try #require(response["order"]?.arrayValue)
-        #expect(order.count == 75)
+        #expect(order.count == 77)
         #expect(Set(order.compactMap(\.stringValue))
             == Set(DrumKitParams.paramSpecs.map(\.name)))
 
@@ -248,7 +266,9 @@ struct DrumKitCommandTests {
         #expect(decay["modulatable"]?.boolValue == true)
         #expect(decay["appliesAtNextNoteOn"]?.boolValue == true)
         #expect(decay["meaning"]?.stringValue?.isEmpty == false)
-        #expect(kick["note"]?.doubleValue == 36)
+        // W9-DRUMDEF: a new drum machine answers General MIDI notes, where the
+        // LOWEST kick note is 35 (it was the pad note 36 before).
+        #expect(kick["note"]?.doubleValue == 35)
 
         // level and pan are the two that move a SOUNDING voice.
         #expect(kick["parameters"]?["level"]?["appliesAtNextNoteOn"]?.boolValue == false)
@@ -273,7 +293,7 @@ struct DrumKitCommandTests {
         ]))
         #expect(response["isActiveInstrument"]?.boolValue == false)
         #expect(response["isConfigured"]?.boolValue == false)
-        #expect(response["parameterCount"]?.doubleValue == 75)
+        #expect(response["parameterCount"]?.doubleValue == 77)
     }
 
     /// ⛔ THE GATED SETTINGS. Each is accepted, stored, echoed back and SILENT.
@@ -335,8 +355,11 @@ struct DrumKitCommandTests {
         ]))
         #expect(response["name"]?.stringValue == "909")
         #expect(response["replacedAllParameters"]?.boolValue == true)
-        #expect(response["parameterCount"]?.doubleValue == 75)
-        let nine = try #require(DrumKitParams.preset(named: "909")).params
+        #expect(response["parameterCount"]?.doubleValue == 77)
+        // W9-DRUMDEF: the preset keeps the kit's note layout, and a new drum
+        // machine is on General MIDI notes.
+        var nine = try #require(DrumKitParams.preset(named: "909")).params
+        nine.noteLayout = DrumKitParams.newKitNoteLayout
         #expect(store.tracks.first { $0.id == id }?.instrument?.drumKit == nine)
         // The edit that was NOT asked to survive did not.
         #expect(store.tracks.first { $0.id == id }?.instrument?.drumKit?.kick.decay
@@ -350,8 +373,10 @@ struct DrumKitCommandTests {
         _ = try payload(await call(router, "instrument.loadDrumPreset", [
             "trackId": .string(id.uuidString), "name": .string("LOFI"),
         ]))
+        // W9-DRUMDEF: the preset keeps the new drum machine's GM layout.
         #expect(store.tracks.first { $0.id == id }?.instrument?.drumKit
-            == DrumKitParams.preset(named: "lofi")?.params)
+            == DrumKitParams.preset(named: "lofi").map { DrumKitParams.newDrumMachineKit.applyingPreset($0) })
+        #expect(store.tracks.first { $0.id == id }?.instrument?.drumKit?.noteLayout == .gm)
 
         let message = try #require(errorText(await call(router, "instrument.loadDrumPreset", [
             "trackId": .string(id.uuidString), "name": .string("nope"),
@@ -424,7 +449,7 @@ struct DrumKitCommandTests {
     @Test("TPL-0: a pads kit's echo is unchanged")
     func padsEchoIsUnchanged() async throws {
         let (router, store) = makeRouter()
-        let id = try drumTrack(router, store)
+        let id = try factoryPadsDrumTrack(router, store)
         let response = try payload(await call(router, "track.setInstrument", [
             "trackId": .string(id.uuidString),
             "drumKit": .object(["snare": .object(["tune": .number(210)])]),
@@ -462,7 +487,7 @@ struct DrumKitCommandTests {
     @Test("TPL-0: describeDrumKit reports the layout, which notes play which voice, and the silent GM notes")
     func describeReportsTheLayout() async throws {
         let (router, store) = makeRouter()
-        let id = try drumTrack(router, store)
+        let id = try factoryPadsDrumTrack(router, store)
         let pads = try payload(await call(router, "instrument.describeDrumKit", [
             "trackId": .string(id.uuidString),
         ]))
@@ -512,8 +537,9 @@ struct DrumKitCommandTests {
                 #expect(message.contains("track.setInstrument"), "\(name): \(message)")
             }
         }
+        // W9-DRUMDEF: unchanged from the GM layout a new drum machine starts on.
         let layout = store.tracks.first { $0.id == id }?.instrument?.resolvedDrumKit.noteLayout
-        #expect(layout == .pads)
+        #expect(layout == .gm)
     }
 
     /// ⭐ PLANT 2 REDDENS HERE: a preset changes how the drums SOUND, never
@@ -545,5 +571,74 @@ struct DrumKitCommandTests {
         #expect(padsResponse["noteLayout"]?.stringValue == "pads")
         #expect(store.tracks.first { $0.id == id }?.instrument?.drumKit
             == DrumKitParams.preset(named: "909")?.params)
+    }
+
+    // MARK: - W8-HAT: the two level trims ride the wire through the table
+
+    /// ⭐ NO `Commands.swift` EDIT: `instrument.setDrumParam`, `track.setInstrument`'s
+    /// `drumKit` overlay and `describeDrumKit` all resolve names through
+    /// `DrumKitParams.paramSpecs`, so two appended rows reach the wire as they
+    /// are. This pins that — and that each STORED value is the one asked for,
+    /// clamped, because a setter's echo is not proof it took.
+    @Test("W8-HAT: the hats and cymbals level trims are settable and described on the wire")
+    func levelTrimsRideTheWire() async throws {
+        let (router, store) = makeRouter()
+        // W9-DRUMDEF: the FACTORY kit (trims 0), so setting 23.4 is a change
+        // the store can be seen to take; a new drum machine already starts there.
+        let id = try factoryPadsDrumTrack(router, store)
+        let stored = { store.tracks.first { $0.id == id }?.instrument?.resolvedDrumKit }
+
+        // Positive control: before any edit the trims read the saved-kit neutral.
+        #expect(stored()?.hatsLevelDb == DrumKitParams.savedKitLevelTrimDb)
+
+        let set = try payload(await call(router, "instrument.setDrumParam", [
+            "trackId": .string(id.uuidString), "name": .string("kit.hatsLevelDb"),
+            "value": .number(23.4),
+        ]))
+        #expect(set["value"]?.doubleValue == 23.4)
+        #expect(stored()?.hatsLevelDb == 23.4)
+        #expect(stored()?.cymbalsLevelDb == DrumKitParams.savedKitLevelTrimDb,
+                "setting the hats trim moved the cymbals trim")
+
+        // Clamped into its own range, and the response says what was STORED.
+        let clamped = try payload(await call(router, "instrument.setDrumParam", [
+            "trackId": .string(id.uuidString), "name": .string("kit.cymbalsLevelDb"),
+            "value": .number(100),
+        ]))
+        #expect(clamped["value"]?.doubleValue == DrumKitParams.cymbalsLevelDbRange.upperBound)
+        #expect(clamped["requested"]?.doubleValue == 100)
+        #expect(stored()?.cymbalsLevelDb == DrumKitParams.cymbalsLevelDbRange.upperBound)
+
+        // The drumKit overlay takes them as TOP-LEVEL keys, like `gain`, and a
+        // partial object leaves the other trim where it was.
+        _ = try payload(await call(router, "track.setInstrument", [
+            "trackId": .string(id.uuidString),
+            "drumKit": .object(["cymbalsLevelDb": .number(5.7)]),
+        ]))
+        #expect(stored()?.cymbalsLevelDb == 5.7)
+        #expect(stored()?.hatsLevelDb == 23.4, "a partial drumKit object reset the hats trim")
+
+        // describeDrumKit lists both under `kit`, in dB, with their ranges.
+        let described = try payload(await call(router, "instrument.describeDrumKit", [
+            "trackId": .string(id.uuidString),
+        ]))
+        let hats = try #require(described["kit"]?["hatsLevelDb"])
+        #expect(hats["value"]?.doubleValue == 23.4)
+        #expect(hats["min"]?.doubleValue == DrumKitParams.hatsLevelDbRange.lowerBound)
+        #expect(hats["max"]?.doubleValue == DrumKitParams.hatsLevelDbRange.upperBound)
+        #expect(hats["default"]?.doubleValue == DrumKitParams.newKitHatsLevelDb)
+        #expect(hats["appliesAtNextNoteOn"]?.boolValue == true)
+        let cymbals = try #require(described["kit"]?["cymbalsLevelDb"])
+        #expect(cymbals["value"]?.doubleValue == 5.7)
+        let order = Set(try #require(described["order"]?.arrayValue).compactMap(\.stringValue))
+        #expect(order.isSuperset(of: ["kit.hatsLevelDb", "kit.cymbalsLevelDb"]))
+
+        // A typo is refused, never stored.
+        let typo = await call(router, "instrument.setDrumParam", [
+            "trackId": .string(id.uuidString), "name": .string("kit.hatLevelDb"),
+            "value": .number(6),
+        ])
+        #expect(typo.ok == false)
+        #expect(stored()?.hatsLevelDb == 23.4)
     }
 }

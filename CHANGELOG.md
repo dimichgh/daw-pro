@@ -15,7 +15,7 @@
    - **Before:** it snapped to the old key's notes.
    - **Now:** the new key's notes. A small deliberate detune (a few cents, say, to match another recording) is kept, not tuned away; the reply reports it (`keptDetuneCents`).
 4. **Applying a preset asks less often.** It no longer asks “replace your edits?” when the only thing you changed is a setting the preset keeps anyway, such as voice size.
-5. **Hard Tune's description is corrected.** It said “Replaces your pitch with the exact note”. Measured, a held note keeps about two thirds of its vibrato. It now says “Holds each note in tune, with less vibrato. The robot effect.”
+5. **Hard Tune's description is corrected.** It said “Replaces your pitch with the exact note”. Measured, it removes about half of the wobble in a held note, not all of it: 77.5 → 38.0 cents across nine long notes of the built-in singer in the voice film, in line with the 2026-09-24 correction below (a median 49 % by one pitch meter, 68 % by another). It now says “Holds each note in tune, with less vibrato. The robot effect.”
 6. **The sampler card shows the sound you actually hear.**
    - **Decay and Sustain:** a sample that has no setting of its own now shows the instrument-wide value it plays with. Before, it showed 0 s and 100 %, whatever was really playing.
    - **One Shot:** when the samples set it themselves, the card's switch says “One Shot does nothing: zones set it, not this card.” instead of looking like it works.
@@ -26,7 +26,140 @@
    - **Now:** any number of 2^53 (9,007,199,254,740,992) or more, anywhere in a command's fields, is refused with a message naming the field, for example `params.notes[3].pitch is too large: wire numbers must be below 9007199254740992`. Positions keep their own "past the timeline limit" message. Paging values that large in `au.describeParams` and `instrument.describeSampler`, which used to be quietly clamped, are refused too.
    - `arrange.insertBars` and `arrange.deleteBars` refuse a fractional bar `count` (2.7 used to become 2).
 8. **A new Rock song skeleton has real drums and bass.** Its Drums and Bass tracks had no instrument, so they played the built-in synth's plain tone. They now use the General MIDI Standard Drum Kit and Electric Bass (finger), the same as the other band genres. Only new skeletons change: a saved project keeps the tracks it has.
-**Behind the scenes:** the song skeleton now builds its tracks with the same code that will build band templates. Recorded projects for all 14 genres, with and without your own track list (28 in all), came out byte-for-byte the same before and after; the only change is the Rock fix above. Ten built-in band templates (Pop Band, Piano Ballad, Rock Band, House Club, Hip-Hop 808, Lo-Fi Chill, Jazz Combo, Acoustic Folk, Soul & Blues Band, Reggae Riddim) now ship inside the app with a check that every one loads and follows the rules, but nothing can open them yet. Chopping a clip into pads with an impossibly fine grid can no longer freeze or crash the app; the values that did it were already out of reach of the app and the wire, so this guards against a future caller. The drum-note rule the agents follow now has its own test, and four rule tests report which case failed instead of a bare “false”. The full test suite passes again (11,134 tests): it had been freezing for about 100 seconds and failing 16–22 tests that passed on their own. The cause was the test runner starting every test at once; it now runs as many at a time as the Mac has cores. That freeze was also hiding a crash: a Swift 6.3.3 compiler bug miscompiles an async closure used as a default value when another module relies on it. Five such closures moved into the code that uses them, and a new check (`scripts/gates/async-default-dup.py`) reads every build for the problem. Measured: the app built on 27 September never had it.
+**Behind the scenes:** the song skeleton now builds its tracks with the same code that will build band templates. Recorded projects for all 14 genres, with and without your own track list (28 in all), came out byte-for-byte the same before and after; the only change is the Rock fix above. Ten built-in band templates (Pop Band, Piano Ballad, Rock Band, House Club, Hip-Hop 808, Lo-Fi Chill, Jazz Combo, Acoustic Folk, Soul & Blues Band, Reggae Riddim) now ship inside the app with a check that every one loads and follows the rules. Chopping a clip into pads with an impossibly fine grid can no longer freeze or crash the app; the values that did it were already out of reach of the app and the wire, so this guards against a future caller. The drum-note rule the agents follow now has its own test, and four rule tests report which case failed instead of a bare “false”. The full test suite passes again (11,134 tests): it had been freezing for about 100 seconds and failing 16–22 tests that passed on their own. The cause was the test runner starting every test at once; it now runs as many at a time as the Mac has cores. That freeze was also hiding a crash: a Swift 6.3.3 compiler bug miscompiles an async closure used as a default value when another module relies on it. Five such closures moved into the code that uses them, and a new check (`scripts/gates/async-default-dup.py`) reads every build for the problem. Measured: the app built on 27 September never had it.
+9. **Start a song from a band template, or save and share your own.**
+   - **What you can do:** ten built-in band templates (Pop Band, Piano Ballad, Rock Band, House Club, Hip-Hop 808, Lo-Fi Chill, Jazz Combo, Acoustic Folk, Soul & Blues Band, Reggae Riddim) add a whole band at once: instruments, effects, buses and mixer settings. An AI agent lists them with `template_list`, reads one with `template_describe`, and adds it to your song with `template_apply`, which only ADDS tracks and never changes or removes the ones you have. Save tracks you like as your own template with `template_save`, remove one with `template_remove`, and share one as a `.dawtemplate` file with `template_export` / `template_import`.
+   - **Song skeletons:** `macro_song_skeleton` takes a `template` (an id or a whole template), so one call sets up the song's form and its band together. `dryRun: true` shows what the call would create without changing anything.
+   - **Behaviour change: a misspelled key in a skeleton's track list is now an error.** In `macro_song_skeleton`'s `tracks` list, an unknown key inside a track (for example `mixerPrest` for `mixerPreset`) used to be silently ignored. It is now refused, naming the key and the valid ones. A `program` key gets its own explanation: "A track list can't pick sounds. To choose instruments, pass a template."
+   - **For agents:** seven new commands (`template.list` … `template.export`, 256 → 263) and seven new MCP tools (261 → 268). The plugin bundle is not regenerated yet.
+10. **Sing your own words on a melody.**
+   - **What you can do:** write words, pick a voice, and hear them sung on a MIDI melody. Right-click a melody clip and choose **Sing these notes…**, or press the **SING** chip in the piano-roll header (it is hidden on drum kits). A sheet opens with three parts: **WORDS** (type one word per note; a `+` holds the word before it onto the next note), **VOICE** and **HEIGHT**. Press **Sing it**.
+   - **The voice:** the **Built-in singer**, or your own voice. To add yours, choose **Add your voice…**: the recorder asks whether you are wearing headphones, then you sing for up to 12 seconds. Or choose **Use a recording you already have…**. The recorder stops playback first, asks your Mac for the microphone, and stops by itself on quiet. It stops and saves nothing if the song starts playing or another project opens.
+   - **The first time:** singing needs a one-time download of about 7 GB. It runs on this Mac and nothing you sing leaves it. DAW Pro asks first, with **Install** and **Not now**, and nothing downloads until you press Install. If an AI agent asked for the download, the window says “An AI agent asked for this.”
+   - **While it sings:** a progress card shows the line being sung and roughly how long is left. **Cancel** stops it. The singing arrives as a new audio track named “Vocals — Built-in singer” (or your voice's name). **Undo** takes the whole take away in one step.
+   - **Height:** if the melody is too high or too low for the voice, the sheet suggests either moving the song (**Move the song up 3**, for example) or **Keep the key**. It words this as a suggestion, because how well a voice fits a tune is still being checked.
+   - **Languages:** English, Chinese (Mandarin) and Chinese (Cantonese). Pick one in the **Language** menu. In Chinese, each character is one sung syllable on one note.
+   - **No words?** Under “No words? Sing:” pick **Ooh**, **Aah** or **Mm**. Choose **One sound per line** or **One per note**. The sheet writes the words for you, and you can edit them.
+   - **Write words for me:** type what the words should be about and press **Write**. Words that fit your tune fill the box. Nothing is saved until you press Sing it.
+   - **A word on one note:** click a note in the sheet's strip and type in the **Word on this note** field. Return saves it, and Tab moves to the next note. **Play the tune** plays the melody while the sheet is open, and the words glow as it plays.
+   - **Harmony:** press **Add a harmony** to sing up to 3 more parts in the same go. The choices are “A third above (sweet, close)”, “A sixth below (warm, under the tune)”, “A third below”, “Sing my other melody…” and “Sing the chord's other notes” (offered only when the tune has chords). Each part lands on its own new track, and the whole take is one Undo step.
+   - **When a harmony doesn't fit the voice:** the line under the part says so. If the app had to move the part up or down an octave, it says that too, and when the move makes it sing the same notes as another choice (a sixth below moved up an octave is a third above), it names that choice. It suggests another part only when that part was checked and fits; if none fits, it says so and offers another voice or moving the song's key.
+   - **Expression:** **Vibrato** (As sung, Straight, Gentle, Normal, Wide), **Air (breathiness)** from None to Lots, and **Follow note loudness**, so quieter notes are sung quieter. You can style the whole vocal or just the notes you pick. “Straight” means much less wobble, not none: measured, a ±40 cent wobble at 110 Hz keeps 14 cents.
+   - **Not yet looked at on screen by a person:** the screens are built and tested, but nobody has opened and photographed them yet. Expect small layout fixes.
+   - **For agents:** `sing_render` (starts a take and returns a job), `sing_job_status`, `sing_cancel_job`, `sing_propose_harmony` (preview one harmony), `sing_capabilities` (the languages), `sing_install_engine`, `sing_list_voices`, `sing_add_voice`. Words and style: `clip_set_lyrics` (now takes `language`, or `wordless` instead of `text`), `clip_set_note_word`, `clip_set_sing_style`, `clip_get_sing_style`, and `ai_write_lyrics` with `fitClipId`. `sing_render` takes `parts` (at most 3: harmony, chordTones, clip, double) plus `key` and `mode`. With `dryRun: true` it previews the lead and every part over the words you send, and saves and sings nothing. A request it refuses changes nothing: not the words, not Undo or Redo. A request from an agent never downloads anything by itself: it waits for the person to press Install.
+11. **The hi-hats and cymbals have their own level.**
+   - **What changed:** the drum machine has two new kit-wide settings, `kit.hatsLevelDb` (the two hi-hats, −24 to +36 dB) and `kit.cymbalsLevelDb` (the cymbal, −24 to +24 dB), added on top of each drum's own level. The drum machine now has 77 settings, up from 75.
+   - **What did not change:** both start at 0 dB, so every saved kit and every new kit sounds exactly as it did. We have not picked a new default for how loud the cymbals should be; that is still an open question. (Answered since: see item 26.)
+   - **For agents:** set them with `instrument_set_drum_param` or the `drumKit` object of `track_set_instrument`, and read the full list from `instrument_describe_drum_kit`.
+12. **Record tells you why it cannot start.**
+   - **Before:** if the Record button could not start, nothing visible happened.
+   - **Now:** while the voice recorder is open, the song's Record button is greyed out. Its tooltip says “The voice recorder is open. Close it before recording in the song.” Any other refusal now shows on that tooltip too, instead of being dropped.
+   - **For agents:** `transport_record`, `transport_record_layer` and a loop-deck pass are refused with the same sentence while the recorder is open, and no take is started.
+13. **The Arrangement row starts muted.**
+   - **Before:** "Start a song" (and `macro_song_skeleton`) added an Arrangement row, the one that shows the song's sections, as a real instrument track that could play. If anything wrote notes into it, they sounded and ended up in a bounce unless someone remembered to mute it.
+   - **Now:** the Arrangement row is created muted, so its mute light is on from the start. It is only there to show the sections. Songs you already made keep it as they were saved.
+14. **The Gain effect's knob is easier to set.**
+   - **Before:** the knob's normal level (no change) sat just 6% of the way up, so small moves near it jumped by more than a decibel.
+   - **Now:** the normal level is straight up, at the middle of the knob, and the area around it moves in finer steps. The sound of saved songs does not change; only how far you turn the knob for a given level.
+15. **Behind the scenes (for agents and testers).**
+   - **Tempo rule:** starting a song from a skeleton or a template now follows the same tempo rule as setting the tempo directly, so the two cannot disagree.
+   - **Mixer presets:** `mixer_apply_preset` refuses mid-take only when the preset would remove an effect that listens to another track. Its reply always carries `removedSidechainKeys` (an empty list when none).
+   - **Engine install:** a fast-failing install could lose its outcome, and it did 12 times in 1,000 test runs. The installer now reads everything the install said before it finishes, so the reason is kept.
+   - **App bundle:** the singing scripts now ship inside the built app.
+   - **Music-team agents:** the arranger can read a clip's notes before it trims or splits it, the finisher can remove a reference track it loaded for a loudness check, and the new-song recipe lets the sound designer work alongside the composer.
+   - **Copilot and agent text:** which MIDI controls each instrument responds to is now worked out from the code (the drum machine responds to none; the sampler also follows its own filter and crossfade controls), and the drum machine's settings are counted (77), not typed.
+   - **Recording without the song:** the audio engine can capture the microphone on its own, without playing the song. It refuses to overwrite an existing file.
+   - **Reading an effect's settings:** `fx_get_params` returns one effect's current settings and changes nothing, so it adds no Undo step.
+   - **Checking a bounce's loudness:** `audio_profile_file` takes `loudness: true` and reports the file's loudness (LUFS) and true peak from the same meter the reference tools use. It copies nothing, so checking a file no longer fills the References folder.
+   - **Seeing one note's spectrum:** `fx_spectrum` takes `audition` and, in one call, plays the note and keeps each band's loudest reading across the whole note. Before, the spectrum was read the instant it was switched on, so a previewed note always looked silent.
+   - **Loudness of part of a song:** the agent guides said a measurement starting mid-song drops notes that are already held and can read as silence. That stopped being true in August: such notes are struck again where the measurement starts. The guides now say so, and name the cost: a note that was fading there starts over, so the first moment can read a little louder than in the full song.
+16. **A truthful answer when an agent asks a sound bank for its plugin settings.**
+   - **Before:** asking a sound-bank instrument (a DLS or SoundFont file) for its plugin settings got a refusal that implied it had none at all.
+   - **Now:** the refusal says what is really there: only gain, pan and tuning. Gain and pan are the track's own volume and pan, such values would not be saved with the song, and the way to change the sound is to pick another program in the bank. Nothing else changed.
+17. **An Accent row in the drum step grid.**
+   - **Now:** under a drum instrument's step grid there is an Accent row. A step marked there plays at full strength (velocity 127); hits you enter by hand start at 100, and melodic notes at 100 as before.
+   - **How big an accent is:** at the entry level you picked on Drum Picks (100), an accent is a small lift, worked out from the drum machine's formula rather than measured on a render: about +1.1 dB on the kick, +1.7 dB on the snare, and barely audible on the hi-hat.
+   - Tested; not yet checked on screen.
+18. **Groundwork for drum patterns that lock to the bar lines. Nothing you can hear changes yet.**
+   - The engine can run a step pattern from the song's own clock, following tempo and time-signature changes, instead of a free-running speed. Exports, mixdowns and stems now receive the song's time signature (before, they always assumed 4/4), and a time-signature change made while the song plays now reaches that clock.
+   - Turning a synced step pattern on is still refused. It waits for the timing work in progress (effects that move in time must sound the same live as in an export). (Changed since: see item 27.)
+   - Checked: 24 of 24 exports and 11 earlier renders are identical byte for byte.
+19. **Chopping a drum loop can sort the hits into a drum kit. For agents now; the switch in the app is being built.**
+   - The slicer measures each hit, guesses whether it is a kick, snare, closed hi-hat, open hi-hat or something else, and puts it on its General MIDI drum key: kick 36, snare 38, closed hat 42, open hat 46, everything else from 84 up. The hi-hats share one choke group, so a closed hat cuts an open one off. A wrong guess can be corrected slice by slice.
+   - **Limits, measured:** the guessing rules were fitted on synthetic and drum-machine hits at velocity 100 only. On the Mac's drum kit a closed hat can be sorted as open, and a cymbal as an open hat. Real loops and softer hits are not measured yet.
+   - Chopping without this option works exactly as before, checked byte for byte.
+   - **For agents:** `clip_slice_to_sampler` takes `mapping: "kit"` and `roles` (slice number → role); each slice reports its `role` and `confidence`.
+20. **The Sing window's harmony choices: a fit rule measured on the real singer.**
+   - **Before:** on the built-in voice every harmony choice read as not fitting, although the real singer sang all four in tune (19 of 19 notes).
+   - **Now:** a harmony part has its own fit rule, set by measuring the real singer. A part fits when, on average, it sits no more than 3 semitones outside the voice's usual range, and no single note goes more than 7 above or 8 below it. This is for the built-in voice; for other voices the numbers are provisional. The key suggestion keeps its own rule, checked identical across 1,086 suggestions.
+   - Tested; not yet checked on screen.
+21. **The Sing window's key suggestion says when no key fits.**
+   - When no key change can bring a melody into the voice's range, the suggestion now says which way it misses: too high, too low, or both. Before, it still said "Fits your voice." This was never in a released app. Every suggestion that does fit reads exactly as before (checked on 659 of 1,086).
+   - **For agents:** `sing_propose_key` replies with `recommendation.fits` (true or false).
+   - Tested; not yet checked on screen.
+22. **The built-in singer now uses your picks from Sung Vocal Picks.**
+   - **Vibrato:** when you haven't chosen one, a part is sung with Medium vibrato (about 50 cents of wobble). Before, it was sung exactly as the engine sang it. "As sung" is still there as a choice and is kept when you pick it.
+   - **Harmony:** a harmony part is now sung as a different performance from the lead, not a copy of the lead's. The harmony's level (4 dB under the lead) and a double's width ("a little wide") were already what you picked, so they stay.
+   - **Songs you already made:** a sung part is saved as audio, so it sounds exactly as before. The new defaults apply the next time a part is sung.
+   - **For agents:** the `sing_render` and singing-style tool descriptions state the new defaults.
+   - Tested; not yet checked on screen.
+23. **The pad grid plays the drum machine.**
+   - Pads 1 to 8 play the drum machine's eight drums in order, with the mouse or the computer keyboard, and each pad is labelled with its drum. Drums that cut each other off (the hi-hats) show a link mark.
+   - The chop panel has the switch from item 19: "Sort the hits into a drum kit". Left off, chopping works exactly as before.
+   - Tested; not yet checked on screen.
+24. **Effect automation lands at the same moment live as in an export.**
+   - **Before:** how often an automated or modulated effect setting was updated depended on the audio buffer size, so live playback could hear a change up to 8.6 ms early (small buffers) or 10.7 ms late (large buffers) compared with the exported file.
+   - **Now:** effect automation is updated on one fixed grid counted from the start of the song (every 512 samples, about 10.7 ms at 48 kHz), whatever the buffer size. Exports are unchanged: 73 of 73 test renders are identical byte for byte on two separate sets.
+   - One tiny difference remains on purpose: a phaser on a track with no automation can still differ between live and export, at a level about 127 dB below full scale, far below hearing.
+25. **In a new song, a panned track keeps its loudness.**
+   - **What changed:** in a song you start from now on, the pan knob uses the same rule pan automation always used: as you turn it, the track stays equally loud. Before, the knob only turned the far side down, so a panned track got quieter. Turned fully to one side, the near side now plays 3 dB louder than before (+3.0 dB).
+   - **Songs you already have:** they keep the old rule and sound exactly as before, checked byte for byte on 19 of 19 test renders. The rule is saved with each song.
+   - **Meters:** in a new song a track's meter reads after the pan. A single-channel track panned fully to one side reads up to 3 dB higher (+2.3 dB at half pan). A stereo track can read lower.
+   - **Band templates in a new song:** the five templates with panned parts play 0.4 to 1.2 LU louder and peak at −1.8 to −2.3 dBTP, still inside the −1 dBTP limit.
+   - **Opening a new song in an older copy of the app:** if you save it there, the setting is dropped and the song plays with the old rule.
+   - **For agents:** `project_snapshot` shows `panLaw: "equalPower"` for a new song, and `track_set_pan` explains both rules.
+   - Tested and measured; not yet heard by you.
+26. **A new drum machine: your hi-hat level, General MIDI notes, and room before clipping.**
+   - **Hi-hats and cymbal:** a new drum machine starts with the hi-hats 23.4 dB and the cymbal 5.7 dB louder, the level you picked: version 2 of "Hi-hats, much louder", as loud as the Mac's own drum kit. This answers the open question in item 11.
+   - **Notes:** a new drum machine plays the General MIDI notes (kick 36, snare 38, closed hi-hat 42, open hi-hat 46), so MIDI files and drum parts from other apps land on the right drums. Kits made before keep their pad layout (notes 36 to 43).
+   - **Level:** a new drum machine and every factory kit now start at kit level 0.7, about 3 dB lower than before (Lo-fi and Acoustic 0.63). A normal beat peaks at least 1 dB below clipping. Every drum hit at full force at once can still clip; a limiter on the drum track is the fix.
+   - **Songs you already have:** unchanged, byte for byte, and the three band templates that use the drum machine keep their exact sound. Loading a factory kit onto a drum machine in an older song sets its level to 0.7 (you can undo it).
+   - **For agents:** `instrument_describe_drum_kit` and `instrument_load_drum_preset` state the new defaults.
+   - Tested and measured; not yet checked on screen.
+27. **Step patterns can lock to the beat. For agents now.**
+   - A step-modulation pattern can be set to a note length instead of a speed: 18 lengths from a whole note to a 32nd, each plain, dotted or triplet. It follows the song's tempo and time-signature changes, and live playback matches the export exactly (0 differing samples at three buffer sizes).
+   - This replaces item 18's "still refused" for step patterns. A synced LFO is still refused.
+   - Saved patterns keep their free-running speed and sound exactly as before.
+   - **For agents:** `mod_add_source` and `mod_set_source` take `stepDivision`; a `rateHz` sent with it is ignored with a warning. Band templates save it.
+28. **An export finishes as the song it started in.**
+   - **Before:** if you started a new song or opened another one while stems were exporting, the rest of the export used the new song's tempo, time signature and master settings. A bounce-in-place could even land its new track in the other song.
+   - **Now:** every stem, the mixdown and the mastered copy use the song the export started in. A bounce-in-place interrupted that way adds nothing to either song and says why. Exports that nobody interrupts are unchanged, checked byte for byte.
+   - Tested. Agents see the bounce message (`track_bounce_in_place`), and the track menu now shows it too (item 31).
+29. **Select All in the pitch editor no longer drags the breaths and S sounds along.**
+   - **Before:** after Select All, a pitch drag moved the breaths and S/T sounds with the notes, although sounds are meant to keep the pitch they were sung at. With Keep voice size on they also got about 6 dB quieter.
+   - **Now:** the drag moves the notes. Sounds that only Select All picked stay where they were sung. A sound you choose yourself (click it, ⇧-click it, or draw a box over it) still moves with the drag.
+   - Tested; not yet checked on screen.
+30. **Start a drum part from a ready-made beat.**
+   - Seven beats: Basic Rock, Four on the Floor, Boom Bap, Trap, Half-Time, Breakbeat and One Drop.
+   - **In the step grid:** an empty drum clip offers "Start from a beat". Pick one and it fills the clip to its own length, on the right keys for your kit. One ⌘Z takes it back.
+   - **If your kit lacks a drum the beat uses** (an open hat, say), that drum is left out and named. Nothing else plays in its place.
+   - A clip that already has notes is never overwritten. Beats are written for 4 beats to a bar; a song in another time signature is refused, with the reason.
+   - **For agents:** `pattern_list` and `clip_add_drum_pattern` add a beat as a new clip. They refuse to land on top of another clip rather than cutting it. Send a `clipId` to fill an empty clip that is already there instead. The in-app copilot knows this too.
+   - Tested; the step-grid menu is not yet checked on screen.
+31. **Bounce in Place tells you when it can't.**
+   - **Before:** if Bounce in Place from the track menu was refused, nothing happened and nothing was said.
+   - **Now:** a message says why, for example that a new song was opened while the track was bouncing, or that the song has no clips yet.
+   - Tested; not yet checked on screen.
+32. **Moving a whole vocal up or down no longer makes the slides between notes jump too far.**
+   - **Before:** after Select All, dragging a vocal up an octave moved most slides between notes up to two octaves. A note next to a slide could sound sharp, and the editor drew the slide where it did not play.
+   - **Now:** a slide moves exactly as far as the notes around it, and the editor draws each slide where it plays. Dragging one slide on its own still moves it by the amount you drag. Pitch edits made before this update keep their sound, so in those a slide at the very start or end of a phrase can still move too far.
+   - **For agents:** to move a vocal or phrase, send `moveByCents` to `clip_set_note_pitches` (optionally with `segmentIds`). Its older `notes` form still sets each note's own offset, and now warns when a slide would end up moving twice as far.
+   - Tested, and checked on our male-to-female test vocal: every slide now lands an octave up, with the notes around it. Not yet checked on screen.
+33. **Deleting bars inside a melody clip takes their words with them.**
+   - **Before:** removing a stretch of bars inside a clip in the piano roll kept every word the singer would sing, even words whose notes were all cut. The leftover words then slid onto the wrong notes. Deleting bars across the whole song already removed them.
+   - **Now:** a word whose notes were all cut is removed too, in the same step, so one ⌘Z brings back both the notes and the words. A word that keeps at least one note stays.
+   - **For agents:** `clip_delete_time_range` follows the same rule, and the `arrange_delete_bars` description now says so too.
+   - Tested; not yet checked on screen.
 
 ## 2026-09-27 (e6f7a27)
 

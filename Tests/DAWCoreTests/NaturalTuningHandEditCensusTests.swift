@@ -96,6 +96,12 @@ struct NaturalTuningHandEditCensusTests {
             "the file format's own copy and decode: a saved vocal must reopen AS SAVED",
         "DAWEngine/Stretch/StretchRenderCache.swift:init":
             "the render key's copy of the set (`Params`), never stored back",
+        // p2-sing-x6 (orchestrator, 2026-10-07): a NEW sung take's table, read at `PitchNoteTable.detected`
+        // (seeds through `PitchEditSet.seeded`, the natural-tuning format) and `SungExpressionPlanner`.
+        "AIServices/SingJobCoordinator.swift:finishPart":
+            "a NEW sung take's table (`PitchEditSet.seeded` + the style planner's vibratos), landed on a NEW clip: no old vocal to update",
+        "DAWCore/ProjectStore+SungVocal.swift:init":
+            "`SungVocalTake.init` stores the set it is handed (construction, like `Clip.init`); not an edit",
     ]
 
     // MARK: - The instrument

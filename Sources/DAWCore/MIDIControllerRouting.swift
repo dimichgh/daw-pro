@@ -31,6 +31,47 @@ public enum MIDIControllerRouting {
     public static let samplerRoutedCCs: Set<Int> = [1, 2, 11, 64]
     /// The CCs the built-in POLY SYNTH consumes — sustain only (m16-b2).
     public static let polySynthRoutedCCs: Set<Int> = [64]
+    /// The subset of `samplerRoutedCCs` that is DEPTH-GATED: CC1 and CC2 only
+    /// reach the sound once `SamplerParams.expressionModDepth` is above 0
+    /// (their MIDI neutral is 0, so an unconditional reading would silence a
+    /// clip until the lane's first point). `routing(for:instrument:)` reads
+    /// this set, and so does `controllerSupportSummary`.
+    public static let samplerDepthGatedCCs: Set<Int> = [1, 2]
+
+    /// ONE readable sentence on which controllers each instrument kind
+    /// consumes, DERIVED from `samplerRoutedCCs`, `samplerDepthGatedCCs` and
+    /// `polySynthRoutedCCs` (never retyped), so agent-facing descriptions that
+    /// embed it cannot drift from the routing table again (m34-m). Hosted
+    /// Audio Unit and sound-bank instruments get every CC as raw MIDI.
+    public static var controllerSupportSummary: String {
+        func list(_ ccs: Set<Int>) -> [String] {
+            ccs.sorted().map { describe(.cc(controller: $0)) }
+        }
+        func join(_ items: [String]) -> String {
+            guard items.count > 1 else { return items.first ?? "" }
+            return items.dropLast().joined(separator: ", ") + " and " + items[items.count - 1]
+        }
+        let samplerAlways = ["pitch bend"] + list(samplerRoutedCCs.subtracting(samplerDepthGatedCCs))
+        let samplerGated = list(samplerRoutedCCs.intersection(samplerDepthGatedCCs))
+        var sampler = "The built-in sampler honors \(join(samplerAlways))"
+        if !samplerGated.isEmpty {
+            sampler += ", plus \(join(samplerGated)) once sampler.expressionModDepth is set above 0"
+        }
+        let polySynth = join(["pitch bend"] + list(polySynthRoutedCCs))
+        // `.testTone` is deliberately left out: it is an internal calibration
+        // instrument a user never selects, so naming it would only add noise.
+        return sampler
+            + ", and also the brightness-filter controller (while sampler.expressionFilterDepth is "
+            + "above 0) and any zone-crossfade controller you have set; "
+            + "the built-in poly synth honors \(polySynth) only; "
+            + "the drum machine ignores every controller (it reads note velocity, and its "
+            + "\(drumParameterCount) parameters are steered with mod.addRoute instead); "
+            + "Audio Unit and sound-bank instruments receive every CC as raw MIDI."
+    }
+
+    /// The drum machine's live parameter count: ONE home, `DrumKitParams.paramSpecs`.
+    /// Every user-facing sentence that quotes it goes through here.
+    public static var drumParameterCount: Int { DrumKitParams.paramSpecs.count }
 
     /// The CCs THIS sampler descriptor routes on top of `samplerRoutedCCs`,
     /// because of parameters rather than of being a sampler at all. Mirrors
@@ -111,11 +152,11 @@ public enum MIDIControllerRouting {
             // look generous would put an INERT-lane warning's opposite in front
             // of the user, which is the failure this whole taxonomy exists to
             // prevent. Parameters are steered by `mod.addRoute` instead, and
-            // all 75 of them are reachable that way.
+            // all of them (`drumParameterCount`) are reachable that way.
             return .inert(reason: "the drum machine's voices are one-shots that latch every "
                 + "parameter when a note starts, so no controller steers them. It DOES respond "
                 + "to note velocity (see kit.velocityToTone and kit.accentThreshold), and every "
-                + "one of its 75 parameters can be modulated with mod.addRoute")
+                + "one of its \(drumParameterCount) parameters can be modulated with mod.addRoute")
 
         case .polySynth:
             switch type {
@@ -165,7 +206,7 @@ public enum MIDIControllerRouting {
                 // unconditional reading renders silence before the first
                 // authored point). A lane on them with depth 0 is exactly the
                 // "accepted but inaudible" case this type exists to name.
-                if controller == 1 || controller == 2 {
+                if samplerDepthGatedCCs.contains(controller) {
                     let depth = instrument.resolvedSampler.expressionModDepth ?? 0
                     if depth <= 0 {
                         let name = controller == 1 ? "CC1 (mod wheel)" : "CC2 (breath)"

@@ -200,3 +200,84 @@ test("fx_spectrum description teaches tapPoint (pre/post fader), the 3s lease, a
   assert.match(description, /8 inserts|at most 8/, "names the cap");
   assert.match(description, /mixer_master_analysis/, "points at mixer_master_analysis for field meaning, one home for that copy");
 });
+
+// m27-j (W8-M27J, 2026-10-07): `audition` — play a note and measure it in ONE call.
+
+test("fx_spectrum forwards `audition` verbatim when given (m27-j); without it the params are unchanged", async () => {
+  queuedResult = {
+    ...STUBBED_SNAPSHOT,
+    hold: "peakOverAudition",
+    reads: 23,
+    framesCovered: 21120,
+    framesMissed: 0,
+    audition: { trackId: "track-1", pitches: [69], velocity: 100, durationMs: 300, audible: true },
+  };
+
+  const result = await client.callTool({
+    name: "fx_spectrum",
+    arguments: { trackId: "track-1", effectId: "eq-1", audition: { pitches: [69], durationMs: 300 } },
+  });
+
+  assert.equal(calls.length, 1, "exactly one bridge call");
+  assert.equal(calls[0]!.command, "fx.spectrum");
+  assert.deepEqual(calls[0]!.params, {
+    trackId: "track-1",
+    effectId: "eq-1",
+    arm: undefined,
+    audition: { pitches: [69], durationMs: 300 },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const parsed = parseJSON(result as any);
+  assert.equal(parsed.hold, "peakOverAudition");
+  assert.equal(parsed.framesMissed, 0);
+  assert.equal(parsed.audition.audible, true);
+
+  // Without `audition` the forwarded params carry no `audition` key at all.
+  calls = [];
+  queuedResult = STUBBED_SNAPSHOT;
+  await client.callTool({ name: "fx_spectrum", arguments: { trackId: "track-1", effectId: "eq-1" } });
+  assert.equal(calls.length, 1);
+  assert.ok(!("audition" in calls[0]!.params), "a call without `audition` must not forward the key");
+});
+
+test("fx_spectrum's `audition` schema is strict and has note_audition's limits (zero bridge calls on a bad one)", async () => {
+  const bad = [
+    { pitches: [69], bogus: 1 },
+    { pitches: [200] },
+    { pitches: [] },
+    { pitches: [60, 61, 62, 63, 64, 65, 66, 67, 68] },
+    { pitches: [60.5] },
+    { pitches: [69], velocity: 0 },
+    { pitches: [69], durationMs: 5 },
+    { pitches: [69], durationMs: 5001 },
+    { velocity: 100 },
+  ];
+  for (const audition of bad) {
+    const r = (await client.callTool({
+      name: "fx_spectrum",
+      arguments: { trackId: "t", effectId: "e", audition },
+    })) as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+    assert.ok(r.isError, `expected a schema error for audition ${JSON.stringify(audition)}`);
+  }
+  assert.equal(calls.length, 0, "the schema refuses before bridge.send is ever invoked");
+});
+
+test("fx_spectrum description teaches the one-call audition and the transport recipe (m27-j)", async () => {
+  const tools = await client.listTools();
+  const tool = tools.tools.find((t) => t.name === "fx_spectrum");
+  assert.ok(tool, "fx_spectrum is registered");
+  const description = tool!.description ?? "";
+  assert.match(description, /audition/, "names the audition parameter");
+  assert.match(description, /same call/i, "says to pass it in the SAME call");
+  assert.match(description, /peakOverAudition/, "names what the held reply is");
+  assert.match(description, /framesMissed/, "names the gap counter");
+  assert.match(description, /note_audition/, "warns against note_audition then fx_spectrum");
+  assert.match(description, /85 ?ms/, "says one read covers only the last ~85 ms");
+  assert.match(description, /within 3 seconds/i, "gives the transport recipe's 3-second window");
+  // The schema exposes `audition` as an object with note_audition's keys.
+  const schema = tool!.inputSchema as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const audition = schema.properties?.audition;
+  assert.ok(audition, "inputSchema has an `audition` property");
+  assert.deepEqual(Object.keys(audition.properties ?? {}).sort(), ["durationMs", "pitches", "trackId", "velocity"]);
+  assert.equal(audition.additionalProperties, false, "the nested schema is strict");
+});

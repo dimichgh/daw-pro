@@ -764,6 +764,27 @@ extension SingingSidecarManager: ModelEvicting {
     }
 }
 
+// MARK: - sing.sidecarStop's evidence (p2-sing-e part 2)
+
+extension SingingSidecarManager {
+    /// `sing.sidecarStop` (design §6 row 3): an explicit `stop()` (classified `.explicit`, never as an eviction),
+    /// then the SAME three authority limbs `evictWithoutCoordinator()` gathers — the port, the health probe, and
+    /// the pre-kill captured tree — so the wire's reply is evidence, not a claim.
+    public func stopReportingEvidence() async throws -> SingingStopReport {
+        let status = try await performStop(classification: .explicit)
+        let answering: Bool
+        switch await probeHealth() {
+        case .unreachable: answering = false
+        case .ready, .loading, .modelError, .malformed: answering = true
+        }
+        let evidence = ModelStopEvidence.gather(
+            baseURL: config.baseURL, probeAnswering: answering,
+            capturedTreePids: ModelStopEvidence.capturedTreePids(lastTerminationOutcome),
+            detail: status.message)
+        return SingingStopReport(status: status, evidence: evidence)
+    }
+}
+
 // MARK: - Configuration
 
 extension SingingSidecarManager {
@@ -882,6 +903,9 @@ extension SingingSidecarManager {
             environment["SING_PORT"] = String(port)
             if !allowedRoots.isEmpty { environment["SING_ALLOWED_ROOTS"] = allowedRoots }
             if let logFile, !logFile.isEmpty { environment["SING_LOG_FILE"] = logFile }
+            // The scripts run from a code-signed, read-only bundle: a `__pycache__` written into
+            // `Contents/Resources/sing/singlib/` would break the seal (same rule as RVC).
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
             for (key, value) in extra { environment[key] = value }
             return environment
         }
@@ -921,21 +945,33 @@ extension SingingSidecarManager {
         /// `Package.swift` and use `<repo>/scripts/sing`; else the app bundle's
         /// `Contents/Resources/sing` (`bundle.sh` copies it there before `codesign`, design §2.3).
         public static func resolveScriptsDir(environment: [String: String]) -> URL? {
+            resolveScriptsDir(
+                environment: environment,
+                anchors: [
+                    URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+                    CommandLine.arguments.first.map {
+                        URL(fileURLWithPath: $0).resolvingSymlinksInPath().deletingLastPathComponent()
+                    },
+                ].compactMap { $0 },
+                bundleResourceURLs: [
+                    Bundle.main.resourceURL,
+                    Bundle.main.bundleURL.appendingPathComponent("Contents/Resources"),
+                ].compactMap { $0 })
+        }
+
+        /// The seam behind `resolveScriptsDir(environment:)` (W8-BSG): the anchors and bundle
+        /// resource directories are parameters so a test can pass a temp tree. Order: override
+        /// env, then the repo walk-up from each anchor, then each bundle `Resources/sing`.
+        static func resolveScriptsDir(
+            environment: [String: String], anchors: [URL], bundleResourceURLs: [URL]
+        ) -> URL? {
             if let override = environment["DAWPRO_SING_SCRIPTS_DIR"], !override.isEmpty {
                 return URL(fileURLWithPath: override).standardizedFileURL
             }
-            let anchors = [
-                URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
-                CommandLine.arguments.first.map {
-                    URL(fileURLWithPath: $0).resolvingSymlinksInPath().deletingLastPathComponent()
-                },
-            ].compactMap { $0 }
             for anchor in anchors {
                 if let found = walkUpForScriptsDir(from: anchor) { return found }
             }
-            for base in [
-                Bundle.main.resourceURL, Bundle.main.bundleURL.appendingPathComponent("Contents/Resources"),
-            ].compactMap({ $0 }) {
+            for base in bundleResourceURLs {
                 let candidate = base.appendingPathComponent("sing")
                 if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
             }

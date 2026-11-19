@@ -545,9 +545,10 @@ struct SampleLibraryCommandTests {
         // The §8.3 criterion at reduced length: hold the 1.5 s fixture for
         // 4 s (8 beats at 120 BPM), mixdown 0–4 s to a temp wav, and assert
         // the 3–4 s WINDOW still sounds — the un-looped file exhausts at
-        // 1.5 s. (The m17-e LORE forbids a mid-note measureLoudness window —
-        // the offline render starts at fromBeat and never delivers earlier
-        // note-ons — so the window proof reads the rendered wav directly.)
+        // 1.5 s. (Since m23-bv an offline render CHASES a held note: a window
+        // opening mid-note re-attacks it at the window start, so a mid-note
+        // measureLoudness no longer reads false silence. This proof still reads
+        // the rendered wav directly: it asserts on raw samples, not a LUFS number.)
         let clip = await router.handle(ControlRequest(
             id: "3", command: "clip.addMIDI",
             params: [

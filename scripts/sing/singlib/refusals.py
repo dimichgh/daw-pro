@@ -1,4 +1,5 @@
-"""The facade's refusal table (design 2026-09-27-p2-sing-integration.md §2.4).
+"""The facade's refusal table (design 2026-09-27-p2-sing-integration.md §2.4, plus the four facadeVersion 2 codes of
+2026-10-06-p2-sing-expansion.md §7.4).
 
 Every refusal answers `{"error": <code>, "message": <sentence>}` with the HTTP status below. The app maps each
 code to its own user-facing sentence; `message` is for logs and agents, and names the offending word, note or
@@ -20,6 +21,11 @@ HTTP_STATUS = {
     "loading": 503,               # the model is still loading
     "nonFinite": 500,             # NaN or Inf in the output (nothing is written)
     "inferenceFailed": 500,       # an exception (its first line), or the engine failed to load
+    # facadeVersion 2 only (design 2026-10-06-p2-sing-expansion.md §7.4); a v1 request can never get one of these.
+    "languageNotSupported": 400,  # a word's `lang` this facade does not sing (names it)
+    "vibratoNeedsMelody": 400,    # a note's `vibrato` in score mode (melody mode is item p2-sing-x10)
+    "promptF0Missing": 400,       # melody mode with an own voice and no voice.prompt.f0 (x10; unreachable before)
+    "f0TooShort": 400,            # an internally built f0 curve shorter than the phrase's mel frames (x10; a defect)
 }
 
 # HTTP-level answers that are not part of the §2.4 table (routing, not rendering).

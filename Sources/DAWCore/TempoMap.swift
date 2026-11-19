@@ -436,6 +436,22 @@ public struct MeterMap: Sendable {
         changes[index(forBeat: beat)].beatsPerBar
     }
 
+    /// m39-w4-4c: where a tempo-synced step pattern's step 0 sits at `beat`.
+    /// That is the start of the last meter change at or before `beat`, or song
+    /// beat 0 for a beat before every change.
+    ///
+    /// THE ONE HOME of that rule. The render's clock compile
+    /// (`ModulationSnapshotBuilder.compileClock`) and `mod.describe` (through
+    /// `ModulationMath.syncedStepValue`) both read it, so the step describe
+    /// reports is the step you hear. It gives the same answer as
+    /// `changes.last { $0.startBeat <= beat }?.startBeat ?? 0` for every input,
+    /// NaN and ±infinity included (pinned bit for bit by test): the binary
+    /// search finds that change, and the `<=` re-check keeps the `?? 0`.
+    public func patternOriginBeat(atBeat beat: Double) -> Double {
+        let change = changes[index(forBeat: beat)]
+        return change.startBeat <= beat ? change.startBeat : 0
+    }
+
     /// 0-based bar index + beat-within-bar at `beat`. For the trivial map
     /// this reproduces the legacy `barsBeatsDisplay` arithmetic exactly
     /// (`Int(pos / bpb)` / `truncatingRemainder`). Beats before 0 clamp to

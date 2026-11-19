@@ -77,6 +77,243 @@ extension PitchEditSet {
     }
 }
 
+// MARK: - vf-18: THE GROUP PITCH MOVE, ONE HOME (W9-SLFX, 2026-10-12)
+//
+// A followed slide's own offset is RELATIVE to the line between its neighbours
+// (natural tuning §4.b.3: the bridge ADDS the neighbours' offsets, so a lone
+// drag of the slide moves it by its own offset). A GROUP move that adds the
+// same delta to the slide AND to the notes it follows therefore moves the
+// slide twice: +12 on every note played the slide at +24 (vf-18, measured by
+// W9-SLIDE). The fix is at the WRITER (design `$S/w9/SLRV/REVIEW.md` §1, §3.5):
+// a group move stores `own + k·Δ`, with `k = 1 − glideFollow` for a followed
+// slide that one of its ANCHORS (the notes its bridge reads) moves with, and
+// `k = 1` for everything else. The pitch editor's group drag and the store's
+// `moveClipNotePitches` (the wire's `clip.setNotePitches {moveByCents}`) both
+// call `applyingGroupPitchMove`, so the carry exists once.
+//
+// ⚠️ The LITERAL writer keeps its meaning: `applyingNotePitchOffsets` /
+// `clip.setNotePitches {notes}` store each note's ABSOLUTE own offset, so +M
+// on a slide and on its anchors still plays the slide at about 2M. That is
+// what the literal form asks for (§4.b.3's additive rule); a "move these
+// notes together" goes through THIS transform.
+
+/// The refusal sentences of the group pitch move, ONE home (the wire lane
+/// echoes them verbatim). The unknown-note and empty-list refusals are
+/// `applyingNotePitchOffsets`'s own, never restated here.
+public enum NotePitchMoveSentences {
+    /// A move that is not a number.
+    public static func moveNotANumber(_ value: Double) -> String {
+        "The move has to be a number of cents (100 cents is one semitone); \(value) is not one. "
+            + "Nothing was changed."
+    }
+
+    /// A move that would take some note past `NoteSegment.pitchOffsetCentsRange`.
+    /// `lowest`/`highest` are the whole-cent moves the group CAN make, so the
+    /// caller can retry inside them.
+    public static func moveOutOfRange(byCents: Double, segmentId: UUID,
+                                      lowest: Double, highest: Double) -> String {
+        "Moving these notes together by \(wholeCents(byCents)) cents would take note \(segmentId) "
+            + "past the pitch limit (2400 cents, two octaves, either way from where it was sung). "
+            + "Together these notes can move by \(wholeCents(lowest)) to \(wholeCents(highest)) "
+            + "cents. Nothing was changed."
+    }
+
+    /// No note named and no sung note to move (the store's "every sung note").
+    public static let noSungNotes =
+        "This clip has no sung notes to move (only sounds like breaths or consonants). Name the "
+        + "notes to move with segmentIds. Nothing was changed."
+
+    /// A signed whole number of cents, `+0` never `-0`. Formatted, never
+    /// converted to `Int`, so an absurd but finite move cannot trap.
+    static func wholeCents(_ value: Double) -> String {
+        let rounded = value.rounded()
+        return rounded == 0 ? "+0" : String(format: "%+.0f", rounded)
+    }
+}
+
+extension PitchEditSet {
+
+    /// vf-18: the stored-offset factor `k` for the note at `index` in a GROUP
+    /// pitch move, every member of which (`movingIDs`) moves by the same delta.
+    ///  * `1 − glideFollow` for a followed slide (`glideFollow` > 0, the
+    ///    render's own test for a bridge) in the group, at least one of whose
+    ///    ANCHORS is in the group too: its bridge already adds that move, so
+    ///    its own offset takes only the rest (`k = 0` at a full follow).
+    ///  * `1` for everything else: a note, a sound, a slide moved WITHOUT its
+    ///    anchors (a lone drag of a slide keeps meaning +D, §4.b.3), and a note
+    ///    that is not in the group.
+    /// The anchors are read as the moved set will render them: a SOUND in the
+    /// group counts as a curve note (a moved sound enters the curve, R21),
+    /// whatever its offset now, because the carry is fixed at the start of a
+    /// gesture and does not know the delta. Which neighbours are anchors is
+    /// the rule the move will STORE (`ruleAfterHandEdit()`, adoption
+    /// included): every neighbour across a soft join under the legacy rule,
+    /// only a HELD one under the hold rule (`PitchEditSet.isSlideAnchor`).
+    /// Constant for a given group, so the pitch editor computes it once per
+    /// gesture (`groupMoveCarries(movingIDs:)` reads the rule once for all).
+    public func groupMoveCarry(ofSegmentAt index: Int, movingIDs: Set<UUID>) -> Double {
+        groupMoveCarry(ofSegmentAt: index, movingIDs: movingIDs, rule: ruleAfterHandEdit())
+    }
+
+    /// `groupMoveCarry` for every member of `movingIDs` at once (the rule is
+    /// read once): the factor per moving note's id. A note not in the table
+    /// is absent.
+    public func groupMoveCarries(movingIDs: Set<UUID>) -> [UUID: Double] {
+        let rule = ruleAfterHandEdit()
+        var out: [UUID: Double] = [:]
+        for index in segments.indices where movingIDs.contains(segments[index].id) {
+            out[segments[index].id] = groupMoveCarry(ofSegmentAt: index, movingIDs: movingIDs, rule: rule)
+        }
+        return out
+    }
+
+    func groupMoveCarry(ofSegmentAt index: Int, movingIDs: Set<UUID>, rule: SlideFollowRule) -> Double {
+        guard segments.indices.contains(index) else { return 1 }
+        let note = segments[index]
+        guard note.glideFollow > 0, movingIDs.contains(note.id) else { return 1 }
+        let anchors = groupMoveAnchorIndices(ofSegmentAt: index, movingIDs: movingIDs, rule: rule)
+        let anchorMoves = [anchors.previous, anchors.next].contains { anchor in
+            anchor.map { movingIDs.contains(segments[$0].id) } == true
+        }
+        return anchorMoves ? 1 - note.glideFollow : 1
+    }
+
+    /// The notes a followed slide at `index` reads as its anchors under
+    /// `rule` once the group `movingIDs` has moved: its previous and next
+    /// CURVE notes across a SOFT join (R15) that `isSlideAnchor` admits, nil
+    /// on a side with none. A curve note is one that `entersPitchCurve`, or a
+    /// sound in the group (see `groupMoveCarry`).
+    func groupMoveAnchorIndices(ofSegmentAt index: Int, movingIDs: Set<UUID>,
+                                rule: SlideFollowRule) -> (previous: Int?, next: Int?) {
+        func isCurveNote(_ j: Int) -> Bool {
+            segments[j].entersPitchCurve || movingIDs.contains(segments[j].id)
+        }
+        let note = segments[index]
+        var previous: Int?
+        var j = index - 1
+        while j >= 0 {
+            if isCurveNote(j) { previous = j; break }
+            j -= 1
+        }
+        var next: Int?
+        j = index + 1
+        while j < segments.count {
+            if isCurveNote(j) { next = j; break }
+            j += 1
+        }
+        if let p = previous, Self.joinKind(leftEndSeconds: segments[p].endSeconds,
+                                           rightStartSeconds: note.startSeconds) != .soft {
+            previous = nil
+        }
+        if let n = next, Self.joinKind(leftEndSeconds: note.endSeconds,
+                                       rightStartSeconds: segments[n].startSeconds) != .soft {
+            next = nil
+        }
+        if let p = previous, !Self.isSlideAnchor(segments[p], rule: rule) { previous = nil }
+        if let n = next, !Self.isSlideAnchor(segments[n], rule: rule) { next = nil }
+        return (previous, next)
+    }
+
+    /// ⭐ **THE GROUP PITCH MOVE (vf-18), one transform.** Every named note
+    /// moves by `byCents` together, the way dragging them together in the
+    /// pitch editor does: each lands at `baseline + k·byCents`, `k` from
+    /// `groupMoveCarry` (a followed slide moved with its anchors is CARRIED by
+    /// them, so it plays exactly `byCents` higher, never twice that).
+    ///  * `k == 1` keeps `baseline + byCents`, the literal expression, bit for
+    ///    bit; only `k < 1` takes `baseline + byCents · k`.
+    ///  * ALL OR NOTHING: if any note would land outside
+    ///    `NoteSegment.pitchOffsetCentsRange` (±2400 c), the move is refused in
+    ///    words naming the whole-cent range the group CAN move, and nothing is
+    ///    stored. A non-finite move is refused in words.
+    ///  * An empty list and an unknown id are refused in
+    ///    `applyingNotePitchOffsets`' own words; a repeated id is folded.
+    ///  * The stored set comes from `applyingNotePitchOffsets` (the ONE home of
+    ///    the clamp, the no-op rule and D4-1's `afterHandEdit(from: self)`), so
+    ///    a drag's draft, its release and the wire store the same set.
+    /// Returns the stored set, the ABSOLUTE offsets it wrote (segment order,
+    /// the literal writer's shape) and the ids of the carried slides (`k < 1`).
+    public func applyingGroupPitchMove(segmentIDs: [UUID], byCents: Double, clipId: UUID) throws
+        -> (set: PitchEditSet, offsets: [NotePitchOffset], carriedSlideIDs: [UUID]) {
+        guard !segmentIDs.isEmpty else {
+            // `applyingNotePitchOffsets` refuses an empty list in its words.
+            return (try applyingNotePitchOffsets([], clipId: clipId), [], [])
+        }
+        guard byCents.isFinite else {
+            throw ProjectError.invalidClipEdit(NotePitchMoveSentences.moveNotANumber(byCents))
+        }
+        // Unknown ids first, in the per-note setters' words (`transitionIndex`
+        // is `applyingNotePitchOffsets`' sentence, verbatim).
+        let movingIDs = Set(segmentIDs)
+        for id in segmentIDs { _ = try Self.transitionIndex(of: id, in: self, clipId: clipId) }
+
+        let rule = ruleAfterHandEdit()
+        let range = NoteSegment.pitchOffsetCentsRange
+        let tolerance = 1e-9
+        var offsets: [NotePitchOffset] = []
+        var carried: [UUID] = []
+        var lowest = -Double.infinity
+        var highest = Double.infinity
+        var outside: UUID?
+        for index in segments.indices where movingIDs.contains(segments[index].id) {
+            let note = segments[index]
+            let carry = groupMoveCarry(ofSegmentAt: index, movingIDs: movingIDs, rule: rule)
+            let baseline = note.pitchOffsetCents
+            let target = carry == 1 ? baseline + byCents : baseline + byCents * carry
+            if carry < 1 { carried.append(note.id) }
+            if carry > 0 {
+                lowest = max(lowest, (range.lowerBound - baseline) / carry)
+                highest = min(highest, (range.upperBound - baseline) / carry)
+            }
+            if outside == nil
+                && (target < range.lowerBound - tolerance || target > range.upperBound + tolerance) {
+                outside = note.id
+            }
+            offsets.append(NotePitchOffset(segmentId: note.id, offsetCents: target))
+        }
+        if let outside {
+            // Inward to whole cents, so the range the sentence names is safe.
+            throw ProjectError.invalidClipEdit(NotePitchMoveSentences.moveOutOfRange(
+                byCents: byCents, segmentId: outside,
+                lowest: (lowest - tolerance).rounded(.up),
+                highest: (highest + tolerance).rounded(.down)))
+        }
+        return (try applyingNotePitchOffsets(offsets, clipId: clipId), offsets, carried)
+    }
+
+    /// ⭐ vf-18 — **WHERE A FOLLOWED SLIDE PLAYS, ONE HOME** (design
+    /// `$S/w9/SLRV/REVIEW.md` §3.7): for every note with `glideFollow` g > 0,
+    /// `g · (from + to) / 2` cents — the mean of the tilt its bridge adds over
+    /// its span (`PitchCorrectionCurve.bridge` is `g · (from + (to − from)·u)`
+    /// with `u` a smoothstep, whose mean is ½), so a flat note drawn there sits
+    /// on the middle of the line it plays. The pitch editor draws every blob
+    /// from it (`NoteBlob.followCents`) and re-reads it from the draft set
+    /// during a drag.
+    ///  * `(from, to)` are `slideAnchorCents(ofSegmentAt:rule:)` under this
+    ///    set's OWN rule (`slideFollowRule`): the curve's hold branch reads that
+    ///    helper, and its legacy case reads the same soft neighbours the curve's
+    ///    legacy loop reads (that helper's doc says the CURVE never calls the
+    ///    legacy case; a display reading it is the inertness predicate's use,
+    ///    not a second curve).
+    ///  * A DISPLAY read: no render, no stored offset and no carry reads it
+    ///    (the carry is `groupMoveCarries`, fixed at a gesture's start).
+    ///  * Only non-zero entries; `ids` limits the notes asked (the editor's
+    ///    live drag asks for its moving notes only).
+    /// Moved here from the editor (`PitchEditorModel`, W9-SLED) unchanged, so
+    /// what the editor draws stays bit for bit what it drew.
+    public func slideFollowCents(only ids: Set<UUID>? = nil) -> [UUID: Double] {
+        var out: [UUID: Double] = [:]
+        for index in segments.indices {
+            let note = segments[index]
+            guard note.glideFollow > 0, ids.map({ $0.contains(note.id) }) ?? true,
+                  let anchors = slideAnchorCents(ofSegmentAt: index, rule: slideFollowRule)
+            else { continue }
+            let follow = note.glideFollow * (anchors.from + anchors.to) / 2
+            if follow != 0 { out[note.id] = follow }
+        }
+        return out
+    }
+}
+
 // MARK: - Natural tuning §4: the slide transforms (NT-C C4)
 //
 // The same ONE-HOME rule as `applyingNotePitchOffsets`, for the joins: the

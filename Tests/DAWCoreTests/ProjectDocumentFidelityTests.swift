@@ -80,6 +80,16 @@ struct ProjectDocumentFidelityTests {
                                                 transport: TransportState) {
         var tracks = MODPFixture.kitchenSinkTracks(modulated: true)
         tracks[1].effects += everyEffectKind()
+        // p2-sing-x5: a singing style off its default in every field, on the Keys melody (notes 401/402), so G3
+        // can see `Clip.singStyle` reach the file. Added HERE, not in `MODPFixture`, so the G2 goldens (built from
+        // the fixture) keep their pre-x5 bytes.
+        tracks[2].clips[0].singStyle = SingStyle(
+            vibrato: .wide, air: 0.4, followVelocity: true,
+            notes: [MODPFixture.id(401): NoteSingStyle(vibrato: .straight, air: 0),
+                    MODPFixture.id(402): NoteSingStyle(air: 0.9)])
+        // m39-w4-6: a drum role on the kitchen sink's sampler zone, so G3 can see `SamplerZone.drumRole` reach
+        // the file. HERE, not in `MODPFixture`, for the same reason: the G2 goldens keep their pre-w4-6 bytes.
+        tracks[2].instrument?.sampler?.zones[0].drumRole = .cymbal
         let transport = try MODPFixture.kitchenSinkTransport()
         let base = try MODPFixture.kitchenSinkDocument(modulated: true, absoluteMedia: true)
         let master = masterModulation()
@@ -90,7 +100,9 @@ struct ProjectDocumentFidelityTests {
             masterEffects: (base.masterEffects ?? []).compactMap { $0.effectDescriptor() },
             masterAutomation: base.masterAutomation ?? [], copilotChats: base.copilotChats ?? [],
             reference: MODPFixture.referenceSlot(),
-            masterModulationSources: master.sources, masterModulationRoutes: master.routes)
+            masterModulationSources: master.sources, masterModulationRoutes: master.routes,
+            // m39-panlaw-new: off its default, so the round trip proves it is saved.
+            panLaw: .equalPower)
         document.savedAt = MODPFixture.savedAt
         return (document, tracks, transport)
     }
@@ -169,7 +181,7 @@ struct ProjectDocumentFidelityTests {
     static let clipTable: [String: Verdict] = same(
         "id", "name", "startBeat", "lengthBeats", "notes", "isAIGenerated", "startOffsetSeconds", "gainDb",
         "fadeInBeats", "fadeOutBeats", "fadeInCurve", "fadeOutCurve", "stretchRatio", "pitchShiftSemitones",
-        "formantPreserve", "gainEnvelope", "controllerLanes", "pitchEdits", "lyrics")
+        "formantPreserve", "gainEnvelope", "controllerLanes", "pitchEdits", "lyrics", "singStyle")
         .merging(["audioFileURL": .saved("media"), "takeGroupID": .saved("takeGroupId")]) { a, _ in a }
 
     static let transportTable: [String: Verdict] = same(
@@ -197,7 +209,7 @@ struct ProjectDocumentFidelityTests {
         "id", "rootPitch", "minPitch", "maxPitch", "gain", "minVelocity", "maxVelocity", "group", "seqLength",
         "seqPosition", "randMin", "randMax", "tuneCents", "pan", "ampVelTrack", "oneShot", "startFrame",
         "endFrame", "attack", "decay", "sustain", "release", "loopMode", "loopStart", "loopEnd", "crossfade",
-        "reverse", "chokeGroup").merging(["audioFileURL": .saved("media")]) { a, _ in a }
+        "reverse", "chokeGroup", "drumRole").merging(["audioFileURL": .saved("media")]) { a, _ in a }
 
     static let takeGroupTable: [String: Verdict] = same("id", "name", "lanes", "comp", "crossfadeSeconds")
     static let takeLaneTable: [String: Verdict] = same("id", "name", "clip")
@@ -220,10 +232,11 @@ struct ProjectDocumentFidelityTests {
     static let projectDocumentTable: [String: Verdict] = same(
         "schemaVersion", "savedAt", "name", "masterVolume", "transport", "tracks", "grooveTemplates", "markers",
         "tempoMap", "meterChanges", "tempoMapRevision", "masterEffects", "masterAutomation",
-        "masterModulationSources", "masterModulationRoutes", "copilotChats", "reference")
+        "masterModulationSources", "masterModulationRoutes", "copilotChats", "reference", "panLaw")
         .merging([
             "copilotChatsDroppedOnLoad": .notSaved("a fact about the last DECODE (chats that could not be read); never coded"),
             "referenceDroppedOnLoad": .notSaved("a fact about the last DECODE (a reference that could not be read); never coded"),
+            "panLawUnreadOnLoad": .notSaved("a fact about the last DECODE (a pan rule this build cannot read); never coded"),
         ]) { a, _ in a }
 
     /// One mirrored type: its classification, instances from the kitchen sink, a fresh default instance, and the
@@ -459,6 +472,7 @@ extension ProjectDocumentFidelityTests {
         "_tracks": .saved("tracks"),
         "_transport": .saved("transport"),
         "_masterVolume": .saved("masterVolume"),
+        "_panLaw": .saved("panLaw"),
         "_masterEffects": .saved("masterEffects"),
         "_masterAutomation": .saved("masterAutomation"),
         "_masterModulationSources": .saved("masterModulationSources"),
@@ -515,6 +529,7 @@ extension ProjectDocumentFidelityTests {
         "_loopDeck": .notSaved("a live-looping session: deliberately not part of the project, see its declaration"),
         "_stopAtContentEnd": .notSaved("a session preference, deliberately never written, see its declaration"),
         "_armedEndStop": .notSaved("the stop armed for this playback"),
+        "_voiceRecorderOpenReason": .notSaved("the app's voice recorder card is open: live UI state the store never saves or clears, see its declaration (p2-sing-f2)"),
         "_insertAnalysisOwners": .notSaved("which live analysers are open"),
         "audition": .notSaved("live preview playback"),
         "livePlay": .notSaved("live keyboard playing"),
@@ -1124,3 +1139,98 @@ enum MODPMirrorDiff {
     }
 }
 // END MODP FIXTURE
+
+// MARK: - S2 (p2-sing-x5, design docs/design/2026-10-06-p2-sing-expansion.md §9.2): no style, no byte change
+
+extension ProjectDocumentFidelityTests {
+
+    /// The four G2 fixtures AS COMMITTED (captured on e6f7a27, unchanged at e7e4d24; their sha256 values are
+    /// pinned in W8-X5M's PREDICTIONS P1, and this round trip was run green on the tree BEFORE any p2-sing-x5
+    /// edit, run PB1). They are the pin-before bytes of S2.
+    static let s2FixtureNames = ["empty", "simple", "routed", "kitchen-sink"]
+
+    static func s2FixtureBytes(_ name: String) throws -> Data {
+        let url = try #require(
+            Bundle.module.url(forResource: name, withExtension: "json",
+                              subdirectory: "Fixtures/ProjectDocumentFidelity"),
+            "the fixture \(name).json is not in the test bundle — a missing file must not read as a match")
+        return try Data(contentsOf: url)
+    }
+
+    /// Opens `bytes` through the real open path's reader (`ProjectBundle.read`), from a temp bundle.
+    static func s2Open(_ bytes: Data, _ name: String) throws -> ProjectDocument {
+        let bundle = tempBundle("s2-\(name)")
+        defer { try? FileManager.default.removeItem(at: bundle) }
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        try bytes.write(to: bundle.appendingPathComponent("project.json"))
+        return try ProjectBundle.read(from: bundle)
+    }
+
+    @Test("S2: each committed fixture opens with no singing style and no lyric language, and saves to its pin-before bytes")
+    func s2FixturesRoundTripToTheirPinBeforeBytes() throws {
+        var clipsSeen = 0
+        var midiSeen = 0
+        var lyricsSeen = 0
+        for name in Self.s2FixtureNames {
+            let pinned = try Self.s2FixtureBytes(name)
+            #expect(pinned.count > 400, "the fixture \(name).json is implausibly small (\(pinned.count) bytes)")
+            let text = String(decoding: pinned, as: UTF8.self)
+            #expect(!text.contains("\"singStyle\""), "precondition: \(name).json predates the field")
+            #expect(!text.contains("\"language\""), "precondition: \(name).json carries no lyric language")
+            let document = try Self.s2Open(pinned, name)
+            // The file's own clip records (the ClipDocument mirror), timeline and take lanes.
+            let records = document.tracks.flatMap { $0.clips }
+                + document.tracks.flatMap { $0.takeGroups ?? [] }.flatMap { $0.lanes }.map { $0.clip }
+            for record in records {
+                #expect(record.singStyle == nil, "S2 \(name): the file record of '\(record.name)' has a style")
+            }
+            // And the clips the project opens as (both ClipDocument → Clip reconstructions).
+            let runtime = document.runtimeState(bundleURL: URL(fileURLWithPath: "/tmp/x5-s2-\(name).dawproj"))
+            let clips = runtime.tracks.flatMap { $0.clips }
+                + runtime.tracks.flatMap { $0.takeGroups }.flatMap { $0.lanes }.map { $0.clip }
+            #expect(clips.count == records.count, "control: every record opened as a clip")
+            for clip in clips {
+                clipsSeen += 1
+                if clip.isMIDI { midiSeen += 1 }
+                #expect(clip.singStyle == nil, "S2 \(name): '\(clip.name)' opened with a singing style")
+                if let lyrics = clip.lyrics {
+                    lyricsSeen += 1
+                    #expect(lyrics.language == nil, "S2 \(name): '\(clip.name)' opened with a language")
+                }
+            }
+            let again = try Self.bundleBytes(of: document)
+            #expect(again == pinned, "S2 \(name): \(Self.firstDifference(again, pinned))")
+        }
+        // Positive control on the language read (p2-sing-x3 landed `ClipLyrics.language`; read directly since
+        // W8-X3b): a file that HAS a language opens with it.
+        let withLanguage = try JSONDecoder().decode(ClipLyrics.self, from: Data(#"{"text":"a","language":"zh"}"#.utf8))
+        #expect(withLanguage.language == "zh", "control: a language that is there is read")
+        #expect(clipsSeen >= 5, "control: the fixtures hold clips (\(clipsSeen))")
+        #expect(midiSeen >= 2, "control: and MIDI clips, the only kind that can carry a style (\(midiSeen))")
+        #expect(lyricsSeen >= 1, "control: and a clip with lyrics (\(lyricsSeen))")
+    }
+
+    @Test("S2 control: the round trip CAN fail — a changed document, or a styled clip, no longer matches its pin")
+    func s2RoundTripCanFail() throws {
+        let pinned = try Self.s2FixtureBytes("kitchen-sink")
+        var document = try Self.s2Open(pinned, "kitchen-sink")
+        document.savedAt = Date(timeIntervalSince1970: 0)
+        #expect(try Self.bundleBytes(of: document) != pinned)
+
+        // A style on the one MIDI clip adds exactly one key, and so changes the bytes.
+        var tracks = document.runtimeState(bundleURL: URL(fileURLWithPath: "/tmp/x5-s2-ks.dawproj")).tracks
+        let t = try #require(tracks.firstIndex { $0.clips.contains { $0.isMIDI } })
+        let c = try #require(tracks[t].clips.firstIndex { $0.isMIDI })
+        tracks[t].clips[c].singStyle = SingStyle(vibrato: .wide)
+        let styled = ClipDocument(from: tracks[t].clips[c], media: nil)
+        #expect(styled.singStyle == SingStyle(vibrato: .wide))
+        var restyled = try Self.s2Open(pinned, "kitchen-sink")
+        let dt = try #require(restyled.tracks.firstIndex { $0.clips.contains { $0.notes != nil } })
+        let dc = try #require(restyled.tracks[dt].clips.firstIndex { $0.notes != nil })
+        restyled.tracks[dt].clips[dc] = styled
+        let bytes = try Self.bundleBytes(of: restyled)
+        #expect(bytes != pinned)
+        let text = String(decoding: bytes, as: UTF8.self)
+        #expect(text.components(separatedBy: "\"singStyle\"").count - 1 == 1)
+    }
+}

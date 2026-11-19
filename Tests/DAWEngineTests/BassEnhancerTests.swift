@@ -448,48 +448,12 @@ struct BassEnhancerTests {
 
     // MARK: - P11: the render path allocates nothing (m23-r1 probe recipe)
 
-    private typealias MallocLoggerFn =
-        @convention(c) (UInt32, UInt, UInt, UInt, UInt, UInt32) -> Void
-
-    /// Heap cells, NOT stored properties: the hook runs INSIDE malloc with its
-    /// locks held, so it must never allocate nor trip a lazy global init.
-    private nonisolated(unsafe) static let eventCount =
-        UnsafeMutablePointer<Int>.allocate(capacity: 1)
-    private nonisolated(unsafe) static let watchedThread =
-        UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-
-    private static let eventHook: MallocLoggerFn = { _, _, _, _, _, _ in
-        var tid: UInt64 = 0
-        pthread_threadid_np(nil, &tid)  // no allocation, safe under malloc
-        if tid == BassEnhancerTests.watchedThread.pointee {
-            BassEnhancerTests.eventCount.pointee &+= 1
-        }
-    }
-
-    /// libmalloc's `malloc_logger` global. Nil is a FAILURE for the caller,
-    /// never a skip — a silently-absent probe is the vacuity this leg exists
-    /// to prevent (m23-r1).
-    private static func mallocLoggerSlot() -> UnsafeMutablePointer<MallocLoggerFn?>? {
-        guard let raw = dlsym(UnsafeMutableRawPointer(bitPattern: -2),
-                              "malloc_logger") else { return nil }
-        return raw.assumingMemoryBound(to: MallocLoggerFn?.self)
-    }
-
-    private static func mallocEvents(
-        slot: UnsafeMutablePointer<MallocLoggerFn?>, _ body: () -> Void
-    ) -> Int {
-        pthread_threadid_np(nil, &watchedThread.pointee)
-        eventCount.pointee = 0
-        let previous = slot.pointee  // restore, don't assume it was nil
-        slot.pointee = eventHook
-        body()
-        slot.pointee = previous
-        return eventCount.pointee
-    }
+    // The hook, the counter cells and the process-wide window lock live in
+    // `Support/MallocProbe.swift` (m39-test-mallocprobe): one measurement at a time.
 
     @Test("process() allocates nothing across 4 000 quanta — and it actually ran")
     func processIsAllocationFree() throws {
-        guard let slot = Self.mallocLoggerSlot() else {
+        guard let slot = MallocProbe.slot() else {
             Issue.record("malloc_logger is unavailable — the allocation probe cannot run. FAILURE, not a skip.")
             return
         }
@@ -532,7 +496,7 @@ struct BassEnhancerTests {
         // `for _ in 0..<n {}` with an EMPTY body raises ~2 malloc/free events
         // per iteration from Range iteration itself, which would redden the
         // leg with the harness's own allocations (m23-r1 law).
-        let events = Self.mallocEvents(slot: slot) {
+        let events = MallocProbe.events(slot: slot) {
             var call = 0
             while call < calls {
                 var frame = 0
@@ -550,7 +514,7 @@ struct BassEnhancerTests {
         // DOES allocate must be seen, or the leg above observes nothing.
         var sink: [[Float]] = []
         sink.reserveCapacity(calls)  // outside the measured window
-        let controlEvents = Self.mallocEvents(slot: slot) {
+        let controlEvents = MallocProbe.events(slot: slot) {
             var call = 0
             while call < calls {
                 sink.append([Float](repeating: 0, count: 8))

@@ -4,9 +4,10 @@ import Foundation
 /// Render-side evaluation of a published `ModulationSnapshot` (m39-e §3.2).
 ///
 /// **RENDER-THREAD CONTRACT.** No allocation, no locks, no ObjC, no actor
-/// hops, no retain/release: the snapshot is borrowed, every source is a pure
-/// function of the transport sample position, and the arithmetic is libm plus
-/// integer ops. The closed forms themselves live in `DAWCore.ModulationMath`
+/// hops, no retain/release: the snapshot is borrowed, every source but the
+/// envelope follower is a pure function of the transport position (a
+/// tempo-synced step source of the MUSICAL position, read off the snapshot's
+/// precomputed clock, m39-w4-4), and the arithmetic is libm plus integer ops. The closed forms themselves live in `DAWCore.ModulationMath`
 /// so the control plane's `mod.describe` and this render path CANNOT disagree
 /// about what a source is doing — one home, two callers.
 ///
@@ -45,6 +46,13 @@ enum ModulationEvaluator {
                 gainLinear: source.detectorGainLinear)
 
         case ModulationSnapshot.SourceCode.stepSequencer:
+            // m39-w4-4: a tempo-synced source reads the musical clock. A
+            // free-running one (`divisionBeats == 0`) takes the unchanged path
+            // below and never touches the clock.
+            if source.divisionBeats > 0 {
+                return syncedStepValue(of: source, atSample: p, positionValid: positionValid,
+                                       snapshot: snapshot)
+            }
             guard positionValid, source.samplesPerStep > 0, source.stepCount > 0,
                   let steps = snapshot.steps.baseAddress else { return neutral }
             let position = Double(p) / source.samplesPerStep
@@ -72,6 +80,40 @@ enum ModulationEvaluator {
                 seed: source.seed, cycleIndex: Int64(floor(raw)))
             return source.bipolar ? v : ModulationMath.toUnipolar(v)
         }
+    }
+
+    /// m39-w4-4 — a TEMPO-SYNCED step source at project-absolute sample `p`
+    /// (design §4.2).
+    ///
+    /// RT, line by line: the guard is Bool/Int compares and the unwrap of a
+    /// stored buffer's base address; `p &- originSample` is one Int64
+    /// subtraction (the clock is indexed by ROLL sample, never by `p`);
+    /// `clockPosition` is the snapshot's bounded binary search over its own POD
+    /// buffer — no allocation, no lock, no ObjC, no tempo map; the next three
+    /// lines are Double arithmetic; the closed form reads the step pool through
+    /// a pointer. Nothing is stored between calls, so a seek and a loop wrap read
+    /// what a playthrough reads (the no-accumulator law below holds here too).
+    ///
+    /// `+ h` makes the edge TRAIL the boundary: the centred closed form
+    /// evaluated `h` later ramps over [k − 2h, k) and returns exactly step k AT
+    /// the boundary, so a drum hit on the grid line latches its own step, never
+    /// the average of two. `edgeMs` stays `edgeMs` across a tempo change: the
+    /// fraction is derived from the segment's rate, with the builder's 0.98 cap.
+    @inline(__always)
+    static func syncedStepValue(of source: ModulationSnapshot.Source, atSample p: Int64,
+                                positionValid: Bool, snapshot: ModulationSnapshot) -> Double {
+        guard positionValid, source.stepCount > 0,
+              let steps = snapshot.steps.baseAddress else { return neutral }
+        let clock = snapshot.clockPosition(atRollSample: p &- snapshot.originSample)
+        guard clock.valid else { return neutral }
+        let stepPosition = (clock.beat - clock.patternOriginBeat) / source.divisionBeats
+        let edgeFraction = min(source.edgeSamples * clock.beatsPerSample / source.divisionBeats, 0.98)
+        let h = ModulationMath.stepEdgeHalfWidth(edgeFraction: edgeFraction)
+        return ModulationMath.stepSequencer(
+            stepPosition: stepPosition + h,
+            steps: steps.advanced(by: Int(source.stepOffset)),
+            stepCount: Int(source.stepCount),
+            edgeFraction: edgeFraction)
     }
 
     /// Σ over a target's ENABLED routes of `depth_i · s_i`, in the published
